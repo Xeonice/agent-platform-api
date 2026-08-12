@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "types": ["node", "reflect-metadata"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/shared-kernel" },
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/modules/sandbox" }
+  ]
+}

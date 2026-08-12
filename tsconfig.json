@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared-kernel" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/modules/sandbox" },
+    { "path": "./apps/api" }
+  ]
+}

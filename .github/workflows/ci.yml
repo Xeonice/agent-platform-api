@@ -1,0 +1,50 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # ── static-checks (shared/09 §2.3, gate 1) ──
+      - name: typecheck
+        run: pnpm typecheck
+      - name: lint (boundaries + no-restricted-syntax, --max-warnings=0)
+        run: pnpm lint --max-warnings=0
+      - name: prettier
+        run: pnpm format:check
+
+      # ── unit (domain, zero-mock; 25 L0) ──
+      - name: unit
+        run: pnpm test:unit
+
+      # ── contract-testkit — REQUIRED, not optional (09 §2.3 / 04 §10) ──
+      - name: contract-testkit
+        run: pnpm test:contract
+
+      # ── integration (drizzle better-sqlite3 saveSync roundtrip + migration) ──
+      - name: integration
+        run: pnpm test:integration
+
+      # ── interface e2e — REQUIRED (REST supertest + MCP client; 09 §2.3 / 25 §6.1) ──
+      - name: e2e
+        run: pnpm test:e2e
+
+      # ── build + openapi.json drift gate (09 §2.3) ──
+      - name: build
+        run: pnpm build
+      - name: openapi.json drift
+        run: |
+          pnpm openapi:emit
+          git diff --exit-code openapi.json

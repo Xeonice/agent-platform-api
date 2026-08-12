@@ -1,0 +1,32 @@
+# Single-machine deployment (docs/shared/11 §1). SECURITY DEFAULTS ARE LOAD-BEARING:
+#   - api binds 127.0.0.1 only (audit P0-3). Changing to 0.0.0.0 must be explicit
+#     and triggers a startup warning + a persistent banner.
+#   - docker-socket-proxy whitelists ONLY CONTAINERS / EXEC / IMAGES — the api
+#     never touches the raw docker.sock (container-escape surface收敛).
+services:
+  api:
+    build: .
+    ports:
+      - '127.0.0.1:3000:3000' # ★ loopback only — do NOT change to 0.0.0.0 without intent
+    environment:
+      HOST: 0.0.0.0 # inside the container; host-side exposure is gated by the ports bind above
+      PORT: '3000'
+      DATA_ROOT: /data # host path MUST equal container path under DooD (11 §1.2)
+      DATABASE_URL: /data/platform.db
+    volumes:
+      - ${DATA_ROOT:-/srv/agent-platform/data}:/data # workspaces / baselines / sqlite / master key
+    depends_on:
+      - docker-proxy
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment: # only the API surfaces the aio provider needs
+      CONTAINERS: '1'
+      EXEC: '1'
+      IMAGES: '1'
+      POST: '1'
+
+  # auth-helper: resident lightweight helper reusing the default AIO image
+  # (11 §1.1). Reserved — the CLI login flow lands in the runtime slice.

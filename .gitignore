@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# secrets & local env
+.env
+.env.local
+
+# sqlite data
+*.sqlite
+*.sqlite-journal
+*.db
+data/
+
+# logs / os
+*.log
+.DS_Store

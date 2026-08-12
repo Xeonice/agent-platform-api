@@ -1,0 +1,213 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/sse": {
+      "get": {
+        "operationId": "SseController_sse",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Sse"
+        ]
+      }
+    },
+    "/api/messages": {
+      "post": {
+        "operationId": "SseController_messages",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "Sse"
+        ]
+      }
+    },
+    "/api/mcp": {
+      "post": {
+        "operationId": "StreamableHttpController_handlePostRequest",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "StreamableHttp"
+        ]
+      },
+      "get": {
+        "operationId": "StreamableHttpController_handleGetRequest",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "StreamableHttp"
+        ]
+      },
+      "delete": {
+        "operationId": "StreamableHttpController_handleDeleteRequest",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "StreamableHttp"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "HealthController_health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Liveness probe (passcode-exempt)",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/sandboxes": {
+      "post": {
+        "operationId": "SandboxController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSandboxDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "summary": "Create a sandbox (Task)",
+        "tags": [
+          "sandbox"
+        ]
+      },
+      "get": {
+        "operationId": "SandboxController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "List sandboxes, optionally filtered by projectId",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}": {
+      "get": {
+        "operationId": "SandboxController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Get a sandbox by id",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Agent Platform API",
+    "description": "",
+    "version": "0.0.1",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "CreateSandboxDto": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runtime": {
+            "type": "string",
+            "minLength": 1
+          },
+          "image": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "initialPrompt": {
+            "type": "string"
+          },
+          "headless": {
+            "type": "boolean"
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          }
+        },
+        "required": [
+          "projectId",
+          "runtime"
+        ]
+      }
+    }
+  }
+}
