@@ -32,7 +32,7 @@ const CONNECTION = Symbol('Connection');
     { provide: DATABASE, useFactory: (conn: Connection) => conn.db, inject: [CONNECTION] },
     {
       provide: UNIT_OF_WORK,
-      useFactory: (conn: Connection) => new SqliteUnitOfWork(conn.sqlite, conn.db),
+      useFactory: (conn: Connection) => new SqliteUnitOfWork(conn.sqlite),
       inject: [CONNECTION],
     },
   ],

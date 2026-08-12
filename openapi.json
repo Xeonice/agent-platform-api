@@ -98,7 +98,14 @@
         },
         "responses": {
           "201": {
-            "description": ""
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponseDto"
+                }
+              }
+            }
           }
         },
         "summary": "Create a sandbox (Task)",
@@ -111,7 +118,17 @@
         "parameters": [],
         "responses": {
           "200": {
-            "description": ""
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SandboxResponseDto"
+                  }
+                }
+              }
+            }
           }
         },
         "summary": "List sandboxes, optionally filtered by projectId",
@@ -135,7 +152,14 @@
         ],
         "responses": {
           "200": {
-            "description": ""
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponseDto"
+                }
+              }
+            }
           }
         },
         "summary": "Get a sandbox by id",
@@ -206,6 +230,118 @@
         "required": [
           "projectId",
           "runtime"
+        ]
+      },
+      "SandboxResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "scheduling",
+              "preparing-workspace",
+              "creating",
+              "starting",
+              "running",
+              "idle",
+              "stopping",
+              "stopped",
+              "failed",
+              "destroying",
+              "destroyed"
+            ]
+          },
+          "headless": {
+            "type": "boolean"
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ],
+            "nullable": true
+          },
+          "idleTimeoutSec": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "waitingInput": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "runtime",
+          "status",
+          "headless",
+          "timeoutMinutes",
+          "idleTimeoutSec",
+          "waitingInput",
+          "version"
+        ]
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
         ]
       }
     }

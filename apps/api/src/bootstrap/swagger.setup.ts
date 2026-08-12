@@ -1,6 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
+import { ErrorEnvelope } from './error-envelope.dto';
 
 /**
  * OpenAPI mount (docs/backend/02 §8).
@@ -17,6 +18,8 @@ export function setupSwagger(app: INestApplication): void {
     .setDescription('云 agent 管理平台后端 — REST + MCP dual protocol')
     .setVersion('0.0.1')
     .build();
-  const document = SwaggerModule.createDocument(app, config);
+  const document = SwaggerModule.createDocument(app, config, {
+    extraModels: [ErrorEnvelope],
+  });
   SwaggerModule.setup('docs', app, document, { jsonDocumentUrl: 'openapi.json' });
 }

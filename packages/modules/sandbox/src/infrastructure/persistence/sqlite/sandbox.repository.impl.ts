@@ -49,8 +49,11 @@ export class SqliteSandboxRepository implements SandboxRepository {
     });
   }
 
-  saveSync(tx: Tx, sandbox: Sandbox): void {
-    const db = tx as unknown as Db;
+  saveSync(_tx: Tx, sandbox: Sandbox): void {
+    // The injected connection is already inside the active UnitOfWork transaction
+    // (better-sqlite3 is single-connection + synchronous), so we write on it
+    // directly; `_tx` is only the marker gating this call (28 §7.3).
+    const db = this.db;
     const history = sandbox.transitions;
     if (history.length === 0) {
       // an aggregate always carries at least its creation transition (28 §2.2)

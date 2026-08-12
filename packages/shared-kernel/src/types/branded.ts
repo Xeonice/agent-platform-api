@@ -11,8 +11,8 @@ export type ImageId = Brand<string, 'ImageId'>;
 export type AutomationId = Brand<string, 'AutomationId'>;
 export type NodeId = Brand<string, 'NodeId'>;
 
-/** Opaque transaction handle — only ever passed through saveSync(tx). (28 §7.3) */
-export type Tx = Brand<object, 'Tx'>;
+// NOTE: the transaction token `Tx` lives in ./ports/unit-of-work.port — it is
+// opaque and mintable ONLY inside UnitOfWork.run (P2-1), not a branded id here.
 
 export const asSandboxId = (v: string): SandboxId => v as SandboxId;
 export const asProjectId = (v: string): ProjectId => v as ProjectId;

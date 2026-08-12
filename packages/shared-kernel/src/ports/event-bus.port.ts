@@ -1,4 +1,4 @@
-import type { Tx } from '../types/branded';
+import type { Tx } from './unit-of-work.port';
 import type { DomainEvent } from '../domain/domain-event';
 
 /**

@@ -4,29 +4,23 @@ import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import { asProjectId, asSandboxId } from '@platform/shared-kernel';
-import type { Tx, UnitOfWork } from '@platform/shared-kernel';
 import { Sandbox } from '../../src/domain/entities/sandbox.entity';
 import { SqliteSandboxRepository } from '../../src/infrastructure/persistence/sqlite/sandbox.repository.impl';
+// The REAL production UnitOfWork adapter — the test does NOT hand-roll or self-mint
+// a Tx (P2-1): the token can only come from inside uow.run.
+import { SqliteUnitOfWork } from '../../../../../apps/api/src/platform/persistence/unit-of-work.impl';
 
 /**
  * Integration test (docs/backend/25): real better-sqlite3 + Drizzle + committed
- * migrations. Proves the SYNCHRONOUS UnitOfWork + saveSync path writes and reads
- * back (P0-2). No mocks of the DB.
+ * migrations + the real SqliteUnitOfWork. Proves the SYNCHRONOUS UnitOfWork +
+ * saveSync path writes and reads back (P0-2). No mocks of the DB.
  */
 function makeHarness() {
   const sqlite = new Database(':memory:');
   const db = drizzle(sqlite) as BetterSQLite3Database<Record<string, never>>;
   migrate(db, { migrationsFolder: resolve(process.cwd(), 'drizzle') });
   const repo = new SqliteSandboxRepository(db);
-  const uow: UnitOfWork = {
-    run<T>(fn: (tx: Tx) => T): T {
-      let result!: T;
-      sqlite.transaction(() => {
-        result = fn(db as unknown as Tx);
-      })();
-      return result;
-    },
-  };
+  const uow = new SqliteUnitOfWork(sqlite);
   return { sqlite, db, repo, uow };
 }
 

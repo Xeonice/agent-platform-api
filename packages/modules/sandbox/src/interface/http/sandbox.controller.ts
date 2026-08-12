@@ -1,12 +1,18 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { SandboxDto } from '@platform/contracts';
 import { SandboxApplicationService } from '../../application/sandbox-application.service';
 import { CreateSandboxDto, ListSandboxesQueryDto, SandboxResponseDto } from './dto/sandbox.dto';
 
 /**
- * REST protocol shell (02 §5.1). It is a thin adapter: it injects the SAME
+ * REST protocol shell (02 §5.1). Thin adapter: it injects the SAME
  * SandboxApplicationService that the MCP tools inject, and does no business logic.
  * All paths carry the global `/api` prefix set at bootstrap.
+ *
+ * Return types are the real application-service types (SandboxDto); the
+ * `@ApiCreatedResponse`/`@ApiOkResponse({ type: SandboxResponseDto })` decorators
+ * drive Swagger to reflect the RESPONSE schema into openapi.json (P1-2) — no
+ * `as Promise<…>` casts (P2-2).
  */
 @ApiTags('sandbox')
 @Controller('sandboxes')
@@ -15,19 +21,22 @@ export class SandboxController {
 
   @Post()
   @ApiOperation({ summary: 'Create a sandbox (Task)' })
-  create(@Body() dto: CreateSandboxDto): Promise<SandboxResponseDto> {
-    return this.app.create(dto) as Promise<SandboxResponseDto>;
+  @ApiCreatedResponse({ type: SandboxResponseDto })
+  create(@Body() dto: CreateSandboxDto): Promise<SandboxDto> {
+    return this.app.create(dto);
   }
 
   @Get()
   @ApiOperation({ summary: 'List sandboxes, optionally filtered by projectId' })
-  list(@Query() query: ListSandboxesQueryDto): Promise<SandboxResponseDto[]> {
-    return this.app.list(query.projectId) as Promise<SandboxResponseDto[]>;
+  @ApiOkResponse({ type: SandboxResponseDto, isArray: true })
+  list(@Query() query: ListSandboxesQueryDto): Promise<SandboxDto[]> {
+    return this.app.list(query.projectId);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get a sandbox by id' })
-  get(@Param('id') id: string): Promise<SandboxResponseDto> {
-    return this.app.get(id) as Promise<SandboxResponseDto>;
+  @ApiOkResponse({ type: SandboxResponseDto })
+  get(@Param('id') id: string): Promise<SandboxDto> {
+    return this.app.get(id);
   }
 }
