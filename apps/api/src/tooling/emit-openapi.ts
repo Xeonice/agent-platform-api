@@ -5,6 +5,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
 import { AppModule } from '../app.module';
+import { ErrorEnvelope } from '../bootstrap/error-envelope.dto';
 
 async function main(): Promise<void> {
   process.env.DATABASE_URL = ':memory:';
@@ -12,7 +13,9 @@ async function main(): Promise<void> {
   const app = await NestFactory.create(AppModule, { logger: false });
   app.setGlobalPrefix('api');
   const config = new DocumentBuilder().setTitle('Agent Platform API').setVersion('0.0.1').build();
-  const document = SwaggerModule.createDocument(app, config);
+  const document = SwaggerModule.createDocument(app, config, {
+    extraModels: [ErrorEnvelope],
+  });
   const out = resolve(process.cwd(), 'openapi.json');
   writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`);
   await app.close();
