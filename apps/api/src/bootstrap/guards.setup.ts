@@ -1,10 +1,15 @@
 import { APP_GUARD } from '@nestjs/core';
 import type { Provider } from '@nestjs/common';
-import { NoopAuthGuard } from '../platform/access-passcode/noop-auth.guard';
+import { PasscodeGuard } from '../platform/access-passcode/passcode.guard';
+import { PasscodeService } from '../platform/access-passcode/passcode.service';
 
 /**
- * Global guard wiring (shared/11 §3). Active guard is NoopAuthGuard (allow-all);
- * PasscodeGuard is the MVP replacement (11 §3.1) — swap the useClass here to
- * enable it across REST / MCP / WS at once.
+ * Global guard wiring (shared/11 §3.1). The active APP_GUARD is now the real
+ * PasscodeGuard (MVP), replacing NoopAuthGuard: it enforces across REST + MCP-
+ * over-HTTP and self-disables when ACCESS_PASSCODE is empty (dev). STDIO MCP is
+ * a non-HTTP context and is exempt; GET /api/health is exempt.
  */
-export const guardProviders: Provider[] = [{ provide: APP_GUARD, useClass: NoopAuthGuard }];
+export const guardProviders: Provider[] = [
+  PasscodeService,
+  { provide: APP_GUARD, useClass: PasscodeGuard },
+];

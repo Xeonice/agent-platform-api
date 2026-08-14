@@ -10,12 +10,15 @@ export interface SandboxProps {
   id: SandboxId;
   projectId: ProjectId;
   runtime: string;
+  provider: string;
   status: SandboxStatus;
   headless: boolean;
   /** null for interactive tasks; 30/60/120/240 for headless (13 §2.1). */
   timeoutMinutes: number | null;
   idleTimeoutSec: number;
   workspacePath: string | null;
+  /** provider's opaque sandbox id (SandboxHandle.providerSandboxId); null until created. */
+  providerSandboxId: string | null;
   version: number;
   transitions: StateTransition[];
 }
@@ -30,6 +33,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _timeoutMinutes: number | null;
   private _idleTimeoutSec: number;
   private _workspacePath: string | null;
+  private _providerSandboxId: string | null;
   private _version: number;
   private readonly _transitions: StateTransition[];
   /** transitions appended in the current UoW, flushed by saveSync (28 §2.2). */
@@ -37,17 +41,20 @@ export class Sandbox extends AggregateRoot<SandboxId> {
 
   readonly projectId: ProjectId;
   readonly runtime: string;
+  readonly provider: string;
   readonly headless: boolean;
 
   private constructor(props: SandboxProps) {
     super(props.id);
     this.projectId = props.projectId;
     this.runtime = props.runtime;
+    this.provider = props.provider;
     this.headless = props.headless;
     this._status = props.status;
     this._timeoutMinutes = props.timeoutMinutes;
     this._idleTimeoutSec = props.idleTimeoutSec;
     this._workspacePath = props.workspacePath;
+    this._providerSandboxId = props.providerSandboxId;
     this._version = props.version;
     this._transitions = props.transitions;
   }
@@ -62,6 +69,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     id: SandboxId;
     projectId: ProjectId;
     runtime: string;
+    provider: string;
     headless: boolean;
     timeoutMinutes: number | null;
     idleTimeoutSec: number;
@@ -77,11 +85,13 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       id: input.id,
       projectId: input.projectId,
       runtime: input.runtime,
+      provider: input.provider,
       status: 'pending',
       headless: input.headless,
       timeoutMinutes: input.timeoutMinutes,
       idleTimeoutSec: input.idleTimeoutSec,
       workspacePath: null,
+      providerSandboxId: null,
       version: 0,
       transitions: [firstTransition],
     });
@@ -102,8 +112,17 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   get workspacePath(): string | null {
     return this._workspacePath;
   }
+  get providerSandboxId(): string | null {
+    return this._providerSandboxId;
+  }
   get version(): number {
     return this._version;
+  }
+
+  /** Record the provider handle + host workspace once created (03 §4). */
+  bindRuntime(input: { providerSandboxId: string; workspacePath: string }): void {
+    this._providerSandboxId = input.providerSandboxId;
+    this._workspacePath = input.workspacePath;
   }
   get transitions(): readonly StateTransition[] {
     return this._transitions;

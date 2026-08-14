@@ -1,8 +1,19 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
+import {
+  ApiCreatedResponse,
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { SandboxDto } from '@platform/contracts';
 import { SandboxApplicationService } from '../../application/sandbox-application.service';
-import { CreateSandboxDto, ListSandboxesQueryDto, SandboxResponseDto } from './dto/sandbox.dto';
+import {
+  CreateSandboxDto,
+  DestroySandboxDto,
+  ListSandboxesQueryDto,
+  SandboxResponseDto,
+} from './dto/sandbox.dto';
 
 /**
  * REST protocol shell (02 §5.1). Thin adapter: it injects the SAME
@@ -38,5 +49,13 @@ export class SandboxController {
   @ApiOkResponse({ type: SandboxResponseDto })
   get(@Param('id') id: string): Promise<SandboxDto> {
     return this.app.get(id);
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'Destroy a sandbox (optionally keeping its workspace)' })
+  @ApiNoContentResponse()
+  destroy(@Param('id') id: string, @Body() body: DestroySandboxDto): Promise<void> {
+    return this.app.destroy(id, body ?? {});
   }
 }

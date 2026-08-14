@@ -16,6 +16,7 @@ export const sandboxes = sqliteTable(
     id: text('id').primaryKey(),
     projectId: text('project_id').notNull(),
     runtime: text('runtime').notNull(),
+    provider: text('provider').notNull().default('aio'),
     status: text('status').notNull().default('pending'),
     headless: integer('headless', { mode: 'boolean' }).notNull(),
     timeoutMinutes: integer('timeout_minutes'),

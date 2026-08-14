@@ -5,40 +5,40 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import type { Request } from 'express';
-import { env } from '../config/env';
+import type { Request, Response } from 'express';
+import { PasscodeService } from './passcode.service';
+
+const SESSION_COOKIE = 'ap_session';
+const MAX_FAILURES = 5;
+const LOCK_MS = 5 * 60 * 1000; // 5 minutes
+const COOKIE_MAX_AGE_SEC = 7 * 24 * 60 * 60;
 
 /**
- * Access passcode Guard — SKELETON (shared/11 §3.1, promoted from v1.1 to MVP, audit P0-3).
+ * Access passcode Guard — the FIRST real APP_GUARD (docs/shared/11 §3.1, MVP;
+ * replaces NoopAuthGuard). Enforced across REST + MCP-over-HTTP (STDIO MCP is not
+ * an HTTP context, so it is naturally exempt). GET /api/health is exempt;
+ * /openapi.json is NOT (it exposes the full surface). 5 consecutive failures per
+ * client IP → lock 5 minutes (429). A valid passcode issues a 7-day signed cookie.
  *
- * "Does this instance let you in" — no user system, no roles. Not wired as the
- * active APP_GUARD yet (NoopAuthGuard is), but present from commit one so the
- * seam is real. Implemented rules:
- *   - exemptions: GET /api/health and static assets only; /openapi.json is NOT exempt
- *   - 5 consecutive failures per client IP → lock 5 min → 429 + retryAfterSec
- * Not yet implemented (documented TODOs): argon2 hash storage in system_settings,
- * signed 7-day cookie issuance, WS handshake check, Bearer passcode for MCP HTTP.
+ * This folder is exempt from the time/random eslint ban (port-impl exemption).
  */
 @Injectable()
 export class PasscodeGuard implements CanActivate {
-  private static readonly MAX_FAILURES = 5;
-  private static readonly LOCK_MS = 5 * 60 * 1000;
-  /** per-IP failure state kept in process memory (single-process, 11 §3.1). */
   private readonly failures = new Map<string, { count: number; lockedUntil: number }>();
 
+  constructor(private readonly passcodes: PasscodeService) {}
+
   canActivate(context: ExecutionContext): boolean {
-    // passcode disabled → behave like NoopAuthGuard
-    if (!env.accessPasscode) {
-      return true;
+    if (context.getType() !== 'http' || !this.passcodes.enabled) {
+      return true; // non-HTTP (STDIO MCP) or passcode disabled ⇒ allow
     }
     const req = context.switchToHttp().getRequest<Request>();
-    if (this.isExempt(req)) {
-      return true;
-    }
+    const res = context.switchToHttp().getResponse<Response>();
+    if (this.isExempt(req)) return true;
 
+    const now = Date.now();
     const ip = req.ip ?? 'unknown';
     const state = this.failures.get(ip);
-    const now = Date.now();
     if (state && state.lockedUntil > now) {
       throw new HttpException(
         { code: 'PASSCODE_LOCKED', retryAfterSec: Math.ceil((state.lockedUntil - now) / 1000) },
@@ -46,15 +46,22 @@ export class PasscodeGuard implements CanActivate {
       );
     }
 
-    if (this.presentedPasscode(req) === env.accessPasscode) {
-      this.failures.delete(ip);
+    // already-authenticated session cookie
+    if (this.passcodes.verifySessionToken(this.cookie(req, SESSION_COOKIE), now)) {
       return true;
     }
 
-    const nextCount = (state?.count ?? 0) + 1;
+    const presented = this.presentedPasscode(req);
+    if (presented !== undefined && this.passcodes.matches(presented)) {
+      this.failures.delete(ip);
+      this.setSessionCookie(res, this.passcodes.issueSessionToken(now));
+      return true;
+    }
+
+    const count = (state?.count ?? 0) + 1;
     this.failures.set(ip, {
-      count: nextCount,
-      lockedUntil: nextCount >= PasscodeGuard.MAX_FAILURES ? now + PasscodeGuard.LOCK_MS : 0,
+      count,
+      lockedUntil: count >= MAX_FAILURES ? now + LOCK_MS : 0,
     });
     throw new HttpException({ code: 'PASSCODE_REQUIRED' }, HttpStatus.UNAUTHORIZED);
   }
@@ -65,10 +72,28 @@ export class PasscodeGuard implements CanActivate {
 
   private presentedPasscode(req: Request): string | undefined {
     const auth = req.headers.authorization;
-    if (auth?.startsWith('Bearer ')) {
-      return auth.slice('Bearer '.length);
-    }
+    if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length);
     const header = req.headers['x-access-passcode'];
-    return Array.isArray(header) ? header[0] : header;
+    if (header) return Array.isArray(header) ? header[0] : header;
+    const q = req.query?.['passcode'];
+    return typeof q === 'string' ? q : undefined;
+  }
+
+  private cookie(req: Request, name: string): string | undefined {
+    const raw = req.headers.cookie;
+    if (!raw) return undefined;
+    for (const part of raw.split(';')) {
+      const [k, ...rest] = part.trim().split('=');
+      if (k === name) return decodeURIComponent(rest.join('='));
+    }
+    return undefined;
+  }
+
+  private setSessionCookie(res: Response, value: string): void {
+    const secure = process.env.PASSCODE_COOKIE_SECURE === 'true' ? '; Secure' : '';
+    res.setHeader(
+      'Set-Cookie',
+      `${SESSION_COOKIE}=${encodeURIComponent(value)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE_SEC}${secure}`,
+    );
   }
 }

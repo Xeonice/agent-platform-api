@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import { setupSwagger } from './bootstrap/swagger.setup';
+import { setupWebsockets } from './bootstrap/websocket.setup';
 import { env, isExposedBind } from './platform/config/env';
 
 async function bootstrap(): Promise<void> {
@@ -14,6 +15,7 @@ async function bootstrap(): Promise<void> {
   // zod single source validation for every createZodDto DTO (02 §3).
   app.useGlobalPipes(new ZodValidationPipe());
 
+  setupWebsockets(app);
   setupSwagger(app);
 
   if (isExposedBind(env.host)) {

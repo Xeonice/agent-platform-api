@@ -1,8 +1,15 @@
+import { z } from 'zod';
 import { Injectable } from '@nestjs/common';
 import { Tool } from '@rekog/mcp-nest';
-import { CreateSandboxSchema, ListSandboxesQuerySchema } from '@platform/contracts';
+import {
+  CreateSandboxSchema,
+  DestroySandboxSchema,
+  ListSandboxesQuerySchema,
+} from '@platform/contracts';
 import type { CreateSandboxInput, ListSandboxesQuery } from '@platform/contracts';
 import { SandboxApplicationService } from '../../application/sandbox-application.service';
+
+const DestroySandboxToolSchema = DestroySandboxSchema.extend({ id: z.string().min(1) });
 
 /**
  * MCP protocol shell (02 §5). It injects the SAME SandboxApplicationService as
@@ -35,5 +42,19 @@ export class SandboxMcpTools {
   async listSandboxes(params: ListSandboxesQuery) {
     const dtos = await this.app.list(params.projectId);
     return { content: [{ type: 'text' as const, text: JSON.stringify(dtos) }] };
+  }
+
+  @Tool({
+    name: 'destroy_sandbox',
+    description: 'Destroy a sandbox by id (optionally keeping its workspace)',
+    parameters: DestroySandboxToolSchema,
+  })
+  async destroySandbox(params: z.infer<typeof DestroySandboxToolSchema>) {
+    await this.app.destroy(params.id, { keepVolume: params.keepVolume });
+    return {
+      content: [
+        { type: 'text' as const, text: JSON.stringify({ id: params.id, destroyed: true }) },
+      ],
+    };
   }
 }

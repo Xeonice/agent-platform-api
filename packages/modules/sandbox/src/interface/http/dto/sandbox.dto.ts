@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import {
   CreateSandboxSchema,
+  DestroySandboxSchema,
   ListSandboxesQuerySchema,
   SandboxDtoSchema,
 } from '@platform/contracts';
@@ -12,4 +13,5 @@ import {
  */
 export class CreateSandboxDto extends createZodDto(CreateSandboxSchema) {}
 export class ListSandboxesQueryDto extends createZodDto(ListSandboxesQuerySchema) {}
+export class DestroySandboxDto extends createZodDto(DestroySandboxSchema) {}
 export class SandboxResponseDto extends createZodDto(SandboxDtoSchema) {}

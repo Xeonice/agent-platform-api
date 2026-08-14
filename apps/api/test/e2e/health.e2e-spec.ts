@@ -3,8 +3,10 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
+import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER } from '@platform/contracts';
 import { SandboxMcpTools } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
+import { fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
  * Interface e2e (docs/backend/25 §6.1, shared/09 §2.3 gate 3): boots the whole
@@ -15,7 +17,12 @@ let app: INestApplication;
 
 beforeAll(async () => {
   process.env.DATABASE_URL = ':memory:';
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(SANDBOX_PROVIDER_REGISTRY)
+    .useValue(makeFakeRegistry())
+    .overrideProvider(WORKSPACE_PREPARER)
+    .useValue(fakeWorkspace)
+    .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
@@ -40,7 +47,8 @@ describe('REST + MCP dual-protocol shell over one application service', () => {
       .post('/api/sandboxes')
       .send({ projectId: 'prj-e2e', runtime: 'claude-code' })
       .expect(201);
-    expect(created.body).toMatchObject({ status: 'pending', projectId: 'prj-e2e' });
+    // the full provision pipeline runs (fake provider) → reaches running
+    expect(created.body).toMatchObject({ status: 'running', projectId: 'prj-e2e' });
 
     // invoke the actual @Tool-decorated MCP handler resolved from the container
     const mcpTools = app.get(SandboxMcpTools);

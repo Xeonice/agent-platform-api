@@ -13,6 +13,7 @@ const alias = {
   '@platform/contracts/testkit': r('packages/contracts/src/testkit/index.ts'),
   '@platform/contracts': r('packages/contracts/src/index.ts'),
   '@platform/sandbox': r('packages/modules/sandbox/src/index.ts'),
+  '@platform/terminal': r('packages/modules/terminal/src/index.ts'),
 };
 
 // SWC transform gives NestJS the decorator metadata Vitest/esbuild would drop.
@@ -32,7 +33,11 @@ export default defineWorkspace([
     ...shared,
     test: {
       name: 'unit',
-      include: ['packages/**/test/domain/**/*.spec.ts', 'packages/**/test/unit/**/*.spec.ts'],
+      include: [
+        'packages/**/test/domain/**/*.spec.ts',
+        'packages/**/test/unit/**/*.spec.ts',
+        'packages/**/test/application/**/*.spec.ts',
+      ],
       environment: 'node',
     },
   },

@@ -1,0 +1,1 @@
+ALTER TABLE `sandboxes` ADD `provider` text DEFAULT 'aio' NOT NULL;

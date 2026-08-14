@@ -166,6 +166,38 @@
         "tags": [
           "sandbox"
         ]
+      },
+      "delete": {
+        "operationId": "SandboxController_destroy",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DestroySandboxDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Destroy a sandbox (optionally keeping its workspace)",
+        "tags": [
+          "sandbox"
+        ]
       }
     }
   },
@@ -314,6 +346,14 @@
           "waitingInput",
           "version"
         ]
+      },
+      "DestroySandboxDto": {
+        "type": "object",
+        "properties": {
+          "keepVolume": {
+            "type": "boolean"
+          }
+        }
       },
       "ErrorEnvelope": {
         "type": "object",
