@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
@@ -14,20 +14,24 @@ import {
   createDockerClient,
   isDockerAvailable,
 } from '../../../../packages/modules/sandbox/src/infrastructure/providers/docker/docker-client';
+import { AioSandboxProvider } from '../../../../packages/modules/sandbox/src/infrastructure/providers/aio/aio-sandbox.provider';
+import type { ProcessStream } from '@platform/contracts';
 
 /**
- * FULL-CHAIN docker-required e2e (S1 acceptance), PARAMETERIZED over BOTH built-in
- * providers: for `aio` AND `boxlite` it runs REST POST /api/sandboxes → real
- * ProviderRegistry → the matching provider CLASS → real docker container →
- * socket.io /terminal → real container PTY (`/bin/sh`) → `ls /` → asserts real
- * root dirs → DELETE. It also proves the registry selected the RIGHT provider by
- * asserting the container's `platform.provider` / `platform.isolation` labels
- * (aio=container, boxlite=micro-vm) and that the two providers' capabilities
- * genuinely differ — so this is not "aio run twice".
+ * FULL-CHAIN docker-required e2e for the `aio` provider (ADR 决策 A): REST POST
+ * /api/sandboxes → real ProviderRegistry → AioSandboxProvider → real docker
+ * container running the AIO Sandbox image → socket.io /terminal → the REAL
+ * in-sandbox agent PTY via `ws /v1/shell/ws` (NOT host docker exec) → `ls /` →
+ * asserts real root dirs → DELETE. It also asserts the container's
+ * `platform.provider`/`platform.isolation` labels and that the registry exposes
+ * two DISTINCT providers with divergent capabilities (so `boxlite` is a real
+ * second class, not a label). The `boxlite` micro-VM chain is covered separately
+ * by boxlite-microvm.e2e (决策 B, BoxLite SDK — no docker container).
  *
- * Skips loudly when the docker daemon is unreachable (never fake-passes).
+ * Skips loudly when the docker daemon is unreachable (never fake-passes). Requires
+ * the AIO Sandbox image present locally (SANDBOX_TEST_IMAGE to override).
  */
-const IMAGE = process.env.SANDBOX_TEST_IMAGE ?? 'alpine:3.20';
+const IMAGE = process.env.SANDBOX_TEST_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest';
 const dockerUp = await isDockerAvailable(createDockerClient()).catch(() => false);
 
 if (!dockerUp) {
@@ -39,9 +43,10 @@ if (!dockerUp) {
   );
 }
 
+// aio only here — boxlite runs on the BoxLite micro-VM SDK (no docker container),
+// exercised by boxlite-microvm.e2e.
 const PROVIDERS = [
   { provider: 'aio', isolation: 'container', updateResources: true, pauseResume: true },
-  { provider: 'boxlite', isolation: 'micro-vm', updateResources: false, pauseResume: false },
 ] as const;
 
 let app: INestApplication;
@@ -105,6 +110,41 @@ function stripAnsi(s: string): string {
   return s.replace(/\[[0-9;?]*[A-Za-z]/g, '');
 }
 
+/** Poll REST until the async-provisioned sandbox reaches `running` (P1-#1). */
+async function waitForRunning(app: INestApplication, id: string, ms = 60_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  let status = 'pending';
+  while (Date.now() < deadline) {
+    const got = await request(app.getHttpServer()).get(`/api/sandboxes/${id}`);
+    status = got.body?.status;
+    if (status === 'running') return;
+    if (status === 'failed') throw new Error(`sandbox ${id} failed: ${JSON.stringify(got.body)}`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`sandbox ${id} never reached running (last=${status})`);
+}
+
+/** Collect a one-shot exec ProcessStream's output to EOF. */
+function collectStream(stream: ProcessStream): Promise<string> {
+  return new Promise((res) => {
+    let out = '';
+    stream.onData((c) => {
+      out += c.toString('utf8');
+    });
+    stream.onExit(() => res(out));
+  });
+}
+
+/** Poll a host file until it contains `needle` (proves box→host workspace writes). */
+async function waitForFileContains(path: string, needle: string, ms = 8000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (existsSync(path) && readFileSync(path, 'utf8').includes(needle)) return;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error(`host file ${path} never contained ${needle}`);
+}
+
 /** Resolve once accumulated (ANSI-stripped) `data` frames match `re`. */
 function waitForOutput(sock: Socket, re: RegExp, ms = 12000): Promise<string> {
   return new Promise((resolveP, reject) => {
@@ -156,7 +196,9 @@ describe.skipIf(!dockerUp)(
         const sandboxId = created.body.id as string;
         const containerName = `platform-${provider}-${sandboxId}`;
         createdContainers.add(containerName);
-        expect(created.body.status).toBe('running');
+        // ASYNC create (P1-#1): POST returns `pending`; wait for background provision.
+        expect(created.body.status).toBe('pending');
+        await waitForRunning(app, sandboxId);
 
         // 2) PROVE the right provider class was selected: inspect the real container's labels
         const info = await docker.getContainer(containerName).inspect();
@@ -173,6 +215,7 @@ describe.skipIf(!dockerUp)(
           transports: ['websocket'],
           forceNew: true,
         });
+        const wsDir = resolve(dataRoot, 'workspaces', sandboxId);
         try {
           const session = await nextFrame(sock, (f) => f.type === 'session');
           if (session.type === 'session') {
@@ -181,9 +224,29 @@ describe.skipIf(!dockerUp)(
           sock.emit('frame', { type: 'input', data: 'ls /\n' });
           const out = await waitForOutput(sock, /\b(bin|etc|usr)\b/);
           expect(out).toMatch(/\b(bin|etc|usr)\b/);
+
+          // workspace bind-mount is REALLY usable by the non-root agent user (the
+          // WorkspacePreparer 0777 fix). host → box: seed a file, read it in-sandbox.
+          writeFileSync(resolve(wsDir, 'host-seed.txt'), 'HOST_SEED_AIO\n');
+          sock.emit('frame', { type: 'input', data: 'cat /workspace/host-seed.txt\n' });
+          await waitForOutput(sock, /HOST_SEED_AIO/);
+          // box → host: the sandbox writes /workspace, the host sees it.
+          sock.emit('frame', { type: 'input', data: 'echo BOX_WROTE_AIO > /workspace/box-out.txt\n' });
+          await waitForFileContains(resolve(wsDir, 'box-out.txt'), 'BOX_WROTE_AIO');
         } finally {
           sock.disconnect();
         }
+
+        // aio restart-safety (parity with boxlite): a FRESH provider instance
+        // re-derives the agent port from `docker inspect` (no persisted state) and
+        // reconnects — so exec/terminal survive a backend restart.
+        const cid = (await docker.getContainer(containerName).inspect()).Id;
+        const freshAio = new AioSandboxProvider(createDockerClient());
+        const exec = await freshAio.spawn(
+          { provider: 'aio', providerSandboxId: cid },
+          { tty: false, cmd: ['echo', 'AIO_RESTART_OK'] },
+        );
+        expect(await collectStream(exec)).toContain('AIO_RESTART_OK');
 
         // 4) destroy via REST + assert the container is really gone
         await request(app.getHttpServer())

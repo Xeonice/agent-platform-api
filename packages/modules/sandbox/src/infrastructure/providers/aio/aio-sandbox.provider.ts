@@ -4,9 +4,11 @@ import { DockerSandboxProvider } from '../docker/docker-sandbox.provider';
 import { DOCKER_CLIENT } from '../docker/docker.token';
 
 /**
- * `aio` — default provider (docs/backend/04 §2.1). Container-level isolation.
- * In S1 it is docker-backed like boxlite; it reuses the platform default OCI
- * image (AIO Sandbox in production).
+ * `aio` — default provider (docs/backend/04 §2.1, SANDBOX-RUNTIME-DECISIONS 决策
+ * A/B). Container-level isolation via dockerode (control plane); exec/pty go
+ * through the in-sandbox AIO Sandbox agent on `:8080` (data plane), NOT host
+ * docker exec. The AIO image ships its own entrypoint that starts the agent, so
+ * NO keep-alive command is set. The agent port is published to loopback only.
  */
 @Injectable()
 export class AioSandboxProvider extends DockerSandboxProvider {
@@ -14,7 +16,7 @@ export class AioSandboxProvider extends DockerSandboxProvider {
     super(docker, {
       name: 'aio',
       isolationLabel: 'container',
-      keepAliveCmd: ['tail', '-f', '/dev/null'],
+      agentPort: 8080,
       capabilities: {
         spawnTty: true,
         volumeMount: true,

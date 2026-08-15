@@ -36,7 +36,13 @@ export class SandboxPtyAdapter implements SandboxPtyPort {
     }
     const provider = this.registry.get(sandbox.provider);
     return provider.spawn(
-      { provider: sandbox.provider, providerSandboxId: sandbox.providerSandboxId },
+      {
+        provider: sandbox.provider,
+        providerSandboxId: sandbox.providerSandboxId,
+        // rebuild the persisted runtime binding (boxlite agent port) from the DB so
+        // the terminal reconnects even after a backend restart (empty in-memory state).
+        agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
+      },
       { cmd: ['/bin/sh'], tty: true, cols: opts.cols, rows: opts.rows, reuse: opts.reuse },
     );
   }

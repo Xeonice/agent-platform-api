@@ -15,6 +15,13 @@
       "when": 1786590831992,
       "tag": "0001_moaning_maximus",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786793037856,
+      "tag": "0002_sturdy_warlock",
+      "breakpoints": true
     }
   ]
 }

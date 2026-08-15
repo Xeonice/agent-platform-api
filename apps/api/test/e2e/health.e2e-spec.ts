@@ -47,8 +47,18 @@ describe('REST + MCP dual-protocol shell over one application service', () => {
       .post('/api/sandboxes')
       .send({ projectId: 'prj-e2e', runtime: 'claude-code' })
       .expect(201);
-    // the full provision pipeline runs (fake provider) → reaches running
-    expect(created.body).toMatchObject({ status: 'running', projectId: 'prj-e2e' });
+    // ASYNC create (P1-#1): returns `pending` immediately; provision runs in the
+    // background and drives it to `running`.
+    expect(created.body).toMatchObject({ status: 'pending', projectId: 'prj-e2e' });
+    const id = created.body.id as string;
+    const deadline = Date.now() + 3000;
+    let status = 'pending';
+    while (Date.now() < deadline && status !== 'running') {
+      const got = await request(app.getHttpServer()).get(`/api/sandboxes/${id}`).expect(200);
+      status = got.body.status;
+      if (status !== 'running') await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(status).toBe('running');
 
     // invoke the actual @Tool-decorated MCP handler resolved from the container
     const mcpTools = app.get(SandboxMcpTools);

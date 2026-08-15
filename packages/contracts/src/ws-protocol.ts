@@ -1,3 +1,5 @@
+import type { SandboxStatus } from './schemas/enums';
+
 /**
  * WS frame contract — SYNC WITH shared/10 §7.4 (the single canonical definition).
  *
@@ -23,11 +25,25 @@ export type TerminalServerFrame =
   | { type: 'session'; socketSessionKey: string };
 
 // ── /events channel (discriminator: event) ──
+// SYNC WITH shared/10 §7.4 (canonical union, 6 variants). `status` is the
+// SandboxStatus enum (NOT a bare string). S1 PRODUCES only sandbox.created /
+// sandbox.status_changed / sandbox.removed; waiting_input (S4), clone_progress
+// (S2) and runtime-auth.status_changed (S3) are defined here but not yet emitted.
 export type SandboxWsEvent =
   | { event: 'sandbox.created'; sandboxId: string; projectId: string }
-  | { event: 'sandbox.status_changed'; sandboxId: string; status: string; phase?: string }
+  | { event: 'sandbox.status_changed'; sandboxId: string; status: SandboxStatus; phase?: string }
   | { event: 'sandbox.removed'; sandboxId: string }
-  | { event: 'sandbox.waiting_input'; sandboxId: string; waiting: boolean; sessionId?: string };
+  | { event: 'sandbox.waiting_input'; sandboxId: string; waiting: boolean; sessionId?: string }
+  | {
+      event: 'project.clone_progress';
+      projectId: string;
+      phase: 'cloning' | 'slow' | 'done' | 'failed';
+      receivedBytes?: number;
+      totalBytes?: number;
+      percent?: number;
+      errorCode?: string;
+    }
+  | { event: 'runtime-auth.status_changed'; runtime: string };
 
 /**
  * Canonical, order-stable description of the frame shapes. Kept as documentation
@@ -38,7 +54,9 @@ export const WS_PROTOCOL_CANONICAL =
   'terminal.client:input{data},resize{cols,rows},ping|' +
   'terminal.server:data{data},exit{code},pong,session{socketSessionKey}|' +
   'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?},' +
-  'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?}';
+  'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
+  'project.clone_progress{projectId,phase,receivedBytes?,totalBytes?,percent?,errorCode?},' +
+  'runtime-auth.status_changed{runtime}';
 
 /**
  * X-Schema-Hash the two repos compare at the /terminal handshake (shared/14 §2.5).

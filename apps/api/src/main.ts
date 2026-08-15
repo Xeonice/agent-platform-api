@@ -8,6 +8,10 @@ import { setupWebsockets } from './bootstrap/websocket.setup';
 import { env, isExposedBind } from './platform/config/env';
 
 async function bootstrap(): Promise<void> {
+  // production entrypoint opts into startup orphan reconciliation (13 §4); tests
+  // (which boot throwaway apps on fresh :memory: DBs) leave it off by default.
+  process.env.SANDBOX_RECONCILE_ON_BOOT ??= 'true';
+
   const app = await NestFactory.create(AppModule);
 
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).

@@ -65,6 +65,13 @@ export default defineWorkspace([
       environment: 'node',
       hookTimeout: 30_000,
       testTimeout: 30_000,
+      // e2e drive SHARED external resources (docker daemon, the :5001 registry,
+      // and — critically — BoxLite, which permits only ONE runtime per BOXLITE_HOME
+      // (~/.boxlite) AT A TIME across processes. Multiple runtimes coexist fine
+      // within one process, so run ALL e2e files in a SINGLE worker process
+      // sequentially; separate forks would contend on the BoxLite lock and 500.
+      // Unit/integration/contract projects stay parallel.
+      poolOptions: { forks: { singleFork: true } },
     },
   },
 ]);

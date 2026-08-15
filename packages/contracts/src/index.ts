@@ -5,6 +5,8 @@ export * from './errors';
 export * from './registry.tokens';
 export * from './sandbox-provider.contract';
 export * from './sandbox-pty.port';
+export * from './sandbox-events.port';
+export * from './terminal-auth.port';
 export * from './workspace-preparer.port';
 export * from './ws-protocol';
 // NOTE: ./testkit is intentionally NOT re-exported here — it is a test-only

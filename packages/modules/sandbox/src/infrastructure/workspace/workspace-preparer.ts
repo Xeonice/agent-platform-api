@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile, rm, chmod } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import type { PreparedWorkspace, WorkspacePreparer } from '@platform/contracts';
@@ -10,6 +10,13 @@ const STATE_FILE = '.platform-workspace-state';
  * `${DATA_ROOT}/workspaces/<sandboxId>` with a `.platform-workspace-state`
  * marker (preparing → ready). S1 skips the baseline copy (no project context yet)
  * but the directory it creates is really bind-mounted into the container.
+ *
+ * The dir is made world-accessible (0777): the bind-mount appears ROOT-owned
+ * inside the sandbox (neither docker nor BoxLite remaps host ownership), but the
+ * in-sandbox AIO agent runs as the NON-root user `gem`, which otherwise cannot
+ * traverse/write `/workspace`. Verified: with 0755 the agent gets "Permission
+ * denied"; with 0777 it reads and writes. Single-tenant private deploy, per-sandbox
+ * dir — the broad mode is acceptable and required for S2/S3 (project code in-sandbox).
  */
 @Injectable()
 export class FsWorkspacePreparer implements WorkspacePreparer {
@@ -27,6 +34,8 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
     // S1: no baseline to cp -a --reflink; empty workspace.
     await writeFile(resolve(hostPath, STATE_FILE), 'ready');
+    // make traversable/writable by the non-root in-sandbox agent user (see class doc).
+    await chmod(hostPath, 0o777);
     return { hostPath };
   }
 

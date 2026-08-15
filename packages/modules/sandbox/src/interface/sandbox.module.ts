@@ -7,6 +7,7 @@ import {
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
 import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
+import { SandboxEventProjector } from '../application/sandbox-event.projector';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
@@ -14,6 +15,7 @@ import { AioSandboxProvider } from '../infrastructure/providers/aio/aio-sandbox.
 import { BoxliteSandboxProvider } from '../infrastructure/providers/boxlite/boxlite-sandbox.provider';
 import { DOCKER_CLIENT } from '../infrastructure/providers/docker/docker.token';
 import { createDockerClient } from '../infrastructure/providers/docker/docker-client';
+import { RuntimeReconciler } from '../infrastructure/reconcile/runtime-reconciler';
 import { SandboxController } from './http/sandbox.controller';
 import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
 
@@ -35,6 +37,8 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     BoxliteSandboxProvider,
     { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
     { provide: SANDBOX_PTY_PORT, useClass: SandboxPtyAdapter },
+    RuntimeReconciler,
+    SandboxEventProjector,
   ],
   exports: [SandboxApplicationService, SANDBOX_PTY_PORT],
 })

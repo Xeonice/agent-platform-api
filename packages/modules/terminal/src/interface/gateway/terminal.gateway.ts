@@ -9,11 +9,18 @@ import {
   WebSocketGateway,
 } from '@nestjs/websockets';
 import type { Socket } from 'socket.io';
-import { SANDBOX_PTY_PORT, WS_SCHEMA_HASH, X_SCHEMA_HASH_HEADER } from '@platform/contracts';
+import {
+  SANDBOX_PTY_PORT,
+  TERMINAL_AUTHENTICATOR,
+  WS_SCHEMA_HASH,
+  X_SCHEMA_HASH_HEADER,
+} from '@platform/contracts';
 import type {
   ProcessStream,
   SandboxPtyPort,
+  TerminalAuthenticator,
   TerminalClientFrame,
+  TerminalHandshakeCredentials,
   TerminalServerFrame,
 } from '@platform/contracts';
 
@@ -37,9 +44,23 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
   private readonly logger = new Logger('TerminalGateway');
   private readonly attachments = new Map<string, Attachment>();
 
-  constructor(@Inject(SANDBOX_PTY_PORT) private readonly pty: SandboxPtyPort) {}
+  constructor(
+    @Inject(SANDBOX_PTY_PORT) private readonly pty: SandboxPtyPort,
+    @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
+  ) {}
 
   async handleConnection(client: Socket): Promise<void> {
+    // access-passcode gate FIRST (S1 audit P1-1): the REST guard self-exempts
+    // non-HTTP contexts, so the WS handshake must re-check the passcode/session
+    // itself. It runs BEFORE any other probe so an UNAUTHENTICATED client cannot
+    // use the distinct disconnect reasons to fingerprint the server (e.g. probe
+    // the schema-hash) — every rejection looks the same until it is authorized.
+    if (!this.auth.authorize(this.readCredentials(client))) {
+      this.logger.warn('terminal handshake rejected: missing/invalid access passcode');
+      client.disconnect(true);
+      return;
+    }
+
     const presented = this.readSchemaHash(client);
     if (presented && presented !== WS_SCHEMA_HASH) {
       this.logger.warn(
@@ -108,6 +129,28 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
   private readQuery(client: Socket, key: string): string | undefined {
     const v = client.handshake.query[key];
     return Array.isArray(v) ? v[0] : v;
+  }
+
+  /** Pull the passcode (auth/query/header) + `ap_session` cookie off the handshake. */
+  private readCredentials(client: Socket): TerminalHandshakeCredentials {
+    const auth = client.handshake.auth as Record<string, unknown> | undefined;
+    const fromAuth = typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const header = client.handshake.headers['x-access-passcode'];
+    const fromHeader = Array.isArray(header) ? header[0] : header;
+    const authz = client.handshake.headers.authorization;
+    const fromBearer = authz?.startsWith('Bearer ') ? authz.slice('Bearer '.length) : undefined;
+    const passcode = fromAuth ?? fromHeader ?? fromBearer ?? this.readQuery(client, 'passcode');
+    return { passcode, sessionToken: this.readCookie(client, 'ap_session') };
+  }
+
+  private readCookie(client: Socket, name: string): string | undefined {
+    const raw = client.handshake.headers.cookie;
+    if (!raw) return undefined;
+    for (const part of raw.split(';')) {
+      const [k, ...rest] = part.trim().split('=');
+      if (k === name) return decodeURIComponent(rest.join('='));
+    }
+    return undefined;
   }
 
   private readSchemaHash(client: Socket): string | undefined {

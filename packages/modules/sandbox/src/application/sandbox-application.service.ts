@@ -4,6 +4,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -49,6 +50,8 @@ const DEFAULT_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
  */
 @Injectable()
 export class SandboxApplicationService {
+  private readonly logger = new Logger('SandboxApplicationService');
+
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
@@ -83,18 +86,39 @@ export class SandboxApplicationService {
     });
     this.persist(sandbox);
 
-    await this.provision(sandbox, provider);
-    return SandboxMapper.toDto(sandbox, false);
+    // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
+    // MUST NOT block on provision→start→agent-readiness — boxlite cold-pull alone
+    // is ~220s. Snapshot the `pending` DTO NOW (before provision runs — it advances
+    // the aggregate synchronously up to its first await), return it immediately, and
+    // let provision drive the state machine in the background (each transition
+    // persists + publishes a SandboxStateChanged event for the WS relay). Failures
+    // land `failed`.
+    const dto = SandboxMapper.toDto(sandbox, false);
+    void this.runProvision(sandbox, provider);
+    return dto;
+  }
+
+  /** Background provision runner — never rejects into an unhandled promise. */
+  private async runProvision(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    try {
+      await this.provision(sandbox, provider);
+    } catch (e) {
+      // provision() already marked `failed` + tore down any orphan; just log here.
+      this.logger.error(`provision failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
+    }
   }
 
   private async provision(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    // hoisted so the failure path can tear down a container that WAS created (e.g.
+    // a later `start`/readiness failure) — otherwise it orphans (S1 audit P1-2).
+    let handle: SandboxHandle | undefined;
     try {
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
       const ws = await this.workspace.prepare(sandbox.id);
 
       this.advance(sandbox, 'creating', 'scheduler');
-      const handle = await provider.create({
+      handle = await provider.create({
         sandboxId: sandbox.id,
         quota: DEFAULT_QUOTA,
         image: { ref: this.defaultImage(), digest: 'sha256:s1-placeholder' },
@@ -105,6 +129,9 @@ export class SandboxApplicationService {
       sandbox.bindRuntime({
         providerSandboxId: handle.providerSandboxId,
         workspacePath: ws.hostPath,
+        // persist any provider runtime binding (boxlite's forwarded agent port) so
+        // a backend restart can rebuild the handle and still reach the instance.
+        agentEndpointPort: handle.agentEndpointPort ?? null,
       });
       this.persist(sandbox); // save handle (no new transition/event)
 
@@ -114,6 +141,9 @@ export class SandboxApplicationService {
       this.advance(sandbox, 'running', 'scheduler');
     } catch (e) {
       this.tryAdvance(sandbox, 'failed', 'scheduler');
+      // destroy the already-created container/box before cleaning the workspace,
+      // so a mid-pipeline failure never leaks a runtime instance (S1 audit P1-2).
+      if (handle) await provider.destroy(handle).catch(() => undefined);
       await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
       throw this.mapProviderError(e);
     }
@@ -155,7 +185,11 @@ export class SandboxApplicationService {
 
   private handleOf(sandbox: Sandbox): SandboxHandle | null {
     return sandbox.providerSandboxId
-      ? { provider: sandbox.provider, providerSandboxId: sandbox.providerSandboxId }
+      ? {
+          provider: sandbox.provider,
+          providerSandboxId: sandbox.providerSandboxId,
+          agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
+        }
       : null;
   }
 

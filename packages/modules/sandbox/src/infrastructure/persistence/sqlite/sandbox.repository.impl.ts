@@ -74,6 +74,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         idleTimeoutSec: sandbox.idleTimeoutSec,
         providerHandle: sandbox.providerSandboxId,
         workspacePath: sandbox.workspacePath,
+        agentEndpointPort: sandbox.agentEndpointPort,
         version: sandbox.version,
         createdAt,
         updatedAt,
@@ -86,6 +87,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
           idleTimeoutSec: sandbox.idleTimeoutSec,
           providerHandle: sandbox.providerSandboxId,
           workspacePath: sandbox.workspacePath,
+          agentEndpointPort: sandbox.agentEndpointPort,
           version: sandbox.version,
           updatedAt,
         },
@@ -122,6 +124,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       idleTimeoutSec: row.idleTimeoutSec,
       workspacePath: row.workspacePath,
       providerSandboxId: row.providerHandle,
+      agentEndpointPort: row.agentEndpointPort,
       version: row.version,
       transitions: transitions.map((t) => ({
         from: t.fromStatus as SandboxStatus | null,

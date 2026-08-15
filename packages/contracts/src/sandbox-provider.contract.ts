@@ -53,6 +53,16 @@ export interface SandboxProviderContext {
 export interface SandboxHandle {
   readonly provider: string; // MUST equal provider.name (SP-01)
   readonly providerSandboxId: string;
+  /**
+   * Optional provider-specific runtime binding the platform PERSISTS verbatim
+   * (with the sandbox) and hands back on every later call — so a backend restart
+   * can still reach the instance. The platform treats it opaquely; only the
+   * owning provider reads it. Used by `boxlite` to remember the forwarded host
+   * loopback port of the in-sandbox agent (BoxLite `getInfo` does not surface
+   * port mappings, unlike docker `inspect`, so it cannot be re-derived). `aio`
+   * leaves it unset — it re-derives the published port from `docker inspect`.
+   */
+  readonly agentEndpointPort?: number;
 }
 
 export type SandboxRuntimeLifecycleState =

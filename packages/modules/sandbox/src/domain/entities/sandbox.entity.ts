@@ -19,6 +19,8 @@ export interface SandboxProps {
   workspacePath: string | null;
   /** provider's opaque sandbox id (SandboxHandle.providerSandboxId); null until created. */
   providerSandboxId: string | null;
+  /** provider runtime binding persisted for restart reconnect (boxlite agent port); null otherwise. */
+  agentEndpointPort: number | null;
   version: number;
   transitions: StateTransition[];
 }
@@ -34,6 +36,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _idleTimeoutSec: number;
   private _workspacePath: string | null;
   private _providerSandboxId: string | null;
+  private _agentEndpointPort: number | null;
   private _version: number;
   private readonly _transitions: StateTransition[];
   /** transitions appended in the current UoW, flushed by saveSync (28 §2.2). */
@@ -55,6 +58,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._idleTimeoutSec = props.idleTimeoutSec;
     this._workspacePath = props.workspacePath;
     this._providerSandboxId = props.providerSandboxId;
+    this._agentEndpointPort = props.agentEndpointPort;
     this._version = props.version;
     this._transitions = props.transitions;
   }
@@ -92,6 +96,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       idleTimeoutSec: input.idleTimeoutSec,
       workspacePath: null,
       providerSandboxId: null,
+      agentEndpointPort: null,
       version: 0,
       transitions: [firstTransition],
     });
@@ -115,14 +120,22 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   get providerSandboxId(): string | null {
     return this._providerSandboxId;
   }
+  get agentEndpointPort(): number | null {
+    return this._agentEndpointPort;
+  }
   get version(): number {
     return this._version;
   }
 
   /** Record the provider handle + host workspace once created (03 §4). */
-  bindRuntime(input: { providerSandboxId: string; workspacePath: string }): void {
+  bindRuntime(input: {
+    providerSandboxId: string;
+    workspacePath: string;
+    agentEndpointPort?: number | null;
+  }): void {
     this._providerSandboxId = input.providerSandboxId;
     this._workspacePath = input.workspacePath;
+    this._agentEndpointPort = input.agentEndpointPort ?? null;
   }
   get transitions(): readonly StateTransition[] {
     return this._transitions;

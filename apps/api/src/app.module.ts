@@ -4,6 +4,8 @@ import { SandboxModule } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
 import { PlatformModule } from './platform/persistence/platform.module';
 import { SystemModule } from './platform/system/system.module';
+import { AccessPasscodeModule } from './platform/access-passcode/access-passcode.module';
+import { RealtimeModule } from './platform/events/realtime.module';
 import { mcpModuleOptions } from './bootstrap/mcp.setup';
 import { guardProviders } from './bootstrap/guards.setup';
 
@@ -15,6 +17,8 @@ import { guardProviders } from './bootstrap/guards.setup';
 @Module({
   imports: [
     PlatformModule,
+    AccessPasscodeModule,
+    RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),
     SystemModule,
     SandboxModule,

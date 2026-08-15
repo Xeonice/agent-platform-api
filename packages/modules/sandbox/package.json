@@ -15,10 +15,11 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@platform/contracts": "workspace:*",
-    "@platform/shared-kernel": "workspace:*",
+    "@boxlite-ai/boxlite": "0.9.7",
     "@nestjs/common": "^11.0.0",
     "@nestjs/swagger": "^11.0.0",
+    "@platform/contracts": "workspace:*",
+    "@platform/shared-kernel": "workspace:*",
     "@rekog/mcp-nest": "^1.6.0",
     "dockerode": "^4.0.2",
     "drizzle-orm": "^0.36.0",

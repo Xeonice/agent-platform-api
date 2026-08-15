@@ -25,6 +25,10 @@ export const sandboxes = sqliteTable(
     quotaRamMb: integer('quota_ram_mb'),
     providerHandle: text('provider_handle'),
     workspacePath: text('workspace_path'),
+    // provider-specific runtime binding persisted so a backend restart can still
+    // reach the instance (13 §2.1). boxlite stores its forwarded agent host port
+    // here; aio leaves it NULL (it re-derives from docker inspect).
+    agentEndpointPort: integer('agent_endpoint_port'),
     version: integer('version').notNull().default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
