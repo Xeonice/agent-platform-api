@@ -6,7 +6,7 @@ import {
   createDockerClient,
   isDockerAvailable,
 } from '../../../../packages/modules/sandbox/src/infrastructure/providers/docker/docker-client';
-import { DockerSandboxProvider } from '../../../../packages/modules/sandbox/src/infrastructure/providers/docker/docker-sandbox.provider';
+import { DockerContainerBackend } from '../../../../packages/modules/sandbox/src/infrastructure/providers/docker/docker-container-backend';
 import type { ProcessStream, SandboxHandle } from '@platform/contracts';
 
 /**
@@ -40,8 +40,8 @@ function collectExec(stream: ProcessStream): Promise<{ out: string; code: number
   });
 }
 
-describe.skipIf(!dockerUp)('DockerSandboxProvider (real docker)', () => {
-  const provider = new DockerSandboxProvider(docker, {
+describe.skipIf(!dockerUp)('DockerContainerBackend — aio 本机容器后端 (real docker)', () => {
+  const provider = new DockerContainerBackend(docker, {
     name: 'aio',
     isolationLabel: 'container',
     keepAliveCmd: ['tail', '-f', '/dev/null'],

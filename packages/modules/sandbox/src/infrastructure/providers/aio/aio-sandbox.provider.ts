@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type Docker from 'dockerode';
-import { DockerSandboxProvider } from '../docker/docker-sandbox.provider';
+import { DockerContainerBackend } from '../docker/docker-container-backend';
 import { DOCKER_CLIENT } from '../docker/docker.token';
 
 /**
@@ -11,7 +11,7 @@ import { DOCKER_CLIENT } from '../docker/docker.token';
  * NO keep-alive command is set. The agent port is published to loopback only.
  */
 @Injectable()
-export class AioSandboxProvider extends DockerSandboxProvider {
+export class AioSandboxProvider extends DockerContainerBackend {
   constructor(@Inject(DOCKER_CLIENT) docker: Docker) {
     super(docker, {
       name: 'aio',

@@ -58,9 +58,9 @@ export interface SandboxHandle {
    * (with the sandbox) and hands back on every later call — so a backend restart
    * can still reach the instance. The platform treats it opaquely; only the
    * owning provider reads it. Used by `boxlite` to remember the forwarded host
-   * loopback port of the in-sandbox agent (BoxLite `getInfo` does not surface
-   * port mappings, unlike docker `inspect`, so it cannot be re-derived). `aio`
-   * leaves it unset — it re-derives the published port from `docker inspect`.
+   * loopback port of the in-sandbox agent (its runtime does not surface port
+   * mappings, so the port cannot be re-resolved after a restart). `aio` leaves
+   * it unset — its container backend re-resolves the published port at spawn time.
    */
   readonly agentEndpointPort?: number;
 }

@@ -14,7 +14,7 @@ import {
 import { DockerExecAgentClient } from './docker-exec-agent.client';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
 
-export interface DockerProviderConfig {
+export interface DockerContainerConfig {
   name: string;
   capabilities: SandboxProviderCapabilities;
   /**
@@ -36,20 +36,24 @@ export interface DockerProviderConfig {
 }
 
 /**
- * Docker-backed SandboxProvider CONTROL PLANE (docs/backend/04 §2 + ADR 决策 A).
- * The 6 required methods map to container create/start/stop/rm/inspect. The DATA
- * plane (`spawn`) is agent-first: when `agentPort` is configured the process/pty
- * comes from the in-sandbox AIO agent; otherwise it falls back to `docker exec`.
- * boxlite reuses this control plane in P1 (BoxLite micro-VM control plane lands in
- * P2); the agent data plane is shared across both.
+ * `aio` 的 Docker 容器后端 —— **不是**一个注册的沙箱方案。
+ *
+ * 注册的方案就是 `aio` + `boxlite`（见 registry）；这里是 `AioSandboxProvider`
+ * 赖以实现的具体 Docker 容器机制，也是开发机上一个方便的**本机/测试运行时**。
+ * Docker 不会泄到这一层之外——对外的 SPI/REST/MCP 保持运行时无关（ADR：服务
+ * 对外是纯粹的沙箱抽象）。
+ *
+ * 控制面：6 个 SPI 方法经 dockerode 映射到容器 create/start/stop/rm/inspect。
+ * 数据面（`spawn`）agent 优先：设了 `agentPort` 则 pty/exec 来自沙箱内 AIO agent；
+ * 未设则退回 `docker exec`（`DockerExecAgentClient`，仅给无 agent 的裸镜像）。
  */
-export class DockerSandboxProvider implements SandboxProvider {
+export class DockerContainerBackend implements SandboxProvider {
   readonly name: string;
   readonly capabilities: SandboxProviderCapabilities;
 
   constructor(
     private readonly docker: Docker,
-    private readonly config: DockerProviderConfig,
+    private readonly config: DockerContainerConfig,
   ) {
     this.name = config.name;
     this.capabilities = config.capabilities;
