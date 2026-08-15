@@ -1,9 +1,5 @@
 import { Inject, Logger } from '@nestjs/common';
-import {
-  type OnGatewayConnection,
-  WebSocketGateway,
-  WebSocketServer,
-} from '@nestjs/websockets';
+import { type OnGatewayConnection, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
 import { TERMINAL_AUTHENTICATOR } from '@platform/contracts';
 import type {
@@ -30,9 +26,7 @@ export class EventsGateway implements OnGatewayConnection, SandboxEventBroadcast
   @WebSocketServer()
   private readonly server!: Namespace;
 
-  constructor(
-    @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
-  ) {}
+  constructor(@Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator) {}
 
   handleConnection(client: Socket): void {
     if (!this.auth.authorize(this.readCredentials(client))) {
@@ -48,7 +42,8 @@ export class EventsGateway implements OnGatewayConnection, SandboxEventBroadcast
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth = typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth =
+      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;

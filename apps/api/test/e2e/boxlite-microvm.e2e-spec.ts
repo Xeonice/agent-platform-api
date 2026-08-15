@@ -105,7 +105,11 @@ afterAll(async () => {
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
 });
 
-function nextFrame(sock: Socket, pred: (f: TerminalServerFrame) => boolean, ms = 15000): Promise<TerminalServerFrame> {
+function nextFrame(
+  sock: Socket,
+  pred: (f: TerminalServerFrame) => boolean,
+  ms = 15000,
+): Promise<TerminalServerFrame> {
   return new Promise((resolveP, reject) => {
     const t = setTimeout(() => reject(new Error('frame timeout')), ms);
     const h = (f: TerminalServerFrame) => {
@@ -135,7 +139,10 @@ async function waitForFileContains(path: string, needle: string, ms = 10000): Pr
 function waitForOutput(sock: Socket, re: RegExp, ms = 20000): Promise<string> {
   return new Promise((resolveP, reject) => {
     let acc = '';
-    const t = setTimeout(() => reject(new Error(`output timeout; got: ${JSON.stringify(acc)}`)), ms);
+    const t = setTimeout(
+      () => reject(new Error(`output timeout; got: ${JSON.stringify(acc)}`)),
+      ms,
+    );
     const h = (f: TerminalServerFrame) => {
       if (f.type === 'data') {
         acc += f.data;

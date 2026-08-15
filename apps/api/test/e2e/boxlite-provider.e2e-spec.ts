@@ -98,10 +98,10 @@ afterAll(async () => {
   }
 });
 
-describe.skipIf(!ready)('BoxliteSandboxProvider — restart reconnect + stop/restart (决策 B)', () => {
-  it(
-    'survives a fresh provider (persisted port) and preserves rootfs across stop→restart',
-    async () => {
+describe.skipIf(!ready)(
+  'BoxliteSandboxProvider — restart reconnect + stop/restart (决策 B)',
+  () => {
+    it('survives a fresh provider (persisted port) and preserves rootfs across stop→restart', async () => {
       const p1 = new BoxliteSandboxProvider();
       const sandboxId = `blprov-${Date.now()}`;
       const handle = await p1.create(ctxFor(sandboxId));
@@ -149,7 +149,6 @@ describe.skipIf(!ready)('BoxliteSandboxProvider — restart reconnect + stop/res
 
       await p1.destroy(handle);
       createdBoxIds.delete(handle.providerSandboxId);
-    },
-    420_000,
-  );
-});
+    }, 420_000);
+  },
+);

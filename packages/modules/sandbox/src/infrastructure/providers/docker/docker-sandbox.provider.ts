@@ -89,7 +89,9 @@ export class DockerSandboxProvider implements SandboxProvider {
           // publish the agent port to LOOPBACK ONLY (HostIp 127.0.0.1), never an
           // external interface — the agent is an unauthenticated shell (ADR 安全姿态).
           // Empty HostPort = kernel-assigned ephemeral port, resolved at spawn time.
-          PortBindings: portKey ? { [portKey]: [{ HostIp: '127.0.0.1', HostPort: '' }] } : undefined,
+          PortBindings: portKey
+            ? { [portKey]: [{ HostIp: '127.0.0.1', HostPort: '' }] }
+            : undefined,
         },
       });
       return { provider: this.name, providerSandboxId: container.id };
@@ -163,9 +165,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
         const client = new AioSandboxAgentClient(base);
-        return spec.tty
-          ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24)
-          : client.exec(spec);
+        return spec.tty ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24) : client.exec(spec);
       }
       // fallback: agent-less bare image → docker exec.
       const container = this.docker.getContainer(handle.providerSandboxId);

@@ -231,7 +231,10 @@ describe.skipIf(!dockerUp)(
           sock.emit('frame', { type: 'input', data: 'cat /workspace/host-seed.txt\n' });
           await waitForOutput(sock, /HOST_SEED_AIO/);
           // box → host: the sandbox writes /workspace, the host sees it.
-          sock.emit('frame', { type: 'input', data: 'echo BOX_WROTE_AIO > /workspace/box-out.txt\n' });
+          sock.emit('frame', {
+            type: 'input',
+            data: 'echo BOX_WROTE_AIO > /workspace/box-out.txt\n',
+          });
           await waitForFileContains(resolve(wsDir, 'box-out.txt'), 'BOX_WROTE_AIO');
         } finally {
           sock.disconnect();

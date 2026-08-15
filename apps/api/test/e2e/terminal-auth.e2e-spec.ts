@@ -57,7 +57,10 @@ function awaitDisconnect(sock: Socket): Promise<boolean> {
   });
 }
 
-function nextFrame(sock: Socket, pred: (f: TerminalServerFrame) => boolean): Promise<TerminalServerFrame> {
+function nextFrame(
+  sock: Socket,
+  pred: (f: TerminalServerFrame) => boolean,
+): Promise<TerminalServerFrame> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('frame timeout')), 4000);
     const h = (f: TerminalServerFrame) => {
@@ -82,7 +85,10 @@ describe('/terminal WS access-passcode gate (P1-1)', () => {
   });
 
   it('refuses a handshake with a WRONG passcode', async () => {
-    const sock = connect({ sandboxId: 'sbx-auth-2', xSchemaHash: WS_SCHEMA_HASH }, { passcode: 'nope' });
+    const sock = connect(
+      { sandboxId: 'sbx-auth-2', xSchemaHash: WS_SCHEMA_HASH },
+      { passcode: 'nope' },
+    );
     try {
       expect(await awaitDisconnect(sock)).toBe(true);
     } finally {

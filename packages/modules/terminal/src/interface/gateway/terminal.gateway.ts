@@ -134,7 +134,8 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
   /** Pull the passcode (auth/query/header) + `ap_session` cookie off the handshake. */
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth = typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth =
+      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;

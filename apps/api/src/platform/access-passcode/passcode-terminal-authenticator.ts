@@ -1,10 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
-import type {
-  TerminalAuthenticator,
-  TerminalHandshakeCredentials,
-} from '@platform/contracts';
+import type { TerminalAuthenticator, TerminalHandshakeCredentials } from '@platform/contracts';
 import { PasscodeService } from './passcode.service';
 
 /**
@@ -27,7 +24,10 @@ export class PasscodeTerminalAuthenticator implements TerminalAuthenticator {
   authorize(credentials: TerminalHandshakeCredentials): boolean {
     if (!this.passcodes.enabled) return true; // passcode disabled ⇒ open (dev)
     const now = this.clock.now().getTime();
-    if (credentials.sessionToken && this.passcodes.verifySessionToken(credentials.sessionToken, now)) {
+    if (
+      credentials.sessionToken &&
+      this.passcodes.verifySessionToken(credentials.sessionToken, now)
+    ) {
       return true;
     }
     if (credentials.passcode !== undefined && this.passcodes.matches(credentials.passcode)) {

@@ -125,9 +125,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     return this.guard(async () => {
       // data plane = the shared in-sandbox AIO agent over the forwarded loopback port.
       const client = new AioSandboxAgentClient(this.agentBase(handle));
-      return spec.tty
-        ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24)
-        : client.exec(spec);
+      return spec.tty ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24) : client.exec(spec);
     });
   }
 

@@ -4,11 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
-import {
-  SANDBOX_PROVIDER_REGISTRY,
-  WORKSPACE_PREPARER,
-  WS_SCHEMA_HASH,
-} from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, WS_SCHEMA_HASH } from '@platform/contracts';
 import type { SandboxWsEvent, TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
@@ -93,12 +89,19 @@ describe('/events realtime sandbox state push', () => {
 
     // sandbox.created carries the id + project
     const createdEv = received.find((e) => e.event === 'sandbox.created');
-    expect(createdEv).toMatchObject({ event: 'sandbox.created', sandboxId: id, projectId: 'prj-events' });
+    expect(createdEv).toMatchObject({
+      event: 'sandbox.created',
+      sandboxId: id,
+      projectId: 'prj-events',
+    });
 
     // `sandbox.created` conveys the pending creation; `status_changed` then carries
     // every subsequent transition, in order, ending at running.
     const statuses = received
-      .filter((e): e is Extract<SandboxWsEvent, { event: 'sandbox.status_changed' }> => e.event === 'sandbox.status_changed')
+      .filter(
+        (e): e is Extract<SandboxWsEvent, { event: 'sandbox.status_changed' }> =>
+          e.event === 'sandbox.status_changed',
+      )
       .map((e) => e.status);
     expect(statuses[statuses.length - 1]).toBe('running');
     expect(statuses).toEqual([

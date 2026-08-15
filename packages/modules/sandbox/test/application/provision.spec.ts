@@ -191,7 +191,15 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
     let n = 0;
     const ids: IdGenerator = { next: () => `sbx-fail-${++n}` };
     const clock: Clock = { now: () => new Date('2026-08-13T00:00:00.000Z') };
-    const service = new SandboxApplicationService(repo, uow, events, clock, ids, registry, workspace);
+    const service = new SandboxApplicationService(
+      repo,
+      uow,
+      events,
+      clock,
+      ids,
+      registry,
+      workspace,
+    );
 
     // create resolves early (pending); the background provision fails and lands `failed`.
     const dto = await service.create({ projectId: 'prj-1', runtime: 'x' });

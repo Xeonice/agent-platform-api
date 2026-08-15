@@ -84,7 +84,11 @@ async function makeOrphanContainer(name: string, sandboxId: string): Promise<voi
     name,
     Image: IMAGE,
     Cmd: ['tail', '-f', '/dev/null'],
-    Labels: { 'platform.managed': 'true', 'platform.provider': 'aio', 'platform.sandboxId': sandboxId },
+    Labels: {
+      'platform.managed': 'true',
+      'platform.provider': 'aio',
+      'platform.sandboxId': sandboxId,
+    },
   });
   createdContainers.add(name);
   await c.start();
@@ -111,7 +115,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const name of createdContainers) {
-    await docker.getContainer(name).remove({ force: true }).catch(() => undefined);
+    await docker
+      .getContainer(name)
+      .remove({ force: true })
+      .catch(() => undefined);
   }
   if (boxliteReady) {
     const rt = await getSharedBoxliteRuntime().catch(() => null);
@@ -150,23 +157,27 @@ describe.skipIf(!dockerUp)('RuntimeReconciler (startup orphan reaper)', () => {
     createdContainers.delete(orphanName);
   }, 60_000);
 
-  it.skipIf(!boxliteReady)('reaps a DB-less orphan boxlite micro-VM', async () => {
-    const orphanId = `orphan-bl-${Date.now()}`;
-    const rt = await getSharedBoxliteRuntime();
-    const box = await rt.create(
-      { image: BOXLITE_IMAGE, memoryMib: 2048, cpus: 2, autoRemove: false, detach: true },
-      `platform-boxlite-${orphanId}`,
-    );
-    createdBoxIds.add(box.id);
+  it.skipIf(!boxliteReady)(
+    'reaps a DB-less orphan boxlite micro-VM',
+    async () => {
+      const orphanId = `orphan-bl-${Date.now()}`;
+      const rt = await getSharedBoxliteRuntime();
+      const box = await rt.create(
+        { image: BOXLITE_IMAGE, memoryMib: 2048, cpus: 2, autoRemove: false, detach: true },
+        `platform-boxlite-${orphanId}`,
+      );
+      createdBoxIds.add(box.id);
 
-    const before = (await rt.listInfo()).some((b) => b.id === box.id);
-    expect(before).toBe(true);
+      const before = (await rt.listInfo()).some((b) => b.id === box.id);
+      expect(before).toBe(true);
 
-    const result = await reconciler.reconcile();
-    expect(result.removedBoxes).toBeGreaterThanOrEqual(1);
+      const result = await reconciler.reconcile();
+      expect(result.removedBoxes).toBeGreaterThanOrEqual(1);
 
-    const after = (await rt.listInfo()).some((b) => b.id === box.id);
-    expect(after).toBe(false); // DB-less micro-VM → reaped
-    createdBoxIds.delete(box.id);
-  }, 120_000);
+      const after = (await rt.listInfo()).some((b) => b.id === box.id);
+      expect(after).toBe(false); // DB-less micro-VM → reaped
+      createdBoxIds.delete(box.id);
+    },
+    120_000,
+  );
 });
