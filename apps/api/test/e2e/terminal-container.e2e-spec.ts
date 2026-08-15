@@ -33,11 +33,21 @@ import type { ProcessStream } from '@platform/contracts';
  */
 const IMAGE = process.env.SANDBOX_TEST_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest';
 const dockerUp = await isDockerAvailable(createDockerClient()).catch(() => false);
+// The AIO Sandbox image is ~3.3GB; do NOT auto-pull it (esp. on CI). Skip loud
+// unless it is already present locally (set SANDBOX_TEST_IMAGE to override).
+const imagePresent = dockerUp
+  ? await createDockerClient()
+      .getImage(IMAGE)
+      .inspect()
+      .then(() => true)
+      .catch(() => false)
+  : false;
+const runnable = dockerUp && imagePresent;
 
-if (!dockerUp) {
+if (!runnable) {
   console.warn(
     '\n[33m========================================================================\n' +
-      '[terminal-container.e2e] SKIPPED — docker daemon unreachable.\n' +
+      '[terminal-container.e2e] SKIPPED — docker down or AIO image not present locally.\n' +
       'This is the full REST→WS→real-container-PTY chain; run it with docker up.\n' +
       '========================================================================[0m\n',
   );
@@ -57,7 +67,7 @@ const docker = createDockerClient();
 const createdContainers = new Set<string>();
 
 beforeAll(async () => {
-  if (!dockerUp) return;
+  if (!runnable) return;
   process.env.DATABASE_URL = ':memory:';
   // project-local temp dir so the host path is docker-shareable (macOS Docker Desktop)
   dataRoot = mkdtempSync(resolve(process.cwd(), 'tmp-e2e-data-'));
@@ -167,7 +177,7 @@ function waitForOutput(sock: Socket, re: RegExp, ms = 12000): Promise<string> {
   });
 }
 
-describe.skipIf(!dockerUp)(
+describe.skipIf(!runnable)(
   'full chain: REST → socket.io → real container PTY (per provider)',
   () => {
     it('the registry exposes two DISTINCT providers with different capabilities', () => {
