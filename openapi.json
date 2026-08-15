@@ -1,6 +1,31 @@
 {
   "openapi": "3.0.0",
   "paths": {
+    "/api/access/unlock": {
+      "post": {
+        "operationId": "AccessController_unlock",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnlockRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Submit the access passcode; sets the ap_session cookie on success",
+        "tags": [
+          "access"
+        ]
+      }
+    },
     "/api/sse": {
       "get": {
         "operationId": "SseController_sse",
@@ -211,6 +236,18 @@
   "servers": [],
   "components": {
     "schemas": {
+      "UnlockRequestDto": {
+        "type": "object",
+        "properties": {
+          "passcode": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "passcode"
+        ]
+      },
       "CreateSandboxDto": {
         "type": "object",
         "properties": {
