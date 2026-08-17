@@ -438,6 +438,145 @@
           "sandbox"
         ]
       }
+    },
+    "/api/credentials": {
+      "get": {
+        "operationId": "CredentialController_list",
+        "parameters": [
+          {
+            "name": "kind",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "enum": [
+                "git"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MaskedGitCredentialResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List git credentials (masked). `kind` is required and must be `git`.",
+        "tags": [
+          "credential"
+        ]
+      }
+    },
+    "/api/credentials/git": {
+      "post": {
+        "operationId": "CredentialController_store",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGitCredentialDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreGitCredentialResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Store a git credential (ssh-key / https-token); same-protocol = replace",
+        "tags": [
+          "credential"
+        ]
+      }
+    },
+    "/api/credentials/git/test": {
+      "post": {
+        "operationId": "CredentialController_test",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/InlineGitTestDto"
+                  },
+                  {
+                    "$ref": "#/components/schemas/StoredGitTestDto"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "source",
+                  "mapping": {
+                    "inline": "#/components/schemas/InlineGitTestDto",
+                    "stored": "#/components/schemas/StoredGitTestDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitTestResultResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Test a git credential via ls-remote (15s); inline (test-before-save) or stored; never returns refs",
+        "tags": [
+          "credential"
+        ]
+      }
+    },
+    "/api/credentials/git/{id}": {
+      "delete": {
+        "operationId": "CredentialController_revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Revoke a git credential (wipes ciphertext, keeps audit metadata)",
+        "tags": [
+          "credential"
+        ]
+      }
     }
   },
   "info": {
@@ -698,6 +837,230 @@
             "type": "boolean"
           }
         }
+      },
+      "MaskedGitCredentialResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "git"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ssh-key",
+              "https-token"
+            ]
+          },
+          "maskedIdentifier": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "github",
+              "gitlab",
+              "gitee",
+              "other"
+            ]
+          },
+          "allowedHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "knownHosts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "keyType": {
+                  "type": "string"
+                },
+                "fingerprint": {
+                  "type": "string"
+                },
+                "firstSeenAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "host",
+                "keyType",
+                "fingerprint",
+                "firstSeenAt"
+              ]
+            }
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "type",
+          "maskedIdentifier",
+          "allowedHosts",
+          "createdAt"
+        ]
+      },
+      "CreateGitCredentialDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "ssh-key",
+              "https-token"
+            ]
+          },
+          "secret": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "github",
+              "gitlab",
+              "gitee",
+              "other"
+            ]
+          },
+          "allowedHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "type",
+          "secret"
+        ]
+      },
+      "StoreGitCredentialResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "maskedIdentifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "maskedIdentifier"
+        ]
+      },
+      "InlineGitTestDto": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "inline"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ssh-key",
+              "https-token"
+            ]
+          },
+          "secret": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "github",
+              "gitlab",
+              "gitee",
+              "other"
+            ]
+          },
+          "allowedHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "repoUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "source",
+          "type",
+          "secret"
+        ]
+      },
+      "StoredGitTestDto": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "stored"
+            ]
+          },
+          "credentialId": {
+            "type": "string"
+          },
+          "repoUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "source",
+          "credentialId"
+        ]
+      },
+      "GitTestResultResponseDto": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "CLONE_FAILED_PERMISSION",
+              "CLONE_FAILED_NETWORK",
+              "TIMEOUT"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok"
+        ]
       },
       "ErrorEnvelope": {
         "type": "object",

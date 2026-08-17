@@ -108,17 +108,28 @@ describe('projects REST', () => {
       .expect(400);
   });
 
-  it('blocks SSRF repoUrl (internal host) with 400', async () => {
+  it('blocks SSRF to loopback / link-local / metadata with 400 (03 §7.3 C4)', async () => {
+    // loopback + cloud metadata + link-local are NEVER a git host — always rejected.
     for (const repoUrl of [
       'http://169.254.169.254/x.git',
       'http://localhost/x.git',
-      'http://10.0.0.1/x.git',
+      'http://127.0.0.1/x.git',
     ]) {
       await request(app.getHttpServer())
         .post('/api/projects')
         .send({ name: `ssrf-${Math.random()}`, sourceType: 'git', repoUrl })
         .expect(400);
     }
+  });
+
+  it('ALLOWS a private-LAN repoUrl (internal self-hosted git is a core use case, C4)', async () => {
+    // 10.x/192.168.x are legitimate internal git hosts on a single-machine deploy;
+    // creation is accepted (202). Delete immediately to cancel the background clone.
+    const res = await request(app.getHttpServer())
+      .post('/api/projects')
+      .send({ name: `lan-${Math.random()}`, sourceType: 'git', repoUrl: 'http://192.168.199.1/x.git' })
+      .expect(202);
+    await request(app.getHttpServer()).delete(`/api/projects/${res.body.id}`).send({}).expect(204);
   });
 
   it('I-PRJ-4: unique name (409), name length ≤40 (400)', async () => {

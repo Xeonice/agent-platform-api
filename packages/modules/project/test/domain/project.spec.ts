@@ -24,28 +24,53 @@ describe('RepoUrl', () => {
     }
   });
 
-  it('blocks SSRF to internal/private/metadata hosts', () => {
+  it('host() returns an AUTHORITY: default port omitted, non-default port kept (C4)', () => {
+    // git ≥ 2.50 credential matching is port-sensitive, so the authority carries the
+    // non-default port. Self-hosted GitLab/Gitea commonly run on :8443/:3000.
+    expect(RepoUrl.create('https://github.com/x/y.git').host()).toBe('github.com');
+    expect(RepoUrl.create('https://github.com:443/x/y.git').host()).toBe('github.com'); // default → omit
+    expect(RepoUrl.create('https://git.company.com:8443/x/y.git').host()).toBe('git.company.com:8443');
+    expect(RepoUrl.create('http://git.company.com:3000/x.git').host()).toBe('git.company.com:3000');
+    expect(RepoUrl.create('git@git.company.com:owner/repo.git').host()).toBe('git.company.com'); // scp, no port
+  });
+
+  it('credentialKind() picks by protocol', () => {
+    expect(RepoUrl.create('https://git.company.com:8443/x.git').credentialKind()).toBe('git-https-token');
+    expect(RepoUrl.create('git@git.company.com:owner/repo.git').credentialKind()).toBe('git-ssh-key');
+  });
+
+  it('blocks SSRF to loopback / link-local / metadata (never a git host, 03 §7.3 C4)', () => {
     const blocked = [
       'http://localhost/x.git',
       'https://localhost:8080/x.git',
       'http://127.0.0.1/x.git',
       'https://127.1.2.3/x.git',
-      'http://10.0.0.5/x.git',
-      'http://172.16.0.1/x.git',
-      'http://172.31.255.1/x.git',
-      'http://192.168.1.10/x.git',
       'http://169.254.169.254/latest/meta-data', // cloud metadata
       'http://0.0.0.0/x.git',
       'git://127.0.0.1/x.git',
       'https://[::1]/x.git',
       'http://[fe80::1]/x.git',
-      'http://[fc00::1]/x.git',
       'http://[::ffff:127.0.0.1]/x.git',
       'git@127.0.0.1:owner/repo.git', // scp-like to loopback
       'git@localhost:owner/repo.git',
     ];
     for (const url of blocked) {
       expect(() => RepoUrl.create(url), url).toThrow(InvalidRepoUrlError);
+    }
+  });
+
+  it('ALLOWS private LAN hosts — internal self-hosted git is a core use case (C4)', () => {
+    // Private ranges are legitimate git hosts on a single-machine on-prem deploy;
+    // where a credential may be sent is governed by allowedHosts, not this blocklist.
+    for (const url of [
+      'http://10.0.0.5/x.git',
+      'http://172.16.0.1/x.git',
+      'http://172.31.255.1/x.git',
+      'http://192.168.1.10/x.git',
+      'http://[fc00::1]/x.git',
+      'git@192.168.1.10:owner/repo.git', // scp-like to a private LAN host
+    ]) {
+      expect(() => RepoUrl.create(url), url).not.toThrow();
     }
   });
 

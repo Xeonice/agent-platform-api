@@ -12,6 +12,14 @@ describe('classifyCloneError (03 §7.5)', () => {
     );
     expect(classifyCloneError('remote: Repository not found.')).toBe('CLONE_FAILED_PERMISSION');
     expect(classifyCloneError('Permission denied (publickey).')).toBe('CLONE_FAILED_PERMISSION');
+    // hermetic no-cred clone (GIT_TERMINAL_PROMPT=0) → git prints this, NOT "auth failed".
+    expect(classifyCloneError('fatal: could not read Username for https://h: terminal prompts disabled')).toBe(
+      'CLONE_FAILED_PERMISSION',
+    );
+    expect(classifyCloneError('fatal: unable to get password from user')).toBe('CLONE_FAILED_PERMISSION');
+    expect(classifyCloneError('remote: HTTP Basic: Access denied\nfatal: Authentication failed')).toBe(
+      'CLONE_FAILED_PERMISSION',
+    );
   });
   it('disk full → DISK_INSUFFICIENT', () => {
     expect(classifyCloneError('error: write: No space left on device')).toBe('DISK_INSUFFICIENT');

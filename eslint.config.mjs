@@ -57,6 +57,7 @@ export default tseslint.config(
             'packages/contracts/tsconfig.json',
             'packages/modules/project/tsconfig.json',
             'packages/modules/sandbox/tsconfig.json',
+            'packages/modules/credential/tsconfig.json',
             'apps/api/tsconfig.json',
           ],
         },

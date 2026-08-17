@@ -1,6 +1,7 @@
 export * from './schemas/enums';
 export * from './schemas/sandbox.schema';
 export * from './schemas/project.schema';
+export * from './schemas/credential.schema';
 export * from './schemas/system.schema';
 export * from './errors';
 export * from './registry.tokens';
@@ -9,6 +10,7 @@ export * from './sandbox-pty.port';
 export * from './sandbox-events.port';
 export * from './sandbox-facade.port';
 export * from './project-facade.port';
+export * from './credential-facade.port';
 export * from './terminal-auth.port';
 export * from './workspace-preparer.port';
 export * from './ws-protocol';
