@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { McpModule } from '@rekog/mcp-nest';
+import { ProjectModule } from '@platform/project';
 import { SandboxModule } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
 import { PlatformModule } from './platform/persistence/platform.module';
@@ -21,6 +22,7 @@ import { guardProviders } from './bootstrap/guards.setup';
     RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),
     SystemModule,
+    ProjectModule,
     SandboxModule,
     TerminalModule,
   ],

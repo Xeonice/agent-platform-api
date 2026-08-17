@@ -7,6 +7,9 @@ import { defineConfig } from 'drizzle-kit';
  */
 export default defineConfig({
   dialect: 'sqlite',
-  schema: './packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite.ts',
+  schema: [
+    './packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite.ts',
+    './packages/modules/project/src/infrastructure/persistence/schema/project.sqlite.ts',
+  ],
   out: './drizzle',
 });

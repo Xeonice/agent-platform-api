@@ -4,11 +4,11 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, WS_SCHEMA_HASH } from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE, WS_SCHEMA_HASH } from '@platform/contracts';
 import type { SandboxWsEvent, TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
-import { fakeWorkspace, makeFakeRegistry } from './_fakes';
+import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
  * /events WS push leg (shared/10 §7.4, 26 §10). Boots the whole app on in-memory
@@ -29,6 +29,8 @@ beforeAll(async () => {
     .useValue(makeFakeRegistry())
     .overrideProvider(WORKSPACE_PREPARER)
     .useValue(fakeWorkspace)
+    .overrideProvider(PROJECT_FACADE)
+    .useValue(fakeProjectFacade)
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');

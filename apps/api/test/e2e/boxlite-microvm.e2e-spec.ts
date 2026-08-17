@@ -159,10 +159,17 @@ function waitForOutput(sock: Socket, re: RegExp, ms = 20000): Promise<string> {
 
 describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws (决策 B)', () => {
   it('creates a REAL micro-VM, runs ls / over the in-sandbox agent, destroys', async () => {
+    // 0) real (empty) project — the sandbox create validates it via the facade.
+    const projectRes = await request(app.getHttpServer())
+      .post('/api/projects')
+      .send({ name: 'proj-boxlite', sourceType: 'empty' })
+      .expect(202);
+    const projectId = projectRes.body.id as string;
+
     // 1) create via REST — registry routes to BoxliteSandboxProvider → BoxLite SDK.
     const created = await request(app.getHttpServer())
       .post('/api/sandboxes')
-      .send({ projectId: 'prj-boxlite-e2e', runtime: 'claude-code', provider: 'boxlite' })
+      .send({ projectId, runtime: 'claude-code', provider: 'boxlite' })
       .expect(201);
     const sandboxId = created.body.id as string;
     // ASYNC create (P1-#1): POST returns `pending`; wait out the background

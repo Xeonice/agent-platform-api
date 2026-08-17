@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/shared-kernel" },
     { "path": "./packages/contracts" },
+    { "path": "./packages/modules/project" },
     { "path": "./packages/modules/sandbox" },
     { "path": "./packages/modules/terminal" },
     { "path": "./apps/api" }

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { eq, ne, and, inArray, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { SandboxId, ProjectId, Tx } from '@platform/shared-kernel';
@@ -47,6 +47,20 @@ export class SqliteSandboxRepository implements SandboxRepository {
         .all();
       return this.toDomain(row, transitions);
     });
+  }
+
+  async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const id of projectIds) out[id] = 0; // ensure every requested id is present
+    if (projectIds.length === 0) return out;
+    const rows = this.db
+      .select({ projectId: sandboxes.projectId, n: sql<number>`count(*)` })
+      .from(sandboxes)
+      .where(and(inArray(sandboxes.projectId, projectIds), ne(sandboxes.status, 'destroyed')))
+      .groupBy(sandboxes.projectId)
+      .all();
+    for (const row of rows) out[row.projectId] = row.n;
+    return out;
   }
 
   saveSync(_tx: Tx, sandbox: Sandbox): void {

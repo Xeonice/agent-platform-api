@@ -107,6 +107,220 @@
         ]
       }
     },
+    "/api/projects": {
+      "post": {
+        "operationId": "ProjectController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "a project with that name already exists (I-PRJ-4)"
+          }
+        },
+        "summary": "Create a project (git ⇒ async clone, empty ⇒ ready); always 202",
+        "tags": [
+          "project"
+        ]
+      },
+      "get": {
+        "operationId": "ProjectController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List all projects",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/projects/{id}": {
+      "get": {
+        "operationId": "ProjectController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get a project by id",
+        "tags": [
+          "project"
+        ]
+      },
+      "delete": {
+        "operationId": "ProjectController_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteProjectDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Delete a project (optionally keeping its baseline)",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/projects/{id}/retry-clone": {
+      "post": {
+        "operationId": "ProjectController_retryClone",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Retry a failed clone",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/projects/{id}/convert-to-empty": {
+      "post": {
+        "operationId": "ProjectController_convertToEmpty",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Convert a failed git project into an empty one",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/projects/{id}/cancel-clone": {
+      "post": {
+        "operationId": "ProjectController_cancelClone",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel an in-progress clone",
+        "tags": [
+          "project"
+        ]
+      }
+    },
     "/api/sandboxes": {
       "post": {
         "operationId": "SandboxController_create",
@@ -247,6 +461,99 @@
         "required": [
           "passcode"
         ]
+      },
+      "CreateProjectDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "sourceType": {
+            "type": "string",
+            "enum": [
+              "git",
+              "empty"
+            ]
+          },
+          "repoUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "repoBranch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "name",
+          "sourceType"
+        ]
+      },
+      "ProjectResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sourceType": {
+            "type": "string",
+            "enum": [
+              "git",
+              "empty"
+            ]
+          },
+          "cloneStatus": {
+            "type": "string",
+            "enum": [
+              "cloning",
+              "ready",
+              "failed"
+            ]
+          },
+          "cloneErrorCode": {
+            "type": "string",
+            "enum": [
+              "CLONE_FAILED_PERMISSION",
+              "CLONE_FAILED_NETWORK",
+              "TIMEOUT",
+              "INTERRUPTED",
+              "DISK_INSUFFICIENT"
+            ],
+            "nullable": true
+          },
+          "taskCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "sourceType",
+          "cloneStatus",
+          "cloneErrorCode",
+          "taskCount",
+          "createdAt"
+        ]
+      },
+      "DeleteProjectDto": {
+        "type": "object",
+        "properties": {
+          "keepBaseline": {
+            "type": "boolean"
+          }
+        }
       },
       "CreateSandboxDto": {
         "type": "object",

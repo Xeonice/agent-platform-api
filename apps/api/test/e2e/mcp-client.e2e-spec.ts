@@ -5,10 +5,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER } from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
 import { SandboxApplicationService } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
-import { fakeWorkspace, makeFakeRegistry } from './_fakes';
+import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
  * MCP client smoke (docs/backend/25 §6.1): a REAL MCP Client drives a tool over a
@@ -25,6 +25,8 @@ beforeAll(async () => {
     .useValue(makeFakeRegistry())
     .overrideProvider(WORKSPACE_PREPARER)
     .useValue(fakeWorkspace)
+    .overrideProvider(PROJECT_FACADE)
+    .useValue(fakeProjectFacade)
     .compile();
   app = moduleRef.createNestApplication();
   await app.init();

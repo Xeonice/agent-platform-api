@@ -4,6 +4,7 @@ import type {
   PreparedWorkspace,
   ProcessSpec,
   ProcessStream,
+  ProjectFacade,
   ProviderRegistry,
   SandboxHandle,
   SandboxProvider,
@@ -65,6 +66,14 @@ class InMemorySandboxRepo implements SandboxRepository {
   async findByProject(): Promise<Sandbox[]> {
     return [...this.store.values()];
   }
+  async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const id of projectIds) out[id] = 0;
+    for (const s of this.store.values()) {
+      if (s.status !== 'destroyed' && out[s.projectId] !== undefined) out[s.projectId] += 1;
+    }
+    return out;
+  }
   saveSync(_tx: Tx, sandbox: Sandbox): void {
     sandbox.markPersisted(sandbox.version);
     this.store.set(sandbox.id, sandbox);
@@ -89,13 +98,27 @@ function harness() {
       wsCalls.push(`cleanup:${id}:${opts.keep}`);
     },
   };
+  const projectFacade: ProjectFacade = {
+    async getRuntimeContextForTask(projectId) {
+      return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
+    },
+  };
   const repo = new InMemorySandboxRepo();
   const uow: UnitOfWork = { run: (fn) => fn({} as Tx) };
   const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
   let n = 0;
   const ids: IdGenerator = { next: () => `sbx-${++n}` };
   const clock: Clock = { now: () => new Date('2026-08-13T00:00:00.000Z') };
-  const service = new SandboxApplicationService(repo, uow, events, clock, ids, registry, workspace);
+  const service = new SandboxApplicationService(
+    repo,
+    uow,
+    events,
+    clock,
+    ids,
+    registry,
+    workspace,
+    projectFacade,
+  );
   return { service, provider, repo, wsCalls };
 }
 
@@ -185,6 +208,11 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
         wsCalls.push(`cleanup:${id}:${opts.keep}`);
       },
     };
+    const projectFacade: ProjectFacade = {
+      async getRuntimeContextForTask(projectId) {
+        return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
+      },
+    };
     const repo = new InMemorySandboxRepo();
     const uow: UnitOfWork = { run: (fn) => fn({} as Tx) };
     const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
@@ -199,6 +227,7 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
       ids,
       registry,
       workspace,
+      projectFacade,
     );
 
     // create resolves early (pending); the background provision fails and lands `failed`.
