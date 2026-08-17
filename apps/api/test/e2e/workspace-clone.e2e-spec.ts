@@ -39,7 +39,15 @@ async function networkUp(): Promise<boolean> {
   }
 }
 const netUp = dockerUp && (await networkUp());
-const ready = dockerUp && netUp;
+// The AIO Sandbox image is ~3.3GB; do NOT auto-pull on CI. Skip unless present locally.
+const imagePresent = dockerUp
+  ? await docker
+      .getImage(IMAGE)
+      .inspect()
+      .then(() => true)
+      .catch(() => false)
+  : false;
+const ready = dockerUp && netUp && imagePresent;
 if (!ready) {
   console.warn(
     `\n[33m[workspace-clone.e2e] SKIPPED — docker=${dockerUp} network=${netUp}. ` +
