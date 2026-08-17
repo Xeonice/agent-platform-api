@@ -55,6 +55,7 @@ export default tseslint.config(
           project: [
             'packages/shared-kernel/tsconfig.json',
             'packages/contracts/tsconfig.json',
+            'packages/modules/project/tsconfig.json',
             'packages/modules/sandbox/tsconfig.json',
             'apps/api/tsconfig.json',
           ],

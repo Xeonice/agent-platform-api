@@ -3,10 +3,10 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER } from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
 import { SandboxMcpTools } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
-import { fakeWorkspace, makeFakeRegistry } from './_fakes';
+import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
  * Interface e2e (docs/backend/25 §6.1, shared/09 §2.3 gate 3): boots the whole
@@ -22,6 +22,8 @@ beforeAll(async () => {
     .useValue(makeFakeRegistry())
     .overrideProvider(WORKSPACE_PREPARER)
     .useValue(fakeWorkspace)
+    .overrideProvider(PROJECT_FACADE)
+    .useValue(fakeProjectFacade)
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');

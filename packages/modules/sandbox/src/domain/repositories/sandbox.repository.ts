@@ -10,6 +10,8 @@ import type { Sandbox } from '../entities/sandbox.entity';
 export interface SandboxRepository {
   findById(id: SandboxId): Promise<Sandbox | null>;
   findByProject(projectId: ProjectId): Promise<Sandbox[]>;
+  /** live (non-destroyed) sandbox count per project id, in ONE grouped query. */
+  countActiveByProject(projectIds: string[]): Promise<Record<string, number>>;
   /** upsert the sandbox row + append pending transitions, inside `tx`. */
   saveSync(tx: Tx, sandbox: Sandbox): void;
 }

@@ -12,6 +12,7 @@ const alias = {
   '@platform/shared-kernel': r('packages/shared-kernel/src/index.ts'),
   '@platform/contracts/testkit': r('packages/contracts/src/testkit/index.ts'),
   '@platform/contracts': r('packages/contracts/src/index.ts'),
+  '@platform/project': r('packages/modules/project/src/index.ts'),
   '@platform/sandbox': r('packages/modules/sandbox/src/index.ts'),
   '@platform/terminal': r('packages/modules/terminal/src/index.ts'),
 };

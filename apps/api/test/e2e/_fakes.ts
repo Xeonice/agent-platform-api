@@ -3,6 +3,8 @@ import type {
   PreparedWorkspace,
   ProcessSpec,
   ProcessStream,
+  ProjectFacade,
+  ProjectRuntimeContext,
   ProviderRegistry,
   SandboxHandle,
   SandboxProvider,
@@ -89,6 +91,17 @@ export const fakeWorkspace: WorkspacePreparer = {
     return { hostPath: `/tmp/platform-test-ws/${sandboxId}` };
   },
   async cleanup(): Promise<void> {},
+};
+
+/** A project facade that always resolves a ready project (no docker/git needed). */
+export const fakeProjectFacade: ProjectFacade = {
+  async getRuntimeContextForTask(projectId: string): Promise<ProjectRuntimeContext> {
+    return {
+      projectId,
+      baselinePath: `/tmp/platform-test-baseline/${projectId}`,
+      sourceType: 'empty',
+    };
+  },
 };
 
 export const fakePtyPort: SandboxPtyPort = {

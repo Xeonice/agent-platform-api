@@ -19,6 +19,8 @@ import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-
 import {
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
+  PROJECT_FACADE,
+  ProjectAccessError,
   SandboxProviderError,
   SandboxProviderErrorCode,
 } from '@platform/contracts';
@@ -30,6 +32,8 @@ import type {
   SandboxProvider,
   SandboxHandle,
   WorkspacePreparer,
+  ProjectFacade,
+  ProjectRuntimeContext,
 } from '@platform/contracts';
 import { Sandbox } from '../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../domain/value-objects/sandbox-status.vo';
@@ -60,6 +64,7 @@ export class SandboxApplicationService {
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly registry: ProviderRegistry,
     @Inject(WORKSPACE_PREPARER) private readonly workspace: WorkspacePreparer,
+    @Inject(PROJECT_FACADE) private readonly projectFacade: ProjectFacade,
   ) {}
 
   private defaultImage(): string {
@@ -72,6 +77,11 @@ export class SandboxApplicationService {
       throw new BadRequestException(`unknown provider '${providerName}'`);
     }
     const provider = this.registry.get(providerName);
+
+    // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
+    // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
+    // which we surface as HTTP BEFORE any sandbox row is written.
+    const projectCtx = await this.resolveProject(input.projectId);
 
     const headless = input.headless ?? false;
     const sandbox = Sandbox.create({
@@ -94,28 +104,49 @@ export class SandboxApplicationService {
     // persists + publishes a SandboxStateChanged event for the WS relay). Failures
     // land `failed`.
     const dto = SandboxMapper.toDto(sandbox, false);
-    void this.runProvision(sandbox, provider);
+    void this.runProvision(sandbox, provider, projectCtx.baselinePath);
     return dto;
   }
 
-  /** Background provision runner — never rejects into an unhandled promise. */
-  private async runProvision(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+  /** Resolve + validate the project via the cross-context facade (maps errors). */
+  private async resolveProject(projectId: string): Promise<ProjectRuntimeContext> {
     try {
-      await this.provision(sandbox, provider);
+      return await this.projectFacade.getRuntimeContextForTask(projectId);
+    } catch (e) {
+      if (e instanceof ProjectAccessError) {
+        const status = e.code === 'PROJECT_NOT_FOUND' ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
+        throw new HttpException({ code: e.code, message: e.message }, status);
+      }
+      throw e;
+    }
+  }
+
+  /** Background provision runner — never rejects into an unhandled promise. */
+  private async runProvision(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    baselinePath: string,
+  ): Promise<void> {
+    try {
+      await this.provision(sandbox, provider, baselinePath);
     } catch (e) {
       // provision() already marked `failed` + tore down any orphan; just log here.
       this.logger.error(`provision failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
     }
   }
 
-  private async provision(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+  private async provision(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    baselinePath: string,
+  ): Promise<void> {
     // hoisted so the failure path can tear down a container that WAS created (e.g.
     // a later `start`/readiness failure) — otherwise it orphans (S1 audit P1-2).
     let handle: SandboxHandle | undefined;
     try {
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
-      const ws = await this.workspace.prepare(sandbox.id);
+      const ws = await this.workspace.prepare(sandbox.id, { baselinePath });
 
       this.advance(sandbox, 'creating', 'scheduler');
       handle = await provider.create({

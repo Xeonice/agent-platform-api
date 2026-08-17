@@ -10,8 +10,18 @@ export interface PreparedWorkspace {
   hostPath: string;
 }
 
+/**
+ * Where the workspace is filled from (03 §7.1): the project's baseline dir is
+ * copied (`cp -a --reflink=auto`) into a fresh per-sandbox workspace. An empty
+ * project's baseline is an empty dir, so the copy yields an empty workspace.
+ */
+export interface WorkspaceSource {
+  /** host baseline dir to import; must exist (platform guarantees it, 03 §4). */
+  baselinePath: string;
+}
+
 export interface WorkspacePreparer {
-  prepare(sandboxId: string): Promise<PreparedWorkspace>;
+  prepare(sandboxId: string, source: WorkspaceSource): Promise<PreparedWorkspace>;
   cleanup(sandboxId: string, opts: { keep: boolean }): Promise<void>;
 }
 

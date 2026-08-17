@@ -198,10 +198,18 @@ describe.skipIf(!runnable)(
     it.each(PROVIDERS)(
       'provider=$provider: real container ($isolation) → ls / → destroy',
       async ({ provider, isolation, updateResources, pauseResume }) => {
+        // 0) create a real (empty) project — the sandbox create now validates it.
+        const projectRes = await request(app.getHttpServer())
+          .post('/api/projects')
+          .send({ name: `proj-${provider}`, sourceType: 'empty' })
+          .expect(202);
+        const projectId = projectRes.body.id as string;
+        expect(projectRes.body.cloneStatus).toBe('ready');
+
         // 1) create via REST — registry must route to the `provider` class
         const created = await request(app.getHttpServer())
           .post('/api/sandboxes')
-          .send({ projectId: `prj-${provider}-e2e`, runtime: 'claude-code', provider })
+          .send({ projectId, runtime: 'claude-code', provider })
           .expect(201);
         const sandboxId = created.body.id as string;
         const containerName = `platform-${provider}-${sandboxId}`;

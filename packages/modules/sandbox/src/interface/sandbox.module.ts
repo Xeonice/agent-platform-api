@@ -1,12 +1,14 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import {
   SANDBOX_PROVIDER_REGISTRY,
   SANDBOX_PTY_PORT,
+  SANDBOX_FACADE,
   WORKSPACE_PREPARER,
 } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
 import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
+import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
@@ -23,8 +25,11 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
  * Composition root for the sandbox context — the ONE place ports are wired to
  * implementations (boundaries `module-root` element). Registers BOTH built-in
  * providers (aio default + boxlite) against the open registry, the workspace
- * preparer, and the cross-context SANDBOX_PTY_PORT (consumed by `terminal`).
+ * preparer, and the cross-context SANDBOX_PTY_PORT (consumed by `terminal`) +
+ * SANDBOX_FACADE (consumed by `project` for taskCount). @Global so those tokens
+ * reach other contexts by token without a package cycle (mirrors ProjectModule).
  */
+@Global()
 @Module({
   controllers: [SandboxController],
   providers: [
@@ -37,9 +42,10 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     BoxliteSandboxProvider,
     { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
     { provide: SANDBOX_PTY_PORT, useClass: SandboxPtyAdapter },
+    { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
     RuntimeReconciler,
     SandboxEventProjector,
   ],
-  exports: [SandboxApplicationService, SANDBOX_PTY_PORT],
+  exports: [SandboxApplicationService, SANDBOX_PTY_PORT, SANDBOX_FACADE],
 })
 export class SandboxModule {}
