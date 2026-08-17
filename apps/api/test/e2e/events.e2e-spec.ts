@@ -4,7 +4,12 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE, WS_SCHEMA_HASH } from '@platform/contracts';
+import {
+  SANDBOX_PROVIDER_REGISTRY,
+  WORKSPACE_PREPARER,
+  PROJECT_FACADE,
+  WS_SCHEMA_HASH,
+} from '@platform/contracts';
 import type { SandboxWsEvent, TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';

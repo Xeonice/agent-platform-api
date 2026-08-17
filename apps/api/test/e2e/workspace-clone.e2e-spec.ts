@@ -77,7 +77,8 @@ async function waitForRunning(id: string, ms = 60_000): Promise<void> {
   while (Date.now() < deadline) {
     const got = await request(app.getHttpServer()).get(`/api/sandboxes/${id}`);
     if (got.body?.status === 'running') return;
-    if (got.body?.status === 'failed') throw new Error(`sandbox failed: ${JSON.stringify(got.body)}`);
+    if (got.body?.status === 'failed')
+      throw new Error(`sandbox failed: ${JSON.stringify(got.body)}`);
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`sandbox ${id} never running`);
@@ -140,7 +141,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const name of createdContainers) {
-    await docker.getContainer(name).remove({ force: true }).catch(() => undefined);
+    await docker
+      .getContainer(name)
+      .remove({ force: true })
+      .catch(() => undefined);
   }
   await app?.close();
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });

@@ -84,7 +84,12 @@ function isBlockedIpv6(ip: string): boolean {
     return isBlockedIpv4(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
   }
   const head = lower.split(':')[0];
-  if (head.startsWith('fe8') || head.startsWith('fe9') || head.startsWith('fea') || head.startsWith('feb')) {
+  if (
+    head.startsWith('fe8') ||
+    head.startsWith('fe9') ||
+    head.startsWith('fea') ||
+    head.startsWith('feb')
+  ) {
     return true; // fe80::/10 link-local
   }
   if (head.startsWith('fc') || head.startsWith('fd')) return true; // fc00::/7 unique-local

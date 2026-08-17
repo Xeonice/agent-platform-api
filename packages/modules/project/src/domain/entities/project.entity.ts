@@ -3,10 +3,7 @@ import type { ProjectId } from '@platform/shared-kernel';
 import { CloneStatusVO } from '../value-objects/project-status.vo';
 import type { CloneStatus } from '../value-objects/project-status.vo';
 import { RepoUrl } from '../value-objects/repo-url.vo';
-import {
-  InvalidProjectTransitionError,
-  ProjectStateError,
-} from '../errors/project-errors';
+import { InvalidProjectTransitionError, ProjectStateError } from '../errors/project-errors';
 import { ProjectCreated } from '../events/project-events';
 
 export type ProjectSourceType = 'git' | 'empty';
@@ -87,10 +84,10 @@ export class Project extends AggregateRoot<ProjectId> {
   }): Project {
     const isGit = input.sourceType === 'git';
     if (isGit && !input.repoUrl) {
-      throw new ProjectStateError("git project requires repoUrl (I-PRJ)");
+      throw new ProjectStateError('git project requires repoUrl (I-PRJ)');
     }
     if (!isGit && input.repoUrl) {
-      throw new ProjectStateError("empty project must not carry repoUrl (I-PRJ)");
+      throw new ProjectStateError('empty project must not carry repoUrl (I-PRJ)');
     }
     // validate the URL shape up front (throws InvalidRepoUrlError → 400)
     const repoUrl = isGit ? RepoUrl.create(input.repoUrl as string).value : null;

@@ -63,6 +63,8 @@ export class ProjectMcpTools {
   })
   async deleteProject(params: z.infer<typeof IdSchema>) {
     await this.app.delete(params.id, {});
-    return { content: [{ type: 'text' as const, text: JSON.stringify({ id: params.id, deleted: true }) }] };
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({ id: params.id, deleted: true }) }],
+    };
   }
 }

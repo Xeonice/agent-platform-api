@@ -42,7 +42,10 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async count(): Promise<number> {
-    const row = this.db.select({ n: sql<number>`count(*)` }).from(projects).get();
+    const row = this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(projects)
+      .get();
     return row?.n ?? 0;
   }
 

@@ -114,8 +114,7 @@ export class SandboxApplicationService {
       return await this.projectFacade.getRuntimeContextForTask(projectId);
     } catch (e) {
       if (e instanceof ProjectAccessError) {
-        const status =
-          e.code === 'PROJECT_NOT_FOUND' ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
+        const status = e.code === 'PROJECT_NOT_FOUND' ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
         throw new HttpException({ code: e.code, message: e.message }, status);
       }
       throw e;

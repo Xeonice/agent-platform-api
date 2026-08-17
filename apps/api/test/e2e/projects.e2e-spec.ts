@@ -163,25 +163,29 @@ describe('projects REST', () => {
     expect(converted.body.cloneErrorCode).toBeNull();
   }, 60_000);
 
-  it.skipIf(!netUp)('clones a public repo → ready with real baseline files', async () => {
-    const res = await request(app.getHttpServer())
-      .post('/api/projects')
-      .send({ name: 'hello', sourceType: 'git', repoUrl: PUBLIC_REPO })
-      .expect(202);
-    const id = res.body.id as string;
-    expect(res.body.cloneStatus).toBe('cloning');
+  it.skipIf(!netUp)(
+    'clones a public repo → ready with real baseline files',
+    async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/projects')
+        .send({ name: 'hello', sourceType: 'git', repoUrl: PUBLIC_REPO })
+        .expect(202);
+      const id = res.body.id as string;
+      expect(res.body.cloneStatus).toBe('cloning');
 
-    const ready = await poll(id, 'ready', 120_000);
-    expect(ready.cloneStatus).toBe('ready');
-    expect(ready.taskCount).toBe(0);
+      const ready = await poll(id, 'ready', 120_000);
+      expect(ready.cloneStatus).toBe('ready');
+      expect(ready.taskCount).toBe(0);
 
-    // the baseline dir on disk really holds the cloned repo
-    const baselineDir = resolve(dataRoot, 'baselines', id);
-    expect(existsSync(baselineDir)).toBe(true);
-    const entries = readdirSync(baselineDir);
-    expect(entries).toContain('README'); // octocat/Hello-World has a README
-    expect(entries).toContain('.git');
-  }, 120_000);
+      // the baseline dir on disk really holds the cloned repo
+      const baselineDir = resolve(dataRoot, 'baselines', id);
+      expect(existsSync(baselineDir)).toBe(true);
+      const entries = readdirSync(baselineDir);
+      expect(entries).toContain('README'); // octocat/Hello-World has a README
+      expect(entries).toContain('.git');
+    },
+    120_000,
+  );
 
   // LAST: fills up to the 50-project cap, so it must not precede the other cases.
   it('I-PRJ-4: at most 50 projects (over the cap → 400)', async () => {

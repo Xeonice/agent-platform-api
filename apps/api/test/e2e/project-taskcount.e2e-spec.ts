@@ -77,7 +77,10 @@ describe('ProjectDto.taskCount', () => {
       if (s.body?.status === 'running') break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    await request(app.getHttpServer()).delete(`/api/sandboxes/${sandboxIds[0]}`).send({}).expect(204);
+    await request(app.getHttpServer())
+      .delete(`/api/sandboxes/${sandboxIds[0]}`)
+      .send({})
+      .expect(204);
     const after = await request(app.getHttpServer()).get(`/api/projects/${projectId}`).expect(200);
     expect(after.body.taskCount).toBe(2);
   });

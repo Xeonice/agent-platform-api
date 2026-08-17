@@ -96,7 +96,11 @@ export const fakeWorkspace: WorkspacePreparer = {
 /** A project facade that always resolves a ready project (no docker/git needed). */
 export const fakeProjectFacade: ProjectFacade = {
   async getRuntimeContextForTask(projectId: string): Promise<ProjectRuntimeContext> {
-    return { projectId, baselinePath: `/tmp/platform-test-baseline/${projectId}`, sourceType: 'empty' };
+    return {
+      projectId,
+      baselinePath: `/tmp/platform-test-baseline/${projectId}`,
+      sourceType: 'empty',
+    };
   },
 };
 
