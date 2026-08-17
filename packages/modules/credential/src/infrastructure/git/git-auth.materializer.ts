@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { GitAuthContext } from '@platform/contracts';
 import { CRYPTO_SERVICE } from '../../domain/ports/crypto.port';
 import type { CryptoService } from '../../domain/ports/crypto.port';
@@ -38,6 +38,8 @@ const HTTPS_HELPER = '!f(){ echo username=x-access-token; echo password=$GIT_TOK
 
 @Injectable()
 export class FsGitAuthMaterializer implements GitAuthMaterializer {
+  private readonly logger = new Logger(FsGitAuthMaterializer.name);
+
   constructor(@Inject(CRYPTO_SERVICE) private readonly crypto: CryptoService) {}
 
   async materialize(input: MaterializeGitAuthInput): Promise<GitAuthContext> {
@@ -45,7 +47,7 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     try {
       return input.obtainedVia === 'git-ssh-key'
         ? await this.materializeSsh(secret, input.host.trim().toLowerCase())
-        : this.materializeHttps(secret, input.allowedHosts);
+        : this.materializeHttps(secret, input.allowedHosts, input.scheme, input.host);
     } finally {
       secret.zeroize();
     }
@@ -86,7 +88,26 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     };
   }
 
-  private materializeHttps(secret: SecretMaterial, allowedHosts: string[]): GitAuthContext {
+  private materializeHttps(
+    secret: SecretMaterial,
+    allowedHosts: string[],
+    scheme: MaterializeGitAuthInput['scheme'],
+    targetHost: string,
+  ): GitAuthContext {
+    // git credential matching is scheme+AUTHORITY sensitive (03 §7.3 C4). The helper
+    // key MUST carry the remote's ACTUAL scheme, else a plaintext `http://` internal
+    // remote never matches a `credential.https://…` helper and the token is dropped.
+    // Only http/https reach a credential helper; `git://` (anon) carries no auth, so
+    // it and any unrecognised value fall back to `https` (the historical default).
+    const helperScheme = scheme === 'http' ? 'http' : 'https';
+    // http token = cleartext over the wire. We do NOT block it (internal trusted-network
+    // git is a core use case, C4 "不禁私网"), but warn loudly for operator awareness.
+    if (helperScheme === 'http') {
+      this.logger.warn(
+        `credential over plaintext http to ${targetHost.trim().toLowerCase()} — ` +
+          'token sent in cleartext; ensure this is a trusted network',
+      );
+    }
     const token = secret.use((buf) => buf.toString('utf8').trim());
     const env: Record<string, string> = { GIT_TOKEN: token };
     // allowedHosts are already canonical authorities (host, or host:port for a
@@ -103,7 +124,7 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     env.GIT_CONFIG_KEY_0 = 'credential.helper';
     env.GIT_CONFIG_VALUE_0 = '';
     hosts.forEach((host, i) => {
-      env[`GIT_CONFIG_KEY_${i + 1}`] = `credential.https://${host}.helper`;
+      env[`GIT_CONFIG_KEY_${i + 1}`] = `credential.${helperScheme}://${host}.helper`;
       env[`GIT_CONFIG_VALUE_${i + 1}`] = HTTPS_HELPER;
     });
     env.GIT_CONFIG_COUNT = String(hosts.length + 1);

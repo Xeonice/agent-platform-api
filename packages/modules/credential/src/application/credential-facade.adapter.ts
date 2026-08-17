@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
 import { CredentialPreparationError } from '@platform/contracts';
-import type { CredentialFacade, GitAuthContext } from '@platform/contracts';
+import type { CredentialFacade, GitAuthContext, GitRemoteScheme } from '@platform/contracts';
 import { CREDENTIAL_REPOSITORY } from '../domain/repositories/credential.repository';
 import type { CredentialRepository } from '../domain/repositories/credential.repository';
 import { GIT_AUTH_MATERIALIZER } from '../domain/ports/git-auth-materializer.port';
@@ -32,7 +32,11 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
-  async prepareGitAuth(kind: GitObtainedVia, host: string): Promise<GitAuthContext> {
+  async prepareGitAuth(
+    kind: GitObtainedVia,
+    host: string,
+    scheme: GitRemoteScheme,
+  ): Promise<GitAuthContext> {
     const candidates = await this.repo.listGitCredentials(false);
     const selectedId = CredentialSelectionService.forKind(kind, candidates);
     if (!selectedId) {
@@ -71,6 +75,7 @@ export class CredentialFacadeAdapter implements CredentialFacade {
         secret: blob,
         allowedHosts: cred.allowedHosts,
         host,
+        scheme,
       });
     } catch (e) {
       // 05 §4.2: an authTag mismatch / unavailable key presents as revoked (not 500).

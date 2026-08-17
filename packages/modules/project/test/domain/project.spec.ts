@@ -39,6 +39,13 @@ describe('RepoUrl', () => {
     expect(RepoUrl.create('git@git.company.com:owner/repo.git').credentialKind()).toBe('git-ssh-key');
   });
 
+  it('scheme() returns the URL scheme (drives the scheme-aware helper key, C4)', () => {
+    expect(RepoUrl.create('https://git.company.com/x.git').scheme()).toBe('https');
+    expect(RepoUrl.create('http://git.company.com:3000/x.git').scheme()).toBe('http');
+    expect(RepoUrl.create('git@git.company.com:owner/repo.git').scheme()).toBe('ssh'); // scp form
+    expect(RepoUrl.create('git://git.company.com/x.git').scheme()).toBe('git');
+  });
+
   it('blocks SSRF to loopback / link-local / metadata (never a git host, 03 §7.3 C4)', () => {
     const blocked = [
       'http://localhost/x.git',

@@ -2,24 +2,31 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer as createHttpsServer, type Server } from 'node:https';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 
 /**
  * SELF-CONTAINED test scaffolding for git-credential-local.e2e-spec.ts: a LOCAL,
- * BASIC-AUTH-PROTECTED, HTTPS git remote that the real product code (project clone
- * workflow + credential materializer + ls-remote tester) can clone from with NO
- * external network and NO real PAT. It exists to pin three CI-permanent judgements:
- * wrong token MUST fail, right token MUST pass, and execution is HERMETIC.
+ * BASIC-AUTH-PROTECTED git remote — over HTTPS (self-signed CA) OR plaintext HTTP —
+ * that the real product code (project clone workflow + credential materializer +
+ * ls-remote tester) can clone from with NO external network and NO real PAT. It pins
+ * CI-permanent judgements: wrong token MUST fail, right token MUST pass, execution is
+ * HERMETIC, and the credential helper key is SCHEME-AWARE (http AND https both work).
  *
- * The four traps this deliberately avoids (all empirically confirmed):
+ * The scaffolding traps this deliberately avoids (all empirically confirmed):
  *  1. SMART http only — the clone uses `git clone --depth=1`; dumb http reports
  *     "does not support shallow capabilities". So every request is proxied through
  *     the `git-http-backend` CGI.
- *  2. HTTPS with a self-signed CA — the materializer's credential helper is keyed
- *     `credential.https://<authority>.helper` (scheme-specific), so a plaintext
- *     `http://` remote would never match the helper. We generate a CA + server cert
- *     (SAN = the bound IP) via openssl and the caller sets GIT_SSL_CAINFO.
+ *  2. Scheme-aware credential helper — the materializer keys the helper
+ *     `credential.<scheme>://<authority>.helper`, so the helper key MUST match the
+ *     remote's actual scheme. The HTTPS variant generates a CA + server cert (SAN =
+ *     the bound IP) via openssl and the caller sets GIT_SSL_CAINFO; the HTTP variant
+ *     needs NO TLS/CA at all (its whole point is to prove `http://` matches).
  *  3. Bind a PRIVATE, non-loopback IPv4 — RepoUrl's SSRF gate blocks loopback/link
  *     -local but ALLOWS private LAN ranges (self-hosted git is a core use case).
  *  4. Authority carries the (non-default) port — allowedHosts / repoUrl use
@@ -73,9 +80,12 @@ export interface LocalGitServer {
   port: number;
   /** authority = ip:port (non-default port kept), matching the credential scope. */
   host: string;
-  /** https://<ip>:<port>/repo.git */
+  /** 'http' | 'https' — the remote's scheme (drives the scheme-aware helper key). */
+  scheme: 'http' | 'https';
+  /** <scheme>://<ip>:<port>/repo.git */
   repoUrl: string;
-  caPath: string;
+  /** self-signed CA path (HTTPS only); undefined for the plaintext HTTP variant. */
+  caPath?: string;
   token: string;
   close: () => Promise<void>;
 }
@@ -85,6 +95,71 @@ interface StartOptions {
   gitHttpBackend: string;
 }
 
+/** Build a bare repo (one commit: README.md + src/app.txt) under a fresh temp root. */
+function prepareRepo(): { root: string; projectRoot: string } {
+  const root = mkdtempSync(join(tmpdir(), 'local-git-'));
+  const workDir = join(root, 'work');
+  const projectRoot = join(root, 'srv');
+  const bareRepo = join(projectRoot, 'repo.git');
+  execFileSync('mkdir', ['-p', workDir, projectRoot]);
+
+  const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+  git(['init', '-q'], workDir);
+  git(['config', 'user.email', 'test@local'], workDir);
+  git(['config', 'user.name', 'Local Test'], workDir);
+  git(['config', 'commit.gpgsign', 'false'], workDir);
+  writeFileSync(join(workDir, 'README.md'), '# local test repo\nhermetic clone target\n');
+  execFileSync('mkdir', ['-p', join(workDir, 'src')]);
+  writeFileSync(join(workDir, 'src', 'app.txt'), 'nested file\n');
+  git(['add', '-A'], workDir);
+  git(['commit', '-q', '-m', 'initial'], workDir);
+  // smart http via git-http-backend needs NO update-server-info (that is dumb http).
+  git(['clone', '-q', '--bare', workDir, bareRepo], projectRoot);
+  return { root, projectRoot };
+}
+
+/** Resolve the listening address into `{ port, host }`. */
+function boundHost(server: Server, ip: string): { port: number; host: string } {
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  return { port, host: `${ip}:${port}` };
+}
+
+/**
+ * Start a LOCAL, BASIC-AUTH, PLAINTEXT HTTP git remote (no TLS, no CA) bound to the
+ * same private non-loopback IP. This is the scheme-aware regression twin of the HTTPS
+ * variant: it proves the credential helper keyed `credential.http://<authority>.helper`
+ * actually fires for an `http://` remote. Everything lives under one temp root.
+ */
+export function startLocalGitHttpServer(opts: StartOptions): Promise<LocalGitServer> {
+  const { ip, gitHttpBackend } = opts;
+  const { root, projectRoot } = prepareRepo();
+  const server = createHttpServer((req, res) =>
+    handleRequest(req, res, { projectRoot, gitHttpBackend }),
+  );
+  return new Promise<LocalGitServer>((resolveP, reject) => {
+    server.on('error', reject);
+    server.listen(0, ip, () => {
+      const { port, host } = boundHost(server, ip);
+      resolveP({
+        ip,
+        port,
+        host,
+        scheme: 'http',
+        repoUrl: `http://${host}/repo.git`,
+        token: TEST_TOKEN,
+        close: () =>
+          new Promise<void>((r) => {
+            server.close(() => {
+              rmSync(root, { recursive: true, force: true });
+              r();
+            });
+          }),
+      });
+    });
+  });
+}
+
 /**
  * Prepare a bare repo (with a real commit: README.md + a subdir file), a self-signed
  * CA + server cert (SAN = ip), and start a basic-auth HTTPS server that proxies to
@@ -92,15 +167,11 @@ interface StartOptions {
  */
 export function startLocalGitServer(opts: StartOptions): Promise<LocalGitServer> {
   const { ip, gitHttpBackend } = opts;
-  const root = mkdtempSync(join(tmpdir(), 'local-git-'));
+  const { root, projectRoot } = prepareRepo();
   const certDir = join(root, 'certs');
-  const workDir = join(root, 'work');
-  const projectRoot = join(root, 'srv');
-  const bareRepo = join(projectRoot, 'repo.git');
+  execFileSync('mkdir', ['-p', certDir]);
 
-  execFileSync('mkdir', ['-p', certDir, workDir, projectRoot]);
-
-  // --- 1) certs: CA + server cert whose SAN is the bound IP ------------------
+  // --- certs: CA + server cert whose SAN is the bound IP ---------------------
   const caKey = join(certDir, 'ca.key');
   const caCrt = join(certDir, 'ca.crt');
   const srvKey = join(certDir, 's.key');
@@ -116,22 +187,7 @@ export function startLocalGitServer(opts: StartOptions): Promise<LocalGitServer>
   ossl(['x509', '-req', '-in', srvCsr, '-CA', caCrt, '-CAkey', caKey, '-CAcreateserial',
     '-out', srvCrt, '-days', '2', '-extfile', extCnf]);
 
-  // --- 2) a real repo: working copy → one commit → bare clone ----------------
-  const git = (args: string[], cwd: string) =>
-    execFileSync('git', args, { cwd, stdio: 'ignore' });
-  git(['init', '-q'], workDir);
-  git(['config', 'user.email', 'test@local'], workDir);
-  git(['config', 'user.name', 'Local Test'], workDir);
-  git(['config', 'commit.gpgsign', 'false'], workDir);
-  writeFileSync(join(workDir, 'README.md'), '# local test repo\nhermetic clone target\n');
-  execFileSync('mkdir', ['-p', join(workDir, 'src')]);
-  writeFileSync(join(workDir, 'src', 'app.txt'), 'nested file\n');
-  git(['add', '-A'], workDir);
-  git(['commit', '-q', '-m', 'initial'], workDir);
-  // smart http via git-http-backend needs NO update-server-info (that is dumb http).
-  git(['clone', '-q', '--bare', workDir, bareRepo], projectRoot);
-
-  // --- 3) HTTPS server → basic auth → git-http-backend CGI --------------------
+  // --- HTTPS server → basic auth → git-http-backend CGI ----------------------
   const server = createHttpsServer(
     { key: readFileSync(srvKey), cert: readFileSync(srvCrt) },
     (req, res) => handleRequest(req, res, { projectRoot, gitHttpBackend }),
@@ -140,13 +196,12 @@ export function startLocalGitServer(opts: StartOptions): Promise<LocalGitServer>
   return new Promise<LocalGitServer>((resolveP, reject) => {
     server.on('error', reject);
     server.listen(0, ip, () => {
-      const addr = server.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      const host = `${ip}:${port}`;
+      const { port, host } = boundHost(server, ip);
       resolveP({
         ip,
         port,
         host,
+        scheme: 'https',
         repoUrl: `https://${host}/repo.git`,
         caPath: caCrt,
         token: TEST_TOKEN,

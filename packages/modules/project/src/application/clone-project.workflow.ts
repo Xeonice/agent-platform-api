@@ -163,7 +163,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       return null; // already validated at create time; be defensive
     }
     try {
-      return await this.credentials.prepareGitAuth(repo.credentialKind(), repo.host());
+      return await this.credentials.prepareGitAuth(repo.credentialKind(), repo.host(), repo.scheme());
     } catch (e) {
       if (e instanceof CredentialPreparationError) return null; // no cred / host not allowed
       throw e;

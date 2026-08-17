@@ -28,6 +28,14 @@ export interface MaterializeGitAuthInput {
   /** Full whitelist (HTTPS helper is bound per host); the current target host too. */
   allowedHosts: string[];
   host: string;
+  /**
+   * The remote's URL scheme (03 §7.3 C4). Structural twin of contracts'
+   * `GitRemoteScheme` (domain must not import contracts). The HTTPS/token branch
+   * keys the credential helper on this scheme so a plaintext `http://` internal
+   * remote matches (git credential matching is scheme+authority sensitive).
+   * Defaulted to `https` when omitted for backward compatibility.
+   */
+  scheme?: 'http' | 'https' | 'ssh' | 'git';
 }
 
 export interface GitAuthMaterializer {

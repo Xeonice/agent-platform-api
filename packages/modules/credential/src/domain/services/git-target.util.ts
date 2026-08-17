@@ -13,9 +13,19 @@ const HTTP_LIKE = /^https?:\/\/[^\s]+$/i;
 const SSH_PROTO = /^ssh:\/\/[^\s]+$/i;
 const SCP_LIKE = /^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):[^\s]+$/;
 
+export type GitTargetScheme = 'http' | 'https' | 'ssh' | 'git';
+
 export interface GitTarget {
   kind: GitObtainedVia;
   host: string;
+  /** The remote's URL scheme — carried so the HTTPS helper key is scheme-aware (C4). */
+  scheme: GitTargetScheme;
+}
+
+function normalizeScheme(scheme: string): GitTargetScheme {
+  return scheme === 'http' || scheme === 'https' || scheme === 'ssh' || scheme === 'git'
+    ? scheme
+    : 'https';
 }
 
 function authorityFromUrl(url: string, kind: GitObtainedVia): GitTarget | null {
@@ -24,7 +34,7 @@ function authorityFromUrl(url: string, kind: GitObtainedVia): GitTarget | null {
     const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     const scheme = u.protocol.replace(/:$/, '');
     const port = u.port ? Number(u.port) : null;
-    return { kind, host: toAuthority(host, port, scheme) };
+    return { kind, host: toAuthority(host, port, scheme), scheme: normalizeScheme(scheme) };
   } catch {
     return null;
   }
@@ -35,6 +45,6 @@ export function parseGitTarget(url: string): GitTarget | null {
   if (HTTP_LIKE.test(v)) return authorityFromUrl(v, 'git-https-token');
   if (SSH_PROTO.test(v)) return authorityFromUrl(v, 'git-ssh-key');
   const scp = SCP_LIKE.exec(v); // user@host:path — scp form carries no port
-  if (scp) return { kind: 'git-ssh-key', host: scp[1].toLowerCase() };
+  if (scp) return { kind: 'git-ssh-key', host: scp[1].toLowerCase(), scheme: 'ssh' };
   return null;
 }

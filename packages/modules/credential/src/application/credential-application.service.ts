@@ -25,6 +25,7 @@ import type { EncryptedBlob } from '../domain/value-objects/encrypted-blob.vo';
 import { classifySshPrivateKey } from '../domain/services/passphrase.detector';
 import { defaultPortForKind, hostAllowed, normalizeAllowedHost } from '../domain/services/host.util';
 import { parseGitTarget } from '../domain/services/git-target.util';
+import type { GitTargetScheme } from '../domain/services/git-target.util';
 import { InvalidCredentialError, PassphraseProtectedKeyError } from '../domain/errors/credential-errors';
 import { CredentialMapper } from './dto/credential.mapper';
 
@@ -160,6 +161,7 @@ export class CredentialApplicationService {
         secret: blob,
         allowedHosts,
         host: target.host,
+        scheme: target.scheme,
       });
     } catch (e) {
       if (e instanceof DecryptionError) {
@@ -254,16 +256,19 @@ function resolveTestTarget(
   kind: GitObtainedVia,
   allowedHosts: string[],
   platform: GitPlatform | undefined,
-): { host: string; url: string } | null {
+): { host: string; url: string; scheme: GitTargetScheme } | null {
   if (repoUrl) {
     const parsed = parseGitTarget(repoUrl);
-    return parsed ? { host: parsed.host, url: repoUrl } : null;
+    return parsed ? { host: parsed.host, url: repoUrl, scheme: parsed.scheme } : null;
   }
   // allowedHosts[0] is already a canonical authority (may carry a non-default port).
   const host = allowedHosts.length > 0 ? allowedHosts[0] : hostForPlatform(platform);
   if (!host) return null;
-  const url = kind === 'git-https-token' ? `https://${host}/` : `ssh://git@${host}/`;
-  return { host, url };
+  // No repoUrl → default probe. A derived token probe assumes https (the safe default
+  // for a bare authority); an SSH probe assumes ssh.
+  const isToken = kind === 'git-https-token';
+  const url = isToken ? `https://${host}/` : `ssh://git@${host}/`;
+  return { host, url, scheme: isToken ? 'https' : 'ssh' };
 }
 
 /** Map a platform hint to its default probe host. */

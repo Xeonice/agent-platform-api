@@ -41,6 +41,7 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
       secret: blob,
       allowedHosts: ['github.com', 'git.example.com'],
       host: HOST,
+      scheme: 'https',
     });
 
     expect(ctx.env.GIT_TOKEN).toBe(TOKEN);
@@ -71,10 +72,44 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
       secret: blob,
       allowedHosts: ['git.company.com:8443'], // self-hosted GitLab on :8443
       host: HOST,
+      scheme: 'https',
     });
     expect(ctx.env.GIT_CONFIG_KEY_0).toBe('credential.helper'); // reset first
     expect(ctx.env.GIT_CONFIG_KEY_1).toBe('credential.https://git.company.com:8443.helper');
     expect(ctx.env.GIT_CONFIG_COUNT).toBe('2');
+  });
+
+  it('http token: helper key is scheme=http so a plaintext http:// remote matches (C4)', async () => {
+    // git credential matching is scheme+authority sensitive — a `credential.https://…`
+    // helper would NOT fire for an `http://` remote, so the key MUST track the scheme.
+    const mat = new FsGitAuthMaterializer(fakeCrypto('ghp_tok'));
+    const ctx = await mat.materialize({
+      obtainedVia: 'git-https-token',
+      secret: blob,
+      allowedHosts: ['git.internal:8080'], // plaintext internal git on :8080
+      host: 'git.internal:8080',
+      scheme: 'http',
+    });
+    expect(ctx.env.GIT_CONFIG_KEY_0).toBe('credential.helper'); // hermetic reset kept
+    expect(ctx.env.GIT_CONFIG_VALUE_0).toBe('');
+    // the ONLY difference from https: the helper key scheme is http.
+    expect(ctx.env.GIT_CONFIG_KEY_1).toBe('credential.http://git.internal:8080.helper');
+    expect(ctx.env.GIT_CONFIG_COUNT).toBe('2');
+    // token still travels ONLY in $GIT_TOKEN, never inlined.
+    expect(ctx.env.GIT_TOKEN).toBe('ghp_tok');
+    expect(ctx.env.GIT_CONFIG_VALUE_1).toContain('$GIT_TOKEN');
+  });
+
+  it('unrecognised/anon scheme (git://) falls back to the https helper key', async () => {
+    const mat = new FsGitAuthMaterializer(fakeCrypto('ghp_tok'));
+    const ctx = await mat.materialize({
+      obtainedVia: 'git-https-token',
+      secret: blob,
+      allowedHosts: ['git.example.com'],
+      host: HOST,
+      scheme: 'git',
+    });
+    expect(ctx.env.GIT_CONFIG_KEY_1).toBe('credential.https://git.example.com.helper');
   });
 
   it('SSH (unknown self-hosted host): keyfile wx+0600, accept-new TOFU; dispose removes dir', async () => {

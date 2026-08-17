@@ -65,6 +65,22 @@ export class RepoUrl {
   host(): string {
     return extractAuthority(this.value) ?? '';
   }
+
+  /**
+   * The URL SCHEME (03 §7.3 C4) — passed across the facade alongside `host()` so the
+   * HTTPS credential helper key is scheme-aware. git credential matching is
+   * scheme+authority sensitive: `credential.https://h.helper` does NOT match a
+   * plaintext `http://h/` remote, so a plaintext internal git host would never
+   * receive its token unless the helper is keyed on the ACTUAL scheme. scp-form
+   * (`user@host:path`) and `ssh://` ⇒ `ssh`; `git://` (anon) ⇒ `git`. An
+   * unrecognised shape falls back to `https` (the historical default).
+   */
+  scheme(): 'http' | 'https' | 'ssh' | 'git' {
+    if (SCP_LIKE.test(this.value)) return 'ssh';
+    const s = /^([a-z][a-z0-9+.-]*):\/\//i.exec(this.value)?.[1]?.toLowerCase();
+    if (s === 'http' || s === 'https' || s === 'ssh' || s === 'git') return s;
+    return 'https';
+  }
 }
 
 const DEFAULT_PORTS: Record<string, number> = { https: 443, http: 80, git: 9418, ssh: 22 };
