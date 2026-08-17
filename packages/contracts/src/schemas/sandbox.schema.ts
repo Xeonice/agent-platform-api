@@ -24,6 +24,12 @@ export const ListSandboxesQuerySchema = z.object({
 });
 export type ListSandboxesQuery = z.infer<typeof ListSandboxesQuerySchema>;
 
+/** DELETE /api/sandboxes/:id body — keepVolume retains the workspace dir (03 §7.7). */
+export const DestroySandboxSchema = z.object({
+  keepVolume: z.boolean().optional(),
+});
+export type DestroySandboxInput = z.infer<typeof DestroySandboxSchema>;
+
 export const SandboxDtoSchema = z.object({
   id: z.string(),
   projectId: z.string(),

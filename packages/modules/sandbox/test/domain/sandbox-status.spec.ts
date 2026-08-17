@@ -31,6 +31,7 @@ describe('Sandbox aggregate', () => {
     id: asSandboxId('sbx-1'),
     projectId: asProjectId('prj-1'),
     runtime: 'claude-code',
+    provider: 'aio',
     headless: false,
     timeoutMinutes: null,
     idleTimeoutSec: 1800,

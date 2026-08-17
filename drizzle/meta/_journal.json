@@ -8,6 +8,20 @@
       "when": 1786521816792,
       "tag": "0000_certain_groot",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786590831992,
+      "tag": "0001_moaning_maximus",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786793037856,
+      "tag": "0002_sturdy_warlock",
+      "breakpoints": true
     }
   ]
 }

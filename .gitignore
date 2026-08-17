@@ -16,3 +16,6 @@ data/
 # logs / os
 *.log
 .DS_Store
+
+# docker-required e2e scratch workspaces
+tmp-e2e-data-*/

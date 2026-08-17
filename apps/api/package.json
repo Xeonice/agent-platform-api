@@ -11,11 +11,14 @@
   "dependencies": {
     "@platform/contracts": "workspace:*",
     "@platform/sandbox": "workspace:*",
+    "@platform/terminal": "workspace:*",
     "@platform/shared-kernel": "workspace:*",
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/platform-socket.io": "^11.0.0",
     "@nestjs/swagger": "^11.0.0",
+    "@nestjs/websockets": "^11.0.0",
     "@rekog/mcp-nest": "^1.6.0",
     "better-sqlite3": "^11.5.0",
     "drizzle-orm": "^0.36.0",
@@ -23,12 +26,14 @@
     "nestjs-zod": "^4.3.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "socket.io": "^4.8.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@nestjs/testing": "^11.0.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^5.0.0",
-    "drizzle-kit": "^0.28.0"
+    "drizzle-kit": "^0.28.0",
+    "socket.io-client": "^4.8.0"
   }
 }

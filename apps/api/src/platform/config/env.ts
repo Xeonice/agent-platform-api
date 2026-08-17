@@ -11,7 +11,9 @@ export const env = {
   get databaseUrl(): string {
     return process.env.DATABASE_URL ?? resolve(this.dataRoot, 'platform.db');
   },
-  accessPasscode: process.env.ACCESS_PASSCODE ?? '',
+  get accessPasscode(): string {
+    return process.env.ACCESS_PASSCODE ?? '';
+  },
 };
 
 /** True when the bind address is not the loopback interface (triggers a warning). */

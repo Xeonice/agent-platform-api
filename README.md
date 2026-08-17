@@ -82,6 +82,20 @@ pnpm build            # 构建
 pnpm openapi:emit     # 产出 openapi.json（CI diff 入库）
 ```
 
+### 运行时（docker / boxlite）e2e 前置
+
+部分 e2e 需真实运行时，缺前置会**响亮 skip**（不假过）：
+
+- **docker / aio**：需 Docker daemon（`docker info` 可达）。
+- **boxlite（micro-VM，决策 B）**：需 macOS Apple Silicon 装好 `@boxlite-ai/boxlite` 原生二进制，且**本地 registry 预置 AIO 镜像**（BoxLite 独立 image store 无断点续传，须经中转）：
+  ```bash
+  docker run -d -p 5001:5000 --name local-registry registry:2
+  docker pull ghcr.io/agent-infra/sandbox:latest                                   # arm64
+  docker tag  ghcr.io/agent-infra/sandbox:latest localhost:5001/agent-infra/sandbox:latest
+  docker push localhost:5001/agent-infra/sandbox:latest
+  ```
+  provider 的 `imageRegistries` 已含 `docker.io`（bootstrap base，**必须保留**）+ `localhost:5001`（可用 `SANDBOX_BOXLITE_REGISTRY` 覆盖）。首个 Box 冷启含镜像入 store ~220s、之后热启 ~7s。选型与工程注记见**文档仓 `SANDBOX-RUNTIME-DECISIONS.md`**。
+
 ## 冒烟切片（本次交付验证的最小闭环）
 
 - `GET /api/health` → `ok`（口令豁免）；`/openapi.json` 暴露。

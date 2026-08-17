@@ -37,6 +37,7 @@ describe('SqliteSandboxRepository saveSync roundtrip', () => {
       id: asSandboxId('sbx-int-1'),
       projectId: asProjectId('prj-int-1'),
       runtime: 'codex',
+      provider: 'boxlite',
       headless: true,
       timeoutMinutes: 60,
       idleTimeoutSec: 1800,
@@ -49,6 +50,7 @@ describe('SqliteSandboxRepository saveSync roundtrip', () => {
     expect(loaded).not.toBeNull();
     expect(loaded!.status).toBe('pending');
     expect(loaded!.runtime).toBe('codex');
+    expect(loaded!.provider).toBe('boxlite');
     expect(loaded!.headless).toBe(true);
     expect(loaded!.timeoutMinutes).toBe(60);
     expect(loaded!.transitions).toHaveLength(1);
@@ -60,6 +62,7 @@ describe('SqliteSandboxRepository saveSync roundtrip', () => {
       id: asSandboxId('sbx-int-2'),
       projectId: asProjectId('prj-int-1'),
       runtime: 'codex',
+      provider: 'aio',
       headless: false,
       timeoutMinutes: null,
       idleTimeoutSec: 1800,

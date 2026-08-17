@@ -1,0 +1,26 @@
+{
+  "name": "@platform/terminal",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*",
+    "@platform/sandbox": "workspace:*",
+    "@platform/shared-kernel": "workspace:*",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/websockets": "^11.0.0",
+    "@nestjs/platform-socket.io": "^11.0.0",
+    "socket.io": "^4.8.0"
+  }
+}

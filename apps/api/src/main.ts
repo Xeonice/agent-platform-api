@@ -4,9 +4,14 @@ import { NestFactory } from '@nestjs/core';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import { setupSwagger } from './bootstrap/swagger.setup';
+import { setupWebsockets } from './bootstrap/websocket.setup';
 import { env, isExposedBind } from './platform/config/env';
 
 async function bootstrap(): Promise<void> {
+  // production entrypoint opts into startup orphan reconciliation (13 §4); tests
+  // (which boot throwaway apps on fresh :memory: DBs) leave it off by default.
+  process.env.SANDBOX_RECONCILE_ON_BOOT ??= 'true';
+
   const app = await NestFactory.create(AppModule);
 
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).
@@ -14,6 +19,7 @@ async function bootstrap(): Promise<void> {
   // zod single source validation for every createZodDto DTO (02 §3).
   app.useGlobalPipes(new ZodValidationPipe());
 
+  setupWebsockets(app);
   setupSwagger(app);
 
   if (isExposedBind(env.host)) {
