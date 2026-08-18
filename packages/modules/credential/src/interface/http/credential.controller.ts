@@ -62,7 +62,9 @@ export class CredentialController {
 
   @Post('git')
   @HttpCode(201)
-  @ApiOperation({ summary: 'Store a git credential (ssh-key / https-token); same-protocol = replace' })
+  @ApiOperation({
+    summary: 'Store a git credential (ssh-key / https-token); same-protocol = replace',
+  })
   @ApiCreatedResponse({ type: StoreGitCredentialResponseDto })
   store(@Body() dto: CreateGitCredentialDto): Promise<StoreGitCredentialResult> {
     return this.app.storeGitCredential(dto);
@@ -71,7 +73,8 @@ export class CredentialController {
   @Post('git/test')
   @HttpCode(200)
   @ApiOperation({
-    summary: 'Test a git credential via ls-remote (15s); inline (test-before-save) or stored; never returns refs',
+    summary:
+      'Test a git credential via ls-remote (15s); inline (test-before-save) or stored; never returns refs',
   })
   @ApiExtraModels(InlineGitTestDto, StoredGitTestDto)
   @ApiBody({

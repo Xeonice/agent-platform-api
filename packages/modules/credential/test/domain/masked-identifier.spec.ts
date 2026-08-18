@@ -3,7 +3,9 @@ import { MaskedIdentifier } from '../../src/domain/value-objects/masked-identifi
 
 describe('MaskedIdentifier (23 §8.3, I-CRD-2 — no secret bytes leak)', () => {
   it('SSH → SHA256: fingerprint, never the key bytes', () => {
-    const key = Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END OPENSSH PRIVATE KEY-----\n');
+    const key = Buffer.from(
+      '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END OPENSSH PRIVATE KEY-----\n',
+    );
     const m = MaskedIdentifier.forSshPrivateKey(key).toString();
     expect(m).toMatch(/^SHA256:[A-Za-z0-9+/]+$/);
     expect(m).not.toContain('SECRETKEYMATERIAL');

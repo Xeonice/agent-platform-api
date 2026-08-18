@@ -45,7 +45,10 @@ export function classifySshPrivateKey(key: Buffer): PassphraseVerdict {
   const text = key.toString('utf8');
 
   if (/Proc-Type:\s*4,\s*ENCRYPTED/i.test(text) || /DEK-Info:/i.test(text)) {
-    return { unprotected: false, reason: 'traditional PEM is passphrase-encrypted (Proc-Type/DEK-Info)' };
+    return {
+      unprotected: false,
+      reason: 'traditional PEM is passphrase-encrypted (Proc-Type/DEK-Info)',
+    };
   }
   if (text.includes('-----BEGIN ENCRYPTED PRIVATE KEY-----')) {
     return { unprotected: false, reason: 'PKCS#8 encrypted private key' };
@@ -53,7 +56,10 @@ export function classifySshPrivateKey(key: Buffer): PassphraseVerdict {
   if (text.includes(OPENSSH_BEGIN)) {
     const cipher = opensshCiphername(text);
     if (cipher === null) {
-      return { unprotected: false, reason: 'unparsable OpenSSH private key (cannot confirm no passphrase)' };
+      return {
+        unprotected: false,
+        reason: 'unparsable OpenSSH private key (cannot confirm no passphrase)',
+      };
     }
     if (cipher !== 'none') {
       return { unprotected: false, reason: `OpenSSH key encrypted with cipher '${cipher}'` };

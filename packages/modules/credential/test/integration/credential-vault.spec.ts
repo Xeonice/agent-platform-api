@@ -91,12 +91,22 @@ describe('CredentialVault (crypto + store/replace/revoke)', () => {
   });
 
   it('"更换" revokes the old same-protocol credential in the same tx (I-CRD-5)', async () => {
-    await h.app.storeGitCredential({ type: 'https-token', secret: 'ghp_first000000000000', allowedHosts: ['github.com'] });
-    await h.app.storeGitCredential({ type: 'https-token', secret: 'ghp_second00000000000', allowedHosts: ['github.com'] });
+    await h.app.storeGitCredential({
+      type: 'https-token',
+      secret: 'ghp_first000000000000',
+      allowedHosts: ['github.com'],
+    });
+    await h.app.storeGitCredential({
+      type: 'https-token',
+      secret: 'ghp_second00000000000',
+      allowedHosts: ['github.com'],
+    });
 
     const active = await h.app.listGitCredentials();
     expect(active).toHaveLength(1); // uq_cred_git_active holds
-    const rows = h.sqlite.prepare('SELECT revoked_at, encrypted_blob FROM credentials ORDER BY issued_at').all() as Array<{
+    const rows = h.sqlite
+      .prepare('SELECT revoked_at, encrypted_blob FROM credentials ORDER BY issued_at')
+      .all() as Array<{
       revoked_at: number | null;
       encrypted_blob: string | null;
     }>;
@@ -115,7 +125,9 @@ describe('CredentialVault (crypto + store/replace/revoke)', () => {
     await h.app.revokeGitCredential(id);
 
     expect(await h.app.listGitCredentials()).toHaveLength(0);
-    const row = h.sqlite.prepare('SELECT encrypted_blob, iv, auth_tag, revoked_at FROM credentials WHERE id = ?').get(id) as {
+    const row = h.sqlite
+      .prepare('SELECT encrypted_blob, iv, auth_tag, revoked_at FROM credentials WHERE id = ?')
+      .get(id) as {
       encrypted_blob: string | null;
       iv: string | null;
       auth_tag: string | null;

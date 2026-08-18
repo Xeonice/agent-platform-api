@@ -29,14 +29,20 @@ describe('RepoUrl', () => {
     // non-default port. Self-hosted GitLab/Gitea commonly run on :8443/:3000.
     expect(RepoUrl.create('https://github.com/x/y.git').host()).toBe('github.com');
     expect(RepoUrl.create('https://github.com:443/x/y.git').host()).toBe('github.com'); // default → omit
-    expect(RepoUrl.create('https://git.company.com:8443/x/y.git').host()).toBe('git.company.com:8443');
+    expect(RepoUrl.create('https://git.company.com:8443/x/y.git').host()).toBe(
+      'git.company.com:8443',
+    );
     expect(RepoUrl.create('http://git.company.com:3000/x.git').host()).toBe('git.company.com:3000');
     expect(RepoUrl.create('git@git.company.com:owner/repo.git').host()).toBe('git.company.com'); // scp, no port
   });
 
   it('credentialKind() picks by protocol', () => {
-    expect(RepoUrl.create('https://git.company.com:8443/x.git').credentialKind()).toBe('git-https-token');
-    expect(RepoUrl.create('git@git.company.com:owner/repo.git').credentialKind()).toBe('git-ssh-key');
+    expect(RepoUrl.create('https://git.company.com:8443/x.git').credentialKind()).toBe(
+      'git-https-token',
+    );
+    expect(RepoUrl.create('git@git.company.com:owner/repo.git').credentialKind()).toBe(
+      'git-ssh-key',
+    );
   });
 
   it('scheme() returns the URL scheme (drives the scheme-aware helper key, C4)', () => {

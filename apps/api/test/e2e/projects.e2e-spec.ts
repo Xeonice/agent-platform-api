@@ -127,7 +127,11 @@ describe('projects REST', () => {
     // creation is accepted (202). Delete immediately to cancel the background clone.
     const res = await request(app.getHttpServer())
       .post('/api/projects')
-      .send({ name: `lan-${Math.random()}`, sourceType: 'git', repoUrl: 'http://192.168.199.1/x.git' })
+      .send({
+        name: `lan-${Math.random()}`,
+        sourceType: 'git',
+        repoUrl: 'http://192.168.199.1/x.git',
+      })
       .expect(202);
     await request(app.getHttpServer()).delete(`/api/projects/${res.body.id}`).send({}).expect(204);
   });

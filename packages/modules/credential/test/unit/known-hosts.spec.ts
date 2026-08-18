@@ -35,7 +35,9 @@ describe('pinned known_hosts (03 §7.3 H)', () => {
       expect(body).toContain(`${host} ssh-rsa `);
     }
     // exact pinned github ed25519 (verified against GitHub's published fingerprint).
-    expect(body).toContain('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl');
+    expect(body).toContain(
+      'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+    );
   });
 
   it('overwrites on each call (integrity — cannot be poisoned by a prior write)', () => {

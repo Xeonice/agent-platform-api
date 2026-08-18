@@ -86,9 +86,9 @@ for (const variant of variants) {
         else delete process.env.GIT_SSL_CAINFO;
 
         process.env.DATABASE_URL = ':memory:';
-        process.env.PLATFORM_MASTER_KEY = Buffer.from(
-          '0123456789abcdef0123456789abcdef',
-        ).toString('base64');
+        process.env.PLATFORM_MASTER_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString(
+          'base64',
+        );
         dataRoot = mkdtempSync(resolve(process.cwd(), `tmp-gitcred-local-${variant.scheme}-`));
         process.env.DATA_ROOT = dataRoot;
 
@@ -110,7 +110,11 @@ for (const variant of variants) {
       it('NO credential → clone fails as PERMISSION (401), not NETWORK', async () => {
         const created = await request(app.getHttpServer())
           .post('/api/projects')
-          .send({ name: `local-nocred-${variant.scheme}`, sourceType: 'git', repoUrl: server.repoUrl })
+          .send({
+            name: `local-nocred-${variant.scheme}`,
+            sourceType: 'git',
+            repoUrl: server.repoUrl,
+          })
           .expect(202);
         expect(await waitClone(app, created.body.id as string)).toBe('failed');
         const failed = await request(app.getHttpServer()).get(`/api/projects/${created.body.id}`);
@@ -122,7 +126,12 @@ for (const variant of variants) {
 
         const stored = await request(app.getHttpServer())
           .post('/api/credentials/git')
-          .send({ type: 'https-token', secret: server.token, platform: 'other', allowedHosts: [host] })
+          .send({
+            type: 'https-token',
+            secret: server.token,
+            platform: 'other',
+            allowedHosts: [host],
+          })
           .expect(201);
         expect(stored.body.id).toBeTruthy();
         expect(stored.body.maskedIdentifier).not.toContain(server.token);
@@ -135,7 +144,11 @@ for (const variant of variants) {
 
         const ok = await request(app.getHttpServer())
           .post('/api/projects')
-          .send({ name: `local-withcred-${variant.scheme}`, sourceType: 'git', repoUrl: server.repoUrl })
+          .send({
+            name: `local-withcred-${variant.scheme}`,
+            sourceType: 'git',
+            repoUrl: server.repoUrl,
+          })
           .expect(202);
         expect(await waitClone(app, ok.body.id as string)).toBe('ready');
 
@@ -143,7 +156,9 @@ for (const variant of variants) {
         const entries = readdirSync(baseline);
         expect(entries).toContain('README.md'); // real cloned file landed
 
-        const list = await request(app.getHttpServer()).get('/api/credentials?kind=git').expect(200);
+        const list = await request(app.getHttpServer())
+          .get('/api/credentials?kind=git')
+          .expect(200);
         expect(JSON.stringify(list.body)).not.toContain(server.token);
       }, 90_000);
 

@@ -33,12 +33,11 @@ export class GitLsRemoteTester implements GitRemoteTester {
       unsafe: buildUnsafe(input),
     });
     try {
-      await git
-        .env(buildChildEnv(input))
-        .raw(['ls-remote', '--exit-code', input.url]);
+      await git.env(buildChildEnv(input)).raw(['ls-remote', '--exit-code', input.url]);
       return { ok: true };
     } catch (e) {
-      if (timedOut) return { ok: false, errorCode: 'TIMEOUT', message: 'connection timed out (15s)' };
+      if (timedOut)
+        return { ok: false, errorCode: 'TIMEOUT', message: 'connection timed out (15s)' };
       const raw = e instanceof Error ? e.message : String(e);
       return { ok: false, errorCode: classify(raw), message: sanitize(raw) };
     } finally {

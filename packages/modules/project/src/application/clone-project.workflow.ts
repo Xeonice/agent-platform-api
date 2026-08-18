@@ -2,7 +2,11 @@ import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs
 import { CLOCK, UNIT_OF_WORK, asProjectId } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
 import { CREDENTIAL_FACADE, CredentialPreparationError } from '@platform/contracts';
-import type { CredentialFacade, GitAuthContext, SandboxEventBroadcaster } from '@platform/contracts';
+import type {
+  CredentialFacade,
+  GitAuthContext,
+  SandboxEventBroadcaster,
+} from '@platform/contracts';
 import { SANDBOX_EVENT_BROADCASTER } from '@platform/contracts';
 import { RepoUrl } from '../domain/value-objects/repo-url.vo';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
@@ -163,7 +167,11 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       return null; // already validated at create time; be defensive
     }
     try {
-      return await this.credentials.prepareGitAuth(repo.credentialKind(), repo.host(), repo.scheme());
+      return await this.credentials.prepareGitAuth(
+        repo.credentialKind(),
+        repo.host(),
+        repo.scheme(),
+      );
     } catch (e) {
       if (e instanceof CredentialPreparationError) return null; // no cred / host not allowed
       throw e;

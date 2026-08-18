@@ -1,5 +1,11 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK, asCredentialId } from '@platform/shared-kernel';
+import {
+  CLOCK,
+  EVENT_BUS,
+  ID_GENERATOR,
+  UNIT_OF_WORK,
+  asCredentialId,
+} from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
 import type {
   CreateGitCredentialInput,
@@ -16,17 +22,27 @@ import type { CryptoService } from '../domain/ports/crypto.port';
 import { GIT_REMOTE_TESTER } from '../domain/ports/git-remote-tester.port';
 import type { GitRemoteTester } from '../domain/ports/git-remote-tester.port';
 import { GIT_AUTH_MATERIALIZER } from '../domain/ports/git-auth-materializer.port';
-import type { GitAuthMaterializer, MaterializedGitAuth } from '../domain/ports/git-auth-materializer.port';
+import type {
+  GitAuthMaterializer,
+  MaterializedGitAuth,
+} from '../domain/ports/git-auth-materializer.port';
 import { SecretMaterial } from '../domain/value-objects/secret-material.vo';
 import { MaskedIdentifier } from '../domain/value-objects/masked-identifier.vo';
 import { obtainedViaFromType } from '../domain/value-objects/obtained-via.vo';
 import type { GitObtainedVia, GitPlatform } from '../domain/value-objects/obtained-via.vo';
 import type { EncryptedBlob } from '../domain/value-objects/encrypted-blob.vo';
 import { classifySshPrivateKey } from '../domain/services/passphrase.detector';
-import { defaultPortForKind, hostAllowed, normalizeAllowedHost } from '../domain/services/host.util';
+import {
+  defaultPortForKind,
+  hostAllowed,
+  normalizeAllowedHost,
+} from '../domain/services/host.util';
 import { parseGitTarget } from '../domain/services/git-target.util';
 import type { GitTargetScheme } from '../domain/services/git-target.util';
-import { InvalidCredentialError, PassphraseProtectedKeyError } from '../domain/errors/credential-errors';
+import {
+  InvalidCredentialError,
+  PassphraseProtectedKeyError,
+} from '../domain/errors/credential-errors';
 import { CredentialMapper } from './dto/credential.mapper';
 
 /**
@@ -165,7 +181,11 @@ export class CredentialApplicationService {
       });
     } catch (e) {
       if (e instanceof DecryptionError) {
-        return { ok: false, errorCode: 'CLONE_FAILED_PERMISSION', message: 'credential could not be decrypted' };
+        return {
+          ok: false,
+          errorCode: 'CLONE_FAILED_PERMISSION',
+          message: 'credential could not be decrypted',
+        };
       }
       throw e;
     }
@@ -222,7 +242,12 @@ export class CredentialApplicationService {
     } catch {
       throw new NotFoundException(`git credential ${input.credentialId} is revoked`);
     }
-    return { kind: cred.obtainedVia, allowedHosts: cred.allowedHosts, blob, platform: cred.metadata?.provider };
+    return {
+      kind: cred.obtainedVia,
+      allowedHosts: cred.allowedHosts,
+      blob,
+      platform: cred.metadata?.provider,
+    };
   }
 
   private mapDomainError(e: unknown): unknown {

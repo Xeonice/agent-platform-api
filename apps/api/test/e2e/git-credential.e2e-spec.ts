@@ -67,7 +67,9 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
 
   beforeAll(async () => {
     process.env.DATABASE_URL = ':memory:';
-    process.env.PLATFORM_MASTER_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString('base64');
+    process.env.PLATFORM_MASTER_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString(
+      'base64',
+    );
     dataRoot = mkdtempSync(resolve(process.cwd(), 'tmp-gitcred-'));
     process.env.DATA_ROOT = dataRoot;
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -127,14 +129,26 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
     const host = hostOf(PRIVATE_REPO!);
     const bad = await request(app.getHttpServer())
       .post('/api/credentials/git/test')
-      .send({ source: 'inline', type: 'https-token', secret: 'ghp_wrongtoken000000', allowedHosts: [host], repoUrl: PRIVATE_REPO })
+      .send({
+        source: 'inline',
+        type: 'https-token',
+        secret: 'ghp_wrongtoken000000',
+        allowedHosts: [host],
+        repoUrl: PRIVATE_REPO,
+      })
       .expect(200);
     expect(bad.body.ok).toBe(false);
     expect(bad.body.errorCode).toBe('CLONE_FAILED_PERMISSION');
 
     const good = await request(app.getHttpServer())
       .post('/api/credentials/git/test')
-      .send({ source: 'inline', type: 'https-token', secret: PAT, allowedHosts: [host], repoUrl: PRIVATE_REPO })
+      .send({
+        source: 'inline',
+        type: 'https-token',
+        secret: PAT,
+        allowedHosts: [host],
+        repoUrl: PRIVATE_REPO,
+      })
       .expect(200);
     expect(good.body.ok).toBe(true);
   }, 60_000);
@@ -142,7 +156,13 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
   it('rejects carrying a credential to a host outside allowedHosts (C3)', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/credentials/git/test')
-      .send({ source: 'inline', type: 'https-token', secret: PAT, allowedHosts: ['github.com'], repoUrl: 'https://evil.example.com/x.git' })
+      .send({
+        source: 'inline',
+        type: 'https-token',
+        secret: PAT,
+        allowedHosts: ['github.com'],
+        repoUrl: 'https://evil.example.com/x.git',
+      })
       .expect(200);
     expect(res.body.ok).toBe(false);
     expect(res.body.errorCode).toBe('CLONE_FAILED_PERMISSION');

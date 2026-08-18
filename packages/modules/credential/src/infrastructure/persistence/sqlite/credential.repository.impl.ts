@@ -58,7 +58,12 @@ export class SqliteCredentialRepository implements CredentialRepository {
       encryptionKeyId: enc?.keyId ?? UNKNOWN_KEY_ID,
       obtainedVia: cred.obtainedVia,
       mode: cred.mode,
-      allowedHosts: cred.obtainedVia === 'git-https-token' ? cred.allowedHosts : cred.allowedHosts.length > 0 ? cred.allowedHosts : null,
+      allowedHosts:
+        cred.obtainedVia === 'git-https-token'
+          ? cred.allowedHosts
+          : cred.allowedHosts.length > 0
+            ? cred.allowedHosts
+            : null,
       issuedAt: cred.issuedAt,
       expiresAt: cred.expiresAt,
       refreshFailures: 0,

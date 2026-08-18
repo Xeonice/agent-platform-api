@@ -179,13 +179,51 @@ export function startLocalGitServer(opts: StartOptions): Promise<LocalGitServer>
   const srvCrt = join(certDir, 's.crt');
   const extCnf = join(certDir, 'ext.cnf');
   const ossl = (args: string[]) => execFileSync('openssl', args, { stdio: 'ignore' });
-  ossl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', caKey, '-out', caCrt,
-    '-days', '2', '-subj', '/CN=TestCA']);
-  ossl(['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', srvKey, '-out', srvCsr,
-    '-subj', `/CN=${ip}`]);
+  ossl([
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    caKey,
+    '-out',
+    caCrt,
+    '-days',
+    '2',
+    '-subj',
+    '/CN=TestCA',
+  ]);
+  ossl([
+    'req',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    srvKey,
+    '-out',
+    srvCsr,
+    '-subj',
+    `/CN=${ip}`,
+  ]);
   writeFileSync(extCnf, `subjectAltName=IP:${ip}\n`);
-  ossl(['x509', '-req', '-in', srvCsr, '-CA', caCrt, '-CAkey', caKey, '-CAcreateserial',
-    '-out', srvCrt, '-days', '2', '-extfile', extCnf]);
+  ossl([
+    'x509',
+    '-req',
+    '-in',
+    srvCsr,
+    '-CA',
+    caCrt,
+    '-CAkey',
+    caKey,
+    '-CAcreateserial',
+    '-out',
+    srvCrt,
+    '-days',
+    '2',
+    '-extfile',
+    extCnf,
+  ]);
 
   // --- HTTPS server → basic auth → git-http-backend CGI ----------------------
   const server = createHttpsServer(

@@ -21,9 +21,15 @@ const GIT_ROW = (id: string, via: string) =>
 describe('credentials migration (13 §2.5.1)', () => {
   it('creates the table + partial unique indexes', () => {
     const db = freshDb();
-    const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map((r) => (r as { name: string }).name);
+    const tables = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table'`)
+      .all()
+      .map((r) => (r as { name: string }).name);
     expect(tables).toContain('credentials');
-    const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index'`).all().map((r) => (r as { name: string }).name);
+    const idx = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='index'`)
+      .all()
+      .map((r) => (r as { name: string }).name);
     expect(idx).toContain('uq_cred_runtime_active');
     expect(idx).toContain('uq_cred_git_active');
   });
@@ -55,7 +61,9 @@ describe('credentials migration (13 §2.5.1)', () => {
   it('partial unique index: two active git creds of the same obtained_via collide (I-CRD-5)', () => {
     const db = freshDb();
     db.prepare(GIT_ROW('a', 'git-https-token')).run();
-    expect(() => db.prepare(GIT_ROW('b', 'git-https-token')).run()).toThrow(/UNIQUE constraint failed/i);
+    expect(() => db.prepare(GIT_ROW('b', 'git-https-token')).run()).toThrow(
+      /UNIQUE constraint failed/i,
+    );
   });
 
   it('CHECK: revoked row must have wiped ciphertext (I-CRD-3)', () => {

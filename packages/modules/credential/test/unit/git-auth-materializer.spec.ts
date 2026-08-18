@@ -126,7 +126,9 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
     expect(ctx.gitSshCommand).toContain('-o IdentitiesOnly=yes');
     // unknown host → accept-new against the platform TOFU known_hosts.
     expect(ctx.gitSshCommand).toContain('-o StrictHostKeyChecking=accept-new');
-    expect(ctx.gitSshCommand).toContain(`UserKnownHostsFile="${resolve(dataRoot, '.ssh', 'known_hosts')}"`);
+    expect(ctx.gitSshCommand).toContain(
+      `UserKnownHostsFile="${resolve(dataRoot, '.ssh', 'known_hosts')}"`,
+    );
     expect(ctx.env.GIT_TOKEN).toBeUndefined();
 
     const keyfile = /-i "([^"]+)"/.exec(ctx.gitSshCommand ?? '')?.[1];
@@ -139,7 +141,9 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
   });
 
   it('SSH (pinned SaaS host github.com): StrictHostKeyChecking=yes against the pinned file', async () => {
-    const mat = new FsGitAuthMaterializer(fakeCrypto('-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----'));
+    const mat = new FsGitAuthMaterializer(
+      fakeCrypto('-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----'),
+    );
     const ctx = await mat.materialize({
       obtainedVia: 'git-ssh-key',
       secret: blob,
@@ -150,7 +154,9 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
     const khFile = /UserKnownHostsFile="([^"]+)"/.exec(ctx.gitSshCommand ?? '')?.[1];
     expect(khFile).toBe(resolve(dataRoot, '.ssh', 'pinned_known_hosts'));
     // the pinned file really contains github's pinned ed25519 key.
-    expect(readFileSync(khFile!, 'utf8')).toContain('github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl');
+    expect(readFileSync(khFile!, 'utf8')).toContain(
+      'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+    );
     await ctx.dispose();
   });
 });

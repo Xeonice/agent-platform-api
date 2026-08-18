@@ -51,14 +51,22 @@ function sshToGithub(knownHostsFile: string): string {
   const r = spawnSync(
     'ssh',
     [
-      '-F', '/dev/null', // hermetic — ignore ambient ~/.ssh/config (as the platform does)
-      '-o', `UserKnownHostsFile=${knownHostsFile}`,
-      '-o', 'StrictHostKeyChecking=yes',
-      '-o', 'BatchMode=yes',
-      '-o', 'IdentitiesOnly=yes',
-      '-o', 'HostKeyAlgorithms=ssh-ed25519',
-      '-o', 'ConnectTimeout=8',
-      '-T', 'git@github.com',
+      '-F',
+      '/dev/null', // hermetic — ignore ambient ~/.ssh/config (as the platform does)
+      '-o',
+      `UserKnownHostsFile=${knownHostsFile}`,
+      '-o',
+      'StrictHostKeyChecking=yes',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'IdentitiesOnly=yes',
+      '-o',
+      'HostKeyAlgorithms=ssh-ed25519',
+      '-o',
+      'ConnectTimeout=8',
+      '-T',
+      'git@github.com',
     ],
     { encoding: 'utf8', timeout: 20_000 },
   );
@@ -86,6 +94,8 @@ describe.skipIf(!ready)('SSH pinned known_hosts (03 §7.3 H)', () => {
     const out = sshToGithub(pinnedKnownHostsPath());
     expect(out).not.toMatch(/Host key verification failed/i);
     // github rejects our (absent) key at AUTH — which means the host key was trusted.
-    expect(out).toMatch(/Permission denied|successfully authenticated|does not provide shell access/i);
+    expect(out).toMatch(
+      /Permission denied|successfully authenticated|does not provide shell access/i,
+    );
   }, 30_000);
 });
