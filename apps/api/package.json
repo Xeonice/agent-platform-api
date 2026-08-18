@@ -16,6 +16,7 @@
     "@nestjs/swagger": "^11.0.0",
     "@nestjs/websockets": "^11.0.0",
     "@platform/contracts": "workspace:*",
+    "@platform/credential": "workspace:*",
     "@platform/project": "workspace:*",
     "@platform/sandbox": "workspace:*",
     "@platform/shared-kernel": "workspace:*",

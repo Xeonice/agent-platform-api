@@ -6,3 +6,5 @@ export * from './ports/event-bus.port';
 export * from './ports/database.token';
 export * from './domain/domain-event';
 export * from './domain/aggregate-root';
+export * from './net/git-remote';
+export * from './net/git-platform-registry';

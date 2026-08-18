@@ -74,6 +74,9 @@ importers:
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@platform/credential':
+        specifier: workspace:*
+        version: link:../../packages/modules/credential
       '@platform/project':
         specifier: workspace:*
         version: link:../../packages/modules/project
@@ -132,6 +135,9 @@ importers:
 
   packages/contracts:
     dependencies:
+      '@platform/shared-kernel':
+        specifier: workspace:*
+        version: link:../shared-kernel
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -139,6 +145,40 @@ importers:
       vitest:
         specifier: ^2.1.2
         version: 2.1.9(@types/node@22.20.1)
+
+  packages/modules/credential:
+    dependencies:
+      '@nestjs/common':
+        specifier: ^11.0.0
+        version: 11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/swagger':
+        specifier: 11.3.0
+        version: 11.3.0(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.29)(reflect-metadata@0.2.2)
+      '@platform/contracts':
+        specifier: workspace:*
+        version: link:../../contracts
+      '@platform/shared-kernel':
+        specifier: workspace:*
+        version: link:../../shared-kernel
+      drizzle-orm:
+        specifier: ^0.36.0
+        version: 0.36.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)
+      nestjs-zod:
+        specifier: ^4.3.0
+        version: 4.3.1(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.29)(@nestjs/swagger@11.3.0(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.29)(reflect-metadata@0.2.2))(zod@3.25.76)
+      simple-git:
+        specifier: ^3.27.0
+        version: 3.36.0
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.11
+        version: 7.6.13
+      better-sqlite3:
+        specifier: ^11.5.0
+        version: 11.10.0
 
   packages/modules/project:
     dependencies:

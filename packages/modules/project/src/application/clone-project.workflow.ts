@@ -1,8 +1,14 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK, UNIT_OF_WORK, asProjectId } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
+import { CREDENTIAL_FACADE, CredentialPreparationError } from '@platform/contracts';
+import type {
+  CredentialFacade,
+  GitAuthContext,
+  SandboxEventBroadcaster,
+} from '@platform/contracts';
 import { SANDBOX_EVENT_BROADCASTER } from '@platform/contracts';
-import type { SandboxEventBroadcaster } from '@platform/contracts';
+import { RepoUrl } from '../domain/value-objects/repo-url.vo';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
 import type { ProjectRepository } from '../domain/repositories/project.repository';
 import { GIT_CLONER } from '../domain/ports/git-cloner.port';
@@ -37,6 +43,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     @Inject(GIT_CLONER) private readonly cloner: GitCloner,
     @Inject(BASELINE_MANAGER) private readonly baseline: BaselineManager,
     @Inject(SANDBOX_EVENT_BROADCASTER) private readonly broadcaster: SandboxEventBroadcaster,
+    @Inject(CREDENTIAL_FACADE) private readonly credentials: CredentialFacade,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -94,8 +101,14 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       controller.abort();
     }, CLONE_TIMEOUT_MS);
     let lastEmit = 0;
+    let auth: GitAuthContext | null = null;
 
     try {
+      // Private-repo support (03 §7.3): pick a credential by URL protocol/host via
+      // the cross-context facade. A hit whose host ∈ allowedHosts yields an opaque
+      // handle we inject; otherwise (no credential / host not allowed) we clone as a
+      // public repo. The workflow only ever holds the handle — never plaintext.
+      auth = await this.prepareAuth(project.repoUrl);
       await this.baseline.removeDir(dest); // fresh dest (retry re-clones from scratch)
       await this.cloner.clone({
         repoUrl: project.repoUrl,
@@ -103,6 +116,8 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         destPath: dest,
         timeoutMs: CLONE_TIMEOUT_MS,
         signal: controller.signal,
+        env: auth?.env,
+        gitSshCommand: auth?.gitSshCommand,
         onProgress: (p: CloneProgress) => {
           const now = this.clock.now().getTime();
           if (now - lastEmit < PROGRESS_THROTTLE_MS) return;
@@ -136,9 +151,30 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       });
       this.logger.warn(`clone failed for project ${projectId}: ${code}`);
     } finally {
+      if (auth) await auth.dispose().catch(() => undefined); // delete temp keyfile dir (03 §7.3)
       clearTimeout(timer);
       this.controllers.delete(projectId);
       this.startNext();
+    }
+  }
+
+  /** Resolve a git-auth handle for the repo, or null to clone as a public repo. */
+  private async prepareAuth(repoUrl: string): Promise<GitAuthContext | null> {
+    let repo: RepoUrl;
+    try {
+      repo = RepoUrl.create(repoUrl);
+    } catch {
+      return null; // already validated at create time; be defensive
+    }
+    try {
+      return await this.credentials.prepareGitAuth(
+        repo.credentialKind(),
+        repo.host(),
+        repo.scheme(),
+      );
+    } catch (e) {
+      if (e instanceof CredentialPreparationError) return null; // no cred / host not allowed
+      throw e;
     }
   }
 

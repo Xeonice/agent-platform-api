@@ -12,7 +12,7 @@ export function classifyCloneError(stderr: string): CloneErrorCode {
     return 'DISK_INSUFFICIENT';
   }
   if (
-    /authentication failed|permission denied|could not read username|could not read password|access denied|invalid username or password|terminal prompts disabled|\b403\b|publickey|repository not found|\bnot found\b|\b404\b/.test(
+    /authentication failed|authentication required|permission denied|could not read username|could not read password|unable to get password from user|access denied|invalid username or password|terminal prompts disabled|\b401\b|\b403\b|publickey|repository not found|\bnot found\b|\b404\b/.test(
       s,
     )
   ) {
@@ -26,7 +26,10 @@ export function classifyCloneError(stderr: string): CloneErrorCode {
  * URL userinfo (`user:pass@`) and common token formats. Truncated for safety.
  */
 export function sanitizeCloneMessage(raw: string): string {
-  let s = raw.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, '$1');
+  // Redact whole `Authorization:` lines FIRST (03 §7.3 G): a curl trace can print
+  // `Authorization: Basic base64(x-access-token:PAT)` — the PAT must never survive.
+  let s = raw.replace(/authorization:\s*\S+.*$/gim, 'Authorization: ***');
+  s = s.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, '$1');
   s = s
     .replace(/\bghp_[A-Za-z0-9]{20,}\b/g, '***')
     .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '***')

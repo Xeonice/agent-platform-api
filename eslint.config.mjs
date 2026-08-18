@@ -57,6 +57,7 @@ export default tseslint.config(
             'packages/contracts/tsconfig.json',
             'packages/modules/project/tsconfig.json',
             'packages/modules/sandbox/tsconfig.json',
+            'packages/modules/credential/tsconfig.json',
             'apps/api/tsconfig.json',
           ],
         },
@@ -140,7 +141,10 @@ export default tseslint.config(
                 'contracts',
               ],
             },
-            { from: 'contracts', allow: ['contracts'] },
+            // contracts may lean on the shared kernel (pure primitives / catalogs like
+            // the git-platform registry). shared-kernel never imports contracts, so this
+            // introduces no cycle.
+            { from: 'contracts', allow: ['contracts', 'shared-kernel'] },
             { from: 'shared-kernel', allow: ['shared-kernel'] },
           ],
         },

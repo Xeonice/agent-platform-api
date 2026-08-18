@@ -3,6 +3,7 @@ import { McpModule } from '@rekog/mcp-nest';
 import { ProjectModule } from '@platform/project';
 import { SandboxModule } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
+import { CredentialModule } from '@platform/credential';
 import { PlatformModule } from './platform/persistence/platform.module';
 import { SystemModule } from './platform/system/system.module';
 import { AccessPasscodeModule } from './platform/access-passcode/access-passcode.module';
@@ -25,6 +26,7 @@ import { guardProviders } from './bootstrap/guards.setup';
     ProjectModule,
     SandboxModule,
     TerminalModule,
+    CredentialModule,
   ],
   providers: [...guardProviders],
 })

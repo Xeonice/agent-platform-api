@@ -21,6 +21,15 @@ export interface CloneRequest {
   timeoutMs: number;
   signal: AbortSignal;
   onProgress: (p: CloneProgress) => void;
+  /**
+   * Materialized git-auth env from `GitAuthContext.env` (03 §7.3): the HTTPS token
+   * `$GIT_TOKEN` + the env-scoped credential.helper config. Merged AFTER the env
+   * guard so it survives; absent ⇒ public-repo clone. The adapter NEVER receives a
+   * credentialId or a SecretMaterial — only this already-assembled env.
+   */
+  env?: Record<string, string>;
+  /** SSH `GIT_SSH_COMMAND` from `GitAuthContext.gitSshCommand` (SSH only). */
+  gitSshCommand?: string;
 }
 
 /** Sanitized clone failure (03 §7.5): URL userinfo/password already stripped. */
