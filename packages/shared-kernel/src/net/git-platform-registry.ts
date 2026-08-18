@@ -23,6 +23,7 @@ export const GIT_PLATFORM_REGISTRY = {
   github: { label: 'GitHub', defaultHost: 'github.com' },
   gitlab: { label: 'GitLab', defaultHost: 'gitlab.com' },
   gitee: { label: 'Gitee', defaultHost: 'gitee.com' },
+  gitea: { label: 'Gitea', defaultHost: 'gitea.com' },
 } as const;
 
 /** The registry keys — the "first-class citizen" platform ids (excludes 'other'). */

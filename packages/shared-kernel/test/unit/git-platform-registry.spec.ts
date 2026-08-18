@@ -7,7 +7,7 @@ import {
 
 describe('git-platform registry (single source of truth)', () => {
   it('exposes the three first-class SaaS ids in insertion order', () => {
-    expect(GIT_PLATFORM_IDS).toEqual(['github', 'gitlab', 'gitee']);
+    expect(GIT_PLATFORM_IDS).toEqual(['github', 'gitlab', 'gitee', 'gitea']);
   });
 
   it('defaultHostFor resolves each registry id to its defaultHost', () => {

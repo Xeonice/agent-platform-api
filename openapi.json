@@ -866,6 +866,7 @@
               "github",
               "gitlab",
               "gitee",
+              "gitea",
               "other"
             ]
           },
@@ -938,6 +939,7 @@
               "github",
               "gitlab",
               "gitee",
+              "gitea",
               "other"
             ]
           },
@@ -995,6 +997,7 @@
               "github",
               "gitlab",
               "gitee",
+              "gitea",
               "other"
             ]
           },
