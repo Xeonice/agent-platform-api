@@ -62,10 +62,24 @@ const variants: Variant[] = [
 
 for (const variant of variants) {
   if (!variant.ready) {
+    // The dominant real-world skip cause is a runner with ONLY loopback (no private
+    // IPv4). We deliberately cannot fall back to 127.0.0.1: the SSRF gate BLOCKS
+    // loopback (it is meant to), so a loopback bind could not stand in for a private
+    // host without defeating the very behaviour under test. There is no clean,
+    // unprivileged, portable way to synthesise a private IP in CI (adding an alias
+    // needs root). So we keep a LOUD skip and state plainly that the regression is
+    // UNCOVERED on this runner — we do NOT fake a pass.
+    const noPrivateIp = !ip;
     console.warn(
       `\n[33m[git-credential-local.e2e:${variant.scheme}] SKIPPED — prerequisites missing ` +
         `(${variant.missing}). This is the LOCAL private-repo clone-with-credential ` +
-        'regression. NOT fake-passed.[0m\n',
+        'regression. NOT fake-passed.' +
+        (noPrivateIp
+          ? ' NOTE: this runner has NO private (non-loopback) IPv4 — the private-repo ' +
+            'clone-with-credential path is UNCOVERED here; run on a host/CI with a ' +
+            '10/172.16-31/192.168 address to exercise it.'
+          : '') +
+        '[0m\n',
     );
   }
 

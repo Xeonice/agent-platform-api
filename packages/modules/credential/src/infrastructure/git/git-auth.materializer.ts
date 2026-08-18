@@ -58,15 +58,24 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     await mkdir(base, { recursive: true, mode: 0o700 });
     const dir = await mkdtemp(join(base, 'k-'));
     const keyfile = join(dir, 'id');
-    // `wx` = exclusive create (fail if exists) + do not follow an existing symlink;
-    // the dir is fresh + random + 0700 so the attack surface is already minimal.
-    const handle = await open(keyfile, 'wx', 0o600);
+    // Everything after `mkdtemp` is guarded: until we RETURN a GitAuthContext there is
+    // no `dispose()` for the workflow's finally to call, so if open/writeFile/sync
+    // throws the fresh temp dir (which may already hold a partially-written keyfile)
+    // would leak. Clean it up here before re-throwing.
     try {
-      const pem = secret.use((buf) => ensureTrailingNewline(buf));
-      await handle.writeFile(pem);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      // `wx` = exclusive create (fail if exists) + do not follow an existing symlink;
+      // the dir is fresh + random + 0700 so the attack surface is already minimal.
+      const handle = await open(keyfile, 'wx', 0o600);
+      try {
+        const pem = secret.use((buf) => ensureTrailingNewline(buf));
+        await handle.writeFile(pem);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (e) {
+      await rm(dir, { recursive: true, force: true });
+      throw e;
     }
     // Pinned SaaS host → StrictHostKeyChecking=yes against the pinned known_hosts
     // (a MITM/rebinding host-key mismatch aborts BEFORE the key signs). Unknown

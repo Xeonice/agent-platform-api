@@ -8,8 +8,13 @@ import { pinnedKnownHostsPath } from '../../../../packages/modules/credential/sr
 /**
  * S3 ACCEPTANCE for pinned known_hosts (03 §7.3 H): proves the PIN MECHANISM
  * really rejects a mismatched host key BEFORE any auth. Uses a real `ssh` to a
- * real SaaS host (github.com). Skips LOUDLY (never fake-passes) when ssh or the
- * network is unavailable.
+ * real SaaS host (github.com).
+ *
+ * NETWORK-GATED: because github's real host key can rotate and public reachability
+ * flaps, this suite would otherwise make the MAIN CI pipeline flaky. It runs ONLY
+ * when `RUN_NETWORK_E2E=1` is set (a dedicated/manual job); otherwise it skips
+ * LOUDLY (never fake-passes). ssh + network are additionally required even when the
+ * gate is on.
  *
  * A WRONG pinned github key + StrictHostKeyChecking=yes  → "Host key verification failed".
  * The REAL pinned file (shipped constants)               → host key ACCEPTED (fails
@@ -34,10 +39,14 @@ async function networkUp(): Promise<boolean> {
     return false;
   }
 }
-const ready = sshAvailable() && (await networkUp());
+const networkGateOn = process.env.RUN_NETWORK_E2E === '1';
+const ready = networkGateOn && sshAvailable() && (await networkUp());
 if (!ready) {
+  const reason = networkGateOn
+    ? 'ssh or network unavailable'
+    : 'network e2e disabled (set RUN_NETWORK_E2E=1 to run — it makes a real ssh to github.com)';
   console.warn(
-    '\n[33m[pinned-known-hosts.e2e] SKIPPED — ssh or network unavailable. ' +
+    `\n[33m[pinned-known-hosts.e2e] SKIPPED — ${reason}. ` +
       'This proves SSH host-key pinning rejects a mismatched key. NOT fake-passed.[0m\n',
   );
 }

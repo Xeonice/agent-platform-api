@@ -1,10 +1,17 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   CLOCK,
   EVENT_BUS,
   ID_GENERATOR,
   UNIT_OF_WORK,
   asCredentialId,
+  isBlockedGitHost,
 } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
 import type {
@@ -104,6 +111,12 @@ export class CredentialApplicationService {
 
       // "更换" (I-CRD-5): revoke any same-protocol active credential + insert the
       // new one in the SAME transaction (else it collides with uq_cred_git_active).
+      // NOTE: this `existing` read is async and OUTSIDE the tx, so two concurrent
+      // stores of the same obtained_via can both see `undefined` and both insert — the
+      // second insert then violates the `uq_cred_git_active` partial-unique index. That
+      // surfaces as a SqliteError which `mapDomainError` maps to a 409 (retryable),
+      // NOT a raw 500. A clean in-tx re-check would need a new SYNC repo port method;
+      // catching the unique conflict is the lighter, sufficient closure here.
       const existing = (await this.repo.listGitCredentials(false)).find(
         (c) => c.obtainedVia === obtainedVia && !c.isRevoked(),
       );
@@ -159,8 +172,22 @@ export class CredentialApplicationService {
       };
     }
 
-    // host ∈ allowedHosts (I-CRD-8 / C3). SSH with no recorded hosts relies on the
-    // RepoUrl SSRF + resolve+pin, so it is allowed; a token is always checked.
+    // SSRF blocklist (03 §7.3 C4) — the SAME gate the clone path applies via RepoUrl,
+    // here on the TEST path so `git ls-remote` can never probe loopback / link-local /
+    // cloud-metadata / unspecified targets. This runs REGARDLESS of allowedHosts: even
+    // an SSH key with an empty whitelist must not be able to reach 169.254.169.254 or
+    // 127.0.0.1. Private LAN ranges stay allowed (internal self-hosted git).
+    if (isBlockedGitHost(target.canonicalHost)) {
+      return {
+        ok: false,
+        errorCode: 'CLONE_FAILED_NETWORK',
+        message: 'target host is not a permitted git remote (loopback/link-local/metadata blocked)',
+      };
+    }
+
+    // host ∈ allowedHosts (I-CRD-8 / C3) — a SEPARATE authorization layer. SSH with no
+    // recorded hosts relies on the SSRF gate above + resolve+pin, so it is allowed; a
+    // token is always checked.
     const mustCheckHost = kind === 'git-https-token' || allowedHosts.length > 0;
     if (mustCheckHost && !hostAllowed(target.host, allowedHosts)) {
       return {
@@ -252,8 +279,35 @@ export class CredentialApplicationService {
 
   private mapDomainError(e: unknown): unknown {
     if (e instanceof InvalidCredentialError) return new BadRequestException(e.message);
+    // Concurrent "更换" of the same obtained_via races on `uq_cred_git_active`
+    // (see storeGitCredential). Map the unique-constraint violation to a retryable
+    // 409 instead of leaking a raw SqliteError as a 500.
+    if (isActiveCredentialConflict(e)) {
+      return new ConflictException(
+        'a credential of this type was replaced concurrently — please retry',
+      );
+    }
     return e;
   }
+}
+
+/**
+ * True when `e` is the `uq_cred_git_active` partial-unique violation raised by two
+ * concurrent stores of the same obtained_via. Detected structurally (SQLite reports a
+ * UNIQUE violation as code `SQLITE_CONSTRAINT_UNIQUE` with the offending COLUMN —
+ * `credentials.obtained_via`, which is unique to the git-active index; some builds
+ * name the index instead) so the application layer keeps no hard dependency on the
+ * better-sqlite3 driver type.
+ */
+function isActiveCredentialConflict(e: unknown): boolean {
+  if (typeof e !== 'object' || e === null) return false;
+  const code = (e as { code?: unknown }).code;
+  const message = (e as { message?: unknown }).message;
+  const isUnique = typeof code === 'string' && code.includes('SQLITE_CONSTRAINT');
+  const namesGitActive =
+    typeof message === 'string' &&
+    (message.includes('obtained_via') || message.includes('uq_cred_git_active'));
+  return isUnique && namesGitActive;
 }
 
 /** Normalise + dedup allowedHosts into canonical authorities for the credential kind. */
@@ -281,10 +335,17 @@ function resolveTestTarget(
   kind: GitObtainedVia,
   allowedHosts: string[],
   platform: GitPlatform | undefined,
-): { host: string; url: string; scheme: GitTargetScheme } | null {
+): { host: string; url: string; scheme: GitTargetScheme; canonicalHost: string } | null {
   if (repoUrl) {
     const parsed = parseGitTarget(repoUrl);
-    return parsed ? { host: parsed.host, url: repoUrl, scheme: parsed.scheme } : null;
+    return parsed
+      ? {
+          host: parsed.host,
+          url: repoUrl,
+          scheme: parsed.scheme,
+          canonicalHost: parsed.canonicalHost,
+        }
+      : null;
   }
   // allowedHosts[0] is already a canonical authority (may carry a non-default port).
   const host = allowedHosts.length > 0 ? allowedHosts[0] : hostForPlatform(platform);
@@ -293,7 +354,11 @@ function resolveTestTarget(
   // for a bare authority); an SSH probe assumes ssh.
   const isToken = kind === 'git-https-token';
   const url = isToken ? `https://${host}/` : `ssh://git@${host}/`;
-  return { host, url, scheme: isToken ? 'https' : 'ssh' };
+  // Re-parse the derived probe URL to recover the bare canonical host for the SSRF
+  // blocklist (strips any :port); fall back to the authority if the probe URL is not
+  // parseable (e.g. a bare IPv6 authority) so a whitelisted host is not wrongly blocked.
+  const canonicalHost = parseGitTarget(url)?.canonicalHost ?? host;
+  return { host, url, scheme: isToken ? 'https' : 'ssh', canonicalHost };
 }
 
 /** Map a platform hint to its default probe host. */
