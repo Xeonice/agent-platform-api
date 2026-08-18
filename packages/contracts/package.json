@@ -19,6 +19,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@platform/shared-kernel": "workspace:*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

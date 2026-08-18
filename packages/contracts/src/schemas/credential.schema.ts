@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { GIT_PLATFORM_IDS } from '@platform/shared-kernel';
+import type { GitPlatform } from '@platform/shared-kernel';
 
 /**
  * Git credential zod single source (docs/backend/02 §5.1, 13 §2.5.1, 27 §5,
@@ -16,9 +18,24 @@ import { z } from 'zod';
 export const GitCredentialTypeSchema = z.enum(['ssh-key', 'https-token']);
 export type GitCredentialType = z.infer<typeof GitCredentialTypeSchema>;
 
-/** Non-sensitive provider hint used for known_hosts pinning + display (13 §2.5.1). */
-export const GitPlatformSchema = z.enum(['github', 'gitlab', 'gitee', 'other']);
-export type GitPlatform = z.infer<typeof GitPlatformSchema>;
+/**
+ * Non-sensitive provider hint used for known_hosts pinning + display (13 §2.5.1).
+ *
+ * Enum values are DERIVED from the single-source `GIT_PLATFORM_REGISTRY` (registry ids
+ * + the `'other'` escape hatch) — adding a platform there flows straight through to
+ * this schema and thus to the emitted OpenAPI enum, with no hand-written list here.
+ *
+ * ZOD/OPENAPI NOTE: `z.enum` needs a `[string, ...string[]]` tuple; the registry gives
+ * a `string[]`, so we cast to a `GitPlatform` tuple. The RUNTIME values are the real
+ * `[...GIT_PLATFORM_IDS, 'other']` array, so `patchNestJsSwagger` reflects the correct
+ * OpenAPI enum; the cast only fixes the STATIC type (`z.infer` = `GitPlatform`, the
+ * literal union — not a widened `string`).
+ */
+const GIT_PLATFORM_ENUM_VALUES: string[] = [...GIT_PLATFORM_IDS, 'other'];
+export const GitPlatformSchema = z.enum(
+  GIT_PLATFORM_ENUM_VALUES as [string, ...string[]],
+) as z.ZodType<GitPlatform>;
+export type { GitPlatform };
 
 /**
  * Recorded host public key (03 §7.3 H). A host public key is NOT a secret and is

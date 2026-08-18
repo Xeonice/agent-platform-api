@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
-import { isPinnedHost, pinnedKnownHostsPath } from '../../src/infrastructure/git/known-hosts';
+import { GIT_PLATFORM_REGISTRY, GIT_PLATFORM_IDS } from '@platform/shared-kernel';
+import {
+  isPinnedHost,
+  pinnedHosts,
+  pinnedKnownHostsPath,
+} from '../../src/infrastructure/git/known-hosts';
 
 describe('pinned known_hosts (03 §7.3 H)', () => {
   let dataRoot: string;
@@ -45,5 +50,12 @@ describe('pinned known_hosts (03 §7.3 H)', () => {
     const a = readFileSync(path, 'utf8');
     const b = readFileSync(pinnedKnownHostsPath(), 'utf8');
     expect(a).toBe(b);
+  });
+
+  it('every pinned host is some registry platform defaultHost (no silent drift)', () => {
+    const registryHosts = GIT_PLATFORM_IDS.map((id) => GIT_PLATFORM_REGISTRY[id].defaultHost);
+    for (const host of pinnedHosts()) {
+      expect(registryHosts).toContain(host);
+    }
   });
 });

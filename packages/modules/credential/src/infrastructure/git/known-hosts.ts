@@ -22,6 +22,15 @@ import { resolve } from 'node:path';
  *   gitee  rsa     SHA256:meTsVSCgOas8fBnJyx8EPlUJr6iQ96riFmCFPfUkDtU
  * Keys rotate rarely; a rotation requires a code + fingerprint update (that is the
  * pin working as intended — a silent host-key change must fail, not auto-trust).
+ *
+ * RELATION TO THE PLATFORM REGISTRY: this table is backend-private (host public keys
+ * must never reach the frontend), so it stays a plain `Record<host, string[]>` rather
+ * than being derived from `GIT_PLATFORM_REGISTRY`. When you add a public SaaS as a
+ * first-class citizen you add its row to `GIT_PLATFORM_REGISTRY` (shared-kernel) and,
+ * IF you also want strict SSH pinning, add ONE entry here keyed by that platform's
+ * `defaultHost`. Skipping the pin is a valid choice — the host then falls back to
+ * `accept-new` TOFU. A dev-time test (known-hosts.spec) asserts every host key here is
+ * some registry platform's `defaultHost`, so the two tables cannot silently drift.
  */
 const PINNED_ENTRIES: Record<string, string[]> = {
   'github.com': [
@@ -41,6 +50,11 @@ const PINNED_ENTRIES: Record<string, string[]> = {
 /** true when the host has pinned keys → use StrictHostKeyChecking=yes. */
 export function isPinnedHost(host: string): boolean {
   return Object.prototype.hasOwnProperty.call(PINNED_ENTRIES, host.toLowerCase());
+}
+
+/** The hosts we pin (for the registry-drift assertion in known-hosts.spec). */
+export function pinnedHosts(): string[] {
+  return Object.keys(PINNED_ENTRIES);
 }
 
 /**

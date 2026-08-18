@@ -11,6 +11,7 @@ import {
   ID_GENERATOR,
   UNIT_OF_WORK,
   asCredentialId,
+  defaultHostFor,
   isBlockedGitHost,
 } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
@@ -348,7 +349,7 @@ function resolveTestTarget(
       : null;
   }
   // allowedHosts[0] is already a canonical authority (may carry a non-default port).
-  const host = allowedHosts.length > 0 ? allowedHosts[0] : hostForPlatform(platform);
+  const host = allowedHosts.length > 0 ? allowedHosts[0] : defaultHostFor(platform);
   if (!host) return null;
   // No repoUrl → default probe. A derived token probe assumes https (the safe default
   // for a bare authority); an SSH probe assumes ssh.
@@ -359,18 +360,4 @@ function resolveTestTarget(
   // parseable (e.g. a bare IPv6 authority) so a whitelisted host is not wrongly blocked.
   const canonicalHost = parseGitTarget(url)?.canonicalHost ?? host;
   return { host, url, scheme: isToken ? 'https' : 'ssh', canonicalHost };
-}
-
-/** Map a platform hint to its default probe host. */
-function hostForPlatform(platform: GitPlatform | undefined): string | null {
-  switch (platform) {
-    case 'github':
-      return 'github.com';
-    case 'gitlab':
-      return 'gitlab.com';
-    case 'gitee':
-      return 'gitee.com';
-    default:
-      return null;
-  }
 }

@@ -5,7 +5,10 @@
  */
 export type GitObtainedVia = 'git-ssh-key' | 'git-https-token';
 
-export type GitPlatform = 'github' | 'gitlab' | 'gitee' | 'other';
+// Single source of truth lives in the shared kernel's git-platform registry; re-export
+// so domain code keeps its familiar `./obtained-via.vo` import site without a duplicate
+// literal union (the domain boundary allows `domain → shared-kernel`, not `→ contracts`).
+export type { GitPlatform } from '@platform/shared-kernel';
 
 /** Wire `type` (27 §5) ↔ domain `obtained_via`. */
 export function obtainedViaFromType(type: 'ssh-key' | 'https-token'): GitObtainedVia {
