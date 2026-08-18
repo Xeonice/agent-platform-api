@@ -57,26 +57,51 @@ function cleanGitEnv(): Record<string, string> {
  * (HTTPS credential.helper) and GIT_SSH_COMMAND survive the guard (03 §7.3 F) —
  * they are platform-authored values, not ambient pass-through.
  */
-function mergeAuthEnv(base: Record<string, string>, req: CloneRequest): Record<string, string> {
+export function mergeAuthEnv(
+  base: Record<string, string>,
+  req: CloneRequest,
+): Record<string, string> {
   const env = { ...base };
   if (req.env) Object.assign(env, req.env);
   if (req.gitSshCommand) env.GIT_SSH_COMMAND = req.gitSshCommand;
+  // HERMETIC for the NO-CREDENTIAL (public / private-without-cred) path too.
+  // The credentialed path gets a `credential.helper=''` reset (index 0) + host
+  // helpers from the materializer; when we inject NO credential, `req.env` is
+  // empty and — without this — git would consult an ambient/built-in helper
+  // (notably macOS Apple Git's compiled-in osxkeychain, which is NOT an env var
+  // and so survives cleanGitEnv) and use a host-cached token for a clone the
+  // platform meant to run anonymously. So ALWAYS neutralize the helper chain:
+  // no platform clone, credentialed or not, ever uses an ambient credential.
+  if (!env.GIT_CONFIG_COUNT) {
+    env.GIT_CONFIG_COUNT = '1';
+    env.GIT_CONFIG_KEY_0 = 'credential.helper';
+    env.GIT_CONFIG_VALUE_0 = '';
+  }
+  // Same discipline for SSH: without a platform-supplied key, offer NO ambient
+  // identity (no `~/.ssh` keys / agent / config), so a no-cred SSH clone fails
+  // instead of silently authenticating with a host key. Harmless over HTTPS
+  // (GIT_SSH_COMMAND is only used by the ssh transport).
+  if (!env.GIT_SSH_COMMAND) {
+    env.GIT_SSH_COMMAND =
+      'ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=none ' +
+      '-o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=/dev/null';
+  }
   return env;
 }
 
 /**
  * simple-git blocks GIT_SSH_COMMAND / credential.helper / env-config-count as
- * "unsafe" by default. When (and only when) WE inject them — platform-generated,
- * never ambient (ambient was stripped by cleanGitEnv) — we opt in per category.
+ * "unsafe" by default. We ALWAYS inject platform-authored values now — a
+ * `credential.helper` reset (hermetic for credentialed AND no-cred clones, see
+ * `mergeAuthEnv`) and a GIT_SSH_COMMAND — never ambient (ambient was stripped by
+ * cleanGitEnv), so we opt into all three categories.
  */
-function authUnsafe(req: CloneRequest): SimpleGitOptions['unsafe'] {
-  const unsafe: NonNullable<SimpleGitOptions['unsafe']> = {};
-  if (req.gitSshCommand) unsafe.allowUnsafeSshCommand = true;
-  if (req.env && req.env.GIT_CONFIG_COUNT) {
-    unsafe.allowUnsafeConfigEnvCount = true;
-    unsafe.allowUnsafeCredentialHelper = true;
-  }
-  return unsafe;
+function authUnsafe(): SimpleGitOptions['unsafe'] {
+  return {
+    allowUnsafeSshCommand: true,
+    allowUnsafeConfigEnvCount: true,
+    allowUnsafeCredentialHelper: true,
+  };
 }
 
 /**
@@ -95,7 +120,7 @@ export class SimpleGitCloner implements GitCloner {
       baseDir: dirname(req.destPath),
       abort: req.signal,
       timeout: { block: req.timeoutMs, stdErr: false, stdOut: false },
-      unsafe: authUnsafe(req),
+      unsafe: authUnsafe(),
     });
     let stderrTail = '';
     git.outputHandler((_command, _stdout, stderr) => {

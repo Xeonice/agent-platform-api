@@ -4,6 +4,55 @@ import {
   sanitizeCloneMessage,
 } from '../../src/infrastructure/git/error.classifier';
 import { parseCloneProgress } from '../../src/infrastructure/git/progress.parser';
+import { mergeAuthEnv } from '../../src/infrastructure/git/git-cloner';
+import type { CloneRequest } from '../../src/domain/ports/git-cloner.port';
+
+function req(overrides: Partial<CloneRequest>): CloneRequest {
+  return {
+    repoUrl: 'https://example.com/x.git',
+    repoBranch: null,
+    destPath: '/tmp/x',
+    timeoutMs: 1000,
+    signal: new AbortController().signal,
+    onProgress: () => {},
+    ...overrides,
+  };
+}
+
+describe('mergeAuthEnv hermetic discipline (no-cred path)', () => {
+  it('NO credential → still resets the credential helper chain (neutralize ambient osxkeychain)', () => {
+    const env = mergeAuthEnv({}, req({}));
+    // a public / no-credential clone must NOT consult an ambient/built-in helper
+    expect(env.GIT_CONFIG_COUNT).toBe('1');
+    expect(env.GIT_CONFIG_KEY_0).toBe('credential.helper');
+    expect(env.GIT_CONFIG_VALUE_0).toBe(''); // empty value = reset the helper list
+  });
+
+  it('NO gitSshCommand → injects a hermetic ssh (no ambient identity/config)', () => {
+    const env = mergeAuthEnv({}, req({}));
+    expect(env.GIT_SSH_COMMAND).toContain('-F /dev/null');
+    expect(env.GIT_SSH_COMMAND).toContain('-o IdentitiesOnly=yes');
+  });
+
+  it('credentialed env (materializer already reset at index 0) is preserved, not doubled', () => {
+    const authEnv = {
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'credential.helper',
+      GIT_CONFIG_VALUE_0: '',
+      GIT_CONFIG_KEY_1: 'credential.https://h.helper',
+      GIT_CONFIG_VALUE_1: '!f...',
+      GIT_TOKEN: 'secret',
+    };
+    const env = mergeAuthEnv({}, req({ env: authEnv }));
+    expect(env.GIT_CONFIG_COUNT).toBe('2'); // untouched — no extra reset appended
+    expect(env.GIT_CONFIG_KEY_1).toBe('credential.https://h.helper');
+  });
+
+  it('platform gitSshCommand (from materializer) is preserved', () => {
+    const env = mergeAuthEnv({}, req({ gitSshCommand: 'ssh -i /k -o Foo=bar' }));
+    expect(env.GIT_SSH_COMMAND).toBe('ssh -i /k -o Foo=bar');
+  });
+});
 
 describe('classifyCloneError (03 §7.5)', () => {
   it('permission is matched before network', () => {
