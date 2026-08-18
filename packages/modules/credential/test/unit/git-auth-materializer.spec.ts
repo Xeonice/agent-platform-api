@@ -123,6 +123,7 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
     });
 
     expect(ctx.gitSshCommand).toContain('-F /dev/null'); // hermetic — ignore ambient ssh config
+    expect(ctx.gitSshCommand).toContain('-o GlobalKnownHostsFile=/dev/null'); // ignore /etc/ssh known_hosts
     expect(ctx.gitSshCommand).toContain('-o IdentitiesOnly=yes');
     // unknown host → accept-new against the platform TOFU known_hosts.
     expect(ctx.gitSshCommand).toContain('-o StrictHostKeyChecking=accept-new');
@@ -151,6 +152,7 @@ describe('FsGitAuthMaterializer (03 §7.3 — token only in env, keyfile 0600)',
       host: 'github.com',
     });
     expect(ctx.gitSshCommand).toContain('-o StrictHostKeyChecking=yes');
+    expect(ctx.gitSshCommand).toContain('-o GlobalKnownHostsFile=/dev/null'); // pin is the ONLY source
     const khFile = /UserKnownHostsFile="([^"]+)"/.exec(ctx.gitSshCommand ?? '')?.[1];
     expect(khFile).toBe(resolve(dataRoot, '.ssh', 'pinned_known_hosts'));
     // the pinned file really contains github's pinned ed25519 key.

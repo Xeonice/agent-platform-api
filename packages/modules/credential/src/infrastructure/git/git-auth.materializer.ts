@@ -74,11 +74,16 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     const pinned = isPinnedHost(host);
     const knownHosts = pinned ? pinnedKnownHostsPath() : platformKnownHostsPath();
     const strict = pinned ? 'yes' : 'accept-new';
-    // `-F /dev/null` makes the invocation HERMETIC: ignore the ambient ~/.ssh/config
-    // so it cannot rewrite the host (e.g. github.com → ssh.github.com:443, which would
-    // bypass the pin), inject a ProxyCommand, or add an ambient IdentityFile. We supply
-    // everything explicitly (-i + IdentitiesOnly + our known_hosts).
-    const gitSshCommand = `ssh -F /dev/null -i "${keyfile}" -o IdentitiesOnly=yes -o UserKnownHostsFile="${knownHosts}" -o StrictHostKeyChecking=${strict}`;
+    // HERMETIC host-key verification — our known_hosts file must be the ONLY source:
+    //  - `-F /dev/null` ignores ambient ~/.ssh/config (so it cannot rewrite the host,
+    //    e.g. github.com → ssh.github.com:443 to bypass the pin, inject a ProxyCommand,
+    //    or add an ambient IdentityFile).
+    //  - `GlobalKnownHostsFile=/dev/null` ignores the host's /etc/ssh/ssh_known_hosts:
+    //    a matching entry there would ACCEPT github's real key even when we pinned a
+    //    different one, silently bypassing the pin (observed on CI runners that ship a
+    //    pre-seeded global known_hosts). Without this, pinning is not a real guarantee.
+    // We supply everything explicitly (-i + IdentitiesOnly + our UserKnownHostsFile).
+    const gitSshCommand = `ssh -F /dev/null -i "${keyfile}" -o IdentitiesOnly=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="${knownHosts}" -o StrictHostKeyChecking=${strict}`;
     return {
       env: {},
       gitSshCommand,

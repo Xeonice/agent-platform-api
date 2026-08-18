@@ -54,6 +54,9 @@ function sshToGithub(knownHostsFile: string): string {
       '-F',
       '/dev/null', // hermetic — ignore ambient ~/.ssh/config (as the platform does)
       '-o',
+      'GlobalKnownHostsFile=/dev/null', // ignore /etc/ssh/ssh_known_hosts (CI runners pre-seed
+      // github's real key there, which would bypass a wrong pin) — matches the platform SSH cmd
+      '-o',
       `UserKnownHostsFile=${knownHostsFile}`,
       '-o',
       'StrictHostKeyChecking=yes',
