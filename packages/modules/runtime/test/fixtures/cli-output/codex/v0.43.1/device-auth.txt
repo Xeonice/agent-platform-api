@@ -1,0 +1,11 @@
+
+Starting login...
+To authenticate, visit:
+
+  [1mhttps://auth.openai.com/codex/device[0m
+
+and enter the code:
+
+  [1mABCD-2WXYZ[0m
+
+The code expires in 15 minutes.

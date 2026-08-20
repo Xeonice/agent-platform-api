@@ -16,6 +16,7 @@ const alias = {
   '@platform/sandbox': r('packages/modules/sandbox/src/index.ts'),
   '@platform/terminal': r('packages/modules/terminal/src/index.ts'),
   '@platform/credential': r('packages/modules/credential/src/index.ts'),
+  '@platform/runtime': r('packages/modules/runtime/src/index.ts'),
 };
 
 // SWC transform gives NestJS the decorator metadata Vitest/esbuild would drop.

@@ -10,6 +10,7 @@ import { SandboxApplicationService } from '../application/sandbox-application.se
 import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
 import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
+import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
@@ -45,6 +46,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
     RuntimeReconciler,
     SandboxEventProjector,
+    CredentialRevokedHandler,
   ],
   exports: [SandboxApplicationService, SANDBOX_PTY_PORT, SANDBOX_FACADE],
 })

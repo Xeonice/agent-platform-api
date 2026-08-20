@@ -577,6 +577,297 @@
           "credential"
         ]
       }
+    },
+    "/api/runtimes": {
+      "get": {
+        "operationId": "RuntimeController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RuntimeResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List runtimes with aggregated credential status (no N+1)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/credentials/status": {
+      "get": {
+        "operationId": "RuntimeController_status",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Single-runtime credential status (never returns plaintext)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/auth/begin": {
+      "post": {
+        "operationId": "RuntimeController_beginAuth",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginAuthDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthChallengeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Start an interactive login in the auth helper (no sandbox)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/auth/status": {
+      "get": {
+        "operationId": "RuntimeController_pollStatus",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "challengeRef",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusResultResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Poll a device-code login (pending/success/expired/error)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/auth/complete": {
+      "post": {
+        "operationId": "RuntimeController_completeAuth",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteAuthDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaskedCredentialResultResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Submit the pasted setup-token code (written to helper stdin)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/credentials/secret": {
+      "post": {
+        "operationId": "RuntimeController_submitSecret",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitSecretDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaskedCredentialResultResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Store an api-key directly (short-circuit, no helper/pty)",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/auth-mode": {
+      "put": {
+        "operationId": "RuntimeController_setAuthMode",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAuthModeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSettingsResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Switch the effective mode (account|api-key); 409 if unconfigured",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtimes/{rt}/credentials/{credentialId}": {
+      "delete": {
+        "operationId": "RuntimeController_revoke",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "credentialId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Revoke a runtime credential (restarts bound live sandboxes)",
+        "tags": [
+          "runtime"
+        ]
+      }
     }
   },
   "info": {
@@ -1063,6 +1354,274 @@
         },
         "required": [
           "ok"
+        ]
+      },
+      "RuntimeResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          },
+          "authMethods": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "oauth-device",
+                    "setup-token"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "api-key"
+                  ]
+                }
+              ]
+            }
+          },
+          "credentialStatus": {
+            "type": "string",
+            "enum": [
+              "none",
+              "active",
+              "expiring",
+              "expired"
+            ]
+          },
+          "maskedIdentifier": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "activeAuthMethod": {
+            "type": "string",
+            "enum": [
+              "account",
+              "api-key"
+            ]
+          },
+          "credentials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "credentialId": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "account",
+                    "api-key"
+                  ]
+                },
+                "maskedIdentifier": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "expiresAt": {
+                  "type": "string"
+                },
+                "lastUsedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "credentialId",
+                "mode",
+                "maskedIdentifier",
+                "status"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "vendor",
+          "authMethods",
+          "credentialStatus",
+          "credentials"
+        ]
+      },
+      "BeginAuthDto": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "oauth-device",
+              "setup-token"
+            ]
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "AuthChallengeResponseDto": {
+        "type": "object",
+        "properties": {
+          "challengeRef": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "oauth-device",
+              "setup-token",
+              "api-key",
+              "access-token-paste"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "url",
+              "device-code",
+              "paste-prompt"
+            ]
+          },
+          "verificationUrl": {
+            "type": "string"
+          },
+          "userCode": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "challengeRef",
+          "method",
+          "kind",
+          "instructions"
+        ]
+      },
+      "AuthStatusResultResponseDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "success",
+              "expired",
+              "error"
+            ]
+          },
+          "maskedIdentifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "CompleteAuthDto": {
+        "type": "object",
+        "properties": {
+          "challengeRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pastedText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "cancel": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "challengeRef"
+        ]
+      },
+      "MaskedCredentialResultResponseDto": {
+        "type": "object",
+        "properties": {
+          "maskedIdentifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "maskedIdentifier"
+        ]
+      },
+      "SubmitSecretDto": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "api-key"
+            ]
+          },
+          "secret": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          }
+        },
+        "required": [
+          "method",
+          "secret"
+        ]
+      },
+      "SetAuthModeDto": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "account",
+              "api-key"
+            ]
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "RuntimeSettingsResponseDto": {
+        "type": "object",
+        "properties": {
+          "runtimeId": {
+            "type": "string"
+          },
+          "activeAuthMethod": {
+            "type": "string",
+            "enum": [
+              "account",
+              "api-key"
+            ]
+          }
+        },
+        "required": [
+          "runtimeId",
+          "activeAuthMethod"
         ]
       },
       "ErrorEnvelope": {

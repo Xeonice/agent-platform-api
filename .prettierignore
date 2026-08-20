@@ -6,3 +6,5 @@ openapi.json
 pnpm-lock.yaml
 *.log
 data
+# byte-exact CLI golden fixtures (OSC-8 / pty-fold control bytes must not be reformatted)
+packages/modules/runtime/test/fixtures/cli-output

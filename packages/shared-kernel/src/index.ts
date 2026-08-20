@@ -1,5 +1,6 @@
 export * from './types/branded';
 export * from './ports/clock.port';
+export * from './ports/time.util';
 export * from './ports/id-generator.port';
 export * from './ports/unit-of-work.port';
 export * from './ports/event-bus.port';

@@ -1,8 +1,15 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { CLOCK, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
-import { CredentialPreparationError } from '@platform/contracts';
-import type { CredentialFacade, GitAuthContext, GitRemoteScheme } from '@platform/contracts';
+import { CredentialPreparationError, RUNTIME_SETTINGS_READER } from '@platform/contracts';
+import type {
+  CredentialFacade,
+  GitAuthContext,
+  GitRemoteScheme,
+  RuntimeCredential,
+  RuntimeSettingsReader,
+} from '@platform/contracts';
+import { RuntimeCredentialService } from './runtime-credential.service';
 import { CREDENTIAL_REPOSITORY } from '../domain/repositories/credential.repository';
 import type { CredentialRepository } from '../domain/repositories/credential.repository';
 import { GIT_AUTH_MATERIALIZER } from '../domain/ports/git-auth-materializer.port';
@@ -30,7 +37,24 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     @Inject(GIT_AUTH_MATERIALIZER) private readonly materializer: GitAuthMaterializer,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
     @Inject(CLOCK) private readonly clock: Clock,
+    private readonly runtimeCredentials: RuntimeCredentialService,
+    @Optional()
+    @Inject(RUNTIME_SETTINGS_READER)
+    private readonly settingsReader?: RuntimeSettingsReader,
   ) {}
+
+  async prepareRuntimeCredential(runtimeId: string): Promise<RuntimeCredential> {
+    const mode = (await this.settingsReader?.activeAuthMethod(runtimeId)) ?? null;
+    if (!mode) {
+      throw new CredentialPreparationError('NO_CREDENTIAL', `no active auth mode for ${runtimeId}`);
+    }
+    return this.runtimeCredentials.prepareActive(runtimeId, mode);
+  }
+
+  async recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void> {
+    const mode = (await this.settingsReader?.activeAuthMethod(runtimeId)) ?? null;
+    await this.runtimeCredentials.recordInjection(runtimeId, mode, sandboxId);
+  }
 
   async prepareGitAuth(
     kind: GitObtainedVia,
@@ -71,7 +95,8 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     let context: GitAuthContext;
     try {
       context = await this.materializer.materialize({
-        obtainedVia: cred.obtainedVia,
+        // narrowed: `prepareGitAuth` only ever sees git credentials (forKind)
+        obtainedVia: cred.obtainedVia as GitObtainedVia,
         secret: blob,
         allowedHosts: cred.allowedHosts,
         host,

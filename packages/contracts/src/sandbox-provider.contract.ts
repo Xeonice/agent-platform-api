@@ -102,6 +102,12 @@ export interface ProcessSpec {
   cwd?: string;
   user?: string;
   timeoutMs?: number;
+  /**
+   * Optional stdin for a one-shot exec — the lowest-exposure channel for feeding a
+   * short-lived secret to a login command (e.g. codex `login --with-access-token`,
+   * 05 §4/§7 #3). Kept OUT of argv/env so it never reaches `/proc/<pid>/cmdline`.
+   */
+  stdin?: string;
   reuse?: string; // pass an existing ref to re-attach (06 §6)
 }
 

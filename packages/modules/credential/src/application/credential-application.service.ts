@@ -271,7 +271,8 @@ export class CredentialApplicationService {
       throw new NotFoundException(`git credential ${input.credentialId} is revoked`);
     }
     return {
-      kind: cred.obtainedVia,
+      // narrowed: `cred.kind === 'git'` above ⇒ obtainedVia is a GitObtainedVia
+      kind: cred.obtainedVia as GitObtainedVia,
       allowedHosts: cred.allowedHosts,
       blob,
       platform: cred.metadata?.provider,
