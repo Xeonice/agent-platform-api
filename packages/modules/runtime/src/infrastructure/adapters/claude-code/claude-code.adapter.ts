@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type {
+  ApiKeyFormatVerdict,
   AuthChallenge,
   AuthCompletionInput,
   AuthSessionContext,
@@ -8,7 +9,10 @@ import type {
   RuntimeCredential,
   SandboxExecFn,
 } from '@platform/contracts';
-import { validateClaudeOauthToken } from '../../../domain/services/token-format.validator';
+import {
+  validateAnthropicApiKey,
+  validateClaudeOauthToken,
+} from '../../../domain/services/token-format.validator';
 import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
 import { readUntil } from '../pty-reader.util';
 import { parseClaudeAuthUrl, parseClaudeSetupToken } from './claude-code.output-parser';
@@ -31,6 +35,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   getAuthMethods(): RuntimeAuthMethod[] {
     return ['setup-token', 'api-key'];
+  }
+
+  /** Anthropic api-key FORMAT check (`sk-ant-…`), owned by the adapter (05 §3.1). */
+  validateApiKey(secret: string): ApiKeyFormatVerdict {
+    return validateAnthropicApiKey(secret);
   }
 
   loginCommand(method: RuntimeAuthMethod): string[] {

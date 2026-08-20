@@ -34,10 +34,6 @@ import {
 } from '../domain/services/auth-method.policy';
 import { RUNTIME_SETTINGS_REPOSITORY } from '../domain/repositories/runtime-settings.repository';
 import type { RuntimeSettingsRepository } from '../domain/repositories/runtime-settings.repository';
-import {
-  validateAnthropicApiKey,
-  validateOpenAiApiKey,
-} from '../domain/services/token-format.validator';
 import { AdapterAuthError } from '../domain/errors/adapter-auth.error';
 
 /** Device-code challenge lifetime (05 §1 ★2: 15min). */
@@ -226,14 +222,15 @@ export class RuntimeApplicationService {
   /** POST .../credentials/secret — api-key short-circuit (05 §3.1). NO helper/pty. */
   async submitSecret(runtimeId: string, secret: string): Promise<{ maskedIdentifier: string }> {
     const adapter = this.adapter(runtimeId);
-    const verdict =
-      runtimeId === 'codex' ? validateOpenAiApiKey(secret) : validateAnthropicApiKey(secret);
+    if (!adapter.createCredentialFromSecret) {
+      throw new BadRequestException(`${runtimeId} does not support api-key`);
+    }
+    // The adapter owns its provider's key FORMAT (05 §3.1) — no `runtimeId === 'codex'`
+    // branch here; an adapter without a check imposes no format constraint.
+    const verdict = adapter.validateApiKey?.(secret) ?? { ok: true };
     if (!verdict.ok) {
       // never echo the value (P2-3) — only the reason.
       throw new UnauthorizedException(`invalid api key: ${verdict.reason} (AUTH_REJECTED)`);
-    }
-    if (!adapter.createCredentialFromSecret) {
-      throw new BadRequestException(`${runtimeId} does not support api-key`);
     }
     const cred = await adapter.createCredentialFromSecret('api-key', secret);
     const masked = await this.storeCredential(runtimeId, cred);

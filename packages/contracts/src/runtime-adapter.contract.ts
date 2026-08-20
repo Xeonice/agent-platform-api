@@ -95,10 +95,42 @@ export interface RuntimeCredential {
  */
 export type AuthChallenge = AuthChallengeDto;
 
+/**
+ * api-key FORMAT verdict — prefix/length/charset (05 §3.1 入库前校验 P1-4c). Each
+ * adapter owns its provider's key shape, so the application layer never hard-codes
+ * "codex ⇒ sk- / else sk-ant-": it just asks the adapter.
+ */
+export interface ApiKeyFormatVerdict {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * The refresh capability an adapter DECLARES when its account credential carries a
+ * short-lived access token that the CLI itself can refresh from a seeded helper HOME
+ * (05 §5.1, method A "let the CLI refresh itself"). Adapters WITHOUT it (claude
+ * setup-token ~1yr no-refresh / api-key no expiry / any new runtime that never
+ * expires) are skipped by the refresh scanner — so the scanner never hard-codes a
+ * per-runtime probe command or auth-file parser.
+ */
+export interface RuntimeRefreshCapability {
+  /** Cheap probe the scanner runs in a seeded HOME to trigger the CLI's own refresh. */
+  probeCommand: string[];
+  /** Parse the CLI-rewritten provider auth file → the fresh short-lived access token. */
+  parseRefreshedAuth(raw: string): { accessToken: string };
+}
+
 export interface RuntimeAdapter {
   readonly id: string;
   readonly displayName: string;
   readonly vendor: string;
+
+  /**
+   * Declared ONLY when this runtime's account credential must be periodically
+   * refreshed by the CLI itself (05 §5.1). The refresh scanner reads the probe
+   * command + parser from here; adapters that omit it are skipped gracefully.
+   */
+  readonly refreshCapability?: RuntimeRefreshCapability;
 
   /** The interactive login command for a method (helper starts it in a real pty). */
   loginCommand(method: RuntimeAuthMethod): string[];
@@ -112,6 +144,12 @@ export interface RuntimeAdapter {
     input: AuthCompletionInput,
     ctx: AuthSessionContext,
   ): Promise<RuntimeCredential>;
+  /**
+   * api-key FORMAT check (prefix/length/charset) for THIS runtime, run BEFORE the
+   * secret enters the Vault (05 §3.1). Absent when the runtime has no api-key method;
+   * the application layer treats an absent check as "no format constraint".
+   */
+  validateApiKey?(secret: string): ApiKeyFormatVerdict;
   /** api-key / access-token-paste short-circuit — pure, no sandbox host (05 §3.1). */
   createCredentialFromSecret?(
     method: 'api-key' | 'access-token-paste',

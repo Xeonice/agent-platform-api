@@ -2,15 +2,18 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import type {
+  ApiKeyFormatVerdict,
   AuthChallenge,
   AuthCompletionInput,
   AuthSessionContext,
   RuntimeAdapter,
   RuntimeAuthMethod,
   RuntimeCredential,
+  RuntimeRefreshCapability,
   SandboxExecFn,
 } from '@platform/contracts';
 import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
+import { validateOpenAiApiKey } from '../../../domain/services/token-format.validator';
 import { readUntil } from '../pty-reader.util';
 import {
   codexLoginSucceeded,
@@ -34,8 +37,28 @@ export class CodexAdapter implements RuntimeAdapter {
   readonly displayName = 'Codex';
   readonly vendor = 'OpenAI';
 
+  /**
+   * Codex account credential = an hourly access token the CLI refreshes itself from a
+   * seeded `auth.json` (05 §5.1). The scanner reads the probe command + parser here —
+   * it no longer hard-codes `['codex','whoami']` / `parseCodexAuthJson`.
+   */
+  readonly refreshCapability: RuntimeRefreshCapability = {
+    probeCommand: ['codex', 'whoami'],
+    parseRefreshedAuth(raw: string): { accessToken: string } {
+      const auth = parseCodexAuthJson(raw);
+      const access = auth.tokens?.access_token;
+      if (!access) throw new Error('refreshed auth.json missing access_token');
+      return { accessToken: access };
+    },
+  };
+
   getAuthMethods(): RuntimeAuthMethod[] {
     return ['oauth-device', 'api-key'];
+  }
+
+  /** OpenAI api-key FORMAT check (`sk-…`), owned by the adapter (05 §3.1). */
+  validateApiKey(secret: string): ApiKeyFormatVerdict {
+    return validateOpenAiApiKey(secret);
   }
 
   loginCommand(method: RuntimeAuthMethod): string[] {
