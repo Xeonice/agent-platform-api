@@ -56,6 +56,11 @@ export interface AuthSessionContext {
  * is PLAINTEXT and lives in memory only; the orchestration side injects it via a
  * one-shot exec and `zeroize()`s it. The injection FORMAT obeys the minimal-exposure
  * priority (05 §4/§7 #3): access-token-only (stdin) > 0600 file > (banned) whole env.
+ *
+ * ⚠️ 已被 05 §1★★（S5 技术验证）推翻，待 S5 按新优先级改写。
+ * （原附注「stdin 档在平台 exec 通道上会被静默丢弃」**已失效**：data-plane 客户端
+ * 已把 `ProcessSpec.stdin` 真正送达 fd 0，见 `aio-sandbox-agent.client.ts`；04 §2.3★
+ * 那张能力表描述的是修复前的状态，⏳ 待回写。）
  */
 export interface RuntimeCredential {
   runtimeId: string;
@@ -75,6 +80,10 @@ export interface RuntimeCredential {
    * it via the highest-priority, lowest-exposure form — fed on process STDIN to a
    * login command (codex `--with-access-token`), never into argv/env/files (05 §4).
    * The adapter (not the credential context) owns the CLI command.
+   *
+   * ⚠️ 已被 05 §1★★（S5 技术验证）推翻，待 S5 按新优先级改写：此处断言的"stdin 是最高
+   * 优先级"不再成立。**但 stdin 通道本身已经可用**——data-plane 客户端会把它写进一个
+   * 0700 暂存文件再重定向进 fd 0，明文不进 argv（RA-14）。
    */
   accessToken?: string;
   /**

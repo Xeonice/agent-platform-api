@@ -30,6 +30,12 @@ const COMPLETE_TIMEOUT_MS = 15 * 60_000;
  * minimal-exposure priority: access-token-only via STDIN (`codex login
  * --with-access-token`) — the token never enters argv/env/files, and the whole
  * `auth.json` (with refresh_token) is NEVER injected (P0-3).
+ *
+ * ⚠️ 已被 05 §1★★（S5 技术验证）推翻，待 S5 按新优先级改写。
+ * （原附注「stdin 档会被静默丢弃」**已失效**：下面这次 `exec(..., { stdin })` 现在真的把
+ * token 送到进程 fd 0 上了。）新优先级：0600 auth.json（refresh_token 值占位）
+ * > (可选/版本敏感) --with-access-token > (禁用) 整份含真 refresh_token 的 auth.json。
+ * P0-3 的安全裁决本身不变。
  */
 @Injectable()
 export class CodexAdapter implements RuntimeAdapter {
