@@ -31,17 +31,38 @@ import {
  * a shared docker network). The internal AIO `session_id` is held here and NEVER
  * surfaced — the only session identifier the frontend sees is the gateway's
  * server-generated `socketSessionKey`.
+ *
+ * `authToken` is the per-sandbox RS256 JWT minted at create() (see `agent-auth.ts`).
+ * The loopback-published port is reachable by every LOCAL process, so the agent is
+ * booted with its own nginx auth gateway ON and every call here carries the token.
+ * It is optional only so the class stays usable against an agent that was started
+ * without a public key (older images, fixtures) — the providers always pass one.
  */
 export class AioSandboxAgentClient {
-  constructor(private readonly baseHttpUrl: string) {}
+  constructor(
+    private readonly baseHttpUrl: string,
+    private readonly authToken?: string,
+  ) {}
 
-  private wsUrl(): string {
-    return `${this.baseHttpUrl.replace(/^http/i, 'ws')}/v1/shell/ws`;
+  private wsUrl(ticket?: string): string {
+    const base = `${this.baseHttpUrl.replace(/^http/i, 'ws')}/v1/shell/ws`;
+    return ticket ? `${base}?ticket=${encodeURIComponent(ticket)}` : base;
   }
 
-  /** Interactive terminal over the AIO shell websocket. */
+  /**
+   * Interactive terminal over the AIO shell websocket.
+   *
+   * The WHATWG `WebSocket` the runtime gives us cannot carry request headers, so
+   * the bearer token cannot ride the upgrade. The agent anticipates exactly this:
+   * `POST /tickets` (itself bearer-protected) mints a short-lived one — its
+   * `GET /auth` handler checks a `ticket` query param BEFORE the Authorization
+   * header, reading it off nginx's `X-Original-URI`. So we spend the token once
+   * over HTTP and hand the upgrade a ticket. 探明 2026-08 against the real image:
+   * no ticket ⇒ the upgrade is refused, a bogus ticket ⇒ refused, ours ⇒ 101.
+   */
   async openTerminal(cols: number, rows: number): Promise<ProcessStream> {
-    const ws = new WebSocket(this.wsUrl());
+    const ticket = this.authToken !== undefined ? await this.issueWsTicket() : undefined;
+    const ws = new WebSocket(this.wsUrl(ticket));
     await this.awaitOpen(ws);
     // seed the initial window size (AIO `resize` mapping); the shell PTY is spawned
     // by the agent on connect, so no explicit "start" frame is required.
@@ -201,11 +222,41 @@ export class AioSandboxAgentClient {
     }
   }
 
+  /**
+   * Trade the bearer token for a short-lived websocket ticket. A failure here is
+   * NOT downgraded to an unauthenticated connect — that would silently reopen the
+   * hole the token exists to close.
+   */
+  private async issueWsTicket(): Promise<string> {
+    const res = await this.fetchAgent('/tickets', {});
+    const ticket = await res
+      .json()
+      .then((d) => (d as { ticket?: unknown }).ticket)
+      .catch(() => undefined);
+    if (!res.ok || typeof ticket !== 'string' || ticket === '') {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        `AIO agent refused to mint a websocket ticket (HTTP ${res.status}); ` +
+          'the terminal cannot be opened without one',
+        undefined,
+        true,
+      );
+    }
+    return ticket;
+  }
+
+  /** Every agent call carries the sandbox's bearer token when one was minted. */
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.authToken !== undefined) h.authorization = `Bearer ${this.authToken}`;
+    return h;
+  }
+
   private async fetchAgent(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     try {
       return await fetch(`${this.baseHttpUrl}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: this.headers(),
         body: JSON.stringify(body),
         signal,
       });

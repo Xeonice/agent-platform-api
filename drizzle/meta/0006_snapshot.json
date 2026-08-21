@@ -1,0 +1,736 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "f3a14a2a-effe-40ae-982a-89f4a46fc6b3",
+  "prevId": "265185bd-bafb-485f-a1dc-84fbd684cfb1",
+  "tables": {
+    "sandbox_state_transitions": {
+      "name": "sandbox_state_transitions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sandbox_id": {
+          "name": "sandbox_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "from_status": {
+          "name": "from_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "to_status": {
+          "name": "to_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "at": {
+          "name": "at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "triggered_by": {
+          "name": "triggered_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_transitions_sandbox": {
+          "name": "idx_transitions_sandbox",
+          "columns": [
+            "sandbox_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "transitions_to_status_ck": {
+          "name": "transitions_to_status_ck",
+          "value": "\"sandbox_state_transitions\".\"to_status\" IN ('pending','scheduling','preparing-workspace','creating','starting','running','idle','stopping','stopped','failed','destroying','destroyed')"
+        },
+        "transitions_triggered_by_ck": {
+          "name": "transitions_triggered_by_ck",
+          "value": "\"sandbox_state_transitions\".\"triggered_by\" IN ('scheduler','reaper','user','health-check','provider-event')"
+        }
+      }
+    },
+    "sandboxes": {
+      "name": "sandboxes",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "runtime": {
+          "name": "runtime",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'aio'"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "headless": {
+          "name": "headless",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "timeout_minutes": {
+          "name": "timeout_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "idle_timeout_sec": {
+          "name": "idle_timeout_sec",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1800
+        },
+        "quota_cores": {
+          "name": "quota_cores",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "quota_ram_mb": {
+          "name": "quota_ram_mb",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "provider_handle": {
+          "name": "provider_handle",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "workspace_path": {
+          "name": "workspace_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "agent_endpoint_port": {
+          "name": "agent_endpoint_port",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "agent_auth_token": {
+          "name": "agent_auth_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_sandboxes_project_status": {
+          "name": "idx_sandboxes_project_status",
+          "columns": [
+            "project_id",
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_sandboxes_status": {
+          "name": "idx_sandboxes_status",
+          "columns": [
+            "status"
+          ],
+          "isUnique": false
+        },
+        "idx_sandboxes_provider_handle": {
+          "name": "idx_sandboxes_provider_handle",
+          "columns": [
+            "provider_handle"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "sandboxes_status_ck": {
+          "name": "sandboxes_status_ck",
+          "value": "\"sandboxes\".\"status\" IN ('pending','scheduling','preparing-workspace','creating','starting','running','idle','stopping','stopped','failed','destroying','destroyed')"
+        },
+        "sandboxes_timeout_ck": {
+          "name": "sandboxes_timeout_ck",
+          "value": "(\"sandboxes\".\"headless\" = 1 AND \"sandboxes\".\"timeout_minutes\" IN (30,60,120,240)) OR (\"sandboxes\".\"headless\" = 0 AND \"sandboxes\".\"timeout_minutes\" IS NULL)"
+        },
+        "sandboxes_idle_ck": {
+          "name": "sandboxes_idle_ck",
+          "value": "\"sandboxes\".\"idle_timeout_sec\" > 0"
+        }
+      }
+    },
+    "projects": {
+      "name": "projects",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_type": {
+          "name": "source_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "repo_url": {
+          "name": "repo_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "repo_branch": {
+          "name": "repo_branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "clone_status": {
+          "name": "clone_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'cloning'"
+        },
+        "clone_error_code": {
+          "name": "clone_error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "baseline_path": {
+          "name": "baseline_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "baseline_size_bytes": {
+          "name": "baseline_size_bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "workspace_mode": {
+          "name": "workspace_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'copy'"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "projects_name_unique": {
+          "name": "projects_name_unique",
+          "columns": [
+            "name"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "projects_source_type_ck": {
+          "name": "projects_source_type_ck",
+          "value": "\"projects\".\"source_type\" IN ('git','empty')"
+        },
+        "projects_clone_status_ck": {
+          "name": "projects_clone_status_ck",
+          "value": "\"projects\".\"clone_status\" IN ('cloning','ready','failed')"
+        },
+        "projects_clone_error_ck": {
+          "name": "projects_clone_error_ck",
+          "value": "\"projects\".\"clone_error_code\" IS NULL OR \"projects\".\"clone_error_code\" IN ('CLONE_FAILED_PERMISSION','CLONE_FAILED_NETWORK','TIMEOUT','INTERRUPTED','DISK_INSUFFICIENT')"
+        },
+        "projects_source_url_ck": {
+          "name": "projects_source_url_ck",
+          "value": "(\"projects\".\"source_type\" = 'git' AND \"projects\".\"repo_url\" IS NOT NULL) OR (\"projects\".\"source_type\" = 'empty' AND \"projects\".\"repo_url\" IS NULL)"
+        },
+        "projects_failed_error_ck": {
+          "name": "projects_failed_error_ck",
+          "value": "(\"projects\".\"clone_status\" = 'failed' AND \"projects\".\"clone_error_code\" IS NOT NULL) OR (\"projects\".\"clone_status\" != 'failed' AND \"projects\".\"clone_error_code\" IS NULL)"
+        },
+        "projects_workspace_mode_ck": {
+          "name": "projects_workspace_mode_ck",
+          "value": "\"projects\".\"workspace_mode\" IN ('copy')"
+        },
+        "projects_name_len_ck": {
+          "name": "projects_name_len_ck",
+          "value": "length(\"projects\".\"name\") BETWEEN 1 AND 40"
+        }
+      }
+    },
+    "credentials": {
+      "name": "credentials",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "runtime_id": {
+          "name": "runtime_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "masked_identifier": {
+          "name": "masked_identifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "owner_ref": {
+          "name": "owner_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "encrypted_blob": {
+          "name": "encrypted_blob",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "iv": {
+          "name": "iv",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "auth_tag": {
+          "name": "auth_tag",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "encryption_key_id": {
+          "name": "encryption_key_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "obtained_via": {
+          "name": "obtained_via",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "allowed_hosts": {
+          "name": "allowed_hosts",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "issued_at": {
+          "name": "issued_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "refresh_failures": {
+          "name": "refresh_failures",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "last_refreshed_at": {
+          "name": "last_refreshed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "credentials_kind_obtained_idx": {
+          "name": "credentials_kind_obtained_idx",
+          "columns": [
+            "kind",
+            "obtained_via",
+            "revoked_at"
+          ],
+          "isUnique": false
+        },
+        "credentials_runtime_idx": {
+          "name": "credentials_runtime_idx",
+          "columns": [
+            "runtime_id",
+            "revoked_at"
+          ],
+          "isUnique": false
+        },
+        "credentials_owner_idx": {
+          "name": "credentials_owner_idx",
+          "columns": [
+            "owner_ref"
+          ],
+          "isUnique": false
+        },
+        "credentials_expires_idx": {
+          "name": "credentials_expires_idx",
+          "columns": [
+            "expires_at"
+          ],
+          "isUnique": false
+        },
+        "uq_cred_runtime_active": {
+          "name": "uq_cred_runtime_active",
+          "columns": [
+            "runtime_id",
+            "mode"
+          ],
+          "isUnique": true,
+          "where": "\"credentials\".\"kind\" = 'runtime' AND \"credentials\".\"revoked_at\" IS NULL"
+        },
+        "uq_cred_git_active": {
+          "name": "uq_cred_git_active",
+          "columns": [
+            "obtained_via"
+          ],
+          "isUnique": true,
+          "where": "\"credentials\".\"kind\" = 'git' AND \"credentials\".\"revoked_at\" IS NULL"
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "credentials_kind_ck": {
+          "name": "credentials_kind_ck",
+          "value": "\"credentials\".\"kind\" IN ('runtime','git')"
+        },
+        "credentials_kind_shape_ck": {
+          "name": "credentials_kind_shape_ck",
+          "value": "(\"credentials\".\"kind\" = 'runtime' AND \"credentials\".\"runtime_id\" IS NOT NULL AND \"credentials\".\"obtained_via\" IN ('setup-token','oauth-device','api-key','access-token-paste')) OR (\"credentials\".\"kind\" = 'git' AND \"credentials\".\"runtime_id\" IS NULL AND \"credentials\".\"obtained_via\" IN ('git-ssh-key','git-https-token'))"
+        },
+        "credentials_mode_ck": {
+          "name": "credentials_mode_ck",
+          "value": "(\"credentials\".\"kind\" = 'runtime' AND \"credentials\".\"mode\" IN ('account','api-key')) OR (\"credentials\".\"kind\" = 'git' AND \"credentials\".\"mode\" IS NULL)"
+        },
+        "credentials_allowed_hosts_ck": {
+          "name": "credentials_allowed_hosts_ck",
+          "value": "(\"credentials\".\"obtained_via\" = 'git-https-token' AND \"credentials\".\"allowed_hosts\" IS NOT NULL) OR (\"credentials\".\"obtained_via\" <> 'git-https-token')"
+        },
+        "credentials_erased_ck": {
+          "name": "credentials_erased_ck",
+          "value": "\"credentials\".\"revoked_at\" IS NULL OR (\"credentials\".\"encrypted_blob\" IS NULL AND \"credentials\".\"iv\" IS NULL AND \"credentials\".\"auth_tag\" IS NULL)"
+        }
+      }
+    },
+    "credential_sandbox_bindings": {
+      "name": "credential_sandbox_bindings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "credential_id": {
+          "name": "credential_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sandbox_id": {
+          "name": "sandbox_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "injected_at": {
+          "name": "injected_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "uq_csb_sandbox_credential": {
+          "name": "uq_csb_sandbox_credential",
+          "columns": [
+            "sandbox_id",
+            "credential_id"
+          ],
+          "isUnique": true
+        },
+        "idx_csb_credential": {
+          "name": "idx_csb_credential",
+          "columns": [
+            "credential_id"
+          ],
+          "isUnique": false
+        },
+        "idx_csb_sandbox": {
+          "name": "idx_csb_sandbox",
+          "columns": [
+            "sandbox_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "credential_sandbox_bindings_credential_id_credentials_id_fk": {
+          "name": "credential_sandbox_bindings_credential_id_credentials_id_fk",
+          "tableFrom": "credential_sandbox_bindings",
+          "tableTo": "credentials",
+          "columnsFrom": [
+            "credential_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "runtime_settings": {
+      "name": "runtime_settings",
+      "columns": {
+        "runtime_id": {
+          "name": "runtime_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "active_auth_method": {
+          "name": "active_auth_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "runtime_settings_active_auth_method_ck": {
+          "name": "runtime_settings_active_auth_method_ck",
+          "value": "\"runtime_settings\".\"active_auth_method\" IN ('account','api-key')"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}

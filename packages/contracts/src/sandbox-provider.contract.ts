@@ -63,6 +63,16 @@ export interface SandboxHandle {
    * it unset — its container backend re-resolves the published port at spawn time.
    */
   readonly agentEndpointPort?: number;
+  /**
+   * Bearer credential the platform presents to the in-sandbox agent, PERSISTED
+   * verbatim with the sandbox exactly like `agentEndpointPort` (the platform
+   * never parses it; only the owning provider reads it). It exists because the
+   * agent port is published on the host loopback, where 127.0.0.1 stops REMOTE
+   * hosts but not other LOCAL processes — without a credential the agent is an
+   * unauthenticated shell for anything running on the box. Both built-ins mint
+   * one per sandbox at `create()` (SANDBOX-RUNTIME-DECISIONS 安全姿态).
+   */
+  readonly agentAuthToken?: string;
 }
 
 export type SandboxRuntimeLifecycleState =

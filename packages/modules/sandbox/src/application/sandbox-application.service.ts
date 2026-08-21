@@ -225,9 +225,11 @@ export class SandboxApplicationService {
       sandbox.bindRuntime({
         providerSandboxId: handle.providerSandboxId,
         workspacePath: ws.hostPath,
-        // persist any provider runtime binding (boxlite's forwarded agent port) so
-        // a backend restart can rebuild the handle and still reach the instance.
+        // persist any provider runtime binding (boxlite's forwarded agent port,
+        // and the agent bearer token both providers mint) so a backend restart can
+        // rebuild the handle and still reach the instance.
         agentEndpointPort: handle.agentEndpointPort ?? null,
+        agentAuthToken: handle.agentAuthToken ?? null,
       });
       this.persist(sandbox); // save handle (no new transition/event)
 
@@ -309,6 +311,7 @@ export class SandboxApplicationService {
           provider: sandbox.provider,
           providerSandboxId: sandbox.providerSandboxId,
           agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
+          agentAuthToken: sandbox.agentAuthToken ?? undefined,
         }
       : null;
   }

@@ -15,10 +15,25 @@ const execFileAsync = promisify(execFile);
  * is an empty dir, so the workspace ends up empty. The dir it creates is really
  * bind-mounted into the container as `/workspace`.
  *
- * The dir is made world-accessible (0777): the bind-mount appears ROOT-owned
- * inside the sandbox (neither docker nor BoxLite remaps host ownership), but the
- * in-sandbox AIO agent runs as the NON-root user `gem`, which otherwise cannot
- * traverse/write `/workspace`. Verified: 0755 ⇒ "Permission denied"; 0777 ⇒ r/w.
+ * ── Permissions (03 §7.6) ───────────────────────────────────────────────────
+ * Each workspace dir itself stays 0777. That is not a preference: the bind-mount
+ * appears ROOT-owned inside the sandbox (neither docker nor BoxLite remaps host
+ * ownership) while the in-sandbox agent runs as the NON-root user `gem`, so
+ * anything tighter breaks it (measured: 0755 ⇒ "Permission denied"; 0777 ⇒ r/w).
+ * `chown` to that user is not available here either — it needs root/CAP_CHOWN the
+ * platform process usually lacks, and the uid is not even KNOWABLE at this point
+ * in the pipeline: `preparing-workspace` runs BEFORE `creating`, so there is no
+ * instance yet to probe (03 §7.6 rightly forbids hard-coding 1000).
+ *
+ * What DOES close the hole is the PARENT: `${DATA_ROOT}/workspaces` is created
+ * 0700 and owned by the platform user, so no other local user can traverse into
+ * it — and a 0777 dir you cannot reach is not an access surface. (Verified on
+ * Linux: with the parent 0700 another uid gets EACCES on read AND on creating a
+ * file inside the 0777 child; flip the parent to 0755 and both succeed. The
+ * bind-mount is unaffected — the daemon resolves the source as root.)
+ *
+ * Residual, stated honestly: this stops OTHER local users, not other processes
+ * running AS THE PLATFORM USER — those already have the DB and the Vault key.
  */
 @Injectable()
 export class FsWorkspacePreparer implements WorkspacePreparer {
@@ -26,17 +41,36 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     return process.env.DATA_ROOT ?? resolve(process.cwd(), 'data');
   }
 
+  private workspacesRoot(): string {
+    return resolve(this.dataRoot(), 'workspaces');
+  }
+
   private dir(sandboxId: string): string {
-    return resolve(this.dataRoot(), 'workspaces', sandboxId);
+    return resolve(this.workspacesRoot(), sandboxId);
+  }
+
+  /**
+   * The single gate protecting every workspace: 0700 on the shared parent. Applied
+   * on every prepare (not just the first) so a root that predates this hardening —
+   * or one a deploy script recreated 0755 — is tightened before anything is copied
+   * into it.
+   */
+  private async ensureWorkspacesRoot(): Promise<string> {
+    const root = this.workspacesRoot();
+    await mkdir(root, { recursive: true });
+    await chmod(root, 0o700);
+    return root;
   }
 
   async prepare(sandboxId: string, source: WorkspaceSource): Promise<PreparedWorkspace> {
+    await this.ensureWorkspacesRoot();
     const hostPath = this.dir(sandboxId);
     await mkdir(hostPath, { recursive: true });
     await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
     await this.importBaseline(source.baselinePath, hostPath);
     await writeFile(resolve(hostPath, STATE_FILE), 'ready');
-    // make traversable/writable by the non-root in-sandbox agent user (see class doc).
+    // writable by the non-root in-sandbox agent user; unreachable to other host
+    // users thanks to the 0700 parent (see class doc).
     await chmod(hostPath, 0o777);
     return { hostPath };
   }

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -205,8 +205,11 @@ describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws
       const out = await waitForOutput(sock, /\b(bin|etc|usr)\b/);
       expect(out).toMatch(/\b(bin|etc|usr)\b/);
 
-      // workspace bind-mount usable by the non-root agent user inside the micro-VM.
+      // workspace bind-mount usable by the non-root agent user inside the micro-VM,
+      // while the shared parent stays untraversable to other local users (加固 2).
       const wsDir = resolve(dataRoot, 'workspaces', sandboxId);
+      expect(statSync(resolve(dataRoot, 'workspaces')).mode & 0o777).toBe(0o700);
+      expect(statSync(wsDir).mode & 0o777).toBe(0o777);
       writeFileSync(resolve(wsDir, 'host-seed.txt'), 'HOST_SEED_BL\n');
       sock.emit('frame', { type: 'input', data: 'cat /workspace/host-seed.txt\n' });
       await waitForOutput(sock, /HOST_SEED_BL/);

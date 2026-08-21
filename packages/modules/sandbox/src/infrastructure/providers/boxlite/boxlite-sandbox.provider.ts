@@ -13,6 +13,12 @@ import {
   type SandboxRuntimeStatus,
 } from '@platform/contracts';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
+import {
+  assertAgentRejectsAnonymous,
+  authHeader,
+  createAgentAuthMaterial,
+  withAgentAuthEnv,
+} from '../aio/agent-auth';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
 
 const AGENT_GUEST_PORT = 8080;
@@ -24,7 +30,9 @@ const AGENT_GUEST_PORT = 8080;
  * NOT a docker container — this is the strong-isolation tier, not just a label.
  * DATA plane = the SHARED in-sandbox AIO agent on `:8080`, reached via BoxLite
  * port-forwarding to a host loopback port (reuses `AioSandboxAgentClient` — the
- * exact same terminal/exec path as `aio`, per 决策 A).
+ * exact same terminal/exec path as `aio`, per 决策 A), guarded by the same
+ * per-sandbox agent token (ADR 安全姿态) since that forwarded port is reachable by
+ * every local process on the host.
  *
  * The OCI image is pulled through a LOCAL registry mirror (ADR 工程注记: BoxLite's
  * own image store has no resumable downloads, so large images are staged via
@@ -52,6 +60,9 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     return this.guard(async () => {
       const runtime = await this.getRuntime();
       const hostPort = await freeLoopbackPort();
+      // per-sandbox agent credential: public half boots the image's auth gateway,
+      // token half travels on the handle and is persisted with the sandbox.
+      const auth = createAgentAuthMaterial(ctx.sandboxId);
       const box = await runtime.create(
         {
           image: ctx.image.ref,
@@ -64,20 +75,30 @@ export class BoxliteSandboxProvider implements SandboxProvider {
           // the agent. Combined with persisting `agentEndpointPort`, terminal/exec
           // reconnect after a backend restart.
           detach: true,
-          env: Object.entries(ctx.env).map(([key, value]) => ({ key, value })),
+          env: Object.entries(withAgentAuthEnv(ctx.env, auth)).map(([key, value]) => ({
+            key,
+            value,
+          })),
           volumes: (ctx.volumes ?? []).map((v) => ({
             hostPath: v.source,
             guestPath: v.target,
             readOnly: v.mode === 'ro',
           })),
-          // forward the guest agent :8080 to a host LOOPBACK port only (ADR 安全姿态)
+          // forward the guest agent :8080 to a host LOOPBACK port only; loopback is
+          // NOT the access control (every local process shares it) — the agent's own
+          // auth gateway keyed by `auth` above is (ADR 安全姿态).
           ports: [{ hostPort, guestPort: AGENT_GUEST_PORT, hostIp: '127.0.0.1' }],
         },
         this.boxName(ctx.sandboxId),
       );
       // the forwarded port is persisted by the platform (SandboxHandle.agentEndpointPort)
       // — BoxLite `getInfo` does not surface port mappings, so it cannot be re-derived.
-      return { provider: this.name, providerSandboxId: box.id, agentEndpointPort: hostPort };
+      return {
+        provider: this.name,
+        providerSandboxId: box.id,
+        agentEndpointPort: hostPort,
+        agentAuthToken: auth.token,
+      };
     });
   }
 
@@ -89,7 +110,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
       }
       // agent readiness gate (决策 A / 03): the micro-VM boots before the in-sandbox
       // agent HTTP server accepts connections on the forwarded port.
-      await this.waitForAgent(this.agentBase(handle));
+      await this.waitForAgent(this.agentBase(handle), handle.agentAuthToken);
     });
   }
 
@@ -124,7 +145,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
     return this.guard(async () => {
       // data plane = the shared in-sandbox AIO agent over the forwarded loopback port.
-      const client = new AioSandboxAgentClient(this.agentBase(handle));
+      const client = new AioSandboxAgentClient(this.agentBase(handle), handle.agentAuthToken);
       return spec.tty ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24) : client.exec(spec);
     });
   }
@@ -180,15 +201,26 @@ export class BoxliteSandboxProvider implements SandboxProvider {
   }
 
   /**
-   * Poll the forwarded agent port until it answers (any HTTP response = up).
+   * Poll the forwarded agent port until it answers. With a token, readiness means
+   * an AUTHENTICATED 2xx (front door + auth backend + injected key all live), and
+   * an anonymous request must be refused — otherwise the image is not enforcing the
+   * gateway and we refuse to run (see `assertAgentRejectsAnonymous`).
    * Budget is generous: a COLD BoxLite store pulls the (large) image during first
    * boot — measured ~220s for the AIO image — before the agent listens.
    */
-  private async waitForAgent(base: string, attempts = 720, intervalMs = 500): Promise<void> {
+  private async waitForAgent(
+    base: string,
+    token: string | undefined,
+    attempts = 720,
+    intervalMs = 500,
+  ): Promise<void> {
     for (let i = 0; i < attempts; i++) {
       try {
-        await fetch(`${base}/`, { method: 'GET' });
-        return;
+        const res = await fetch(`${base}/`, { method: 'GET', headers: authHeader(token) });
+        if (token === undefined || res.status < 400) {
+          await assertAgentRejectsAnonymous(base, token);
+          return;
+        }
       } catch {
         /* not ready yet */
       }

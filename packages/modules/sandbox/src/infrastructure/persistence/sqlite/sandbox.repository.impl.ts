@@ -89,6 +89,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         providerHandle: sandbox.providerSandboxId,
         workspacePath: sandbox.workspacePath,
         agentEndpointPort: sandbox.agentEndpointPort,
+        agentAuthToken: sandbox.agentAuthToken,
         version: sandbox.version,
         createdAt,
         updatedAt,
@@ -102,6 +103,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
           providerHandle: sandbox.providerSandboxId,
           workspacePath: sandbox.workspacePath,
           agentEndpointPort: sandbox.agentEndpointPort,
+          agentAuthToken: sandbox.agentAuthToken,
           version: sandbox.version,
           updatedAt,
         },
@@ -139,6 +141,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       workspacePath: row.workspacePath,
       providerSandboxId: row.providerHandle,
       agentEndpointPort: row.agentEndpointPort,
+      agentAuthToken: row.agentAuthToken,
       version: row.version,
       transitions: transitions.map((t) => ({
         from: t.fromStatus as SandboxStatus | null,
