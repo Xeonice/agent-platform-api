@@ -76,6 +76,10 @@ export function makeFakeRegistry(): ProviderRegistry {
   ]);
   return {
     defaultProvider: 'aio',
+    register: (p) => {
+      if (providers.has(p.name)) throw new Error(`duplicate provider ${p.name}`);
+      providers.set(p.name, p);
+    },
     get: (n) => {
       const p = providers.get(n);
       if (!p) throw new Error(`no provider ${n}`);

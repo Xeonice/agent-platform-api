@@ -37,11 +37,16 @@ import { RUNTIME_SETTINGS_REPOSITORY } from '../domain/repositories/runtime-sett
 import type { RuntimeSettingsRepository } from '../domain/repositories/runtime-settings.repository';
 import { AdapterAuthError } from '../domain/errors/adapter-auth.error';
 
-/** Device-code challenge lifetime (05 §1 ★2: 15min). */
+/**
+ * Device-code challenge lifetime (05 §1 ★2: 15min). This one IS a platform constant —
+ * it bounds the platform's own in-memory AuthSession, not any vendor's token.
+ *
+ * The per-credential lifetimes that used to live here (codex hourly / claude ~1yr) are
+ * VENDOR facts and now come from `RuntimeAdapter.credentialTtlMs` (04 §3): keying them
+ * off the auth METHOD in this layer silently gave any third-party runtime that uses
+ * `oauth-device` the Codex hour.
+ */
 const DEVICE_CODE_TTL_MS = 15 * 60_000;
-/** Access-token / token lifetimes per method (05 §5: codex hourly, claude ~1yr). */
-const CODEX_ACCESS_TTL_MS = 60 * 60_000;
-const CLAUDE_TOKEN_TTL_MS = 365 * 24 * 60 * 60_000;
 
 @Injectable()
 export class RuntimeApplicationService {
@@ -185,7 +190,7 @@ export class RuntimeApplicationService {
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
       );
-      const masked = await this.storeCredential(runtimeId, cred);
+      const masked = await this.storeCredential(adapter, cred);
       entry.status = 'success';
       entry.maskedIdentifier = masked;
       return { maskedIdentifier: masked };
@@ -216,7 +221,7 @@ export class RuntimeApplicationService {
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
       );
-      maskedIdentifier = await this.storeCredential(runtimeId, cred);
+      maskedIdentifier = await this.storeCredential(adapter, cred);
       status = 'success';
     } catch (e) {
       // an expired challenge surfaces as a distinct `expired` terminal (vs generic error)
@@ -253,7 +258,7 @@ export class RuntimeApplicationService {
       throw new UnauthorizedException(`invalid api key: ${verdict.reason} (AUTH_REJECTED)`);
     }
     const cred = await adapter.createCredentialFromSecret('api-key', secret);
-    const masked = await this.storeCredential(runtimeId, cred);
+    const masked = await this.storeCredential(adapter, cred);
     return { maskedIdentifier: masked };
   }
 
@@ -281,7 +286,7 @@ export class RuntimeApplicationService {
   }
 
   /** Build the store input from an adapter credential + compute expiry, then store. */
-  private async storeCredential(runtimeId: string, cred: RuntimeCredential): Promise<string> {
+  private async storeCredential(adapter: RuntimeAdapter, cred: RuntimeCredential): Promise<string> {
     try {
       const payload: RuntimeSecretPayload = {
         credentialFiles: cred.credentialFiles.length > 0 ? cred.credentialFiles : undefined,
@@ -290,11 +295,11 @@ export class RuntimeApplicationService {
         authFile: cred.authFile,
       };
       const { maskedIdentifier } = await this.credentials.storeRuntimeCredential({
-        runtimeId,
+        runtimeId: adapter.id,
         obtainedVia: cred.obtainedVia,
-        maskedIdentifier: cred.maskedIdentifier ?? runtimeId,
+        maskedIdentifier: cred.maskedIdentifier ?? adapter.id,
         payload,
-        expiresAt: this.expiryFor(cred.obtainedVia),
+        expiresAt: this.expiryFor(adapter, cred.obtainedVia),
       });
       return maskedIdentifier;
     } finally {
@@ -302,10 +307,15 @@ export class RuntimeApplicationService {
     }
   }
 
-  private expiryFor(method: RuntimeAuthMethod): Date | null {
-    if (method === 'oauth-device') return shiftMs(this.clock.now(), CODEX_ACCESS_TTL_MS);
-    if (method === 'setup-token') return shiftMs(this.clock.now(), CLAUDE_TOKEN_TTL_MS);
-    return null; // api-key / access-token-paste: no platform expiry
+  /**
+   * Platform-side expiry for a credential, ASKED OF THE ADAPTER (04 §3
+   * `credentialTtlMs`). An adapter that declares no TTL for the method gets `null` —
+   * no platform expiry — which is also what a third-party runtime gets until it says
+   * otherwise, instead of inheriting a built-in vendor's lifetime.
+   */
+  private expiryFor(adapter: RuntimeAdapter, method: RuntimeAuthMethod): Date | null {
+    const ttlMs = adapter.credentialTtlMs?.[method];
+    return ttlMs === undefined ? null : shiftMs(this.clock.now(), ttlMs);
   }
 
   private adapter(runtimeId: string): RuntimeAdapter {

@@ -20,6 +20,7 @@ import { DOCKER_CLIENT } from '../infrastructure/providers/docker/docker.token';
 import { createDockerClient } from '../infrastructure/providers/docker/docker-client';
 import { RuntimeReconciler } from '../infrastructure/reconcile/runtime-reconciler';
 import { SandboxController } from './http/sandbox.controller';
+import { ProviderController } from './http/provider.controller';
 import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
 
 /**
@@ -29,10 +30,14 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
  * preparer, and the cross-context SANDBOX_PTY_PORT (consumed by `terminal`) +
  * SANDBOX_FACADE (consumed by `project` for taskCount). @Global so those tokens
  * reach other contexts by token without a package cycle (mirrors ProjectModule).
+ *
+ * SANDBOX_PROVIDER_REGISTRY is EXPORTED (mirroring RuntimeModule's adapter registry):
+ * that is what makes 04 §8 方式一 real — an out-of-tree module can inject the token and
+ * `register()` its provider from `onModuleInit` without this file being edited.
  */
 @Global()
 @Module({
-  controllers: [SandboxController],
+  controllers: [SandboxController, ProviderController],
   providers: [
     SandboxApplicationService,
     SandboxMcpTools,
@@ -48,6 +53,6 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     SandboxEventProjector,
     CredentialRevokedHandler,
   ],
-  exports: [SandboxApplicationService, SANDBOX_PTY_PORT, SANDBOX_FACADE],
+  exports: [SandboxApplicationService, SANDBOX_PROVIDER_REGISTRY, SANDBOX_PTY_PORT, SANDBOX_FACADE],
 })
 export class SandboxModule {}

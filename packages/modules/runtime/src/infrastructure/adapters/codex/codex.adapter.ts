@@ -38,6 +38,16 @@ export class CodexAdapter implements RuntimeAdapter {
   readonly vendor = 'OpenAI';
 
   /**
+   * Codex's own credential lifetimes (05 §5): the device-auth account credential is a
+   * ~1h access token. `api-key` is absent on purpose — an OpenAI key has no expiry.
+   * The application layer stamps `credentials.expires_at` from THIS table, so no
+   * platform-level "oauth-device ⇒ 1 hour" assumption leaks onto other runtimes.
+   */
+  readonly credentialTtlMs: Readonly<Partial<Record<RuntimeAuthMethod, number>>> = {
+    'oauth-device': 60 * 60_000,
+  };
+
+  /**
    * Codex account credential = an hourly access token the CLI refreshes itself from a
    * seeded `auth.json` (05 §5.1). The scanner reads the probe command + parser here —
    * it no longer hard-codes `['codex','whoami']` / `parseCodexAuthJson`.

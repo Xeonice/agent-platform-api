@@ -27,9 +27,12 @@ import {
 import type {
   CreateSandboxInput,
   DestroySandboxInput,
+  ProviderDto,
+  RequiredCapabilities,
   SandboxDto,
   ProviderRegistry,
   SandboxProvider,
+  SandboxProviderCapabilities,
   SandboxHandle,
   WorkspacePreparer,
   ProjectFacade,
@@ -71,12 +74,37 @@ export class SandboxApplicationService {
     return process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20';
   }
 
+  /**
+   * `GET /api/providers` — read-only capability discovery (04 §5 「能力发现」). The list
+   * IS the registry: a provider registered by an out-of-tree module appears here with
+   * no change to this method, and the frontend drives its per-capability UI (e.g. no
+   * `pauseResume` ⇒ no "暂停" button) off these bits instead of a hard-coded list.
+   */
+  listProviders(): ProviderDto[] {
+    const defaultProvider = this.registry.defaultProvider;
+    return this.registry.list().map((p) => ({
+      name: p.name,
+      capabilities: {
+        spawnTty: p.capabilities.spawnTty,
+        volumeMount: p.capabilities.volumeMount,
+        updateResources: p.capabilities.updateResources,
+        pauseResume: p.capabilities.pauseResume,
+        snapshot: p.capabilities.snapshot,
+        watchEvents: p.capabilities.watchEvents,
+      },
+      isDefault: p.name === defaultProvider,
+    }));
+  }
+
   async create(input: CreateSandboxInput): Promise<SandboxDto> {
     const providerName = input.provider ?? this.registry.defaultProvider;
     if (!this.registry.has(providerName)) {
       throw new BadRequestException(`unknown provider '${providerName}'`);
     }
     const provider = this.registry.get(providerName);
+    // 04 §5 「创建前静态校验」: capability mismatches are rejected HERE — before the
+    // project lookup, before a row is written, before anything is scheduled.
+    this.assertCapabilities(provider, input.require);
 
     // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
     // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -106,6 +134,43 @@ export class SandboxApplicationService {
     const dto = SandboxMapper.toDto(sandbox, false);
     void this.runProvision(sandbox, provider, projectCtx.baselinePath);
     return dto;
+  }
+
+  /**
+   * Static capability negotiation (04 §5), the ONLY producer of `UNSUPPORTED_CAPABILITY`:
+   *
+   *   ① every bit the request explicitly demands must be advertised by the provider —
+   *     `require: { snapshot: true }` against a provider without checkpoint support is
+   *     rejected outright rather than failing deep inside provisioning;
+   *   ② `spawnTty` is required UNCONDITIONALLY (04 §2.5 spawnTty row): every agent
+   *     runtime here needs a TTY for the terminal page and the runtime auth entry, so a
+   *     provider that cannot spawn one can never host a sandbox on this platform.
+   *
+   * Both throw BEFORE scheduling, so `provider.create` is never reached.
+   */
+  private assertCapabilities(provider: SandboxProvider, require?: RequiredCapabilities): void {
+    const caps = provider.capabilities;
+    for (const [bit, demanded] of Object.entries(require ?? {})) {
+      if (demanded === true && !caps[bit as keyof SandboxProviderCapabilities]) {
+        throw this.unsupported(
+          `provider '${provider.name}' does not support '${bit}', which this request requires`,
+        );
+      }
+    }
+    if (!caps.spawnTty) {
+      throw this.unsupported(
+        `provider '${provider.name}' does not support spawnTty — every agent runtime on ` +
+          'this platform needs a TTY (terminal session + runtime auth), so no sandbox can ' +
+          'be created on it',
+      );
+    }
+  }
+
+  /** UNSUPPORTED_CAPABILITY through the SAME contract→HTTP table as provider errors (04 §4). */
+  private unsupported(message: string): unknown {
+    return this.mapProviderError(
+      new SandboxProviderError(SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY, message),
+    );
   }
 
   /** Resolve + validate the project via the cross-context facade (maps errors). */

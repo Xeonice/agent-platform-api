@@ -15,6 +15,10 @@ const clock: Clock = { now: () => new Date(1_000_000) };
 function registryWith(adapters: RuntimeAdapter[]): RuntimeAdapterRegistry {
   const map = new Map(adapters.map((a) => [a.id, a]));
   return {
+    register(a) {
+      if (map.has(a.id)) throw new Error(`duplicate runtime adapter id '${a.id}'`);
+      map.set(a.id, a);
+    },
     get(id) {
       const a = map.get(id);
       if (!a) throw new Error(`unknown runtime '${id}'`);

@@ -33,6 +33,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly displayName = 'Claude Code';
   readonly vendor = 'Anthropic';
 
+  /**
+   * Claude's own credential lifetimes (05 §5): a `setup-token` (`sk-ant-oat01-…`) is
+   * valid ~1 year and is NOT refreshable (hence no `refreshCapability`). `api-key` is
+   * absent on purpose — an Anthropic key has no expiry.
+   */
+  readonly credentialTtlMs: Readonly<Partial<Record<RuntimeAuthMethod, number>>> = {
+    'setup-token': 365 * 24 * 60 * 60_000,
+  };
+
   getAuthMethods(): RuntimeAuthMethod[] {
     return ['setup-token', 'api-key'];
   }

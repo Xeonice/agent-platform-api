@@ -439,6 +439,31 @@
         ]
       }
     },
+    "/api/providers": {
+      "get": {
+        "operationId": "ProviderController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List registered sandbox providers with their capabilities",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
     "/api/credentials": {
       "get": {
         "operationId": "CredentialController_list",
@@ -1031,6 +1056,26 @@
                 "maximum": 240
               }
             ]
+          },
+          "require": {
+            "type": "object",
+            "properties": {
+              "spawnTty": {
+                "type": "boolean"
+              },
+              "volumeMount": {
+                "type": "boolean"
+              },
+              "updateResources": {
+                "type": "boolean"
+              },
+              "pauseResume": {
+                "type": "boolean"
+              },
+              "snapshot": {
+                "type": "boolean"
+              }
+            }
           }
         },
         "required": [
@@ -1128,6 +1173,53 @@
             "type": "boolean"
           }
         }
+      },
+      "ProviderResponseDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "spawnTty": {
+                "type": "boolean"
+              },
+              "volumeMount": {
+                "type": "boolean"
+              },
+              "updateResources": {
+                "type": "boolean"
+              },
+              "pauseResume": {
+                "type": "boolean"
+              },
+              "snapshot": {
+                "type": "boolean"
+              },
+              "watchEvents": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "spawnTty",
+              "volumeMount",
+              "updateResources",
+              "pauseResume",
+              "snapshot",
+              "watchEvents"
+            ]
+          },
+          "isDefault": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "capabilities",
+          "isDefault"
+        ]
       },
       "MaskedGitCredentialResponseDto": {
         "type": "object",

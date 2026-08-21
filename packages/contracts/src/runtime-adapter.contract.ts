@@ -132,6 +132,17 @@ export interface RuntimeAdapter {
    */
   readonly refreshCapability?: RuntimeRefreshCapability;
 
+  /**
+   * How long a credential obtained via each auth method stays valid, in ms — the
+   * platform-side `credentials.expires_at` it stamps at store time (05 §5). This is
+   * a VENDOR fact (codex's access token lives ~1h; claude's setup-token ~1yr), so it
+   * belongs to the adapter, NOT to the application layer: keying it off the METHOD
+   * alone would hand every third-party runtime that happens to use `oauth-device`
+   * the Codex hour. A method the adapter does not list carries NO platform expiry
+   * (api-key / a never-expiring token) — `undefined` means "no expiry", never "0".
+   */
+  readonly credentialTtlMs?: Readonly<Partial<Record<RuntimeAuthMethod, number>>>;
+
   /** The interactive login command for a method (helper starts it in a real pty). */
   loginCommand(method: RuntimeAuthMethod): string[];
   /** Available auth methods; return order = recommended priority (04 §3). */
@@ -159,7 +170,19 @@ export interface RuntimeAdapter {
   injectCredential(cred: RuntimeCredential, exec: SandboxExecFn): Promise<void>;
 }
 
+/**
+ * Open RuntimeAdapter registry (04 §8). `register` is the extension point itself:
+ * an out-of-tree module injects `RUNTIME_ADAPTER_REGISTRY` and registers its adapter
+ * from its own `onModuleInit` — the built-in catalogue is never edited. A duplicate
+ * `id` is a FAIL-FAST error (04 §8 "id 唯一，冲突启动即 fail-fast"), never a silent
+ * overwrite, so two packages claiming `claude-code` surface at boot, not at runtime.
+ *
+ * NOTE: unlike `ProviderRegistry` there is no `default` option — this platform has no
+ * "default runtime" concept (`CreateSandbox.runtime` is required), and an option that
+ * nothing reads would be exactly the dead contract this registry is meant to avoid.
+ */
 export interface RuntimeAdapterRegistry {
+  register(impl: RuntimeAdapter): void;
   get(id: string): RuntimeAdapter;
   has(id: string): boolean;
   list(): RuntimeAdapter[];
