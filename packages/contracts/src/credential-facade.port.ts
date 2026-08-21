@@ -9,7 +9,10 @@
  * avoids a package cycle.
  */
 import type { Tx } from '@platform/shared-kernel';
-import type { RuntimeCredential } from './runtime-adapter.contract';
+import type {
+  InjectableRuntimeCredential,
+  RefreshableRuntimeCredential,
+} from './runtime-adapter.contract';
 
 export const CREDENTIAL_FACADE = Symbol('CredentialFacade');
 
@@ -64,17 +67,33 @@ export type GitRemoteScheme = 'http' | 'https' | 'ssh' | 'git';
 
 export interface CredentialFacade {
   /**
-   * Runtime out-口 (S4, P0-2 — parallel to `prepareGitAuth` but semantically
-   * DIFFERENT): hand out a CONTROLLED-PLAINTEXT `RuntimeCredential` (NOT an opaque
-   * handle — runtime credentials must be injected INTO a sandbox). Internally
-   * `forRuntime` picks the effective credential by `runtime_settings.active_auth_method`
-   * → `credential/infrastructure` decrypts and produces the `RuntimeCredential`.
-   * The credential context NEVER reverse-depends on sandbox exec: the sandbox
-   * orchestration side holds `exec` and calls `adapter.injectCredential(cred, exec)`,
-   * then `zeroize()`s (23 §8.2, 27 §4). Throws `CredentialPreparationError`
-   * (`NO_CREDENTIAL`) when the active mode has no usable credential.
+   * Runtime INJECTION out-口 (S4, P0-2 — parallel to `prepareGitAuth` but semantically
+   * DIFFERENT): hand out a CONTROLLED-PLAINTEXT credential (NOT an opaque handle —
+   * runtime credentials must be injected INTO a sandbox). Internally `forRuntime`
+   * picks the effective credential by `runtime_settings.active_auth_method` →
+   * `credential/infrastructure` decrypts and assembles it. The credential context
+   * NEVER reverse-depends on sandbox exec: the sandbox orchestration side holds `exec`
+   * and calls `adapter.injectCredential(cred, exec)`, then `zeroize()`s (23 §8.2,
+   * 27 §4). Throws `CredentialPreparationError` (`NO_CREDENTIAL`) when the active mode
+   * has no usable credential.
+   *
+   * ★ 裁决 D-18 (05 §4.3): the return type is `InjectableRuntimeCredential`, which has
+   * NO `authFile` field. The real `refresh_token` is not merely "not supposed to" reach
+   * this path — it structurally CANNOT. The platform-only full auth file is served by
+   * `prepareForRefresh` below, to exactly one caller.
    */
-  prepareRuntimeCredential(runtimeId: string): Promise<RuntimeCredential>;
+  prepareRuntimeCredential(runtimeId: string): Promise<InjectableRuntimeCredential>;
+
+  /**
+   * Runtime REFRESH out-口 (05 §4.3 / §5.1) — the ONLY out-口 that carries the real
+   * `refresh_token`. Its ONLY legitimate caller is the credential refresh scanner,
+   * which seeds a throw-away helper HOME with the complete auth file so the CLI can
+   * refresh itself, then writes the fresh token back to the vault. It is keyed by
+   * `credentialId` (not `runtimeId`) because the scanner has already selected the row.
+   * Throws `CredentialPreparationError` (`NO_CREDENTIAL`) when the credential does not
+   * exist, is revoked, cannot be decrypted, or carries no platform auth file at all.
+   */
+  prepareForRefresh(credentialId: string): Promise<RefreshableRuntimeCredential>;
 
   /**
    * Record that the active runtime credential was injected into `sandboxId`

@@ -4,6 +4,7 @@ import type {
   AuthChallenge,
   AuthCompletionInput,
   AuthSessionContext,
+  InjectableRuntimeCredential,
   RuntimeAdapter,
   RuntimeAuthMethod,
   RuntimeCredential,
@@ -131,9 +132,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return cred;
   }
 
-  /** claude injects via `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` env at sandbox
-   *  start — no file, no argv, no exec needed here (05 §4). */
-  async injectCredential(cred: RuntimeCredential, _exec: SandboxExecFn): Promise<void> {
+  /**
+   * claude injects via `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` env at sandbox
+   * start — no file, no argv, no exec needed here (05 §4). The parameter type carries
+   * no `authFile` (05 §4.3 裁决 D-18); claude's setup-token has no refresh token at all,
+   * so this adapter has nothing to sanitize, but it obeys the same injection contract.
+   */
+  async injectCredential(cred: InjectableRuntimeCredential, _exec: SandboxExecFn): Promise<void> {
     if (!cred.env || Object.keys(cred.env).length === 0) {
       throw new AdapterAuthError('AUTH_REJECTED', 'no injectable claude credential material');
     }

@@ -21,6 +21,8 @@ export interface SandboxProps {
   providerSandboxId: string | null;
   /** provider runtime binding persisted for restart reconnect (boxlite agent port); null otherwise. */
   agentEndpointPort: number | null;
+  /** per-sandbox bearer token for the in-sandbox agent; null for agent-less runtimes. */
+  agentAuthToken: string | null;
   version: number;
   transitions: StateTransition[];
 }
@@ -37,6 +39,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _workspacePath: string | null;
   private _providerSandboxId: string | null;
   private _agentEndpointPort: number | null;
+  private _agentAuthToken: string | null;
   private _version: number;
   private readonly _transitions: StateTransition[];
   /** transitions appended in the current UoW, flushed by saveSync (28 §2.2). */
@@ -59,6 +62,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._workspacePath = props.workspacePath;
     this._providerSandboxId = props.providerSandboxId;
     this._agentEndpointPort = props.agentEndpointPort;
+    this._agentAuthToken = props.agentAuthToken;
     this._version = props.version;
     this._transitions = props.transitions;
   }
@@ -97,6 +101,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       workspacePath: null,
       providerSandboxId: null,
       agentEndpointPort: null,
+      agentAuthToken: null,
       version: 0,
       transitions: [firstTransition],
     });
@@ -123,6 +128,10 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   get agentEndpointPort(): number | null {
     return this._agentEndpointPort;
   }
+  /** SECRET — reachable only by the sandbox context; never mapped onto a wire DTO. */
+  get agentAuthToken(): string | null {
+    return this._agentAuthToken;
+  }
   get version(): number {
     return this._version;
   }
@@ -132,10 +141,12 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     providerSandboxId: string;
     workspacePath: string;
     agentEndpointPort?: number | null;
+    agentAuthToken?: string | null;
   }): void {
     this._providerSandboxId = input.providerSandboxId;
     this._workspacePath = input.workspacePath;
     this._agentEndpointPort = input.agentEndpointPort ?? null;
+    this._agentAuthToken = input.agentAuthToken ?? null;
   }
   get transitions(): readonly StateTransition[] {
     return this._transitions;

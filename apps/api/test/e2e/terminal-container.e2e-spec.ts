@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
@@ -15,6 +15,9 @@ import {
   isDockerAvailable,
 } from '../../../../packages/modules/sandbox/src/infrastructure/providers/docker/docker-client';
 import { AioSandboxProvider } from '../../../../packages/modules/sandbox/src/infrastructure/providers/aio/aio-sandbox.provider';
+import { SANDBOX_REPOSITORY } from '../../../../packages/modules/sandbox/src/domain/repositories/sandbox.repository';
+import type { SandboxRepository } from '../../../../packages/modules/sandbox/src/domain/repositories/sandbox.repository';
+import { asSandboxId } from '@platform/shared-kernel';
 import type { ProcessStream } from '@platform/contracts';
 
 /**
@@ -234,6 +237,11 @@ describe.skipIf(!runnable)(
           forceNew: true,
         });
         const wsDir = resolve(dataRoot, 'workspaces', sandboxId);
+        // 加固 2: the workspace stays 0777 (the non-root in-sandbox user must write
+        // it) but its PARENT is 0700, so no other local user can traverse in and
+        // read the cloned repo — or plant an AGENTS.md for the next agent run.
+        expect(statSync(resolve(dataRoot, 'workspaces')).mode & 0o777).toBe(0o700);
+        expect(statSync(wsDir).mode & 0o777).toBe(0o777);
         try {
           const session = await nextFrame(sock, (f) => f.type === 'session');
           if (session.type === 'session') {
@@ -262,12 +270,29 @@ describe.skipIf(!runnable)(
         // re-derives the agent port from `docker inspect` (no persisted state) and
         // reconnects — so exec/terminal survive a backend restart.
         const cid = (await docker.getContainer(containerName).inspect()).Id;
+        // …but the agent BEARER TOKEN is the one thing docker cannot give back (the
+        // container only carries the public half), so the restart path reads it out
+        // of the DB, exactly like SandboxPtyAdapter does on a real reconnect.
+        const repo = app.get<SandboxRepository>(SANDBOX_REPOSITORY);
+        const persistedSandbox = await repo.findById(asSandboxId(sandboxId));
+        const agentAuthToken = persistedSandbox?.agentAuthToken ?? undefined;
+        expect(agentAuthToken).toBeTypeOf('string');
         const freshAio = new AioSandboxProvider(createDockerClient());
         const exec = await freshAio.spawn(
-          { provider: 'aio', providerSandboxId: cid },
+          { provider: 'aio', providerSandboxId: cid, agentAuthToken },
           { tty: false, cmd: ['echo', 'AIO_RESTART_OK'] },
         );
         expect(await collectStream(exec)).toContain('AIO_RESTART_OK');
+
+        // …and the token is LOAD-BEARING, not decoration: the same call without it
+        // is refused by the agent itself (加固 1 — the loopback port is no longer
+        // an open shell for anything else running on this host).
+        const anonymous = await freshAio.spawn(
+          { provider: 'aio', providerSandboxId: cid },
+          { tty: false, cmd: ['echo', 'SHOULD_NOT_RUN'] },
+        );
+        const anonymousOut = await collectStream(anonymous).catch((e: Error) => e.message);
+        expect(anonymousOut).not.toContain('SHOULD_NOT_RUN');
 
         // 4) destroy via REST + assert the container is really gone
         await request(app.getHttpServer())

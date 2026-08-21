@@ -12,6 +12,14 @@ import { classifyCloneError, sanitizeCloneMessage } from './error.classifier';
 // pager …). We inherit PATH/HOME/http(s)_proxy etc. but DROP these — they must not
 // leak from a CI/harness into project clones, and passing them trips simple-git.
 const GUARDED_ENV = new Set([
+  // simple-git's env vulnerability scanner rejects the PLAIN forms too — `EDITOR`,
+  // `PAGER`, `PREFIX` — not just their `GIT_`-prefixed twins, and a rejected spawn
+  // surfaces as an unclassified error, i.e. a BOGUS `CLONE_FAILED_NETWORK`. Vitest
+  // sets `EDITOR` in its workers, which is exactly how this was found. An ambient
+  // editor/pager has no business in a platform git child anyway.
+  'EDITOR',
+  'PAGER',
+  'PREFIX',
   'GIT_ASKPASS',
   'GIT_CONFIG',
   'GIT_CONFIG_COUNT',

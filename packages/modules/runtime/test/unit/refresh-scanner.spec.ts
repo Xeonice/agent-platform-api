@@ -65,7 +65,9 @@ function fakeHelper(refreshedAccess: string): AuthHelper {
 
 interface FakeCred {
   listRefreshDue: (leadMs: number) => Promise<Array<{ credentialId: string; runtimeId: string }>>;
-  materializeById: (id: string) => Promise<{ authFile?: string; zeroize(): void }>;
+  // the refresh out-口 (05 §4.3) — `authFile` is REQUIRED here, unlike the injection
+  // out-口, which has no such field at all
+  prepareForRefresh: (id: string) => Promise<{ authFile: string; zeroize(): void }>;
   applyRefresh: (id: string, payload: unknown, exp: Date) => Promise<void>;
   recordRefreshFailure: (id: string) => Promise<void>;
 }
@@ -75,7 +77,7 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
     const applied: Array<{ id: string; payload: { accessToken?: string } }> = [];
     const cred: FakeCred = {
       listRefreshDue: async () => [{ credentialId: 'c1', runtimeId: 'codex' }],
-      materializeById: async () => ({
+      prepareForRefresh: async () => ({
         authFile: '{"tokens":{"access_token":"old"}}',
         zeroize() {},
       }),
@@ -100,7 +102,7 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
     const failures: string[] = [];
     const cred: FakeCred = {
       listRefreshDue: async () => [{ credentialId: 'bad', runtimeId: 'codex' }],
-      materializeById: async () => {
+      prepareForRefresh: async () => {
         throw new Error('decrypt failed');
       },
       applyRefresh: async () => {},
@@ -128,7 +130,7 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
         await gate; // hold the first pass open
         return [];
       },
-      materializeById: async () => ({ zeroize() {} }),
+      prepareForRefresh: async () => ({ authFile: '{}', zeroize() {} }),
       applyRefresh: async () => {},
       recordRefreshFailure: async () => {},
     };
@@ -154,7 +156,7 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
     const cred: FakeCred = {
       // a due claude-code credential surfaces (e.g. its ~1yr token nears expiry)
       listRefreshDue: async () => [{ credentialId: 'cc1', runtimeId: 'claude-code' }],
-      materializeById: async () => {
+      prepareForRefresh: async () => {
         materialized = true;
         return { authFile: '{}', zeroize() {} };
       },
@@ -240,7 +242,7 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
     const applied: Array<{ id: string; payload: { accessToken?: string } }> = [];
     const cred: FakeCred = {
       listRefreshDue: async () => [{ credentialId: 'a1', runtimeId: 'acme' }],
-      materializeById: async () => ({ authFile: '{"acme":{"key":"OLD"}}', zeroize() {} }),
+      prepareForRefresh: async () => ({ authFile: '{"acme":{"key":"OLD"}}', zeroize() {} }),
       applyRefresh: async (id, payload) => {
         applied.push({ id, payload: payload as { accessToken?: string } });
       },

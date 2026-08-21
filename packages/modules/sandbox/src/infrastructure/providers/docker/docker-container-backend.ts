@@ -13,6 +13,12 @@ import {
 } from '@platform/contracts';
 import { DockerExecAgentClient } from './docker-exec-agent.client';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
+import {
+  assertAgentRejectsAnonymous,
+  authHeader,
+  createAgentAuthMaterial,
+  withAgentAuthEnv,
+} from '../aio/agent-auth';
 
 export interface DockerContainerConfig {
   name: string;
@@ -28,9 +34,10 @@ export interface DockerContainerConfig {
   /**
    * When set, this image ships an in-sandbox agent listening on this TCP port
    * (SANDBOX-RUNTIME-DECISIONS 决策 A). The container exposes it on a
-   * LOOPBACK-only host port (never an external interface); `spawn` then goes
-   * through `AioSandboxAgentClient`. When unset, `spawn` falls back to
-   * `docker exec` (`DockerExecAgentClient`).
+   * LOOPBACK-only host port (never an external interface) AND is booted with the
+   * agent's own auth gateway on, so the port is not an open shell for other local
+   * processes; `spawn` then goes through `AioSandboxAgentClient`. When unset,
+   * `spawn` falls back to `docker exec` (`DockerExecAgentClient`).
    */
   agentPort?: number;
 }
@@ -68,6 +75,12 @@ export class DockerContainerBackend implements SandboxProvider {
       const binds = (ctx.volumes ?? []).map((v) => `${v.source}:${v.target}:${v.mode}`);
       const agentPort = this.config.agentPort;
       const portKey = agentPort ? `${agentPort}/tcp` : undefined;
+      // An agent image gets a per-sandbox credential: the public half boots the
+      // image's own auth gateway, the token half travels on the handle. Without it
+      // the loopback-published port is an unauthenticated shell for every local
+      // process on the host (ADR 安全姿态). Bare images have no agent to protect.
+      const auth = agentPort !== undefined ? createAgentAuthMaterial(ctx.sandboxId) : undefined;
+      const env = auth ? withAgentAuthEnv(ctx.env, auth) : ctx.env;
       const container = await this.docker.createContainer({
         name: this.containerName(ctx.sandboxId),
         Image: ctx.image.ref,
@@ -83,7 +96,7 @@ export class DockerContainerBackend implements SandboxProvider {
           'platform.isolation': this.config.isolationLabel,
           'platform.sandboxId': ctx.sandboxId,
         },
-        Env: Object.entries(ctx.env).map(([k, v]) => `${k}=${v}`),
+        Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
         ExposedPorts: portKey ? { [portKey]: {} } : undefined,
         HostConfig: {
           Binds: binds.length ? binds : undefined,
@@ -91,14 +104,23 @@ export class DockerContainerBackend implements SandboxProvider {
           NanoCpus: Math.round(ctx.quota.cores * 1e9),
           AutoRemove: false,
           // publish the agent port to LOOPBACK ONLY (HostIp 127.0.0.1), never an
-          // external interface — the agent is an unauthenticated shell (ADR 安全姿态).
+          // external interface. Loopback alone is NOT the access control — every
+          // local process shares it — so the agent also runs behind its own auth
+          // gateway keyed by the token above (ADR 安全姿态).
           // Empty HostPort = kernel-assigned ephemeral port, resolved at spawn time.
           PortBindings: portKey
             ? { [portKey]: [{ HostIp: '127.0.0.1', HostPort: '' }] }
             : undefined,
         },
       });
-      return { provider: this.name, providerSandboxId: container.id };
+      return {
+        provider: this.name,
+        providerSandboxId: container.id,
+        // persisted by the platform: unlike the published port (re-derivable from
+        // `docker inspect`) the token cannot be recovered from the daemon, so a
+        // backend restart would otherwise lose the only way to talk to the agent.
+        agentAuthToken: auth?.token,
+      };
     });
   }
 
@@ -117,7 +139,7 @@ export class DockerContainerBackend implements SandboxProvider {
       // before the in-sandbox agent HTTP server accepts connections.
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
-        await this.waitForAgent(base);
+        await this.waitForAgent(base, handle.agentAuthToken);
       }
     });
   }
@@ -168,7 +190,7 @@ export class DockerContainerBackend implements SandboxProvider {
       // agent-first data plane (ADR 决策 A): in-sandbox AIO agent when available.
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
-        const client = new AioSandboxAgentClient(base);
+        const client = new AioSandboxAgentClient(base, handle.agentAuthToken);
         return spec.tty ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24) : client.exec(spec);
       }
       // fallback: agent-less bare image → docker exec.
@@ -199,16 +221,26 @@ export class DockerContainerBackend implements SandboxProvider {
   }
 
   /**
-   * Poll the agent HTTP origin until it accepts a connection (ANY HTTP response
-   * proves the server is listening — AIO has no dedicated health route, `/`
-   * returns 200). Uses a fixed attempt/interval loop (no wall clock — Date.now()
-   * is banned in infrastructure).
+   * Poll the agent HTTP origin until it is ready. Without a token ANY HTTP
+   * response proves the server is listening (AIO has no dedicated health route,
+   * `/` returns 200). WITH a token readiness is stricter — and better: a 2xx on an
+   * AUTHENTICATED `/` proves the front door, the auth backend and the injected key
+   * are all live, so the first exec cannot race a half-started gateway. Uses a
+   * fixed attempt/interval loop (no wall clock — Date.now() is banned here).
    */
-  private async waitForAgent(base: string, attempts = 80, intervalMs = 250): Promise<void> {
+  private async waitForAgent(
+    base: string,
+    token: string | undefined,
+    attempts = 80,
+    intervalMs = 250,
+  ): Promise<void> {
     for (let i = 0; i < attempts; i++) {
       try {
-        await fetch(`${base}/`, { method: 'GET' });
-        return; // reachable → agent server is up
+        const res = await fetch(`${base}/`, { method: 'GET', headers: authHeader(token) });
+        if (token === undefined || res.status < 400) {
+          await assertAgentRejectsAnonymous(base, token);
+          return; // reachable → agent server is up
+        }
       } catch {
         /* ECONNREFUSED / not yet listening */
       }

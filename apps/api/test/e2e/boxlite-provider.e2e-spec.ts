@@ -117,10 +117,15 @@ describe.skipIf(!ready)(
 
       // (A) restart-reconnect: a brand-new provider instance (empty Map/runtime),
       // handed a handle rebuilt ONLY from persisted fields, still reaches the box.
+      // the agent token is minted at create() and persisted with the port; both are
+      // required to reach the agent after a restart (加固 1 — the forwarded loopback
+      // port is guarded by the agent's own auth gateway).
+      expect(handle.agentAuthToken).toBeTypeOf('string');
       const persisted: SandboxHandle = {
         provider: 'boxlite',
         providerSandboxId: handle.providerSandboxId,
         agentEndpointPort: handle.agentEndpointPort,
+        agentAuthToken: handle.agentAuthToken,
       };
       const p2 = new BoxliteSandboxProvider();
       const s2 = await p2.spawn(persisted, { tty: false, cmd: ['sh', '-c', 'echo RECONNECT_OK'] });

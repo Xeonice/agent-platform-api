@@ -30,6 +30,8 @@ import { CRYPTO_SERVICE } from '../domain/ports/crypto.port';
 import type { CryptoService } from '../domain/ports/crypto.port';
 import { RUNTIME_CREDENTIAL_MATERIALIZER } from '../domain/ports/runtime-credential-materializer.port';
 import type {
+  MaterializeRuntimeInput,
+  MaterializedRefreshCredential,
   MaterializedRuntimeCredential,
   RuntimeCredentialMaterializer,
   RuntimeSecretPayload,
@@ -155,7 +157,12 @@ export class RuntimeCredentialService {
     }
   }
 
-  /** Select + materialize the ACTIVE runtime credential (facade `prepareRuntimeCredential`). */
+  /**
+   * INJECTION path (facade `prepareRuntimeCredential`): select + materialize the ACTIVE
+   * runtime credential. The result is a `MaterializedRuntimeCredential`, which has NO
+   * `authFile` — the injection path cannot reach the real `refresh_token` (I-CRD-9,
+   * 裁决 D-18). This is not the refresh path: see `prepareForRefresh`.
+   */
   async prepareActive(
     runtimeId: string,
     activeMode: RuntimeMode,
@@ -168,17 +175,33 @@ export class RuntimeCredentialService {
         `no active credential for ${runtimeId}`,
       );
     }
-    return this.materializeById(
+    const cred = await this.requireRuntimeCredential(
       id as string,
       candidates.find((c) => c.id === id),
     );
+    const out = await this.materializer.materializeForInjection(this.materializeInputFor(cred));
+    this.touchLastUsed(cred);
+    return out;
   }
 
-  /** Materialize a SPECIFIC runtime credential by id (refresh scanner path). */
-  async materializeById(
+  /**
+   * REFRESH path (facade `prepareForRefresh`, 05 §5.1) — the ONLY out-口 that carries
+   * the complete auth file with the real `refresh_token`. Its only legitimate caller is
+   * the refresh scanner, which seeds a throw-away helper HOME so the CLI refreshes
+   * itself. Keyed by `credentialId` because the scanner already picked the row.
+   */
+  async prepareForRefresh(credentialId: string): Promise<MaterializedRefreshCredential> {
+    const cred = await this.requireRuntimeCredential(credentialId);
+    const out = await this.materializer.materializeForRefresh(this.materializeInputFor(cred));
+    this.touchLastUsed(cred);
+    return out;
+  }
+
+  /** Load (or accept a prefetched) `kind='runtime'` credential row, or reject. */
+  private async requireRuntimeCredential(
     credentialId: string,
     prefetched?: Credential,
-  ): Promise<MaterializedRuntimeCredential> {
+  ): Promise<Credential> {
     const cred = prefetched ?? (await this.repo.findById(asCredentialId(credentialId)));
     if (!cred || cred.kind !== 'runtime') {
       throw new CredentialPreparationError(
@@ -186,22 +209,26 @@ export class RuntimeCredentialService {
         `runtime credential ${credentialId} not found`,
       );
     }
-    const blob = cred.assertUsable();
-    const obtainedVia = cred.obtainedVia as RuntimeAuthMethod;
-    const out = await this.materializer.materialize({
+    return cred;
+  }
+
+  private materializeInputFor(cred: Credential): MaterializeRuntimeInput {
+    return {
       runtimeId: cred.runtimeId ?? '',
-      obtainedVia,
+      obtainedVia: cred.obtainedVia as RuntimeAuthMethod,
       maskedIdentifier: cred.masked.toString(),
       issuedAt: cred.issuedAt,
       expiresAt: cred.expiresAt,
-      secret: blob,
-    });
+      secret: cred.assertUsable(),
+    };
+  }
+
+  private touchLastUsed(cred: Credential): void {
     try {
       this.uow.run((tx) => this.repo.touchLastUsedSync(tx, cred.id, this.clock.now()));
     } catch {
       /* best-effort */
     }
-    return out;
   }
 
   /** Read-model for `GET /api/runtimes` (27 §4) — the ACTIVE credential's status. */

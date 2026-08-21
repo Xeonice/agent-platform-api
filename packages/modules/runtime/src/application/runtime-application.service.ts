@@ -288,6 +288,10 @@ export class RuntimeApplicationService {
   /** Build the store input from an adapter credential + compute expiry, then store. */
   private async storeCredential(adapter: RuntimeAdapter, cred: RuntimeCredential): Promise<string> {
     try {
+      // The adapter already SPLIT the material at birth (05 §4.3 ②): `credentialFiles`
+      // holds the sanitized injectable form, `authFile` the platform-only complete one.
+      // They are stored in two separate payload fields and read back by two different
+      // facade methods — this layer just carries them across, it never converts.
       const payload: RuntimeSecretPayload = {
         credentialFiles: cred.credentialFiles.length > 0 ? cred.credentialFiles : undefined,
         env: cred.env,

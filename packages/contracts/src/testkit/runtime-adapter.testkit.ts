@@ -1,20 +1,49 @@
 import { describe, it, expect } from 'vitest';
+import { RUNTIME_REFRESH_TOKEN_PLACEHOLDER } from '@platform/shared-kernel';
 import type { ProcessStream } from '../sandbox-provider.contract';
 import type {
   AuthSessionContext,
+  InjectableRuntimeCredential,
   RuntimeAdapter,
-  RuntimeCredential,
   SandboxExecFn,
 } from '../runtime-adapter.contract';
 import { RUNTIME_AUTH_METHODS, RUNTIME_BEGIN_METHODS } from '../schemas/runtime.schema';
+
+/**
+ * What the PLATFORM holds for a credential and must NEVER let reach a sandbox
+ * (RA-15/16/17, 05 §4.3 裁决 D-18). This is supplied OUT OF BAND rather than on the
+ * credential itself, because that is the whole point of the decision:
+ * `InjectableRuntimeCredential` has no `authFile` field, so a test could not put a real
+ * refresh token on the injected credential even if it wanted to.
+ */
+export interface RuntimeAdapterPlatformOnlySecret {
+  /**
+   * The REAL `refresh_token` value the vault holds for this credential. Must be
+   * non-empty — an empty sentinel would make every assertion below vacuous.
+   */
+  realRefreshToken: string;
+  /**
+   * The COMPLETE provider auth file carrying that token — i.e. the `authFile` the
+   * credential record really has (RA-17's「`authFile` 非空」case). Supplying it turns
+   * on the extra "a credential that DOES have one still leaks nothing" clause.
+   */
+  platformAuthFile?: string;
+  /**
+   * Set false for a runtime that injects NO provider auth file (claude's env-only
+   * form). RA-16 then does not demand a placeholder-bearing file. Defaults to true.
+   */
+  expectsSanitizedAuthFile?: boolean;
+}
 
 /** One `injectCredential` case: a credential + the plaintext that must not surface. */
 export interface RuntimeAdapterInjectionCase {
   /** Shown on failure. NEVER put the secret itself here — the message is logged. */
   label: string;
-  credential: RuntimeCredential;
+  credential: InjectableRuntimeCredential;
   /** Plaintext fragments that MUST NOT appear in any argv the adapter builds. */
   secrets: string[];
+  /** Enables RA-15/16/17 for this case (see the type doc above). */
+  platformOnly?: RuntimeAdapterPlatformOnlySecret;
 }
 
 export interface RuntimeAdapterTestOptions {
@@ -34,15 +63,65 @@ const UNIVERSALLY_INVALID_API_KEYS = ['', '   ', '\n', 'not a valid key'];
 interface RecordedExec {
   cmd: string[];
   stdin?: string;
+  env?: Record<string, string>;
+  cwd?: string;
 }
 
-function recordingExec(): { exec: SandboxExecFn; calls: RecordedExec[] } {
+/**
+ * A fake `exec` that captures EVERY channel an adapter can push bytes through — argv,
+ * stdin, env and cwd. RA-15 needs all of them: RA-14 only inspects argv because env is
+ * a legitimate channel for a short-lived token, but a refresh token entering a sandbox
+ * through ANY channel is the violation.
+ *
+ * `$HOME` probes are answered with a plausible HOME so an adapter that expands
+ * `~/`-relative paths at inject time (裁决 D-19) can proceed to actually write.
+ */
+function recordingExec(homeProbeAnswer = '/home/gem'): {
+  exec: SandboxExecFn;
+  calls: RecordedExec[];
+} {
   const calls: RecordedExec[] = [];
   const exec: SandboxExecFn = async (cmd, execOpts) => {
-    calls.push({ cmd, stdin: execOpts?.stdin });
-    return { stdout: '', stderr: '', exitCode: 0 };
+    calls.push({ cmd, stdin: execOpts?.stdin, env: execOpts?.env, cwd: execOpts?.cwd });
+    const stdout = cmd.some((token) => token.includes('$HOME')) ? homeProbeAnswer : '';
+    return { stdout, stderr: '', exitCode: 0 };
   };
   return { exec, calls };
+}
+
+/** EVERY string an adapter handed to `exec` — the search space for RA-15/16/17. */
+function allBytesGivenToExec(calls: RecordedExec[]): string[] {
+  const out: string[] = [];
+  for (const call of calls) {
+    out.push(...call.cmd);
+    if (call.stdin !== undefined) out.push(call.stdin);
+    if (call.cwd !== undefined) out.push(call.cwd);
+    for (const [key, value] of Object.entries(call.env ?? {})) out.push(key, value);
+  }
+  return out;
+}
+
+/**
+ * Every `"refresh_token": <value>` occurrence in whatever the adapter sent, decoded.
+ * A regex rather than `JSON.parse` on purpose: it finds the field however deeply it is
+ * nested, and it still finds it when the payload is a shell heredoc, a concatenation,
+ * or any format that is not a bare JSON document.
+ */
+const REFRESH_TOKEN_FIELD_RE =
+  /"refresh_token"\s*:\s*(?:"((?:\\.|[^"\\])*)"|(null|true|false|-?\d+(?:\.\d+)?))/g;
+
+function refreshTokenValuesIn(payloads: string[]): Array<string | null> {
+  const found: Array<string | null> = [];
+  for (const payload of payloads) {
+    REFRESH_TOKEN_FIELD_RE.lastIndex = 0;
+    let match = REFRESH_TOKEN_FIELD_RE.exec(payload);
+    while (match !== null) {
+      // `null` marks a non-string value (null/number/bool) — never acceptable material.
+      found.push(match[1] === undefined ? null : (JSON.parse(`"${match[1]}"`) as string));
+      match = REFRESH_TOKEN_FIELD_RE.exec(payload);
+    }
+  }
+  return found;
 }
 
 /**
@@ -100,6 +179,12 @@ export function runRuntimeAdapterContractTests(
     declaredMethods.includes('api-key') &&
     typeof probe.createCredentialFromSecret === 'function';
   const hasInjectionCases = (opts.injectionCases?.length ?? 0) > 0 || canAutoBuildApiKeyCase;
+  // RA-15/16 need a case that declares what the PLATFORM holds but must never inject;
+  // RA-17 additionally needs one whose credential record really carries a full authFile.
+  const platformOnlyCases = (opts.injectionCases ?? []).filter((c) => c.platformOnly !== undefined);
+  const authFileBearingCases = platformOnlyCases.filter(
+    (c) => c.platformOnly?.platformAuthFile !== undefined,
+  );
 
   describe(`RuntimeAdapter contract: ${label}`, () => {
     it('RA-08 (MUST): id/displayName/vendor are non-empty and id === the registry key', () => {
@@ -288,6 +373,104 @@ export function runRuntimeAdapterContractTests(
       });
     } else {
       it.skip('RA-14 (MUST) SKIPPED — no injectable credential fixture supplied (pass opts.injectionCases or opts.validApiKeySample)', () =>
+        undefined);
+    }
+
+    if (platformOnlyCases.length > 0) {
+      it('RA-15 (MUST): no real refresh_token in ANY byte injectCredential() hands to exec (P0-3)', async () => {
+        for (const testCase of platformOnlyCases) {
+          const platformOnly = testCase.platformOnly;
+          if (!platformOnly) continue;
+          expect(
+            platformOnly.realRefreshToken.length,
+            `${testCase.label}: an empty realRefreshToken makes RA-15 vacuous`,
+          ).toBeGreaterThan(0);
+          const adapter = factory();
+          const { exec, calls } = recordingExec();
+          await adapter.injectCredential(testCase.credential, exec);
+          for (const payload of allBytesGivenToExec(calls)) {
+            // A refresh token inside a sandbox is a credential the platform CANNOT
+            // revoke upstream — so unlike RA-14 (argv only, because env is a legitimate
+            // channel for a short-lived token), EVERY channel counts here.
+            expect(
+              payload,
+              `${testCase.label}: the real refresh_token reached the sandbox`,
+            ).not.toContain(platformOnly.realRefreshToken);
+          }
+        }
+      });
+
+      it('RA-16 (MUST): the injected auth file keeps refresh_token, valued EXACTLY the placeholder', async () => {
+        for (const testCase of platformOnlyCases) {
+          const platformOnly = testCase.platformOnly;
+          if (!platformOnly || platformOnly.expectsSanitizedAuthFile === false) continue;
+          const adapter = factory();
+          const { exec, calls } = recordingExec();
+          await adapter.injectCredential(testCase.credential, exec);
+          const values = refreshTokenValuesIn(allBytesGivenToExec(calls));
+          // NOT missing: deleting the field makes codex fail with `missing field
+          // 'refresh_token'` (05 §1★★ 実測), so "just drop it" is not a valid fix.
+          expect(
+            values.length,
+            `${testCase.label}: no refresh_token field was injected at all — the field must be KEPT`,
+          ).toBeGreaterThan(0);
+          for (const value of values) {
+            // NOT empty, NOT null, NOT the real one: exactly the shared-kernel constant.
+            expect(
+              value,
+              `${testCase.label}: refresh_token must be exactly the shared-kernel placeholder`,
+            ).toBe(RUNTIME_REFRESH_TOKEN_PLACEHOLDER);
+          }
+        }
+      });
+    } else {
+      it.skip('RA-15 / RA-16 (MUST) SKIPPED — no injection case declares `platformOnly` (the real refresh_token this adapter must never inject)', () =>
+        undefined);
+    }
+
+    if (authFileBearingCases.length > 0) {
+      it('RA-17 (MUST): a credential whose record DOES carry a full authFile still leaks nothing', async () => {
+        for (const testCase of authFileBearingCases) {
+          const platformOnly = testCase.platformOnly;
+          const platformAuthFile = platformOnly?.platformAuthFile;
+          if (!platformOnly || platformAuthFile === undefined) continue;
+          // Non-vacuity first: the fixture must really be the dangerous case.
+          expect(
+            platformAuthFile,
+            `${testCase.label}: the platform auth file fixture must contain the real refresh_token`,
+          ).toContain(platformOnly.realRefreshToken);
+
+          const adapter = factory();
+          const { exec, calls } = recordingExec();
+          await adapter.injectCredential(testCase.credential, exec);
+          const payloads = allBytesGivenToExec(calls);
+          for (const payload of payloads) {
+            expect(
+              payload,
+              `${testCase.label}: the platform-only auth file reached the sandbox verbatim`,
+            ).not.toContain(platformAuthFile);
+            expect(
+              payload,
+              `${testCase.label}: the real refresh_token reached the sandbox`,
+            ).not.toContain(platformOnly.realRefreshToken);
+          }
+          if (platformOnly.expectsSanitizedAuthFile !== false) {
+            const values = refreshTokenValuesIn(payloads);
+            expect(
+              values.length,
+              `${testCase.label}: the injected auth file must KEEP the refresh_token field`,
+            ).toBeGreaterThan(0);
+            for (const value of values) {
+              expect(
+                value,
+                `${testCase.label}: refresh_token must be exactly the shared-kernel placeholder`,
+              ).toBe(RUNTIME_REFRESH_TOKEN_PLACEHOLDER);
+            }
+          }
+        }
+      });
+    } else {
+      it.skip('RA-17 (MUST) SKIPPED — no injection case supplies `platformOnly.platformAuthFile` (a credential record that really carries a full auth file)', () =>
         undefined);
     }
   });

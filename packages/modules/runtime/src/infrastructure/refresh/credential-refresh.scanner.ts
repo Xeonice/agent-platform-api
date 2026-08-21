@@ -84,19 +84,25 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
       ? this.registry.get(runtimeId).refreshCapability
       : undefined;
     if (!cap) return;
-    const mat = await this.credentials.materializeById(credentialId);
+    // The ONE call site of the refresh out-口 (05 §4.3 裁决 D-18): `prepareForRefresh`
+    // is the only method that hands out the complete auth file with the real
+    // refresh_token, and this scanner — which never touches a sandbox — is its only
+    // legitimate caller. A credential carrying no platform auth file surfaces as
+    // NO_CREDENTIAL here and is recorded as a refresh failure by `runOnce`.
+    const mat = await this.credentials.prepareForRefresh(credentialId);
     try {
-      if (!mat.authFile)
-        throw new Error('no auth file to refresh (credential carries no account auth material)');
       const session = await this.helper.openSession(cap.probeCommand, [
         { relPath: 'auth.json', content: mat.authFile, mode: 0o600 },
       ]);
       try {
         await this.waitForExit(session.pty, REFRESH_CMD_TIMEOUT_MS);
         const raw = await readFile(join(session.homeDir, 'auth.json'), 'utf8');
-        const { accessToken } = cap.parseRefreshedAuth(raw);
+        const { accessToken, credentialFiles } = cap.parseRefreshedAuth(raw);
         if (!accessToken) throw new Error('refreshed auth file missing access token');
-        const payload: RuntimeSecretPayload = { accessToken, authFile: raw };
+        // Re-store BOTH halves: the adapter's freshly SANITIZED injectable files and the
+        // platform-only complete file. Dropping `credentialFiles` here would leave the
+        // next injection with nothing to write (05 §4.3 ②).
+        const payload: RuntimeSecretPayload = { accessToken, credentialFiles, authFile: raw };
         await this.credentials.applyRefresh(
           credentialId,
           payload,

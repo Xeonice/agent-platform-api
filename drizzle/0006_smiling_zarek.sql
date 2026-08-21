@@ -1,0 +1,1 @@
+ALTER TABLE `sandboxes` ADD `agent_auth_token` text;

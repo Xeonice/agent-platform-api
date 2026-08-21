@@ -51,42 +51,111 @@ export interface AuthSessionContext {
 }
 
 /**
- * RuntimeCredential — the controlled-plaintext wrapper the credential facade hands
- * out for injection (04 §3, 23 §8.2 relaxed I-CRD-2). `credentialFiles[].content`
- * is PLAINTEXT and lives in memory only; the orchestration side injects it via a
- * one-shot exec and `zeroize()`s it. The injection FORMAT obeys the minimal-exposure
- * priority (05 §4/§7 #3): access-token-only (stdin) > 0600 file > (banned) whole env.
+ * One provider credential file the adapter wants materialized inside the sandbox.
+ *
+ * `containerPath` is a **`~/`-RELATIVE** path (e.g. `~/.codex/auth.json`) — NOT an
+ * absolute one (05 §4.3 裁决 D-19, testkit RA-06). `prepareRuntimeCredential(runtimeId)`
+ * has no sandbox in its signature: at the moment a credential is built nobody knows
+ * which sandbox it will be injected into, let alone that sandbox's `$HOME`. The same
+ * credential is meant to be injectable into MANY sandboxes ("log in once, use
+ * everywhere", 05 §2 决策 A). `$HOME` is therefore expanded ONLY inside
+ * `injectCredential(cred, exec)`, by probing the live sandbox through `exec`.
+ *
+ * `content` is PLAINTEXT and lives in memory only. For a provider auth file it is the
+ * SANITIZED form produced at credential BIRTH — see `RuntimeCredential.authFile`.
  */
-export interface RuntimeCredential {
+export interface RuntimeCredentialFile {
+  /** `~/`-relative path inside the sandbox, e.g. `~/.codex/auth.json`. */
+  containerPath: string;
+  /** Plaintext file content — already sanitized for a provider auth file. */
+  content: string;
+  /** POSIX mode string, e.g. `'0600'` (the default for credential material). */
+  mode?: string;
+}
+
+/**
+ * InjectableRuntimeCredential — the ONLY credential shape the injection path ever
+ * sees (04 §3, 05 §4.3 裁决 D-18, 23 §8.2 I-CRD-9).
+ *
+ * **It has NO `authFile` field, on purpose.** Injection and platform-side refresh used
+ * to share ONE object that carried the real `refresh_token`, and the only thing
+ * stopping `injectCredential` from writing it into a sandbox was a comment. A real
+ * `refresh_token` inside a sandbox is a long-lived credential the platform cannot
+ * revoke upstream (one `echo` steals it — P0-3), so the discipline is now a TYPE:
+ * `injectCredential(cred: InjectableRuntimeCredential, …)` simply cannot reach a
+ * refresh token, and no future branch, fallback or rewrite can make it reachable.
+ *
+ * The refresh path uses the separate `RefreshableRuntimeCredential`, handed out by
+ * `CredentialFacade.prepareForRefresh(credentialId)` — whose only caller is the
+ * refresh scanner (05 §5.1).
+ */
+export interface InjectableRuntimeCredential {
   runtimeId: string;
   obtainedVia: RuntimeAuthMethod;
   maskedIdentifier?: string;
   issuedAt: string;
   expiresAt?: string;
-  /** Absolute container paths + plaintext content; `mode` e.g. '0600'. Memory-only. */
-  credentialFiles: Array<{ containerPath: string; content: string; mode?: string }>;
+  /** `~/`-relative paths + plaintext (already-sanitized) content. Memory-only. */
+  credentialFiles: RuntimeCredentialFile[];
   /**
    * Plaintext env to inject (e.g. `CLAUDE_CODE_OAUTH_TOKEN` / `OPENAI_API_KEY`).
-   * NEVER the whole `auth.json` (that carries the refresh_token — P0-3).
+   * NEVER the whole `auth.json` — that carries the refresh_token (P0-3), and env is
+   * readable from inside the sandbox by any process.
    */
   env?: Record<string, string>;
   /**
-   * A short-lived ACCESS token (no refresh token). When present the adapter injects
-   * it via the highest-priority, lowest-exposure form — fed on process STDIN to a
-   * login command (codex `--with-access-token`), never into argv/env/files (05 §4).
-   * The adapter (not the credential context) owns the CLI command.
+   * A short-lived ACCESS token (never a refresh token). Injected by feeding it on
+   * process STDIN to a login command (codex `--with-access-token`), never into
+   * argv/env/files. This form is OPTIONAL and VERSION-SENSITIVE (05 §1★★: a token
+   * minted by codex 0.147.0 is rejected by 0.139.0), so it ranks BELOW the 0600
+   * sanitized auth file in the minimal-exposure priority. The adapter (not the
+   * credential context) owns the CLI command.
    */
   accessToken?: string;
-  /**
-   * The COMPLETE provider auth file (e.g. codex `auth.json` WITH refresh_token) —
-   * PLATFORM-ONLY. Used solely by the refresh scanner (05 §5.1) to seed a helper
-   * HOME. `injectCredential` MUST NEVER write this into a sandbox (it carries the
-   * refresh_token, P0-3); injection uses `accessToken`/`env`/a sanitized file only.
-   */
-  authFile?: string;
   /** Wipe every plaintext buffer this credential carries (called in `finally`). */
   zeroize(): void;
 }
+
+/**
+ * RefreshableRuntimeCredential — PLATFORM-ONLY (05 §4.3, §5.1). Injectable material
+ * PLUS the COMPLETE provider auth file (codex `auth.json` WITH the real
+ * `refresh_token`), used solely to seed the refresh scanner's throw-away helper HOME
+ * so the CLI can refresh itself. Handed out ONLY by
+ * `CredentialFacade.prepareForRefresh(credentialId)`; it must never be passed to
+ * `injectCredential` — which cannot accept it as anything but its injectable half.
+ */
+export type RefreshableRuntimeCredential = InjectableRuntimeCredential & { authFile: string };
+
+/**
+ * RuntimeCredential — what an adapter MINTS at credential BIRTH (`completeAuth` /
+ * `createCredentialFromSecret`), before anything is persisted. This is the one place
+ * where both forms legitimately coexist, because it is the moment the adapter
+ * SEPARATES them (05 §4.3 裁决 D-18 ②):
+ *
+ *   credentialFiles: [{ containerPath: '~/.codex/auth.json', content: <SANITIZED>, mode: '0600' }]
+ *   authFile:        <COMPLETE, with the real refresh_token>   // platform-only
+ *
+ * The two fields are stored in separate `RuntimeSecretPayload` fields and are read
+ * back by two different facade methods. **The injection path performs NO conversion
+ * whatsoever** — it does not parse provider JSON and does not rewrite fields; it just
+ * writes `credentialFiles[].content` out verbatim.
+ *
+ * WHY SANITIZE AT BIRTH RATHER THAN AT INJECTION TIME: the shape of `auth.json` is one
+ * CLI's quirk, and 04 §3 assigns that knowledge to the adapter. Sanitizing in the
+ * credential context would force an `if (runtimeId === 'codex')` there, which breaks
+ * the moment a third party registers a runtime with a different file format (runtime
+ * ids are an OPEN registry, 10 §7.2). Birth-time sanitization is also strictly
+ * stronger: sanitizing at injection time would still require handing the real value to
+ * the injection path once — here it is never handed over at all.
+ */
+export type RuntimeCredential = InjectableRuntimeCredential & {
+  /**
+   * The COMPLETE provider auth file (with the real `refresh_token`) — PLATFORM-ONLY,
+   * consumed exclusively by the refresh scanner (05 §5.1). It is deliberately absent
+   * from `InjectableRuntimeCredential`, so it cannot travel down the injection path.
+   */
+  authFile?: string;
+};
 
 /**
  * Re-export of the wire AuthChallenge shape for adapter method signatures (the
@@ -116,8 +185,25 @@ export interface ApiKeyFormatVerdict {
 export interface RuntimeRefreshCapability {
   /** Cheap probe the scanner runs in a seeded HOME to trigger the CLI's own refresh. */
   probeCommand: string[];
-  /** Parse the CLI-rewritten provider auth file → the fresh short-lived access token. */
-  parseRefreshedAuth(raw: string): { accessToken: string };
+  /**
+   * Parse the CLI-rewritten provider auth file into the material a REFRESHED credential
+   * is stored from. This is the THIRD birth site of a credential (alongside
+   * `completeAuth` / `createCredentialFromSecret`), so it obeys the same split as the
+   * other two (05 §4.3 裁决 D-18 ②): it returns the fresh short-lived access token AND
+   * the SANITIZED `credentialFiles` (refresh_token value = the shared-kernel
+   * placeholder). The scanner pairs those with the raw file as the platform-only
+   * `authFile`. An adapter that returned only `accessToken` would silently drop the
+   * sanitized file on every refresh and leave later injections with nothing to write.
+   */
+  parseRefreshedAuth(raw: string): RefreshedRuntimeAuth;
+}
+
+/** What `parseRefreshedAuth` yields — mirrors the birth-time split of a credential. */
+export interface RefreshedRuntimeAuth {
+  /** The fresh short-lived access token the CLI just obtained. */
+  accessToken: string;
+  /** Sanitized injectable files rebuilt from the refreshed auth file (05 §4.3 ②). */
+  credentialFiles?: RuntimeCredentialFile[];
 }
 
 export interface RuntimeAdapter {
@@ -167,7 +253,19 @@ export interface RuntimeAdapter {
     secret: string,
   ): Promise<RuntimeCredential>;
   /** Materialize an existing Vault credential into a new sandbox (05 §4). */
-  injectCredential(cred: RuntimeCredential, exec: SandboxExecFn): Promise<void>;
+  /**
+   * Materialize an existing Vault credential into a NEW sandbox (05 §4).
+   *
+   * The parameter type is `InjectableRuntimeCredential` — structurally WITHOUT
+   * `authFile` — so "the injection path cannot reach the real refresh_token" is a
+   * compile-time fact rather than a comment (05 §4.3 裁决 D-18 ①, 23 §8.2 I-CRD-9).
+   * The implementation writes `credentialFiles[].content` VERBATIM: no JSON parsing,
+   * no field rewriting (the sanitized form was produced at credential birth). `$HOME`
+   * for the `~/`-relative `containerPath`s is expanded HERE and only here, by probing
+   * the live sandbox through `exec` (裁决 D-19) — never hard-coded, never reused
+   * across sandboxes.
+   */
+  injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void>;
 }
 
 /**

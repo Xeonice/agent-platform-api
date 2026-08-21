@@ -39,9 +39,11 @@ export class SandboxPtyAdapter implements SandboxPtyPort {
       {
         provider: sandbox.provider,
         providerSandboxId: sandbox.providerSandboxId,
-        // rebuild the persisted runtime binding (boxlite agent port) from the DB so
-        // the terminal reconnects even after a backend restart (empty in-memory state).
+        // rebuild the persisted runtime binding (boxlite agent port + the agent
+        // bearer token) from the DB so the terminal reconnects even after a backend
+        // restart (empty in-memory state).
         agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
+        agentAuthToken: sandbox.agentAuthToken ?? undefined,
       },
       { cmd: ['/bin/sh'], tty: true, cols: opts.cols, rows: opts.rows, reuse: opts.reuse },
     );
