@@ -77,3 +77,38 @@ describe('CredentialFacadeAdapter.prepareGitAuth', () => {
     expect(materialize).toHaveBeenCalledOnce();
   });
 });
+
+describe('CredentialFacadeAdapter.prepareRuntimeCredential (P1-c symmetric out-discipline)', () => {
+  function makeRuntimeAdapter(prepareActive: () => Promise<never>) {
+    const repo = { findById: async () => null } as never;
+    const runtimeCredentials = { prepareActive: vi.fn(prepareActive) };
+    const settingsReader = { activeAuthMethod: async () => 'account' as const };
+    const adapter = new CredentialFacadeAdapter(
+      repo,
+      { materialize: vi.fn() } as never,
+      { run: (fn: (tx: never) => unknown) => fn({} as never) } as never,
+      { now: () => NOW } as never,
+      runtimeCredentials as never,
+      settingsReader as never,
+    );
+    return { adapter, prepareActive: runtimeCredentials.prepareActive };
+  }
+
+  it('DecryptionError degrades to NO_CREDENTIAL (05 §4.2 — not 500), mirroring git', async () => {
+    const { adapter, prepareActive } = makeRuntimeAdapter(async () => {
+      throw new DecryptionError();
+    });
+    await expect(adapter.prepareRuntimeCredential('codex')).rejects.toMatchObject({
+      code: 'NO_CREDENTIAL',
+    });
+    expect(prepareActive).toHaveBeenCalledOnce();
+  });
+
+  it('propagates non-decryption errors unchanged (no swallowing)', async () => {
+    const boom = new Error('unexpected');
+    const { adapter } = makeRuntimeAdapter(async () => {
+      throw boom;
+    });
+    await expect(adapter.prepareRuntimeCredential('codex')).rejects.toBe(boom);
+  });
+});

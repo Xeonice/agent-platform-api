@@ -4,7 +4,13 @@ import { EncryptedBlob, Erased, isEncrypted } from '../value-objects/encrypted-b
 import type { CredentialSecret } from '../value-objects/encrypted-blob.vo';
 import { MaskedIdentifier } from '../value-objects/masked-identifier.vo';
 import type { CredentialMetadata } from '../value-objects/credential-metadata.vo';
-import type { GitObtainedVia } from '../value-objects/obtained-via.vo';
+import { isRuntimeAuthMethod, modeForRuntimeMethod } from '../value-objects/obtained-via.vo';
+import type {
+  GitObtainedVia,
+  ObtainedVia,
+  RuntimeAuthMethod,
+  RuntimeMode,
+} from '../value-objects/obtained-via.vo';
 import { InvalidCredentialError, CredentialRevokedError } from '../errors/credential-errors';
 import { CredentialStored, CredentialRevoked } from '../events/credential-events';
 
@@ -14,9 +20,9 @@ export interface CredentialProps {
   id: CredentialId;
   kind: CredentialKind;
   runtimeId: string | null;
-  obtainedVia: GitObtainedVia;
+  obtainedVia: ObtainedVia;
   masked: MaskedIdentifier;
-  mode: null; // git ⇒ always NULL (I-CRD-1)
+  mode: RuntimeMode | null; // git ⇒ NULL (I-CRD-1); runtime ⇒ account|api-key
   allowedHosts: string[];
   metadata: CredentialMetadata | null;
   secret: CredentialSecret;
@@ -25,12 +31,14 @@ export interface CredentialProps {
   expiresAt: Date | null;
   lastUsedAt: Date | null;
   revokedAt: Date | null;
+  refreshFailures: number;
+  lastRefreshedAt: Date | null;
 }
 
 /**
- * Credential aggregate root (docs/backend/23 §8.1). This slice builds ONLY
- * `kind='git'` credentials (SSH key / HTTPS token). Invariants enforced here:
- *   - I-CRD-1: git ⇒ runtimeId null, mode null, obtainedVia ∈ {git-ssh-key, git-https-token}
+ * Credential aggregate root (docs/backend/23 §8.1). Serves BOTH the `git`
+ * (S3) and `runtime` (S4) halves. Invariants enforced here:
+ *   - I-CRD-1: kind ↔ runtimeId / mode / obtainedVia cross-constraints
  *   - I-CRD-8: git-https-token ⇒ allowedHosts non-empty (≥1 host)
  *   - I-CRD-3: revoke() wipes the ciphertext to `Erased`, metadata retained
  *   - I-CRD-4: a revoked credential cannot be selected / materialized
@@ -38,9 +46,9 @@ export interface CredentialProps {
 export class Credential extends AggregateRoot<CredentialId> {
   readonly kind: CredentialKind;
   readonly runtimeId: string | null;
-  readonly obtainedVia: GitObtainedVia;
+  readonly obtainedVia: ObtainedVia;
   private _masked: MaskedIdentifier;
-  readonly mode: null;
+  readonly mode: RuntimeMode | null;
   readonly allowedHosts: string[];
   private _metadata: CredentialMetadata | null;
   private _secret: CredentialSecret;
@@ -49,6 +57,8 @@ export class Credential extends AggregateRoot<CredentialId> {
   readonly expiresAt: Date | null;
   private _lastUsedAt: Date | null;
   private _revokedAt: Date | null;
+  readonly refreshFailures: number;
+  readonly lastRefreshedAt: Date | null;
 
   private constructor(props: CredentialProps) {
     super(props.id);
@@ -65,6 +75,8 @@ export class Credential extends AggregateRoot<CredentialId> {
     this.expiresAt = props.expiresAt;
     this._lastUsedAt = props.lastUsedAt;
     this._revokedAt = props.revokedAt;
+    this.refreshFailures = props.refreshFailures;
+    this.lastRefreshedAt = props.lastRefreshedAt;
   }
 
   static rehydrate(props: CredentialProps): Credential {
@@ -102,6 +114,55 @@ export class Credential extends AggregateRoot<CredentialId> {
       expiresAt: input.expiresAt ?? null,
       lastUsedAt: null,
       revokedAt: null,
+      refreshFailures: 0,
+      lastRefreshedAt: null,
+    });
+    cred.raise(new CredentialStored(input.id, input.now));
+    return cred;
+  }
+
+  /**
+   * Create a runtime credential (S4). Enforces I-CRD-1: `runtimeId` non-empty,
+   * `obtainedVia ∈ RuntimeAuthMethod`; `mode` is DERIVED from `obtainedVia`
+   * (`api-key`→`api-key`, else `account`) so it is never a caller-supplied mismatch.
+   */
+  static createRuntime(input: {
+    id: CredentialId;
+    runtimeId: string;
+    obtainedVia: RuntimeAuthMethod;
+    masked: MaskedIdentifier;
+    metadata?: CredentialMetadata | null;
+    secret: EncryptedBlob;
+    now: Date;
+    expiresAt?: Date | null;
+  }): Credential {
+    if (!input.runtimeId || input.runtimeId.trim().length === 0) {
+      throw new InvalidCredentialError(
+        'runtime credential requires a non-empty runtimeId (I-CRD-1)',
+      );
+    }
+    if (!isRuntimeAuthMethod(input.obtainedVia)) {
+      throw new InvalidCredentialError(
+        `runtime credential obtainedVia must be a RuntimeAuthMethod (I-CRD-1), got '${input.obtainedVia}'`,
+      );
+    }
+    const cred = new Credential({
+      id: input.id,
+      kind: 'runtime',
+      runtimeId: input.runtimeId,
+      obtainedVia: input.obtainedVia,
+      masked: input.masked,
+      mode: modeForRuntimeMethod(input.obtainedVia),
+      allowedHosts: [],
+      metadata: input.metadata ?? null,
+      secret: input.secret,
+      ownerRef: null,
+      issuedAt: input.now,
+      expiresAt: input.expiresAt ?? null,
+      lastUsedAt: null,
+      revokedAt: null,
+      refreshFailures: 0,
+      lastRefreshedAt: null,
     });
     cred.raise(new CredentialStored(input.id, input.now));
     return cred;

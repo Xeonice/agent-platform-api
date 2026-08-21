@@ -80,14 +80,22 @@ class InMemorySandboxRepo implements SandboxRepository {
   }
 }
 
-function harness() {
-  const provider = new FakeProvider('aio');
-  const registry: ProviderRegistry = {
-    defaultProvider: 'aio',
+/** A single-provider registry double (the extension points are proven elsewhere). */
+function registryOf(provider: SandboxProvider): ProviderRegistry {
+  return {
+    defaultProvider: provider.name,
+    register: () => {
+      throw new Error('not used by the provision tests');
+    },
     get: () => provider,
-    has: (n) => n === 'aio',
+    has: (n) => n === provider.name,
     list: () => [provider],
   };
+}
+
+function harness() {
+  const provider = new FakeProvider('aio');
+  const registry = registryOf(provider);
   const wsCalls: string[] = [];
   const workspace: WorkspacePreparer = {
     async prepare(id: string): Promise<PreparedWorkspace> {
@@ -193,12 +201,7 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
       }
     }
     const provider = new FailingStartProvider('aio');
-    const registry: ProviderRegistry = {
-      defaultProvider: 'aio',
-      get: () => provider,
-      has: (n) => n === 'aio',
-      list: () => [provider],
-    };
+    const registry = registryOf(provider);
     const wsCalls: string[] = [];
     const workspace: WorkspacePreparer = {
       async prepare(id: string): Promise<PreparedWorkspace> {

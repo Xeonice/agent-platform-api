@@ -8,7 +8,34 @@
  * `SecretMaterial`. Living in `contracts` keeps both sides boundaries-clean and
  * avoids a package cycle.
  */
+import type { Tx } from '@platform/shared-kernel';
+import type { RuntimeCredential } from './runtime-adapter.contract';
+
 export const CREDENTIAL_FACADE = Symbol('CredentialFacade');
+
+/**
+ * Read port the credential facade uses to learn a runtime's effective mode
+ * (`runtime_settings.active_auth_method`) WITHOUT importing the runtime module —
+ * the runtime context provides the impl against this contracts token, so
+ * `prepareRuntimeCredential(runtimeId)` can select by mode with no package cycle.
+ * Returns `null` when the runtime has no settings row yet.
+ */
+export const RUNTIME_SETTINGS_READER = Symbol('RuntimeSettingsReader');
+export interface RuntimeSettingsReader {
+  activeAuthMethod(runtimeId: string): Promise<'account' | 'api-key' | null>;
+}
+
+/**
+ * SYNC write port for `runtime_settings` used INSIDE the credential store
+ * transaction (R-1 bounded exception ②, 24 §2.3): first-config writes `credentials`
+ * + `runtime_settings` in ONE UoW. Implemented by the runtime module; injected into
+ * the credential store path via this contracts token (no package cycle).
+ */
+export const RUNTIME_SETTINGS_WRITER = Symbol('RuntimeSettingsWriter');
+export interface RuntimeSettingsWriter {
+  /** Upsert the runtime's effective mode in the caller's transaction. */
+  saveSync(tx: Tx, runtimeId: string, mode: 'account' | 'api-key', now: Date): void;
+}
 
 /**
  * Opaque git-auth handle (23 §8). The token lives ONLY in `env` (via `$GIT_TOKEN`
@@ -36,6 +63,27 @@ export interface GitAuthContext {
 export type GitRemoteScheme = 'http' | 'https' | 'ssh' | 'git';
 
 export interface CredentialFacade {
+  /**
+   * Runtime out-口 (S4, P0-2 — parallel to `prepareGitAuth` but semantically
+   * DIFFERENT): hand out a CONTROLLED-PLAINTEXT `RuntimeCredential` (NOT an opaque
+   * handle — runtime credentials must be injected INTO a sandbox). Internally
+   * `forRuntime` picks the effective credential by `runtime_settings.active_auth_method`
+   * → `credential/infrastructure` decrypts and produces the `RuntimeCredential`.
+   * The credential context NEVER reverse-depends on sandbox exec: the sandbox
+   * orchestration side holds `exec` and calls `adapter.injectCredential(cred, exec)`,
+   * then `zeroize()`s (23 §8.2, 27 §4). Throws `CredentialPreparationError`
+   * (`NO_CREDENTIAL`) when the active mode has no usable credential.
+   */
+  prepareRuntimeCredential(runtimeId: string): Promise<RuntimeCredential>;
+
+  /**
+   * Record that the active runtime credential was injected into `sandboxId`
+   * (23 §8.4 ledger, I-CSB-1). The credential context owns the ledger (it knows the
+   * `credentialId`); the orchestration side passes only the `sandboxId` it holds.
+   * Idempotent; a no-op when no active credential is configured.
+   */
+  recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void>;
+
   /**
    * Resolve + materialize the effective git credential for `(kind, host, scheme)`
    * into an opaque handle. `forKind` selects the credential → `host ∈ allowedHosts`

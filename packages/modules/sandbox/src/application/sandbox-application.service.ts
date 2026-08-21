@@ -27,9 +27,12 @@ import {
 import type {
   CreateSandboxInput,
   DestroySandboxInput,
+  ProviderDto,
+  RequiredCapabilities,
   SandboxDto,
   ProviderRegistry,
   SandboxProvider,
+  SandboxProviderCapabilities,
   SandboxHandle,
   WorkspacePreparer,
   ProjectFacade,
@@ -71,12 +74,37 @@ export class SandboxApplicationService {
     return process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20';
   }
 
+  /**
+   * `GET /api/providers` — read-only capability discovery (04 §5 「能力发现」). The list
+   * IS the registry: a provider registered by an out-of-tree module appears here with
+   * no change to this method, and the frontend drives its per-capability UI (e.g. no
+   * `pauseResume` ⇒ no "暂停" button) off these bits instead of a hard-coded list.
+   */
+  listProviders(): ProviderDto[] {
+    const defaultProvider = this.registry.defaultProvider;
+    return this.registry.list().map((p) => ({
+      name: p.name,
+      capabilities: {
+        spawnTty: p.capabilities.spawnTty,
+        volumeMount: p.capabilities.volumeMount,
+        updateResources: p.capabilities.updateResources,
+        pauseResume: p.capabilities.pauseResume,
+        snapshot: p.capabilities.snapshot,
+        watchEvents: p.capabilities.watchEvents,
+      },
+      isDefault: p.name === defaultProvider,
+    }));
+  }
+
   async create(input: CreateSandboxInput): Promise<SandboxDto> {
     const providerName = input.provider ?? this.registry.defaultProvider;
     if (!this.registry.has(providerName)) {
       throw new BadRequestException(`unknown provider '${providerName}'`);
     }
     const provider = this.registry.get(providerName);
+    // 04 §5 「创建前静态校验」: capability mismatches are rejected HERE — before the
+    // project lookup, before a row is written, before anything is scheduled.
+    this.assertCapabilities(provider, input.require);
 
     // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
     // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -106,6 +134,43 @@ export class SandboxApplicationService {
     const dto = SandboxMapper.toDto(sandbox, false);
     void this.runProvision(sandbox, provider, projectCtx.baselinePath);
     return dto;
+  }
+
+  /**
+   * Static capability negotiation (04 §5), the ONLY producer of `UNSUPPORTED_CAPABILITY`:
+   *
+   *   ① every bit the request explicitly demands must be advertised by the provider —
+   *     `require: { snapshot: true }` against a provider without checkpoint support is
+   *     rejected outright rather than failing deep inside provisioning;
+   *   ② `spawnTty` is required UNCONDITIONALLY (04 §2.5 spawnTty row): every agent
+   *     runtime here needs a TTY for the terminal page and the runtime auth entry, so a
+   *     provider that cannot spawn one can never host a sandbox on this platform.
+   *
+   * Both throw BEFORE scheduling, so `provider.create` is never reached.
+   */
+  private assertCapabilities(provider: SandboxProvider, require?: RequiredCapabilities): void {
+    const caps = provider.capabilities;
+    for (const [bit, demanded] of Object.entries(require ?? {})) {
+      if (demanded === true && !caps[bit as keyof SandboxProviderCapabilities]) {
+        throw this.unsupported(
+          `provider '${provider.name}' does not support '${bit}', which this request requires`,
+        );
+      }
+    }
+    if (!caps.spawnTty) {
+      throw this.unsupported(
+        `provider '${provider.name}' does not support spawnTty — every agent runtime on ` +
+          'this platform needs a TTY (terminal session + runtime auth), so no sandbox can ' +
+          'be created on it',
+      );
+    }
+  }
+
+  /** UNSUPPORTED_CAPABILITY through the SAME contract→HTTP table as provider errors (04 §4). */
+  private unsupported(message: string): unknown {
+    return this.mapProviderError(
+      new SandboxProviderError(SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY, message),
+    );
   }
 
   /** Resolve + validate the project via the cross-context facade (maps errors). */
@@ -166,6 +231,13 @@ export class SandboxApplicationService {
       });
       this.persist(sandbox); // save handle (no new transition/event)
 
+      // ── S5 hook (05 §7.1 ②): runtime credential injection wires in HERE, between a
+      // created container and agent readiness — `CREDENTIAL_FACADE.prepareRuntimeCredential`
+      // → adapter `injectCredential(cred, exec)` (writes env/0600 file / feeds stdin) →
+      // `recordRuntimeInjection` (credential_sandbox_bindings ledger, feeds the revoke
+      // coordinator). Left UNWIRED in S4 by design (facade + ledger exist + unit-tested;
+      // no live caller yet) — this is a clean insertion point, not a half-wired state. ──
+
       this.advance(sandbox, 'starting', 'scheduler');
       await provider.start(handle);
 
@@ -192,17 +264,34 @@ export class SandboxApplicationService {
     return sandboxes.map((s) => SandboxMapper.toDto(s, false));
   }
 
-  async destroy(id: string, input: DestroySandboxInput = {}): Promise<void> {
+  /**
+   * Tear down a sandbox. `force` (INTERNAL only — never exposed on the DELETE wire
+   * DTO) SKIPS the graceful `provider.stop()` and goes straight to the force removal
+   * (`provider.destroy` already does `remove({force:true})` — 04 §2.2). The credential
+   * revoke coordinator (05 §4) escalates to `force` when a graceful teardown times out
+   * so a wedged container can never block clearing a revoked credential's bindings.
+   */
+  async destroy(id: string, input: DestroySandboxInput & { force?: boolean } = {}): Promise<void> {
     const sandbox = await this.repo.findById(asSandboxId(id));
     if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
     const provider = this.registry.get(sandbox.provider);
     const handle = this.handleOf(sandbox);
+    const graceful = !(input.force ?? false);
 
     try {
+      // Bring the aggregate to a state from which `destroying` is legal (23 I-SBX-1:
+      // stopped|failed → destroying). `force` skips only the graceful `provider.stop()`
+      // IO — the state walk itself is unchanged so the transition table stays honoured.
       if (sandbox.status === 'running' || sandbox.status === 'idle') {
         this.advance(sandbox, 'stopping', 'user');
-        if (handle) await provider.stop(handle);
+        if (handle && graceful) await provider.stop(handle);
         this.advance(sandbox, 'stopped', 'user');
+      } else if (sandbox.status === 'stopping') {
+        // recover an interrupted graceful attempt (a prior teardown that timed out
+        // inside provider.stop persisted `stopping` before we escalated to force).
+        this.advance(sandbox, 'stopped', 'user');
+      } else if (sandbox.status === 'starting') {
+        this.advance(sandbox, 'failed', 'user'); // starting → failed → destroying
       }
       this.advance(sandbox, 'destroying', 'user');
       if (handle) await provider.destroy(handle);

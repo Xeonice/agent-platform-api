@@ -1,0 +1,13 @@
+
+Open this URL to authorize:
+
+  ]8;;https://claude.ai/oauth/authorize?code=1&client=setup-token&state=abc123def456https://claude.ai/oauth/aut&]8;;
+
+Paste the code from your browser here: 
+[32mSuccess![0m Your API token:
+
+sk-ant-oat01-AAAABBBBCCCC
+DDDDEEEEFFFFGGGG
+HHHHIIIIJJJJ
+
+Store it securely.

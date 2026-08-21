@@ -13,6 +13,7 @@
     { "path": "../../packages/modules/project" },
     { "path": "../../packages/modules/sandbox" },
     { "path": "../../packages/modules/terminal" },
-    { "path": "../../packages/modules/credential" }
+    { "path": "../../packages/modules/credential" },
+    { "path": "../../packages/modules/runtime" }
   ]
 }

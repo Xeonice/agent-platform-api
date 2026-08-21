@@ -3,6 +3,7 @@ import {
   CreateSandboxSchema,
   DestroySandboxSchema,
   ListSandboxesQuerySchema,
+  ProviderDtoSchema,
   SandboxDtoSchema,
 } from '@platform/contracts';
 
@@ -15,3 +16,4 @@ export class CreateSandboxDto extends createZodDto(CreateSandboxSchema) {}
 export class ListSandboxesQueryDto extends createZodDto(ListSandboxesQuerySchema) {}
 export class DestroySandboxDto extends createZodDto(DestroySandboxSchema) {}
 export class SandboxResponseDto extends createZodDto(SandboxDtoSchema) {}
+export class ProviderResponseDto extends createZodDto(ProviderDtoSchema) {}

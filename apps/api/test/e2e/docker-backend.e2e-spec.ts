@@ -24,8 +24,8 @@ if (!dockerUp) {
       '[docker-provider.e2e] SKIPPED — docker daemon unreachable (DOCKER_HOST=' +
       (process.env.DOCKER_HOST ?? 'default socket') +
       ').\n' +
-      'This is the ONLY test that needs a live daemon; run it with docker up to\n' +
-      'verify the real create→exec→destroy chain.\n' +
+      'Run it with docker up to verify the real create→exec→destroy chain\n' +
+      '(builtin-provider-contract.e2e also needs the daemon, for SP-01).\n' +
       '========================================================================[0m\n',
   );
 }

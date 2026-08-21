@@ -102,6 +102,12 @@ export interface ProcessSpec {
   cwd?: string;
   user?: string;
   timeoutMs?: number;
+  /**
+   * Optional stdin for a one-shot exec — the lowest-exposure channel for feeding a
+   * short-lived secret to a login command (e.g. codex `login --with-access-token`,
+   * 05 §4/§7 #3). Kept OUT of argv/env so it never reaches `/proc/<pid>/cmdline`.
+   */
+  stdin?: string;
   reuse?: string; // pass an existing ref to re-attach (06 §6)
 }
 
@@ -137,8 +143,19 @@ export interface SandboxProvider {
   watchEvents?(): AsyncIterable<ProviderEvent>;
 }
 
-/** Open registry keyed by ProviderId string (not a closed enum, 04 §8). */
+/**
+ * Open registry keyed by ProviderId string (not a closed enum, 04 §8).
+ *
+ * `register` is the extension point itself: an out-of-tree module injects
+ * `SANDBOX_PROVIDER_REGISTRY` and registers its provider from its own
+ * `onModuleInit` — no built-in module's providers array is edited, and the new
+ * provider immediately shows up on `GET /api/providers` and in `create`. A
+ * duplicate `name` is a FAIL-FAST error (04 §8 "name 唯一，冲突启动即 fail-fast"),
+ * never a silent overwrite. `opts.default` moves `defaultProvider` to the newly
+ * registered implementation (built-in `aio` holds it otherwise).
+ */
 export interface ProviderRegistry {
+  register(impl: SandboxProvider, opts?: { default?: boolean }): void;
   get(name: string): SandboxProvider;
   has(name: string): boolean;
   list(): SandboxProvider[];
