@@ -48,7 +48,17 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     if (!mode) {
       throw new CredentialPreparationError('NO_CREDENTIAL', `no active auth mode for ${runtimeId}`);
     }
-    return this.runtimeCredentials.prepareActive(runtimeId, mode);
+    try {
+      return await this.runtimeCredentials.prepareActive(runtimeId, mode);
+    } catch (e) {
+      // 05 §4.2 通用出口纪律 (git & runtime SAME discipline): an authTag mismatch /
+      // unavailable master key presents as revoked (NO_CREDENTIAL → re-auth guidance),
+      // never a 500 — symmetric with `prepareGitAuth`.
+      if (e instanceof DecryptionError) {
+        throw new CredentialPreparationError('NO_CREDENTIAL', 'credential could not be decrypted');
+      }
+      throw e;
+    }
   }
 
   async recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void> {

@@ -7,7 +7,10 @@ import { extractOsc8Urls, stripAnsi } from '../ansi.util';
  *      pty-truncated) → parse OSC-8, never `grep https://`.
  *   2. the 1-year token (`sk-ant-oat01-…`) is printed to stdout and FOLDED across
  *      lines by the pty → rejoin the charset-only fold fragments, strip whitespace.
- * Pure — no IO; the caller wraps the result in SecretMaterial + validates format.
+ * Pure — no IO. The caller validates format (PREFIX+LENGTH+CHARSET) and carries the
+ * plaintext token in the controlled-plaintext `RuntimeCredential` wrapper (`env`,
+ * runtime-adapter.contract) — a裸 string by design (injection writes env/stdin), NOT a
+ * `SecretMaterial`; it is `zeroize()`d after injection (05 §4 明文纪律).
  */
 const TOKEN_PREFIX = 'sk-ant-oat01-';
 const TOKEN_CHAR = /^[A-Za-z0-9_-]+$/;

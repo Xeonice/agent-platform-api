@@ -166,6 +166,13 @@ export class SandboxApplicationService {
       });
       this.persist(sandbox); // save handle (no new transition/event)
 
+      // ── S5 hook (05 §7.1 ②): runtime credential injection wires in HERE, between a
+      // created container and agent readiness — `CREDENTIAL_FACADE.prepareRuntimeCredential`
+      // → adapter `injectCredential(cred, exec)` (writes env/0600 file / feeds stdin) →
+      // `recordRuntimeInjection` (credential_sandbox_bindings ledger, feeds the revoke
+      // coordinator). Left UNWIRED in S4 by design (facade + ledger exist + unit-tested;
+      // no live caller yet) — this is a clean insertion point, not a half-wired state. ──
+
       this.advance(sandbox, 'starting', 'scheduler');
       await provider.start(handle);
 
@@ -192,17 +199,34 @@ export class SandboxApplicationService {
     return sandboxes.map((s) => SandboxMapper.toDto(s, false));
   }
 
-  async destroy(id: string, input: DestroySandboxInput = {}): Promise<void> {
+  /**
+   * Tear down a sandbox. `force` (INTERNAL only — never exposed on the DELETE wire
+   * DTO) SKIPS the graceful `provider.stop()` and goes straight to the force removal
+   * (`provider.destroy` already does `remove({force:true})` — 04 §2.2). The credential
+   * revoke coordinator (05 §4) escalates to `force` when a graceful teardown times out
+   * so a wedged container can never block clearing a revoked credential's bindings.
+   */
+  async destroy(id: string, input: DestroySandboxInput & { force?: boolean } = {}): Promise<void> {
     const sandbox = await this.repo.findById(asSandboxId(id));
     if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
     const provider = this.registry.get(sandbox.provider);
     const handle = this.handleOf(sandbox);
+    const graceful = !(input.force ?? false);
 
     try {
+      // Bring the aggregate to a state from which `destroying` is legal (23 I-SBX-1:
+      // stopped|failed → destroying). `force` skips only the graceful `provider.stop()`
+      // IO — the state walk itself is unchanged so the transition table stays honoured.
       if (sandbox.status === 'running' || sandbox.status === 'idle') {
         this.advance(sandbox, 'stopping', 'user');
-        if (handle) await provider.stop(handle);
+        if (handle && graceful) await provider.stop(handle);
         this.advance(sandbox, 'stopped', 'user');
+      } else if (sandbox.status === 'stopping') {
+        // recover an interrupted graceful attempt (a prior teardown that timed out
+        // inside provider.stop persisted `stopping` before we escalated to force).
+        this.advance(sandbox, 'stopped', 'user');
+      } else if (sandbox.status === 'starting') {
+        this.advance(sandbox, 'failed', 'user'); // starting → failed → destroying
       }
       this.advance(sandbox, 'destroying', 'user');
       if (handle) await provider.destroy(handle);

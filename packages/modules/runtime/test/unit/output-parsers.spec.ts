@@ -35,6 +35,12 @@ describe('codex device-auth parser (golden)', () => {
     expect(auth.tokens?.access_token).toBe('SYNTHETIC-ACCESS-TOKEN-0001');
     expect(auth.tokens?.refresh_token).toBeDefined(); // platform keeps it; never injected
   });
+
+  it('does NOT treat "not logged in" as success (P2: bare `logged in` substring bug)', () => {
+    expect(codexLoginSucceeded(read('codex/v0.43.1/login-notloggedin.txt'))).toBe(false);
+    // guard the exact failure phrasing too, independent of the fixture.
+    expect(codexLoginSucceeded('You are not logged in.')).toBe(false);
+  });
 });
 
 describe('claude setup-token parser (golden)', () => {

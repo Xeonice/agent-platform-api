@@ -54,6 +54,7 @@ function service(list: Credential[]): RuntimeCredentialService {
     clock,
     {} as never,
     undefined,
+    undefined,
   );
 }
 

@@ -26,6 +26,7 @@ import type { RuntimeSecretPayload } from '@platform/credential';
 import { AUTH_HELPER } from '../domain/ports/auth-helper.port';
 import type { AuthHelper, AuthHelperSession } from '../domain/ports/auth-helper.port';
 import { AuthSessionStore } from './auth-session.store';
+import type { AuthOutcomeStatus } from './auth-session.store';
 import { AuthChallenge } from '../domain/value-objects/auth-challenge.vo';
 import { RuntimeSettings } from '../domain/entities/runtime-settings.entity';
 import {
@@ -143,19 +144,23 @@ export class RuntimeApplicationService {
     runtimeId: string,
     challengeRef: string,
   ): Promise<{ status: 'pending' | 'success' | 'expired' | 'error'; maskedIdentifier?: string }> {
+    const now = this.clock.now();
     const entry = this.sessions.get(challengeRef);
-    if (!entry || entry.runtimeId !== runtimeId) {
-      if (this.expiredRef(challengeRef)) return { status: 'expired' };
-      throw new NotFoundException(`unknown challengeRef ${challengeRef}`);
+    if (entry && entry.runtimeId === runtimeId) {
+      // still live: a pending challenge past its TTL reads as `expired`.
+      if (entry.status === 'pending' && entry.expiresAt.getTime() <= now.getTime()) {
+        return { status: 'expired' };
+      }
+      return { status: entry.status, maskedIdentifier: entry.maskedIdentifier };
     }
-    if (entry.expiresAt.getTime() <= this.clock.now().getTime() && entry.status === 'pending') {
-      return { status: 'expired' };
+    // The live entry is gone — a settled device-code login leaves a terminal tombstone
+    // (success/error/expired) so the frontend's next poll still sees a TRUE terminal
+    // state instead of a bare 404 (P2; the frontend's assumed-dead fix depends on this).
+    const outcome = this.sessions.outcome(challengeRef, now);
+    if (outcome && outcome.runtimeId === runtimeId) {
+      return { status: outcome.status, maskedIdentifier: outcome.maskedIdentifier };
     }
-    return { status: entry.status, maskedIdentifier: entry.maskedIdentifier };
-  }
-
-  private expiredRef(_ref: string): boolean {
-    return false;
+    throw new NotFoundException(`unknown challengeRef ${challengeRef}`);
   }
 
   /** POST .../auth/complete — setup-token paste (05 §3). */
@@ -198,6 +203,8 @@ export class RuntimeApplicationService {
     const entry = this.sessions.get(challengeRef);
     if (!entry) return;
     const adapter = this.adapter(runtimeId);
+    let status: AuthOutcomeStatus = 'error';
+    let maskedIdentifier: string | undefined;
     try {
       const cred = await adapter.completeAuth(
         entry.challenge.toDto(),
@@ -209,13 +216,26 @@ export class RuntimeApplicationService {
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
       );
-      entry.maskedIdentifier = await this.storeCredential(runtimeId, cred);
-      entry.status = 'success';
+      maskedIdentifier = await this.storeCredential(runtimeId, cred);
+      status = 'success';
     } catch (e) {
-      entry.status = 'error';
+      // an expired challenge surfaces as a distinct `expired` terminal (vs generic error)
+      // so the frontend can guide "code expired → restart" rather than "login failed".
+      status =
+        e instanceof AdapterAuthError && e.code === 'AUTH_CHALLENGE_EXPIRED' ? 'expired' : 'error';
       this.logger.warn(`device login ${challengeRef} failed: ${(e as Error).message}`);
     } finally {
       await entry.session.dispose();
+      // Drop the heavy live entry (releasing the pty session) and retain only the tiny
+      // terminal tombstone for subsequent polls (P2 memory leak fix).
+      this.sessions.settle(challengeRef, {
+        runtimeId,
+        status,
+        maskedIdentifier,
+        evictAt: entry.expiresAt,
+      });
+      // opportunistically drop any tombstones the frontend never polled (bounds growth).
+      this.sessions.sweepOutcomes(this.clock.now());
     }
   }
 

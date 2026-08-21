@@ -9,8 +9,16 @@ import {
   shiftMs,
 } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
-import { CredentialPreparationError, RUNTIME_SETTINGS_WRITER } from '@platform/contracts';
-import type { CredentialStatus, RuntimeSettingsWriter } from '@platform/contracts';
+import {
+  CredentialPreparationError,
+  RUNTIME_SETTINGS_READER,
+  RUNTIME_SETTINGS_WRITER,
+} from '@platform/contracts';
+import type {
+  CredentialStatus,
+  RuntimeSettingsReader,
+  RuntimeSettingsWriter,
+} from '@platform/contracts';
 import { Credential } from '../domain/entities/credential.entity';
 import { CredentialSandboxBinding } from '../domain/entities/credential-sandbox-binding.entity';
 import { CredentialInjected } from '../domain/events/credential-events';
@@ -94,6 +102,9 @@ export class RuntimeCredentialService {
     @Optional()
     @Inject(RUNTIME_SETTINGS_WRITER)
     private readonly settingsWriter?: RuntimeSettingsWriter,
+    @Optional()
+    @Inject(RUNTIME_SETTINGS_READER)
+    private readonly settingsReader?: RuntimeSettingsReader,
   ) {}
 
   /**
@@ -122,12 +133,20 @@ export class RuntimeCredentialService {
       const existing = (await this.repo.listByRuntime(input.runtimeId, false)).find(
         (c) => c.mode === mode && !c.isRevoked(),
       );
+      // I-RTS-3: `active_auth_method` is seeded ONLY on FIRST config (no settings row
+      // yet). A re-store / refresh of a credential must NOT silently flip the effective
+      // mode back — the ONLY switch entry point is `PUT /auth-mode` (I-RTS-2, with 409).
+      // `activeAuthMethod` returns null iff the runtime has no settings row (the port
+      // contract), so a non-null answer means "already configured → leave it alone".
+      const alreadyConfigured =
+        this.settingsReader !== undefined &&
+        (await this.settingsReader.activeAuthMethod(input.runtimeId)) !== null;
       this.uow.run((tx) => {
         if (existing) this.repo.revokeAndEraseSync(tx, existing.id, now);
         this.repo.saveSync(tx, cred);
-        // First-config (or mode switch during store): the effective mode follows the
-        // credential just stored (I-RTS-3) — SAME tx (R-1 ②). Idempotent upsert.
-        this.settingsWriter?.saveSync(tx, input.runtimeId, mode, now);
+        // First-config only: seed the effective mode to this credential's mode — SAME
+        // tx (R-1 ②). Once a row exists we never re-write it here (I-RTS-3).
+        if (!alreadyConfigured) this.settingsWriter?.saveSync(tx, input.runtimeId, mode, now);
         this.events.publishInTx(tx, cred.pullEvents());
       });
       return { maskedIdentifier: input.maskedIdentifier };

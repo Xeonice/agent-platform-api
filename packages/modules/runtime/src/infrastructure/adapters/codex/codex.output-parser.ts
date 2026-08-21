@@ -22,14 +22,14 @@ export function parseCodexDeviceChallenge(raw: string): CodexDeviceChallenge | n
   return { verificationUrl: url[1], userCode: code[1] };
 }
 
-/** True once the CLI has confirmed the device login succeeded (poll/complete). */
+/**
+ * True once the CLI has confirmed the device login succeeded (poll/complete). Matches
+ * PRECISE success phrases only — a bare `includes('logged in')` also fires on the
+ * FAILURE line "not logged in" (P2), so it is never used.
+ */
 export function codexLoginSucceeded(raw: string): boolean {
   const text = stripAnsi(raw).toLowerCase();
-  return (
-    text.includes('successfully logged in') ||
-    text.includes('logged in') ||
-    text.includes('authentication complete')
-  );
+  return text.includes('successfully logged in') || text.includes('authentication complete');
 }
 
 export interface CodexAuthJson {
