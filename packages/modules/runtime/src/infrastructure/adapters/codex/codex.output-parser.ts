@@ -1,3 +1,4 @@
+import { RUNTIME_REFRESH_TOKEN_PLACEHOLDER } from '@platform/shared-kernel';
 import { stripAnsi } from '../ansi.util';
 
 /**
@@ -45,10 +46,39 @@ export interface CodexAuthJson {
 }
 
 /**
- * Parse `~/.codex/auth.json` (05 §1 ★2 実測 top-level keys). Returns the access
- * token (short-lived) that gets injected via stdin, plus the whole file for the 0600
- * fallback form. The `refresh_token` NEVER leaves the platform (P0-3).
+ * Parse `~/.codex/auth.json` (05 §1 ★2 実測 top-level keys). The `refresh_token` it
+ * contains NEVER leaves the platform (P0-3) — see `sanitizeCodexAuthJson`.
  */
 export function parseCodexAuthJson(jsonText: string): CodexAuthJson {
   return JSON.parse(jsonText) as CodexAuthJson;
+}
+
+/**
+ * Produce the SANITIZED `auth.json` that is the ONLY form ever injected into a sandbox
+ * (05 §1★★ / §4.3 裁决 D-18 ②): every field preserved verbatim, except
+ * `tokens.refresh_token`, whose VALUE becomes the shared-kernel placeholder.
+ *
+ * Two details are load-bearing and must not be "simplified":
+ *  - The FIELD IS KEPT. Deleting it makes codex fail with `missing field
+ *    'refresh_token'` (05 §1★★ 実測); only the VALUE is replaced.
+ *  - Unknown keys survive. The file's shape is OpenAI's, not ours; rebuilding it from
+ *    a known-key allowlist would silently drop whatever the CLI adds next.
+ *
+ * This runs at credential BIRTH (`completeAuth` / `parseRefreshedAuth`), NOT on the
+ * injection path — by the time `injectCredential` runs, the real refresh token is not
+ * reachable at all (`InjectableRuntimeCredential` has no `authFile`).
+ */
+export function sanitizeCodexAuthJson(rawAuthJson: string): string {
+  const parsed: unknown = JSON.parse(rawAuthJson);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('codex auth.json is not a JSON object');
+  }
+  const root = parsed as Record<string, unknown>;
+  const tokens = root.tokens;
+  const sanitizedTokens: Record<string, unknown> =
+    typeof tokens === 'object' && tokens !== null && !Array.isArray(tokens)
+      ? { ...(tokens as Record<string, unknown>) }
+      : {};
+  sanitizedTokens.refresh_token = RUNTIME_REFRESH_TOKEN_PLACEHOLDER;
+  return JSON.stringify({ ...root, tokens: sanitizedTokens });
 }

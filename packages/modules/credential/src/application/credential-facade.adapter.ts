@@ -6,7 +6,8 @@ import type {
   CredentialFacade,
   GitAuthContext,
   GitRemoteScheme,
-  RuntimeCredential,
+  InjectableRuntimeCredential,
+  RefreshableRuntimeCredential,
   RuntimeSettingsReader,
 } from '@platform/contracts';
 import { RuntimeCredentialService } from './runtime-credential.service';
@@ -17,6 +18,7 @@ import type { GitAuthMaterializer } from '../domain/ports/git-auth-materializer.
 import { CredentialSelectionService } from '../domain/services/credential-selection.domain-service';
 import { hostAllowed } from '../domain/services/host.util';
 import { DecryptionError } from '../domain/ports/crypto.port';
+import { MissingPlatformAuthFileError } from '../domain/ports/runtime-credential-materializer.port';
 import { CredentialRevokedError } from '../domain/errors/credential-errors';
 import type { GitObtainedVia } from '../domain/value-objects/obtained-via.vo';
 import type { EncryptedBlob } from '../domain/value-objects/encrypted-blob.vo';
@@ -43,7 +45,11 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     private readonly settingsReader?: RuntimeSettingsReader,
   ) {}
 
-  async prepareRuntimeCredential(runtimeId: string): Promise<RuntimeCredential> {
+  /**
+   * INJECTION out-口 (裁决 D-18): returns an `InjectableRuntimeCredential` — no
+   * `authFile`, so the real `refresh_token` cannot travel down the injection path.
+   */
+  async prepareRuntimeCredential(runtimeId: string): Promise<InjectableRuntimeCredential> {
     const mode = (await this.settingsReader?.activeAuthMethod(runtimeId)) ?? null;
     if (!mode) {
       throw new CredentialPreparationError('NO_CREDENTIAL', `no active auth mode for ${runtimeId}`);
@@ -51,14 +57,37 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     try {
       return await this.runtimeCredentials.prepareActive(runtimeId, mode);
     } catch (e) {
-      // 05 §4.2 通用出口纪律 (git & runtime SAME discipline): an authTag mismatch /
-      // unavailable master key presents as revoked (NO_CREDENTIAL → re-auth guidance),
-      // never a 500 — symmetric with `prepareGitAuth`.
-      if (e instanceof DecryptionError) {
-        throw new CredentialPreparationError('NO_CREDENTIAL', 'credential could not be decrypted');
-      }
-      throw e;
+      throw this.asPreparationError(e);
     }
+  }
+
+  /**
+   * REFRESH out-口 (05 §4.3 / §5.1) — the ONLY method that hands out the complete auth
+   * file with the real `refresh_token`, and only to the refresh scanner. A credential
+   * that carries no platform auth file (api-key, paste-only token, a runtime whose CLI
+   * keeps none) presents as `NO_CREDENTIAL`, symmetric with every other out-口.
+   */
+  async prepareForRefresh(credentialId: string): Promise<RefreshableRuntimeCredential> {
+    try {
+      return await this.runtimeCredentials.prepareForRefresh(credentialId);
+    } catch (e) {
+      throw this.asPreparationError(e);
+    }
+  }
+
+  /**
+   * 05 §4.2 通用出口纪律 (git & runtime SAME discipline): an authTag mismatch /
+   * unavailable master key / a credential with no refreshable material presents as
+   * `NO_CREDENTIAL` (→ re-auth guidance), never a 500 — symmetric with `prepareGitAuth`.
+   */
+  private asPreparationError(e: unknown): unknown {
+    if (e instanceof DecryptionError) {
+      return new CredentialPreparationError('NO_CREDENTIAL', 'credential could not be decrypted');
+    }
+    if (e instanceof MissingPlatformAuthFileError) {
+      return new CredentialPreparationError('NO_CREDENTIAL', e.message);
+    }
+    return e;
   }
 
   async recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void> {

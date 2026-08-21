@@ -15,5 +15,8 @@ export type { CredentialSandboxBindingRepository } from './domain/repositories/c
 export type { CredentialSandboxBinding } from './domain/entities/credential-sandbox-binding.entity';
 export type {
   RuntimeSecretPayload,
+  RuntimeCredentialFileMaterial,
   MaterializedRuntimeCredential,
+  MaterializedRefreshCredential,
 } from './domain/ports/runtime-credential-materializer.port';
+export { MissingPlatformAuthFileError } from './domain/ports/runtime-credential-materializer.port';
