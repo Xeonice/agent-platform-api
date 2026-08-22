@@ -12,6 +12,13 @@ export interface OpenPtyOptions {
   rows: number;
   /** re-attach to an existing session ref (06 §6). */
   reuse?: string;
+  /**
+   * What the pty should run. Since S5 the terminal gateway ALWAYS attaches the
+   * platform-owned tmux session started by provision (`tmux attach -t
+   * platform-agent`, 26 §8) — it no longer decides "is this the first session?"
+   * and no longer calls `buildStartCommand`. Absent ⇒ the sandbox's default shell.
+   */
+  cmd?: string[];
 }
 
 export interface SandboxPtyPort {

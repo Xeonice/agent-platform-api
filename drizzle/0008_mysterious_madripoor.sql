@@ -1,0 +1,1 @@
+ALTER TABLE `sandboxes` ADD `failure_code` text;

@@ -1,151 +1,13 @@
 import { beforeEach, describe, it, expect } from 'vitest';
-import type { Clock, EventBus, IdGenerator, Tx, UnitOfWork } from '@platform/shared-kernel';
-import type {
-  PreparedWorkspace,
-  ProcessSpec,
-  ProcessStream,
-  ProjectFacade,
-  ProviderRegistry,
-  SandboxHandle,
-  SandboxProvider,
-  SandboxProviderCapabilities,
-  SandboxProviderContext,
-  SandboxRuntimeStatus,
-  WorkspacePreparer,
-} from '@platform/contracts';
-import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
 import type { SandboxId } from '@platform/shared-kernel';
-import type { Sandbox } from '../../src/domain/entities/sandbox.entity';
-import type { SandboxRepository } from '../../src/domain/repositories/sandbox.repository';
+import { RuntimeInstallFailedError, ImageContractViolationError } from '@platform/contracts';
+import { FakeAdapter, FakeProvider, harness, waitForStatus } from './_harness';
 
 /**
- * Application-layer test with IN-MEMORY provider doubles (docs/backend/25) — NO
- * docker. Proves the full provision pipeline drives the state machine
- * pending → scheduling → preparing-workspace → creating → starting → running,
- * records the provider handle, and that destroy walks to `destroyed`.
+ * Application-layer tests with IN-MEMORY doubles (docs/backend/25) — NO docker.
+ * Covers the full provision pipeline plus the S5 `starting` 段 cases
+ * T-SBX-31 / 32 / 33 / 34 / 35 and E2E-1-bootstrap's application half.
  */
-const CAPS: SandboxProviderCapabilities = {
-  spawnTty: true,
-  volumeMount: true,
-  updateResources: false,
-  pauseResume: false,
-  snapshot: false,
-  watchEvents: false,
-};
-
-class FakeProvider implements SandboxProvider {
-  readonly capabilities = CAPS;
-  readonly calls: string[] = [];
-  constructor(readonly name: string) {}
-  async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
-    this.calls.push('create');
-    return { provider: this.name, providerSandboxId: `fake-${ctx.sandboxId}` };
-  }
-  async start(): Promise<void> {
-    this.calls.push('start');
-  }
-  async stop(): Promise<void> {
-    this.calls.push('stop');
-  }
-  async destroy(): Promise<void> {
-    this.calls.push('destroy');
-  }
-  async inspect(): Promise<SandboxRuntimeStatus> {
-    return { lifecycleState: 'instance_running' };
-  }
-  async spawn(_h: SandboxHandle, _s: ProcessSpec): Promise<ProcessStream> {
-    throw new Error('not used');
-  }
-}
-
-class InMemorySandboxRepo implements SandboxRepository {
-  readonly store = new Map<string, Sandbox>();
-  async findById(id: SandboxId): Promise<Sandbox | null> {
-    return this.store.get(id) ?? null;
-  }
-  async findByProject(): Promise<Sandbox[]> {
-    return [...this.store.values()];
-  }
-  async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
-    const out: Record<string, number> = {};
-    for (const id of projectIds) out[id] = 0;
-    for (const s of this.store.values()) {
-      if (s.status !== 'destroyed' && out[s.projectId] !== undefined) out[s.projectId] += 1;
-    }
-    return out;
-  }
-  saveSync(_tx: Tx, sandbox: Sandbox): void {
-    sandbox.markPersisted(sandbox.version);
-    this.store.set(sandbox.id, sandbox);
-  }
-}
-
-/** A single-provider registry double (the extension points are proven elsewhere). */
-function registryOf(provider: SandboxProvider): ProviderRegistry {
-  return {
-    defaultProvider: provider.name,
-    register: () => {
-      throw new Error('not used by the provision tests');
-    },
-    get: () => provider,
-    has: (n) => n === provider.name,
-    list: () => [provider],
-  };
-}
-
-function harness() {
-  const provider = new FakeProvider('aio');
-  const registry = registryOf(provider);
-  const wsCalls: string[] = [];
-  const workspace: WorkspacePreparer = {
-    async prepare(id: string): Promise<PreparedWorkspace> {
-      wsCalls.push(`prepare:${id}`);
-      return { hostPath: `/tmp/ws/${id}` };
-    },
-    async cleanup(id, opts): Promise<void> {
-      wsCalls.push(`cleanup:${id}:${opts.keep}`);
-    },
-  };
-  const projectFacade: ProjectFacade = {
-    async getRuntimeContextForTask(projectId) {
-      return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
-    },
-  };
-  const repo = new InMemorySandboxRepo();
-  const uow: UnitOfWork = { run: (fn) => fn({} as Tx) };
-  const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
-  let n = 0;
-  const ids: IdGenerator = { next: () => `sbx-${++n}` };
-  const clock: Clock = { now: () => new Date('2026-08-13T00:00:00.000Z') };
-  const service = new SandboxApplicationService(
-    repo,
-    uow,
-    events,
-    clock,
-    ids,
-    registry,
-    workspace,
-    projectFacade,
-  );
-  return { service, provider, repo, wsCalls };
-}
-
-/** Poll the service until the sandbox reaches `status` (async provision, P1-#1). */
-async function waitForStatus(
-  service: SandboxApplicationService,
-  id: string,
-  status: string,
-  ms = 2000,
-): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const dto = await service.get(id).catch(() => null);
-    if (dto?.status === status) return;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  throw new Error(`sandbox ${id} never reached ${status}`);
-}
-
 describe('SandboxApplicationService provision pipeline (in-memory doubles)', () => {
   let h: ReturnType<typeof harness>;
   beforeEach(() => {
@@ -192,52 +54,323 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
   });
 
   it('destroys the already-created container when start fails (P1-2, no orphan)', async () => {
-    // provider whose create() succeeds but start() throws — the container exists
-    // and MUST be torn down on the failure path.
     class FailingStartProvider extends FakeProvider {
       override async start(): Promise<void> {
         this.calls.push('start');
         throw new Error('agent never became ready');
       }
     }
-    const provider = new FailingStartProvider('aio');
-    const registry = registryOf(provider);
-    const wsCalls: string[] = [];
-    const workspace: WorkspacePreparer = {
-      async prepare(id: string): Promise<PreparedWorkspace> {
-        return { hostPath: `/tmp/ws/${id}` };
-      },
-      async cleanup(id, opts): Promise<void> {
-        wsCalls.push(`cleanup:${id}:${opts.keep}`);
-      },
-    };
-    const projectFacade: ProjectFacade = {
-      async getRuntimeContextForTask(projectId) {
-        return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
-      },
-    };
-    const repo = new InMemorySandboxRepo();
-    const uow: UnitOfWork = { run: (fn) => fn({} as Tx) };
-    const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
-    let n = 0;
-    const ids: IdGenerator = { next: () => `sbx-fail-${++n}` };
-    const clock: Clock = { now: () => new Date('2026-08-13T00:00:00.000Z') };
-    const service = new SandboxApplicationService(
-      repo,
-      uow,
-      events,
-      clock,
-      ids,
-      registry,
-      workspace,
-      projectFacade,
-    );
+    const failing = harness({ providers: [new FailingStartProvider('aio')] });
 
-    // create resolves early (pending); the background provision fails and lands `failed`.
-    const dto = await service.create({ projectId: 'prj-1', runtime: 'x' });
-    await waitForStatus(service, dto.id, 'failed');
+    const dto = await failing.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(failing.service, dto.id, 'failed');
     // create → start(threw) → destroy (teardown) — the container is not orphaned.
-    expect(provider.calls).toEqual(['create', 'start', 'destroy']);
-    expect(wsCalls.some((c) => c.startsWith('cleanup:'))).toBe(true);
+    expect(failing.provider.calls).toEqual(['create', 'start', 'destroy']);
+    expect(failing.wsCalls.some((c) => c.startsWith('cleanup:'))).toBe(true);
   });
 });
+
+describe('T-SBX-31 — the `starting` 段 runs its five steps in the pinned order (03 §4.3)', () => {
+  it('start → agent readiness → ensureRuntimeInstalled → injectCredential → bootstrap', async () => {
+    const cred = injectableCredential();
+    const h = harness({ credential: cred });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const order = h.calls.filter((c) => c !== 'buildStartCommand' && c !== 'buildAttachCommand');
+    expect(order).toEqual([
+      'prepareRuntimeCredential',
+      'provider.create',
+      'provider.start',
+      'agent-readiness-probe',
+      'ensureRuntimeInstalled',
+      'injectCredential',
+      'recordRuntimeInjection',
+      'bootstrapAgentSession',
+    ]);
+  });
+
+  it('injectCredential comes AFTER provider.start — exec derives from spawn (04 §2.3)', async () => {
+    const h = harness({ credential: injectableCredential() });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    // this is the assertion the old (wrong) design would have failed: it injected
+    // BEFORE start, when no `exec` can exist at all.
+    expect(h.calls.indexOf('injectCredential')).toBeGreaterThan(h.calls.indexOf('provider.start'));
+    expect(h.injections).toEqual([`claude-code:${dto.id}`]);
+  });
+
+  it('env-form credential material reaches the sandbox at CREATE time (05 §4.1)', async () => {
+    const h = harness({ credential: injectableCredential() });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+    // claude's credential IS an env var; a per-call env would be visible in `ps`
+    // inside the sandbox and cannot be added to an already-started process.
+    expect(h.provider.lastContext?.env).toMatchObject({
+      CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x',
+    });
+  });
+
+  it('a missing credential is a loud WARNING, not a provisioning failure', async () => {
+    const h = harness(); // no credential configured ⇒ facade throws NO_CREDENTIAL
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+    expect(h.calls).not.toContain('injectCredential');
+    expect(h.injections).toEqual([]);
+  });
+});
+
+describe('T-SBX-32 — install writes never join the create transaction T1', () => {
+  it('the runtime_installations write happens after T1 committed', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    // T1 = the FIRST sandbox transaction, opened+closed inside create().
+    const t1Index = h.txLog.indexOf('tx:sandbox');
+    expect(t1Index).toBe(0);
+
+    await waitForStatus(h.service, dto.id, 'running');
+    const installTx = h.txLog.indexOf('tx:runtime_installations');
+    expect(installTx).toBeGreaterThan(t1Index);
+    // …and it is its OWN transaction, never nested inside a sandbox one.
+    expect(h.txLog.filter((t) => t === 'tx:runtime_installations')).toHaveLength(1);
+  });
+});
+
+describe('T-SBX-33 — install failure lands `failed` with a reason and the compensation', () => {
+  it('starting → failed + failure_code INSTALL_FAILED + full teardown', async () => {
+    const h = harness({ installError: new RuntimeInstallFailedError('npm exited 1') });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'failed');
+
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.status).toBe('failed');
+    // the CODE is its own field — the frontend branches on it, and P22 §1 owns the
+    // sentence. The prose stays detail-only and is never parsed for the code.
+    expect(stored!.failureCode).toBe('INSTALL_FAILED');
+    expect(stored!.failureReason).toBe('npm exited 1');
+    // the transition really came from `starting`
+    const path = stored!.transitions.map((t) => t.to);
+    expect(path.slice(-2)).toEqual(['starting', 'failed']);
+    // compensation identical to any other `starting` failure (24 §1.3)
+    expect(h.provider.calls).toContain('destroy');
+    expect(h.wsCalls.some((c) => c.startsWith(`cleanup:${dto.id}:false`))).toBe(true);
+    // the agent session is never started for a sandbox that has no CLI
+    expect(h.calls).not.toContain('bootstrapAgentSession');
+  });
+});
+
+describe('async failures expose a CODE on both of their two outlets (04 §4)', () => {
+  it('the WS projection of a failed transition carries errorCode', async () => {
+    // provisioning is async: the caller already holds its 202, so this event is the
+    // only LIVE channel a failure code has. `IMAGE_CONTRACT_VIOLATION` in particular
+    // does NOT ride runtime.install_progress, so without this the frontend would have
+    // nothing but generic fallback copy.
+    const h = harness({ installError: new RuntimeInstallFailedError('npm exited 1') });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'failed');
+
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    const failed = stored!.transitions.at(-1)!;
+    expect(failed.to).toBe('failed');
+    // the aggregate raised the code with the transition (the projector reads it off
+    // the domain event — it never re-derives it from prose).
+    expect(stored!.failureCode).toBe('INSTALL_FAILED');
+  });
+
+  it('the DTO carries the persisted code + detail, so a refresh still explains it', async () => {
+    const h = harness({ installError: new RuntimeInstallFailedError('npm exited 1') });
+    const created = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, created.id, 'failed');
+
+    const dto = await h.service.get(created.id);
+    expect(dto.failureCode).toBe('INSTALL_FAILED');
+    expect(dto.failureMessage).toBe('npm exited 1');
+    // …and it is a CODE, not a sentence: the frontend keys P22 §1 copy off it.
+    expect(dto.failureCode).not.toMatch(/\s/);
+  });
+
+  it('an error with no code of its own still gets one (02 §6.2 — never code-less)', async () => {
+    const h = harness({ bootstrapError: new Error('something unlabelled broke') });
+    const created = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, created.id, 'failed');
+    const dto = await h.service.get(created.id);
+    expect(dto.failureCode).toBe('INTERNAL');
+    expect(dto.failureMessage).toBe('something unlabelled broke');
+  });
+
+  it('a healthy sandbox carries neither field', async () => {
+    const h = harness();
+    const created = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, created.id, 'running');
+    const dto = await h.service.get(created.id);
+    expect(dto.failureCode).toBeUndefined();
+    expect(dto.failureMessage).toBeUndefined();
+  });
+});
+
+describe('E2E-1-bootstrapNoTmux (application half) — tmux missing fails LOUDLY', () => {
+  it('IMAGE_CONTRACT_VIOLATION → failed, no buildStartCommand, prompt NOT consumed', async () => {
+    const h = harness({
+      bootstrapError: new ImageContractViolationError('镜像缺少 tmux'),
+    });
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: '重构登录模块',
+    });
+    await waitForStatus(h.service, dto.id, 'failed');
+
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.failureCode).toBe('IMAGE_CONTRACT_VIOLATION');
+    expect(stored!.failureReason).toContain('tmux');
+    // ③ nothing was started ⇒ the instruction was NOT consumed (I-SBX-10): a task
+    // whose session never started has not run its instruction.
+    expect(stored!.initialTask.consumedAt).toBeUndefined();
+    expect(stored!.initialTask.prompt).toBe('重构登录模块');
+    // ④ compensation ran
+    expect(h.provider.calls).toContain('destroy');
+    expect(h.wsCalls.some((c) => c.startsWith(`cleanup:${dto.id}:false`))).toBe(true);
+  });
+});
+
+describe('E2E-1-bootstrap (application half) — the agent session starts in provision', () => {
+  it('with an initialPrompt: buildStartCommand is used and the prompt is consumed', async () => {
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: '把 README 翻译成英文',
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    // NO WS connection was ever made — this is exactly the gap 裁决 D-15 closes.
+    expect(h.calls).toContain('bootstrapAgentSession');
+    expect(h.adapter.startCommands).toHaveLength(1);
+    expect(h.adapter.startCommands[0]).toMatchObject({
+      prompt: '把 README 翻译成英文',
+      headless: false,
+      workdir: '/workspace',
+    });
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.initialTask.consumedAt).toBeInstanceOf(Date);
+  });
+
+  it('without an initialPrompt: a session still starts, from buildAttachCommand', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.adapter.startCommands).toHaveLength(0);
+    expect(h.adapter.attachCommandCalls).toBe(1);
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.initialTask.consumedAt).toBeUndefined();
+  });
+});
+
+describe('T-SBX-34 — bootstrap runs for interactive tasks only', () => {
+  it('headless=true does NOT start an agent session (its path is a later slice)', async () => {
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      headless: true,
+      timeoutMinutes: 30,
+      initialPrompt: 'run the test suite',
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.calls).toContain('ensureRuntimeInstalled');
+    expect(h.calls).not.toContain('bootstrapAgentSession');
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.initialTask.consumedAt).toBeUndefined();
+  });
+});
+
+describe('T-SBX-35 — a restart does NOT replay the initial instruction (I-SBX-10)', () => {
+  it('the second provision uses buildAttachCommand, not buildStartCommand', async () => {
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: '给项目加上 CI',
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+    expect(h.adapter.startCommands).toHaveLength(1);
+
+    // stop, then re-provision the SAME aggregate. `stopped → starting` skips
+    // preparing-workspace (the directory is still there) but re-runs the whole
+    // `starting` 段 — the instance is a fresh process tree (I-SBX-9).
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    stored!.transitionTo('stopping', 'reaper', new Date());
+    stored!.transitionTo('stopped', 'reaper', new Date());
+    await h.provision.restart(stored!, h.provider);
+
+    // still ONE start command in total: the restart went down the attach path.
+    expect(h.adapter.startCommands).toHaveLength(1);
+    expect(h.adapter.attachCommandCalls).toBe(1);
+  });
+});
+
+describe('image input is honoured (TASK-LAUNCH-DECISIONS §3★1)', () => {
+  it('the requested image reaches provider.create AND getInstallPlan', async () => {
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      image: 'localhost:5001/agent-infra/sandbox:latest',
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.provider.lastContext?.image.ref).toBe('localhost:5001/agent-infra/sandbox:latest');
+    expect(h.installInputs[0].image.ref).toBe('localhost:5001/agent-infra/sandbox:latest');
+  });
+
+  it('falls back to the platform default when none is given', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+    expect(h.provider.lastContext?.image.ref).toBe(
+      process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20',
+    );
+  });
+
+  it('rejects a malformed image reference before anything is written', async () => {
+    const h = harness();
+    await expect(
+      h.service.create({ projectId: 'prj-1', runtime: 'claude-code', image: 'bad ref' }),
+    ).rejects.toThrow(/invalid image reference/i);
+    expect(h.repo.store.size).toBe(0);
+  });
+});
+
+describe('the default task name is derived server-side (P21-1 §9)', () => {
+  it('uses the adapter displayName when there is no instruction', async () => {
+    const h = harness({ adapters: [new FakeAdapter('codex', 'Codex')] });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'codex' });
+    expect(dto.name).toBe('Codex · 2026-08-21 00:00');
+  });
+
+  it('uses the first line of the instruction — and never echoes the instruction', async () => {
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: '修复登录页的报错\n细节：看 issue #42',
+    });
+    expect(dto.name).toBe('修复登录页的报错…');
+    expect(JSON.stringify(dto)).not.toContain('issue #42');
+    expect(Object.keys(dto)).not.toContain('initialPrompt');
+  });
+});
+
+function injectableCredential() {
+  return {
+    runtimeId: 'claude-code',
+    obtainedVia: 'setup-token' as const,
+    issuedAt: '2026-08-21T00:00:00.000Z',
+    credentialFiles: [],
+    env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x' },
+    zeroize(): void {},
+  };
+}

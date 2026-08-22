@@ -5,6 +5,7 @@ import { io, type Socket } from 'socket.io-client';
 import { SANDBOX_PTY_PORT, WS_SCHEMA_HASH } from '@platform/contracts';
 import type { TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { expectPasscodeEnabled, useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 import { fakePtyPort } from './_fakes';
 
@@ -17,10 +18,10 @@ import { fakePtyPort } from './_fakes';
 const PASSCODE = 'test-passcode-xyz';
 let app: INestApplication;
 let port: number;
+let restoreEnv: () => void;
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = ':memory:';
-  process.env.ACCESS_PASSCODE = PASSCODE;
+  restoreEnv = useEnv({ DATABASE_URL: ':memory:', ACCESS_PASSCODE: PASSCODE });
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(SANDBOX_PTY_PORT)
     .useValue(fakePtyPort)
@@ -28,6 +29,9 @@ beforeAll(async () => {
   app = moduleRef.createNestApplication();
   setupWebsockets(app);
   await app.init();
+  // the whole point of this spec is that the WS handshake is passcode-gated, so make
+  // the precondition explicit instead of letting a leaked env silently open it up.
+  expectPasscodeEnabled(app, true);
   await app.listen(0);
   const addr = app.getHttpServer().address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -35,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  delete process.env.ACCESS_PASSCODE;
+  restoreEnv?.();
 });
 
 function connect(query: Record<string, string>, auth?: Record<string, string>): Socket {

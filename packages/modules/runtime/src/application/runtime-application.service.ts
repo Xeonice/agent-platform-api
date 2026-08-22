@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
@@ -338,6 +339,11 @@ export class RuntimeApplicationService {
           return new NotFoundException(e.message); // 410-ish; mapped to 404 for MVP
         case 'AUTH_REJECTED':
           return new UnauthorizedException(e.message);
+        case 'INSTALL_FAILED':
+          // 04 §4: 500. Its real exposure is `starting → failed` inside provision
+          // (there is no synchronous response there); this row exists so a future
+          // sync entry point has a rule and 02 §6.2 is satisfied.
+          return new InternalServerErrorException(e.message);
         default:
           return e;
       }

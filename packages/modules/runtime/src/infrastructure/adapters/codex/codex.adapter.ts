@@ -12,9 +12,19 @@ import type {
   RuntimeAuthMethod,
   RuntimeCredential,
   RuntimeCredentialFile,
+  RuntimeInstallPlan,
   RuntimeRefreshCapability,
+  RuntimeTaskSpec,
+  ResolvedImageSpec,
+  SandboxCommand,
   SandboxExecFn,
 } from '@platform/contracts';
+import {
+  imagePreinstalls,
+  npmInstallPlan,
+  probeOnPath,
+  runInstallCommands,
+} from '../install-plan.util';
 import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
 import { validateOpenAiApiKey } from '../../../domain/services/token-format.validator';
 import { readUntil } from '../pty-reader.util';
@@ -29,6 +39,20 @@ const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
 const HOME_PROBE_TIMEOUT_MS = 15_000;
 const WRITE_FILE_TIMEOUT_MS = 30_000;
+
+const CODEX_BINARY = 'codex';
+/**
+ * Turn OFF codex's built-in bwrap sandbox (04 §3 ★2). `--dangerously-bypass-approvals
+ * -and-sandbox` is the other documented spelling; `-s danger-full-access` is the one
+ * verified live in S5.
+ */
+const SANDBOX_OFF_ARGS = ['-s', 'danger-full-access'];
+/**
+ * `install()` takes no image (04 §3), while `getInstallPlan` is keyed on one. The
+ * install COMMANDS are image-independent for an npm-distributed CLI — only the
+ * strategy/estimate differ — so a neutral spec is used to read them back.
+ */
+const ANY_IMAGE: ResolvedImageSpec = { ref: '', digest: '' };
 
 /** Where codex reads its credential — `~/`-relative; `$HOME` is expanded at inject time. */
 const CODEX_AUTH_FILE_PATH = '~/.codex/auth.json';
@@ -237,6 +261,63 @@ export class CodexAdapter implements RuntimeAdapter {
     }
     if (cred.env && Object.keys(cred.env).length > 0) return; // env applied at start
     throw new AdapterAuthError('AUTH_REJECTED', 'no injectable codex credential material');
+  }
+
+  // ── run half (04 §3) ───────────────────────────────────────────────────────
+
+  /**
+   * (image, runtime) verdict — PURE (04 §3 ★1). The AIO default image ships
+   * `@openai/codex` preinstalled (measured 0.139.0), so on that family this is a
+   * zero-install; anywhere else the platform falls back to installing it on start.
+   */
+  getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan {
+    return npmInstallPlan({
+      packageName: '@openai/codex',
+      binary: CODEX_BINARY,
+      preinstalled: imagePreinstalls(imageSpec.ref, 'codex'),
+      // measured on a cold AIO default image; codex is the SMALL one of the two.
+      estimatedInstallSec: 120,
+    });
+  }
+
+  /**
+   * PATH lookup + a real `--version` (RA-01). Never a hard-coded path: the npm prefix
+   * is the user-level `/home/gem/.npm-global` and `codex` actually resolves through an
+   * fnm shim (`/home/gem/.fnm_shell/bin/codex`), so any constant path is wrong on BOTH
+   * built-in providers (04 §2.1★).
+   */
+  isInstalled(exec: SandboxExecFn): Promise<boolean> {
+    return probeOnPath(exec, CODEX_BINARY);
+  }
+
+  /** Re-enterable by construction: `npm i -g` converges on a re-run (RA-02, ~6s). */
+  async install(exec: SandboxExecFn): Promise<void> {
+    await runInstallCommands(exec, this.getInstallPlan(ANY_IMAGE).packageManagerCmds);
+  }
+
+  /**
+   * Start codex on a task. `-s danger-full-access` DISABLES codex's own bwrap sandbox
+   * (04 §3 ★2) — not laziness: bwrap needs a mount namespace, which is refused inside
+   * BOTH providers, and the observed failure mode is vicious (auth succeeds, the model
+   * really runs, every file write is blocked, and the agent simply reports "I can't
+   * change files"). The real boundary is the container/microVM around us, and our own
+   * data-plane agent is already an unauthenticated shell inside it, so the inner layer
+   * blocks nothing that is not already reachable. Making bwrap work would instead mean
+   * granting the container `SYS_ADMIN` — weakening the layer that actually works.
+   */
+  buildStartCommand(task: RuntimeTaskSpec): SandboxCommand {
+    const cmd = [CODEX_BINARY];
+    if (task.headless) cmd.push('exec');
+    cmd.push(...SANDBOX_OFF_ARGS);
+    if (task.headless && task.outputFormat === 'json-stream') cmd.push('--json');
+    if (task.extraArgs) cmd.push(...task.extraArgs);
+    if (task.prompt !== undefined && task.prompt !== '') cmd.push(task.prompt);
+    return { cmd, cwd: task.workdir };
+  }
+
+  /** A plain interactive codex session — same inner-sandbox switch, no instruction. */
+  buildAttachCommand(): SandboxCommand {
+    return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS] };
   }
 
   /**

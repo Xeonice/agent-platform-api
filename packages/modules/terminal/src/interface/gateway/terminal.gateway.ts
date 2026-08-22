@@ -9,20 +9,15 @@ import {
   WebSocketGateway,
 } from '@nestjs/websockets';
 import type { Socket } from 'socket.io';
-import {
-  SANDBOX_PTY_PORT,
-  TERMINAL_AUTHENTICATOR,
-  WS_SCHEMA_HASH,
-  X_SCHEMA_HASH_HEADER,
-} from '@platform/contracts';
+import { TERMINAL_AUTHENTICATOR, WS_SCHEMA_HASH, X_SCHEMA_HASH_HEADER } from '@platform/contracts';
 import type {
   ProcessStream,
-  SandboxPtyPort,
   TerminalAuthenticator,
   TerminalClientFrame,
   TerminalHandshakeCredentials,
   TerminalServerFrame,
 } from '@platform/contracts';
+import { TerminalSessionService } from '../../application/terminal-session.service';
 
 interface Attachment {
   stream: ProcessStream;
@@ -36,6 +31,8 @@ interface Attachment {
  *     first `session` frame; never client-chosen.
  *   - Frames follow shared/10 §7.4 (`type` discriminator; data is plain string).
  *   - Handshake carries X-Schema-Hash (14 §2.5 scheme B): loud reject on mismatch.
+ *   - Since S5 the gateway ALWAYS ATTACHES the tmux session provision started
+ *     (`TerminalSessionService.openSession`); it no longer starts the agent itself.
  *   - tmux re-attach grace window (06 §6) is a SKELETON — S1 kills the pty on
  *     disconnect; `?socketSessionKey=` is accepted for the future reuse path.
  */
@@ -45,7 +42,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
   private readonly attachments = new Map<string, Attachment>();
 
   constructor(
-    @Inject(SANDBOX_PTY_PORT) private readonly pty: SandboxPtyPort,
+    private readonly sessions: TerminalSessionService,
     @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
   ) {}
 
@@ -81,7 +78,10 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
     const reuse = this.readQuery(client, 'socketSessionKey');
 
     try {
-      const stream = await this.pty.openPty(sandboxId, { cols, rows, reuse });
+      // ALWAYS attach the agent session provision already started (26 §8 / 裁决 D-15).
+      // The gateway no longer decides "is this the first session?" and never calls
+      // buildStartCommand — that moved into bootstrapAgentSession.
+      const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse });
       const socketSessionKey = randomBytes(16).toString('hex'); // 128-bit, server-generated
       this.attachments.set(client.id, { stream, socketSessionKey, sandboxId });
 
@@ -92,7 +92,7 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
         client.disconnect(true);
       });
     } catch (e) {
-      this.logger.error(`openPty failed for sandbox ${sandboxId}: ${(e as Error).message}`);
+      this.logger.error(`openSession failed for sandbox ${sandboxId}: ${(e as Error).message}`);
       client.disconnect(true);
     }
   }

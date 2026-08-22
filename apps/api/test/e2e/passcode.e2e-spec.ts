@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { expectPasscodeEnabled, useEnv } from './_env';
 import { PasscodeService } from '../../src/platform/access-passcode/passcode.service';
 
 /**
@@ -13,20 +14,44 @@ import { PasscodeService } from '../../src/platform/access-passcode/passcode.ser
  */
 const PASSCODE = 'S1TestPasscode99';
 let app: INestApplication;
+let restoreEnv: () => void;
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = ':memory:';
-  process.env.ACCESS_PASSCODE = PASSCODE; // enables the guard for this process
+  // save-and-restore, never a bare delete: the e2e project shares ONE process
+  // (singleFork), so erasing a key leaks into every later spec (_env.ts).
+  restoreEnv = useEnv({ DATABASE_URL: ':memory:', ACCESS_PASSCODE: PASSCODE });
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
   await app.init();
+  await app.listen(0);
+  // fail HERE, naming the cause, rather than 20 lines later as `expected 200 to be 401`
+  expectPasscodeEnabled(app, true);
 });
 
+/**
+ * Build a SEPARATE app (and therefore a separate `PasscodeAttemptLimiter`).
+ *
+ * The lockout case deliberately drives the limiter into a 5-MINUTE lock, and the
+ * limiter is per-app in-memory state keyed by client IP. Sharing the app would mean
+ * every later test in this file gets 429 instead of the 401 it asserts — i.e. the
+ * file would only pass in one particular test order, which is exactly the kind of
+ * hidden coupling that makes a suite untrustworthy when the runner reorders it.
+ */
+async function buildIsolatedApp(): Promise<INestApplication> {
+  const ref = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const isolated = ref.createNestApplication();
+  isolated.setGlobalPrefix('api');
+  isolated.useGlobalPipes(new ZodValidationPipe());
+  await isolated.init();
+  await isolated.listen(0);
+  return isolated;
+}
+
 afterAll(async () => {
-  delete process.env.ACCESS_PASSCODE;
   await app?.close();
+  restoreEnv?.();
 });
 
 describe('access passcode guard', () => {
@@ -56,15 +81,25 @@ describe('access passcode guard', () => {
   });
 
   it('locks for 5 minutes after 5 consecutive failures (429 + retryAfterSec)', async () => {
-    const server = app.getHttpServer();
-    for (let i = 0; i < 5; i++) {
-      await request(server).get('/api/sandboxes?projectId=p').set('x-access-passcode', 'wrong');
+    // own app ⇒ own limiter: this case ends with a 5-minute lock, and leaving that on
+    // the shared app would make every other test here order-dependent.
+    const isolated = await buildIsolatedApp();
+    try {
+      const server = isolated.getHttpServer();
+      for (let i = 0; i < 5; i++) {
+        await request(server)
+          .get('/api/sandboxes?projectId=p')
+          .set('x-access-passcode', 'wrong')
+          .expect(401); // a fresh limiter ⇒ the first five really are 401, not "≤5"
+      }
+      const locked = await request(server)
+        .get('/api/sandboxes?projectId=p')
+        .set('x-access-passcode', 'wrong')
+        .expect(429);
+      expect(locked.body.code).toBe('PASSCODE_LOCKED');
+      expect(locked.body.retryAfterSec).toBeGreaterThan(0);
+    } finally {
+      await isolated.close();
     }
-    const locked = await request(server)
-      .get('/api/sandboxes?projectId=p')
-      .set('x-access-passcode', 'wrong')
-      .expect(429);
-    expect(locked.body.code).toBe('PASSCODE_LOCKED');
-    expect(locked.body.retryAfterSec).toBeGreaterThan(0);
   });
 });

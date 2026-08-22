@@ -247,20 +247,59 @@ describe.skipIf(!runnable)(
           if (session.type === 'session') {
             expect(session.socketSessionKey).toMatch(/^[0-9a-f]{32}$/); // 128-bit, server-generated
           }
-          sock.emit('frame', { type: 'input', data: 'ls /\n' });
-          const out = await waitForOutput(sock, /\b(bin|etc|usr)\b/);
-          expect(out).toMatch(/\b(bin|etc|usr)\b/);
+          // S5 (裁决 D-15 / 26 §8): the gateway ATTACHES the tmux session provision
+          // already started, and that session is running the AGENT CLI — not a shell.
+          // Wait for the agent's own banner: it proves the whole S5 chain end to end
+          // (CLI verified present → tmux session started detached by provision → the
+          // gateway attached it), and it proves `ProcessSpec.cmd` now reaches the tty
+          // side at all, which it did not before (04 §2.3★「仍然存在的限制」).
+          // NB the tolerant separator: the banner arrives as a tmux-redrawn frame where
+          // every word is separated by cursor-movement escapes, and `stripAnsi` here
+          // removes the CSI bodies but leaves the bare ESC bytes behind — `\s*` would
+          // not match those, which is exactly the kind of intermittent
+          // "assertion passes on one render and not the next" this comment exists to
+          // stop someone re-introducing.
+          await waitForOutput(sock, /Claude[^\w]{0,16}Code/i, 20000);
+
+          // The workspace round-trip now goes over the one-shot EXEC data plane rather
+          // than by typing into the terminal: since S5 the terminal is the AGENT's
+          // (a full-screen TUI that owns the keyboard), so driving shell commands
+          // through it would be testing the agent's input handling, not ours. The
+          // exec path is the same in-sandbox agent and the same bind mount.
+          const shell = async (script: string): Promise<string> =>
+            collectStream(
+              await app
+                .get<ProviderRegistry>(SANDBOX_PROVIDER_REGISTRY)
+                .get(provider)
+                .spawn(
+                  {
+                    provider,
+                    providerSandboxId: (await docker.getContainer(containerName).inspect()).Id,
+                    agentAuthToken:
+                      (
+                        await app
+                          .get<SandboxRepository>(SANDBOX_REPOSITORY)
+                          .findById(asSandboxId(sandboxId))
+                      )?.agentAuthToken ?? undefined,
+                  },
+                  { tty: false, cmd: ['sh', '-c', script] },
+                ),
+            );
+
+          expect(await shell('ls /')).toMatch(/\b(bin|etc|usr)\b/);
+
+          // The platform's tmux session is REALLY alive inside the sandbox, held by the
+          // sandbox's own tmux server — which is why a backend restart cannot end it.
+          // `has-session` + echo puts the verdict on STDOUT: `tmux ls` answers on
+          // stderr, which `toExecFn` does not carry (04 §2.4).
+          expect(await shell('tmux has-session -t platform-agent; echo rc=$?')).toContain('rc=0');
 
           // workspace bind-mount is REALLY usable by the non-root agent user (the
           // WorkspacePreparer 0777 fix). host → box: seed a file, read it in-sandbox.
           writeFileSync(resolve(wsDir, 'host-seed.txt'), 'HOST_SEED_AIO\n');
-          sock.emit('frame', { type: 'input', data: 'cat /workspace/host-seed.txt\n' });
-          await waitForOutput(sock, /HOST_SEED_AIO/);
+          expect(await shell('cat /workspace/host-seed.txt')).toContain('HOST_SEED_AIO');
           // box → host: the sandbox writes /workspace, the host sees it.
-          sock.emit('frame', {
-            type: 'input',
-            data: 'echo BOX_WROTE_AIO > /workspace/box-out.txt\n',
-          });
+          await shell('echo BOX_WROTE_AIO > /workspace/box-out.txt');
           await waitForFileContains(resolve(wsDir, 'box-out.txt'), 'BOX_WROTE_AIO');
         } finally {
           sock.disconnect();

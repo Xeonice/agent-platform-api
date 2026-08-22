@@ -50,6 +50,20 @@
       "when": 1787322301948,
       "tag": "0006_smiling_zarek",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787331247841,
+      "tag": "0007_woozy_scream",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787333772340,
+      "tag": "0008_mysterious_madripoor",
+      "breakpoints": true
     }
   ]
 }

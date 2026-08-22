@@ -22,5 +22,12 @@ export class SandboxStateChanged implements DomainEvent {
     readonly from: SandboxStatus,
     readonly to: SandboxStatus,
     readonly occurredAt: Date,
+    /**
+     * Set only when `to === 'failed'`: the machine-readable cause, carried on the
+     * event so the WS projection can hand the frontend a CODE rather than leaving it
+     * to guess. Provisioning is async, so this event is the only LIVE channel a
+     * failure has (04 §4) — the same code is persisted for the post-refresh read.
+     */
+    readonly errorCode?: string,
   ) {}
 }

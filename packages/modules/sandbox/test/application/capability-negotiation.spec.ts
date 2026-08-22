@@ -1,30 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { HttpException } from '@nestjs/common';
-import type {
-  Clock,
-  EventBus,
-  IdGenerator,
-  SandboxId,
-  Tx,
-  UnitOfWork,
-} from '@platform/shared-kernel';
-import type {
-  CreateSandboxInput,
-  PreparedWorkspace,
-  ProcessSpec,
-  ProcessStream,
-  ProjectFacade,
-  ProviderRegistry,
-  SandboxHandle,
-  SandboxProvider,
-  SandboxProviderCapabilities,
-  SandboxProviderContext,
-  SandboxRuntimeStatus,
-  WorkspacePreparer,
-} from '@platform/contracts';
-import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
-import type { Sandbox } from '../../src/domain/entities/sandbox.entity';
-import type { SandboxRepository } from '../../src/domain/repositories/sandbox.repository';
+import type { CreateSandboxInput, SandboxProviderCapabilities } from '@platform/contracts';
+import { FakeProvider, FULL_CAPS as FULL, harness as makeHarness } from './_harness';
 
 /**
  * Capabilities協商 (docs/backend/04 §5): the two rules that have a REAL platform branch
@@ -32,100 +9,12 @@ import type { SandboxRepository } from '../../src/domain/repositories/sandbox.re
  * 「能力发现」 endpoint's application half. This is also the FIRST producer of
  * `UNSUPPORTED_CAPABILITY`: before this slice the error code had no throw site at all.
  */
-const FULL: SandboxProviderCapabilities = {
-  spawnTty: true,
-  volumeMount: true,
-  updateResources: true,
-  pauseResume: true,
-  snapshot: true,
-  watchEvents: true,
-};
-
-class FakeProvider implements SandboxProvider {
-  readonly calls: string[] = [];
-  constructor(
-    readonly name: string,
-    readonly capabilities: SandboxProviderCapabilities,
-  ) {}
-  async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
-    this.calls.push('create');
-    return { provider: this.name, providerSandboxId: `fake-${ctx.sandboxId}` };
-  }
-  async start(): Promise<void> {
-    this.calls.push('start');
-  }
-  async stop(): Promise<void> {}
-  async destroy(): Promise<void> {}
-  async inspect(): Promise<SandboxRuntimeStatus> {
-    return { lifecycleState: 'instance_running' };
-  }
-  async spawn(_h: SandboxHandle, _s: ProcessSpec): Promise<ProcessStream> {
-    throw new Error('not used');
-  }
-}
-
-class InMemorySandboxRepo implements SandboxRepository {
-  readonly store = new Map<string, Sandbox>();
-  async findById(id: SandboxId): Promise<Sandbox | null> {
-    return this.store.get(id) ?? null;
-  }
-  async findByProject(): Promise<Sandbox[]> {
-    return [...this.store.values()];
-  }
-  async countActiveByProject(): Promise<Record<string, number>> {
-    return {};
-  }
-  saveSync(_tx: Tx, sandbox: Sandbox): void {
-    sandbox.markPersisted(sandbox.version);
-    this.store.set(sandbox.id, sandbox);
-  }
+function provider(name: string, caps: SandboxProviderCapabilities): FakeProvider {
+  return new FakeProvider(name, caps);
 }
 
 function harness(providers: FakeProvider[], defaultProvider = providers[0].name) {
-  const byName = new Map(providers.map((p) => [p.name, p]));
-  const registry: ProviderRegistry = {
-    defaultProvider,
-    register: (p) => {
-      byName.set(p.name, p as FakeProvider);
-    },
-    get: (n) => {
-      const p = byName.get(n);
-      if (!p) throw new Error(`no provider ${n}`);
-      return p;
-    },
-    has: (n) => byName.has(n),
-    list: () => [...byName.values()],
-  };
-  const workspace: WorkspacePreparer = {
-    async prepare(id: string): Promise<PreparedWorkspace> {
-      return { hostPath: `/tmp/ws/${id}` };
-    },
-    async cleanup(): Promise<void> {},
-  };
-  let projectLookups = 0;
-  const projectFacade: ProjectFacade = {
-    async getRuntimeContextForTask(projectId) {
-      projectLookups += 1;
-      return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
-    },
-  };
-  const repo = new InMemorySandboxRepo();
-  const uow: UnitOfWork = { run: (fn) => fn({} as Tx) };
-  const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
-  let n = 0;
-  const ids: IdGenerator = { next: () => `sbx-${++n}` };
-  const clock: Clock = { now: () => new Date('2026-08-21T00:00:00.000Z') };
-  const service = new SandboxApplicationService(
-    repo,
-    uow,
-    events,
-    clock,
-    ids,
-    registry,
-    workspace,
-    projectFacade,
-  );
-  return { service, registry, repo, projectLookups: () => projectLookups };
+  return makeHarness({ providers, defaultProvider });
 }
 
 const base: CreateSandboxInput = { projectId: 'prj-1', runtime: 'claude-code' };
@@ -145,7 +34,7 @@ async function expectUnsupported(p: Promise<unknown>): Promise<HttpException> {
 
 describe('create-time capability negotiation (04 §5 创建前静态校验)', () => {
   it('rejects a request that requires a capability the provider lacks — WITHOUT scheduling', async () => {
-    const noSnapshot = new FakeProvider('aio', { ...FULL, snapshot: false });
+    const noSnapshot = provider('aio', { ...FULL, snapshot: false });
     const h = harness([noSnapshot]);
 
     const err = await expectUnsupported(h.service.create({ ...base, require: { snapshot: true } }));
@@ -158,7 +47,7 @@ describe('create-time capability negotiation (04 §5 创建前静态校验)', ()
   });
 
   it('lets the same request through on a provider that DOES advertise the bit', async () => {
-    const withSnapshot = new FakeProvider('aio', FULL);
+    const withSnapshot = provider('aio', FULL);
     const h = harness([withSnapshot]);
 
     const dto = await h.service.create({ ...base, require: { snapshot: true } });
@@ -167,7 +56,7 @@ describe('create-time capability negotiation (04 §5 创建前静态校验)', ()
   });
 
   it('checks every requested bit, not just snapshot', async () => {
-    const p = new FakeProvider('aio', { ...FULL, pauseResume: false, updateResources: false });
+    const p = provider('aio', { ...FULL, pauseResume: false, updateResources: false });
     const h = harness([p]);
 
     await expectUnsupported(h.service.create({ ...base, require: { pauseResume: true } }));
@@ -178,8 +67,8 @@ describe('create-time capability negotiation (04 §5 创建前静态校验)', ()
   });
 
   it('the requirement is evaluated against the REQUESTED provider, not the default', async () => {
-    const aio = new FakeProvider('aio', FULL);
-    const lite = new FakeProvider('boxlite', { ...FULL, snapshot: false });
+    const aio = provider('aio', FULL);
+    const lite = provider('boxlite', { ...FULL, snapshot: false });
     const h = harness([aio, lite], 'aio');
 
     await expectUnsupported(
@@ -193,7 +82,7 @@ describe('create-time capability negotiation (04 §5 创建前静态校验)', ()
 
 describe('spawnTty is required unconditionally (04 §2.5 spawnTty row)', () => {
   it('refuses to create on a provider that cannot spawn a TTY, even with no `require`', async () => {
-    const headlessOnly = new FakeProvider('noTty', { ...FULL, spawnTty: false });
+    const headlessOnly = provider('noTty', { ...FULL, spawnTty: false });
     const h = harness([headlessOnly]);
 
     const err = await expectUnsupported(h.service.create(base));
@@ -204,7 +93,7 @@ describe('spawnTty is required unconditionally (04 §2.5 spawnTty row)', () => {
   });
 
   it('a TTY-capable provider is unaffected', async () => {
-    const ok = new FakeProvider('aio', FULL);
+    const ok = provider('aio', FULL);
     const h = harness([ok]);
     await expect(h.service.create(base)).resolves.toMatchObject({ status: 'pending' });
   });
@@ -212,8 +101,8 @@ describe('spawnTty is required unconditionally (04 §2.5 spawnTty row)', () => {
 
 describe('capability discovery (04 §5 能力发现)', () => {
   it('projects the whole registry — all 6 bits per provider + which one is default', () => {
-    const aio = new FakeProvider('aio', FULL);
-    const lite = new FakeProvider('boxlite', { ...FULL, updateResources: false, snapshot: false });
+    const aio = provider('aio', FULL);
+    const lite = provider('boxlite', { ...FULL, updateResources: false, snapshot: false });
     const h = harness([aio, lite], 'aio');
 
     expect(h.service.listProviders()).toEqual([
@@ -227,12 +116,12 @@ describe('capability discovery (04 §5 能力发现)', () => {
   });
 
   it('is REGISTRY-driven: a provider registered after boot appears with no code change', () => {
-    const aio = new FakeProvider('aio', FULL);
+    const aio = provider('aio', FULL);
     const h = harness([aio], 'aio');
     expect(h.service.listProviders().map((p) => p.name)).toEqual(['aio']);
 
     // exactly what an out-of-tree module does in its onModuleInit
-    const acme = new FakeProvider('acme', { ...FULL, pauseResume: false });
+    const acme = provider('acme', { ...FULL, pauseResume: false });
     h.registry.register(acme);
 
     const rows = h.service.listProviders();

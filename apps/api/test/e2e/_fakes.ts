@@ -52,6 +52,29 @@ export class EchoProcessStream implements ProcessStream {
   }
 }
 
+/**
+ * A one-shot exec double: replays output then the exit code, so the platform's
+ * `toExecFn` (which resolves on `onExit`) actually settles. Without it every
+ * `starting`-段 step that needs an exec — install probe, credential injection, the
+ * tmux self-check — would hang forever and the sandbox would sit in `starting`.
+ */
+export class FakeExecProcessStream implements ProcessStream {
+  readonly ref = 'fake-exec-ref';
+  constructor(
+    private readonly output: string = '',
+    private readonly code: number = 0,
+  ) {}
+  onData(cb: (c: Buffer) => void): void {
+    cb(Buffer.from(this.output, 'utf8'));
+  }
+  write(): void {}
+  resize(): void {}
+  onExit(cb: (c: number | null) => void): void {
+    cb(this.code);
+  }
+  async kill(): Promise<void> {}
+}
+
 class FakeProvider implements SandboxProvider {
   readonly capabilities = CAPS;
   constructor(readonly name: string) {}
@@ -64,8 +87,9 @@ class FakeProvider implements SandboxProvider {
   async inspect(): Promise<SandboxRuntimeStatus> {
     return { lifecycleState: 'instance_running' };
   }
-  async spawn(_h: SandboxHandle, _s: ProcessSpec): Promise<ProcessStream> {
-    return new EchoProcessStream();
+  async spawn(_h: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
+    // tty:false is an EXEC (04 §2.3) and must terminate; tty:true is a live terminal.
+    return spec.tty ? new EchoProcessStream() : new FakeExecProcessStream('fake 1.0.0', 0);
   }
 }
 

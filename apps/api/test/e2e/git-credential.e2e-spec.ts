@@ -77,6 +77,7 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
     app.setGlobalPrefix('api');
     app.useGlobalPipes(new ZodValidationPipe());
     await app.init();
+    await app.listen(0);
   }, 60_000);
 
   afterAll(async () => {

@@ -40,7 +40,14 @@ export class SandboxEventProjector implements OnApplicationBootstrap {
     }
     if (e instanceof SandboxStateChanged) {
       const out: SandboxWsEvent[] = [
-        { event: 'sandbox.status_changed', sandboxId: e.sandboxId, status: e.to },
+        {
+          event: 'sandbox.status_changed',
+          sandboxId: e.sandboxId,
+          status: e.to,
+          // present only on `failed` — the LIVE channel for a failure code, since an
+          // async provision has no HTTP response left to carry one (04 §4).
+          errorCode: e.errorCode,
+        },
       ];
       if (e.to === 'destroyed') out.push({ event: 'sandbox.removed', sandboxId: e.sandboxId });
       return out;

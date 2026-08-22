@@ -1,4 +1,4 @@
-import type { SandboxStatus } from './schemas/enums';
+import type { RuntimeInstallStatus, SandboxStatus } from './schemas/enums';
 
 /**
  * WS frame contract — SYNC WITH shared/10 §7.4 (the single canonical definition).
@@ -25,13 +25,28 @@ export type TerminalServerFrame =
   | { type: 'session'; socketSessionKey: string };
 
 // ── /events channel (discriminator: event) ──
-// SYNC WITH shared/10 §7.4 (canonical union, 6 variants). `status` is the
+// SYNC WITH shared/10 §7.4 (canonical union, 7 variants). `status` is the
 // SandboxStatus enum (NOT a bare string). S1 PRODUCES only sandbox.created /
 // sandbox.status_changed / sandbox.removed; waiting_input (S4), clone_progress
 // (S2) and runtime-auth.status_changed (S3) are defined here but not yet emitted.
 export type SandboxWsEvent =
   | { event: 'sandbox.created'; sandboxId: string; projectId: string }
-  | { event: 'sandbox.status_changed'; sandboxId: string; status: SandboxStatus; phase?: string }
+  /**
+   * `errorCode` is present only on `status:'failed'` — the code (never a sentence)
+   * behind the failure, so the frontend can render the P22 §1 人话 immediately instead
+   * of a generic fallback. Async provisioning means there is no HTTP response left to
+   * carry it (the caller holds its 202 already), and `runtime.install_progress` only
+   * covers install failures — `IMAGE_CONTRACT_VIOLATION` has no other live channel.
+   * The same code is also persisted on `SandboxDto.failureCode`, because a WS event
+   * missed is gone and a refresh must still show the reason.
+   */
+  | {
+      event: 'sandbox.status_changed';
+      sandboxId: string;
+      status: SandboxStatus;
+      phase?: string;
+      errorCode?: string;
+    }
   | { event: 'sandbox.removed'; sandboxId: string }
   | { event: 'sandbox.waiting_input'; sandboxId: string; waiting: boolean; sessionId?: string }
   | {
@@ -43,7 +58,26 @@ export type SandboxWsEvent =
       percent?: number;
       errorCode?: string;
     }
-  | { event: 'runtime-auth.status_changed'; runtime: string };
+  | { event: 'runtime-auth.status_changed'; runtime: string }
+  /**
+   * Install progress of the runtime CLI inside a sandbox's `starting` 段 (03 §4.3 ③).
+   *
+   * WHY A SEVENTH EVENT RATHER THAN REUSING `sandbox.status_changed` (T-3): while the
+   * CLI installs, `sandbox.status` is CONSTANT at `starting` — measured at 753s for a
+   * cold `claude-code` (04 §3 ★1). Folding progress into `status_changed` would emit a
+   * run of "state changes" where no state changed, breaking that event's documented
+   * "EVERY state-machine transition" semantics and the frontend's patch behaviour.
+   * It DOES go through the Outbox (its源 event does), because a dropped frame would
+   * leave the progress card pinned on stale copy forever.
+   */
+  | {
+      event: 'runtime.install_progress';
+      sandboxId: string;
+      runtime: string;
+      status: RuntimeInstallStatus;
+      versionDetected?: string;
+      errorCode?: string;
+    };
 
 /**
  * Canonical, order-stable description of the frame shapes. Kept as documentation
@@ -53,10 +87,11 @@ export type SandboxWsEvent =
 export const WS_PROTOCOL_CANONICAL =
   'terminal.client:input{data},resize{cols,rows},ping|' +
   'terminal.server:data{data},exit{code},pong,session{socketSessionKey}|' +
-  'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?},' +
+  'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?,errorCode?},' +
   'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
   'project.clone_progress{projectId,phase,receivedBytes?,totalBytes?,percent?,errorCode?},' +
-  'runtime-auth.status_changed{runtime}';
+  'runtime-auth.status_changed{runtime},' +
+  'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}';
 
 /**
  * X-Schema-Hash the two repos compare at the /terminal handshake (shared/14 §2.5).

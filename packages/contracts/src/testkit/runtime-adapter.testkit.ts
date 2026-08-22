@@ -235,6 +235,44 @@ export function runRuntimeAdapterContractTests(
       }
     });
 
+    it('RA-07 (MUST): buildStartCommand()/buildAttachCommand() are non-empty and PURE', () => {
+      const adapter = factory();
+      const task = { prompt: 'do the thing', headless: false, workdir: '/workspace' };
+      for (const [label, build] of [
+        ['buildStartCommand', () => adapter.buildStartCommand(task)],
+        ['buildAttachCommand', () => adapter.buildAttachCommand()],
+      ] as const) {
+        const command = build();
+        expect(Array.isArray(command.cmd), `${label}: cmd must be an argv array`).toBe(true);
+        expect(command.cmd.length, `${label}: cmd must not be empty`).toBeGreaterThan(0);
+        for (const token of command.cmd) {
+          expect(typeof token, `${label}: argv token must be a string`).toBe('string');
+        }
+        // Pure ⇒ same input, same output, no IO. The platform calls these inside the
+        // provision workflow AND on the terminal attach path; a hidden IO or a
+        // non-deterministic result would make those two disagree.
+        expect(build(), `${label} must be pure`).toEqual(command);
+      }
+    });
+
+    it('RA-07 (MUST): getInstallPlan() is a PURE, well-formed verdict on the image', () => {
+      const adapter = factory();
+      const image = { ref: 'example.invalid/some/image:tag', digest: 'sha256:deadbeef' };
+      const plan = adapter.getInstallPlan(image);
+      expect(['preinstalled', 'install-on-start', 'sidecar-inject']).toContain(plan.strategy);
+      // requiredBinaries[0] is what the platform runs `--version` on to fill
+      // `runtime_installations.version_detected` (13 §2.3.2) — without it the platform
+      // would have to hard-code a per-runtime executable name.
+      expect(plan.requiredBinaries.length, 'requiredBinaries must name the CLI').toBeGreaterThan(0);
+      expect(Array.isArray(plan.packageManagerCmds)).toBe(true);
+      if (plan.strategy === 'install-on-start') {
+        expect(plan.packageManagerCmds.length, 'install-on-start needs commands').toBeGreaterThan(
+          0,
+        );
+      }
+      expect(adapter.getInstallPlan(image), 'getInstallPlan must be pure').toEqual(plan);
+    });
+
     if (illegalMethod) {
       it('RA-03 (MUST): beginAuth() rejects a method outside getAuthMethods()', async () => {
         let resolved = false;

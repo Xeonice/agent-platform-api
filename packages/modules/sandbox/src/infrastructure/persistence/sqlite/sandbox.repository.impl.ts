@@ -4,6 +4,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { SandboxId, ProjectId, Tx } from '@platform/shared-kernel';
 import { Sandbox } from '../../../domain/entities/sandbox.entity';
+import { InitialTask } from '../../../domain/value-objects/initial-task.vo';
 import type { SandboxStatus } from '../../../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../../../domain/entities/state-transition.entity';
 import type { SandboxRepository } from '../../../domain/repositories/sandbox.repository';
@@ -80,7 +81,9 @@ export class SqliteSandboxRepository implements SandboxRepository {
       .values({
         id: sandbox.id as string,
         projectId: sandbox.projectId as string,
+        name: sandbox.name,
         runtime: sandbox.runtime,
+        imageRef: sandbox.imageRef,
         provider: sandbox.provider,
         status: sandbox.status,
         headless: sandbox.headless,
@@ -90,6 +93,10 @@ export class SqliteSandboxRepository implements SandboxRepository {
         workspacePath: sandbox.workspacePath,
         agentEndpointPort: sandbox.agentEndpointPort,
         agentAuthToken: sandbox.agentAuthToken,
+        initialPrompt: sandbox.initialTask.prompt ?? null,
+        initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
+        failureCode: sandbox.failureCode,
+        failureReason: sandbox.failureReason,
         version: sandbox.version,
         createdAt,
         updatedAt,
@@ -97,6 +104,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       .onConflictDoUpdate({
         target: sandboxes.id,
         set: {
+          name: sandbox.name,
           status: sandbox.status,
           timeoutMinutes: sandbox.timeoutMinutes,
           idleTimeoutSec: sandbox.idleTimeoutSec,
@@ -104,6 +112,11 @@ export class SqliteSandboxRepository implements SandboxRepository {
           workspacePath: sandbox.workspacePath,
           agentEndpointPort: sandbox.agentEndpointPort,
           agentAuthToken: sandbox.agentAuthToken,
+          // the instruction itself never changes after T1; only its consumed marker
+          // moves (once, forward) — see I-SBX-10.
+          initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
+          failureCode: sandbox.failureCode,
+          failureReason: sandbox.failureReason,
           version: sandbox.version,
           updatedAt,
         },
@@ -133,7 +146,9 @@ export class SqliteSandboxRepository implements SandboxRepository {
       id: row.id as SandboxId,
       projectId: row.projectId as ProjectId,
       runtime: row.runtime,
+      imageRef: row.imageRef ?? '',
       provider: row.provider,
+      name: row.name ?? '',
       status: row.status as SandboxStatus,
       headless: row.headless,
       timeoutMinutes: row.timeoutMinutes,
@@ -142,6 +157,12 @@ export class SqliteSandboxRepository implements SandboxRepository {
       providerSandboxId: row.providerHandle,
       agentEndpointPort: row.agentEndpointPort,
       agentAuthToken: row.agentAuthToken,
+      initialTask: InitialTask.create({
+        prompt: row.initialPrompt,
+        consumedAt: row.initialPromptConsumedAt,
+      }),
+      failureCode: row.failureCode,
+      failureReason: row.failureReason,
       version: row.version,
       transitions: transitions.map((t) => ({
         from: t.fromStatus as SandboxStatus | null,

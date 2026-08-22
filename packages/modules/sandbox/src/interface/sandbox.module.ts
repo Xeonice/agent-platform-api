@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import {
+  SANDBOX_EXEC_PORT,
   SANDBOX_PROVIDER_REGISTRY,
   SANDBOX_PTY_PORT,
   SANDBOX_FACADE,
@@ -8,6 +9,8 @@ import {
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
 import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
+import { SandboxExecAdapter } from '../application/sandbox-exec.adapter';
+import { ProvisionSandboxWorkflow } from '../application/workflows/provision-sandbox.workflow';
 import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
 import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
@@ -40,6 +43,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
   controllers: [SandboxController, ProviderController],
   providers: [
     SandboxApplicationService,
+    ProvisionSandboxWorkflow,
     SandboxMcpTools,
     { provide: SANDBOX_REPOSITORY, useClass: SqliteSandboxRepository },
     { provide: WORKSPACE_PREPARER, useClass: FsWorkspacePreparer },
@@ -48,11 +52,18 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     BoxliteSandboxProvider,
     { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
     { provide: SANDBOX_PTY_PORT, useClass: SandboxPtyAdapter },
+    { provide: SANDBOX_EXEC_PORT, useClass: SandboxExecAdapter },
     { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
     RuntimeReconciler,
     SandboxEventProjector,
     CredentialRevokedHandler,
   ],
-  exports: [SandboxApplicationService, SANDBOX_PROVIDER_REGISTRY, SANDBOX_PTY_PORT, SANDBOX_FACADE],
+  exports: [
+    SandboxApplicationService,
+    SANDBOX_PROVIDER_REGISTRY,
+    SANDBOX_PTY_PORT,
+    SANDBOX_EXEC_PORT,
+    SANDBOX_FACADE,
+  ],
 })
 export class SandboxModule {}

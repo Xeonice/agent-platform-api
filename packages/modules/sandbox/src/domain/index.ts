@@ -3,4 +3,7 @@ export * from './entities/sandbox.entity';
 export * from './entities/state-transition.entity';
 export * from './events/sandbox-events';
 export * from './errors/invalid-transition.error';
+export * from './errors/invariant-violation.error';
+export * from './value-objects/initial-task.vo';
+export * from './services/task-name.policy';
 export * from './repositories/sandbox.repository';

@@ -8,8 +8,18 @@ import type {
   RuntimeAdapter,
   RuntimeAuthMethod,
   RuntimeCredential,
+  RuntimeInstallPlan,
+  RuntimeTaskSpec,
+  ResolvedImageSpec,
+  SandboxCommand,
   SandboxExecFn,
 } from '@platform/contracts';
+import {
+  imagePreinstalls,
+  npmInstallPlan,
+  probeOnPath,
+  runInstallCommands,
+} from '../install-plan.util';
 import {
   validateAnthropicApiKey,
   validateClaudeOauthToken,
@@ -20,6 +30,19 @@ import { parseClaudeAuthUrl, parseClaudeSetupToken } from './claude-code.output-
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 5 * 60_000;
+
+const CLAUDE_BINARY = 'claude';
+/**
+ * Claude has NO bwrap — it ships a permission/approval model instead, and its own
+ * help text says `--dangerously-skip-permissions` is "recommended only for sandboxes
+ * with no internet access", i.e. it already assumes an EXTERNAL sandbox. That is
+ * exactly our situation (04 §3 ★2). Note how little this has in common with codex's
+ * `-s danger-full-access`: the shapes do not generalise, which is precisely why this
+ * lives per-adapter and never in platform code.
+ */
+const PERMISSIONS_OFF_ARGS = ['--dangerously-skip-permissions'];
+/** `install()` takes no image; the npm commands are image-independent (see codex). */
+const ANY_IMAGE: ResolvedImageSpec = { ref: '', digest: '' };
 
 /**
  * Claude Code RuntimeAdapter (docs/backend/04 §3, 05 §1 ★1). Account login =
@@ -130,6 +153,50 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       },
     };
     return cred;
+  }
+
+  // ── run half (04 §3) ───────────────────────────────────────────────────────
+
+  /**
+   * (image, runtime) verdict — PURE (04 §3 ★1). This is the exact case that proves
+   * the plan must be keyed on the PAIR: the AIO default image has NO claude-code and
+   * a cold `npm i -g @anthropic-ai/claude-code` there was measured at 753 SECONDS,
+   * while the boxlite reference image ships it and installs nothing.
+   */
+  getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan {
+    return npmInstallPlan({
+      packageName: '@anthropic-ai/claude-code',
+      binary: CLAUDE_BINARY,
+      preinstalled: imagePreinstalls(imageSpec.ref, 'claude-code'),
+      estimatedInstallSec: 753,
+    });
+  }
+
+  /** PATH lookup + real `--version` (RA-01); never a hard-coded install path. */
+  isInstalled(exec: SandboxExecFn): Promise<boolean> {
+    return probeOnPath(exec, CLAUDE_BINARY);
+  }
+
+  /** Re-enterable: `npm i -g` converges when re-run after a partial failure (RA-02). */
+  async install(exec: SandboxExecFn): Promise<void> {
+    await runInstallCommands(exec, this.getInstallPlan(ANY_IMAGE).packageManagerCmds);
+  }
+
+  /** Start claude on a task, with its approval prompts turned off (see above). */
+  buildStartCommand(task: RuntimeTaskSpec): SandboxCommand {
+    const cmd = [CLAUDE_BINARY, ...PERMISSIONS_OFF_ARGS];
+    if (task.headless) cmd.push('--print');
+    if (task.headless && task.outputFormat === 'json-stream') {
+      cmd.push('--output-format', 'stream-json');
+    }
+    if (task.extraArgs) cmd.push(...task.extraArgs);
+    if (task.prompt !== undefined && task.prompt !== '') cmd.push(task.prompt);
+    return { cmd, cwd: task.workdir };
+  }
+
+  /** A plain interactive claude session — same permission switch, no instruction. */
+  buildAttachCommand(): SandboxCommand {
+    return { cmd: [CLAUDE_BINARY, ...PERMISSIONS_OFF_ARGS] };
   }
 
   /**

@@ -31,7 +31,8 @@ import type {
   SandboxRuntimeStatus,
 } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
-import { fakeProjectFacade, fakeWorkspace } from './_fakes';
+import { useEnv } from './_env';
+import { FakeExecProcessStream, fakeProjectFacade, fakeWorkspace } from './_fakes';
 
 /**
  * OUT-OF-TREE REGISTRATION ACCEPTANCE (docs/backend/04 §8 方式一: DI Token + 动态模块).
@@ -82,8 +83,11 @@ class AcmeSandboxProvider implements SandboxProvider {
   async inspect(): Promise<SandboxRuntimeStatus> {
     return { lifecycleState: 'instance_running' };
   }
-  async spawn(_h: SandboxHandle, _s: ProcessSpec): Promise<ProcessStream> {
-    throw new Error('not used in this e2e');
+  async spawn(_h: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
+    this.calls.push(spec.tty ? 'spawn:tty' : 'spawn:exec');
+    // the `starting` 段 really execs through the third-party provider (install probe,
+    // credential injection, tmux self-check), so a one-shot exec must TERMINATE.
+    return new FakeExecProcessStream('acme 1.0.0', 0);
   }
 }
 
@@ -156,15 +160,16 @@ class AcmeExtensionModule implements OnModuleInit {
 
 let app: INestApplication;
 let dataRoot: string;
+let restoreEnv: () => void;
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = ':memory:';
-  process.env.PLATFORM_MASTER_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString(
-    'base64',
-  );
   dataRoot = mkdtempSync(resolve(tmpdir(), 'registry-ext-'));
-  process.env.DATA_ROOT = dataRoot;
-  delete process.env.ACCESS_PASSCODE;
+  restoreEnv = useEnv({
+    DATABASE_URL: ':memory:',
+    PLATFORM_MASTER_KEY: Buffer.from('0123456789abcdef0123456789abcdef').toString('base64'),
+    DATA_ROOT: dataRoot,
+    ACCESS_PASSCODE: undefined,
+  });
 
   const moduleRef = await Test.createTestingModule({
     // the third-party module sits BESIDE the app, exactly like an installed plugin
@@ -180,12 +185,12 @@ beforeAll(async () => {
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
   await app.init();
+  await app.listen(0);
 });
 
 afterAll(async () => {
   await app?.close();
-  delete process.env.DATA_ROOT;
-  delete process.env.PLATFORM_MASTER_KEY;
+  restoreEnv?.();
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
 });
 
@@ -228,8 +233,13 @@ describe('an out-of-tree module registers a provider + a runtime adapter (04 §8
     expect(created.body.status).toBe('pending');
 
     await waitForStatus(id, 'running');
-    // the application really drove the out-of-tree implementation
-    expect(acmeProvider.calls.slice(before)).toEqual([`create:${id}`, 'start']);
+    // the application really drove the out-of-tree implementation — including the
+    // `starting` 段, whose install probe / credential inject / tmux self-check all go
+    // through the third party's own `spawn({tty:false})` (03 §4.3, 04 §2.3).
+    const calls = acmeProvider.calls.slice(before);
+    expect(calls.slice(0, 2)).toEqual([`create:${id}`, 'start']);
+    expect(calls.slice(2).every((c) => c === 'spawn:exec')).toBe(true);
+    expect(calls.length).toBeGreaterThan(2);
 
     await request(app.getHttpServer()).delete(`/api/sandboxes/${id}`).send({}).expect(204);
     expect(acmeProvider.calls).toContain('destroy');

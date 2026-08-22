@@ -187,7 +187,15 @@ describe.skipIf(!runnable)('AIO data-plane kill — 真杀,不是本地假装 (r
     };
     const baseline = await countShells();
 
-    const pty = await provider.spawn(handle!, { cmd: ['/bin/sh'], tty: true, cols: 80, rows: 24 });
+    // S5: the tty side now HONOURS `spec.cmd` (it used to be silently dropped, 04
+    // §2.3★), so the session shell is the one we ask for — ask for `bash -i` so this
+    // case still counts the same process it always counted.
+    const pty = await provider.spawn(handle!, {
+      cmd: ['bash', '-i'],
+      tty: true,
+      cols: 80,
+      rows: 24,
+    });
     await new Promise((r) => setTimeout(r, 2_000));
     pty.write('sleep 121\n');
     await new Promise((r) => setTimeout(r, 2_000));

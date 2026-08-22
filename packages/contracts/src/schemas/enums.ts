@@ -45,3 +45,21 @@ export const TimeoutMinutesSchema = z.union([
   z.literal(240),
 ]);
 export type TimeoutMinutes = z.infer<typeof TimeoutMinutesSchema>;
+
+/**
+ * `runtime_installations.status` — the 4-value install state machine (13 §2.3.2,
+ * 23 §7.2). It is DELIBERATELY separate from `SandboxStatus`: an install has its
+ * own state machine and lives in its own aggregate (23 D-5), and `installing` must
+ * really exist because a cold `npm i -g @anthropic-ai/claude-code` was measured at
+ * 753s (04 §3 ★1) — a minute-scale window with no intermediate state cannot be
+ * explained to the user.
+ */
+export const RUNTIME_INSTALL_STATUSES = [
+  'not_installed',
+  'installing',
+  'installed',
+  'failed',
+] as const;
+
+export const RuntimeInstallStatusSchema = z.enum(RUNTIME_INSTALL_STATUSES);
+export type RuntimeInstallStatus = z.infer<typeof RuntimeInstallStatusSchema>;
