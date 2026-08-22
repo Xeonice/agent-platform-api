@@ -6,6 +6,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { useEnv } from './_env';
 import {
   findPrivateIpv4,
   gitHttpBackendPath,
@@ -89,36 +90,35 @@ for (const variant of variants) {
       let app: INestApplication;
       let dataRoot: string;
       let server: LocalGitServer;
-      const priorCaInfo = process.env.GIT_SSL_CAINFO;
+      let restoreEnv: () => void;
 
       beforeAll(async () => {
         server = await variant.start();
+        dataRoot = mkdtempSync(resolve(process.cwd(), `tmp-gitcred-local-${variant.scheme}-`));
         // HTTPS only: the clone/ls-remote child inherits GIT_SSL_CAINFO (kept by the
         // cloner guard) so it trusts our self-signed CA WITHOUT disabling TLS
-        // validation. Plaintext http needs no CA.
-        if (server.caPath) process.env.GIT_SSL_CAINFO = server.caPath;
-        else delete process.env.GIT_SSL_CAINFO;
-
-        process.env.DATABASE_URL = ':memory:';
-        process.env.PLATFORM_MASTER_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString(
-          'base64',
-        );
-        dataRoot = mkdtempSync(resolve(process.cwd(), `tmp-gitcred-local-${variant.scheme}-`));
-        process.env.DATA_ROOT = dataRoot;
+        // validation. Plaintext http needs no CA — `undefined` UNSETS it, and the
+        // restore puts back whatever the environment really had (_env.ts).
+        restoreEnv = useEnv({
+          GIT_SSL_CAINFO: server.caPath ?? undefined,
+          DATABASE_URL: ':memory:',
+          PLATFORM_MASTER_KEY: Buffer.from('0123456789abcdef0123456789abcdef').toString('base64'),
+          DATA_ROOT: dataRoot,
+        });
 
         const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
         app.useGlobalPipes(new ZodValidationPipe());
         await app.init();
+        await app.listen(0);
       }, 60_000);
 
       afterAll(async () => {
         await app?.close();
         await server?.close();
         if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
-        if (priorCaInfo === undefined) delete process.env.GIT_SSL_CAINFO;
-        else process.env.GIT_SSL_CAINFO = priorCaInfo;
+        restoreEnv?.();
       });
 
       it('NO credential → clone fails as PERMISSION (401), not NETWORK', async () => {

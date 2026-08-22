@@ -45,7 +45,16 @@ export class SandboxPtyAdapter implements SandboxPtyPort {
         agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
         agentAuthToken: sandbox.agentAuthToken ?? undefined,
       },
-      { cmd: ['/bin/sh'], tty: true, cols: opts.cols, rows: opts.rows, reuse: opts.reuse },
+      {
+        // Since S5 the caller ALWAYS supplies the command (the terminal context
+        // attaches the platform's tmux agent session, 26 §8); a bare shell is only
+        // the fallback for a caller that asks for nothing.
+        cmd: opts.cmd ?? ['/bin/sh'],
+        tty: true,
+        cols: opts.cols,
+        rows: opts.rows,
+        reuse: opts.reuse,
+      },
     );
   }
 }

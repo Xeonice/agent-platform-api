@@ -5,12 +5,18 @@ import type { SandboxStatus } from '../value-objects/sandbox-status.vo';
 import type { StateTransition, TriggeredBy } from './state-transition.entity';
 import { InvalidSandboxTransitionError } from '../errors/invalid-transition.error';
 import { SandboxCreated, SandboxStateChanged } from '../events/sandbox-events';
+import { InitialTask } from '../value-objects/initial-task.vo';
+import { deriveDefaultTaskName } from '../services/task-name.policy';
 
 export interface SandboxProps {
   id: SandboxId;
   projectId: ProjectId;
   runtime: string;
   provider: string;
+  /** Task display name; defaulted from `initialTask.prompt` at create time. */
+  name: string;
+  /** The image this sandbox actually runs (13 §2.1.1 `image_ref`). */
+  imageRef: string;
   status: SandboxStatus;
   headless: boolean;
   /** null for interactive tasks; 30/60/120/240 for headless (13 §2.1). */
@@ -23,6 +29,17 @@ export interface SandboxProps {
   agentEndpointPort: number | null;
   /** per-sandbox bearer token for the in-sandbox agent; null for agent-less runtimes. */
   agentAuthToken: string | null;
+  /** "WHAT to run" — the create-time instruction + its one-shot consumed marker. */
+  initialTask: InitialTask;
+  /**
+   * Machine-readable failure cause (13 §2.1.1 `failure_code`) — one of the 04 §4
+   * codes. It is stored SEPARATELY from the free text on purpose: the frontend needs
+   * something it can BRANCH on, and P22 §1 owns the sentence keyed by the code.
+   * Embedding the code in a prose string would force the UI to parse prose.
+   */
+  failureCode: string | null;
+  /** Free-text detail paired with `failureCode` — debugging aid, never UI copy. */
+  failureReason: string | null;
   version: number;
   transitions: StateTransition[];
 }
@@ -40,6 +57,10 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _providerSandboxId: string | null;
   private _agentEndpointPort: number | null;
   private _agentAuthToken: string | null;
+  private _initialTask: InitialTask;
+  private _failureCode: string | null;
+  private _failureReason: string | null;
+  private _name: string;
   private _version: number;
   private readonly _transitions: StateTransition[];
   /** transitions appended in the current UoW, flushed by saveSync (28 §2.2). */
@@ -48,6 +69,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   readonly projectId: ProjectId;
   readonly runtime: string;
   readonly provider: string;
+  readonly imageRef: string;
   readonly headless: boolean;
 
   private constructor(props: SandboxProps) {
@@ -55,7 +77,12 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this.projectId = props.projectId;
     this.runtime = props.runtime;
     this.provider = props.provider;
+    this.imageRef = props.imageRef;
     this.headless = props.headless;
+    this._name = props.name;
+    this._initialTask = props.initialTask;
+    this._failureCode = props.failureCode;
+    this._failureReason = props.failureReason;
     this._status = props.status;
     this._timeoutMinutes = props.timeoutMinutes;
     this._idleTimeoutSec = props.idleTimeoutSec;
@@ -72,13 +99,25 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     return new Sandbox(props);
   }
 
-  /** Create a brand-new sandbox in `pending` with its first transition. */
+  /**
+   * Create a brand-new sandbox in `pending` with its first transition.
+   *
+   * The `initialPrompt` is validated + stored HERE, inside T1 (26 §1): the consumer
+   * (`bootstrapAgentSession`) runs in the provision workflow AFTER the 202, and that
+   * workflow only ever receives a `sandboxId` — anything crossing that boundary must
+   * be persisted (TASK-LAUNCH-DECISIONS T-1). The default display name is derived in
+   * the same breath, which is what allows the prompt itself to stay off every DTO.
+   */
   static create(input: {
     id: SandboxId;
     projectId: ProjectId;
     runtime: string;
+    /** Human-facing runtime label used only for the fallback name. */
+    runtimeLabel?: string;
     provider: string;
+    imageRef: string;
     headless: boolean;
+    initialPrompt?: string;
     timeoutMinutes: number | null;
     idleTimeoutSec: number;
     now: Date;
@@ -89,11 +128,18 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       at: input.now,
       triggeredBy: 'user',
     };
+    const initialTask = InitialTask.create({ prompt: input.initialPrompt });
     const sandbox = new Sandbox({
       id: input.id,
       projectId: input.projectId,
       runtime: input.runtime,
       provider: input.provider,
+      imageRef: input.imageRef,
+      name: deriveDefaultTaskName({
+        prompt: initialTask.prompt,
+        runtimeLabel: input.runtimeLabel ?? input.runtime,
+        now: input.now,
+      }),
       status: 'pending',
       headless: input.headless,
       timeoutMinutes: input.timeoutMinutes,
@@ -102,6 +148,9 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       providerSandboxId: null,
       agentEndpointPort: null,
       agentAuthToken: null,
+      initialTask,
+      failureCode: null,
+      failureReason: null,
       version: 0,
       transitions: [firstTransition],
     });
@@ -112,6 +161,19 @@ export class Sandbox extends AggregateRoot<SandboxId> {
 
   get status(): SandboxStatus {
     return this._status;
+  }
+  get name(): string {
+    return this._name;
+  }
+  /** "WHAT to run" (23 §5.3). The prompt NEVER leaves the backend on a DTO (D-14). */
+  get initialTask(): InitialTask {
+    return this._initialTask;
+  }
+  get failureCode(): string | null {
+    return this._failureCode;
+  }
+  get failureReason(): string | null {
+    return this._failureReason;
   }
   get timeoutMinutes(): number | null {
     return this._timeoutMinutes;
@@ -148,6 +210,33 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._agentEndpointPort = input.agentEndpointPort ?? null;
     this._agentAuthToken = input.agentAuthToken ?? null;
   }
+  /**
+   * Stamp the initial instruction as started (I-SBX-10). Called by the provision
+   * workflow ONLY after `bootstrapAgentSession` actually started the session — a
+   * session that failed to start has not consumed anything, otherwise a retry would
+   * silently drop the user's instruction.
+   */
+  consumeInitialTask(at: Date): void {
+    this._initialTask = this._initialTask.consume(at);
+  }
+
+  /**
+   * Move to `failed` recording BOTH halves of the cause (13 §2.1.1):
+   *   - `code` — machine-readable, from the 04 §4 closed set. This is what the wire
+   *     carries (DTO + WS) and what the frontend branches on;
+   *   - `message` — free-text detail for debugging. It is NOT the user-facing
+   *     sentence: P22 §1 owns that, keyed by the code.
+   *
+   * They are two fields rather than one prose string because provisioning is async —
+   * the only way a failure reaches the user is this record and its projection, and a
+   * UI that had to regex a code out of prose would break on the first reworded message.
+   */
+  failWith(failure: { code: string; message: string }, triggeredBy: TriggeredBy, now: Date): void {
+    this._failureCode = failure.code;
+    this._failureReason = failure.message;
+    this.transitionTo('failed', triggeredBy, now);
+  }
+
   get transitions(): readonly StateTransition[] {
     return this._transitions;
   }
@@ -168,7 +257,15 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._transitions.push(transition);
     this._pendingTransitions.push(transition);
     this._status = next;
-    this.raise(new SandboxStateChanged(this.id, from, next, now));
+    this.raise(
+      new SandboxStateChanged(
+        this.id,
+        from,
+        next,
+        now,
+        next === 'failed' ? (this._failureCode ?? undefined) : undefined,
+      ),
+    );
   }
 
   /** called by repository after a successful flush (28 §2.2). */

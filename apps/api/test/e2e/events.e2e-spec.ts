@@ -12,6 +12,7 @@ import {
 } from '@platform/contracts';
 import type { SandboxWsEvent, TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
@@ -25,10 +26,12 @@ import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
  */
 let app: INestApplication;
 let port: number;
+let restoreEnv: () => void;
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = ':memory:';
-  delete process.env.ACCESS_PASSCODE; // /events auth open in dev (no passcode)
+  // `ACCESS_PASSCODE: undefined` UNSETS it for this spec (/events auth open in dev)
+  // and restores whatever was there before — a bare delete would not (_env.ts).
+  restoreEnv = useEnv({ DATABASE_URL: ':memory:', ACCESS_PASSCODE: undefined });
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(SANDBOX_PROVIDER_REGISTRY)
     .useValue(makeFakeRegistry())
@@ -49,6 +52,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  restoreEnv?.();
 });
 
 function connect(namespace: string, query?: Record<string, string>): Promise<Socket> {

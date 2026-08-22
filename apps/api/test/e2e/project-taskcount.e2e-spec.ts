@@ -34,6 +34,7 @@ beforeAll(async () => {
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
   await app.init();
+  await app.listen(0);
 });
 
 afterAll(async () => {

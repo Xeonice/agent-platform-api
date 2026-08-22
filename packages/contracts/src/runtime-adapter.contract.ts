@@ -1,4 +1,4 @@
-import type { ProcessSpec, ProcessStream } from './sandbox-provider.contract';
+import type { ProcessSpec, ProcessStream, ResolvedImageSpec } from './sandbox-provider.contract';
 import type { AuthChallengeDto, RuntimeAuthMethod } from './schemas/runtime.schema';
 
 /**
@@ -8,9 +8,21 @@ import type { AuthChallengeDto, RuntimeAuthMethod } from './schemas/runtime.sche
  * the neutral primitives `ProcessStream` (interactive pty) / `SandboxExecFn`
  * (one-shot exec). So one `ClaudeCodeAdapter` runs identically under aio/boxlite.
  *
- * NOTE (S4 scope): the run methods (`getInstallPlan/install/buildStartCommand/…`,
- * 04 §3) are added by a later sandbox-run slice; S4 defines exactly the auth +
- * inject surface it exercises so the built-in adapters stay lean and testable.
+ * S5 (sandbox-run slice) COMPLETES the contract: the run half —
+ * `getInstallPlan` / `isInstalled` / `install` / `buildStartCommand` /
+ * `buildAttachCommand` / `parseOutput?` — is now present exactly as 04 §3 sketches
+ * it. Five of those six are REQUIRED, which by 04 §9's release semantics makes this
+ * a MAJOR contract change ("必须方法签名变更"). It is taken deliberately rather than
+ * softened into optional methods with platform defaults, because:
+ *   - 04 §3 states them as required and 04 §10.3 RA-01/RA-02/RA-07 are MUST clauses
+ *     that only mean something if every adapter really has them;
+ *   - a platform-default `buildStartCommand` is not writable: 04 §3 ★2 shows the
+ *     inner-sandbox switch (`codex -s danger-full-access` vs claude's permission
+ *     model) has NO common shape, and inventing a default would put per-CLI quirks
+ *     back into platform code — the exact thing this contract exists to prevent;
+ *   - there is no out-of-tree implementer yet (04 §9 落地状态: the package is still
+ *     private `@platform/contracts`), so the cost of the major is zero today and
+ *     strictly rising later.
  */
 
 /**
@@ -206,6 +218,84 @@ export interface RefreshedRuntimeAuth {
   credentialFiles?: RuntimeCredentialFile[];
 }
 
+/**
+ * What `getInstallPlan(imageSpec)` answers: "does THIS runtime need installing on
+ * THIS image, how, and roughly how long" (04 §3 ★1). The verdict is keyed on the
+ * (image, runtime) PAIR, never on the runtime alone — the same `claude-code` is a
+ * zero-install on one image and a measured 753s install on another.
+ *
+ * It is a PURE function: no IO, no network, no side effects. It is called twice for
+ * different purposes — once in the create-time validation path purely to WARN the
+ * user ("claude-code takes ~12.5 min on this image, consider another one"), and once
+ * inside the provision workflow's `starting`段 to decide whether `install()` runs
+ * (03 §4.3 ③). Only the second call writes anything, and it writes in its OWN short
+ * transaction, never in T1 (13 §2.3.2 / 23 §4.3).
+ */
+export interface RuntimeInstallPlan {
+  /**
+   * `preinstalled` — the image ships the CLI; `isInstalled()` returning false is
+   * then a LOUD failure (`INSTALL_FAILED`), not a cue to install.
+   * `install-on-start` — the platform may install it on first boot (the fallback,
+   * not the recommendation: 04 §7 asks image authors to preinstall).
+   * `sidecar-inject` — reserved; no built-in uses it.
+   */
+  strategy: 'preinstalled' | 'install-on-start' | 'sidecar-inject';
+  /** Shell command lines run IN ORDER by `install()`. Empty for `preinstalled`. */
+  packageManagerCmds: string[];
+  /**
+   * Executables that must resolve on PATH once installed. The orchestrator uses
+   * `requiredBinaries[0]` for the `--version` probe that fills
+   * `runtime_installations.version_detected` (13 §2.3.2), so the platform never
+   * hard-codes a per-runtime binary name.
+   */
+  requiredBinaries: string[];
+  /** Env var names the CLI needs present to install/run (documentation-grade). */
+  envRequirements: string[];
+  /** Measured wall time, seconds — feeds the "this will take a while" hint. */
+  estimatedInstallSec?: number;
+}
+
+/**
+ * What to run when the platform starts an agent task (04 §3 `buildStartCommand`).
+ * `headless:false` is the S5 path: the provision workflow's `bootstrapAgentSession`
+ * turns `initialPrompt` into "start the CLI carrying this instruction" (03 §4.3 ⑤).
+ * `headless:true` is the MCP `run_agent_task` path, whose PRODUCTISATION is out of
+ * S5 (TASK-LAUNCH-DECISIONS T-4) — the shape is defined here so adapters answer it
+ * consistently when that slice lands.
+ */
+export interface RuntimeTaskSpec {
+  prompt?: string;
+  taskId?: string;
+  headless: boolean;
+  outputFormat?: 'text' | 'json-stream';
+  extraArgs?: string[];
+  /** Working directory inside the sandbox — the platform's workspace mount. */
+  workdir?: string;
+}
+
+/**
+ * A command an adapter wants run inside the sandbox.
+ *
+ * ⚠️ `env` is NOT a secret channel: the platform materialises it as `K=V` in front
+ * of the command, and both argv and env are readable from inside the sandbox via
+ * `ps` / `/proc/<pid>/cmdline` (04 §2.3★ 第 2 条). Credentials go through
+ * `injectCredential` (0600 file / stdin) or the sandbox-creation env, never here.
+ */
+export interface SandboxCommand {
+  cmd: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+export type RuntimeEventType =
+  'stdout-chunk' | 'tool-call' | 'task-complete' | 'error' | 'auth-required';
+
+export interface RuntimeEvent {
+  type: RuntimeEventType;
+  timestamp: string;
+  data: unknown;
+}
+
 export interface RuntimeAdapter {
   readonly id: string;
   readonly displayName: string;
@@ -266,6 +356,40 @@ export interface RuntimeAdapter {
    * across sandboxes.
    */
   injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void>;
+
+  // ── run half (04 §3; added in S5) ────────────────────────────────────────────
+  /**
+   * PURE verdict on "(this image, this runtime) → install or not, how long" (★1).
+   * No IO, no network — it is called on the request path too, only to warn.
+   */
+  getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan;
+  /**
+   * Idempotent probe. MUST go through `command -v` / PATH lookup and MUST NOT
+   * hard-code an install path (04 §2.1★ / RA-01): the npm prefix is a user-level
+   * non-standard location (`/home/gem/.npm-global`) and `codex` actually resolves
+   * to an fnm shim — any hard-coded path is wrong on BOTH built-in providers.
+   */
+  isInstalled(exec: SandboxExecFn): Promise<boolean>;
+  /**
+   * Install the CLI per the plan. MUST be re-enterable: a half-failed attempt
+   * re-run must converge (RA-02; measured re-entry cost is ~6s, so no incremental
+   * recovery machinery is warranted).
+   */
+  install(exec: SandboxExecFn): Promise<void>;
+  /**
+   * The command that STARTS an agent task. Pure. This is where the two things
+   * platform-generic logic cannot own live (04 §3 ★2): ① turning OFF the CLI's own
+   * inner sandbox — codex's bwrap cannot create a mount namespace inside either
+   * provider, so it is disabled with `-s danger-full-access`, while claude has no
+   * bwrap at all and uses its permission model instead; the two have NO common
+   * shape, so this stays per-runtime. ② the CLI's own timeout flag as a first line
+   * (the platform's forced kill is the only reliable one, ★3).
+   */
+  buildStartCommand(task: RuntimeTaskSpec): SandboxCommand;
+  /** What a terminal session runs when there is no instruction to carry. Pure. */
+  buildAttachCommand(): SandboxCommand;
+  /** Optional: structure raw CLI output; unimplemented ⇒ the platform passes bytes. */
+  parseOutput?(chunk: Buffer): RuntimeEvent[];
 }
 
 /**

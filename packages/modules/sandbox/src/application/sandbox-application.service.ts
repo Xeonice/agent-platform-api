@@ -4,7 +4,6 @@ import {
   HttpStatus,
   Inject,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -17,6 +16,9 @@ import {
 } from '@platform/shared-kernel';
 import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-kernel';
 import {
+  ImageContractViolationError,
+  RuntimeInstallFailedError,
+  RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
   PROJECT_FACADE,
@@ -29,6 +31,7 @@ import type {
   DestroySandboxInput,
   ProviderDto,
   RequiredCapabilities,
+  RuntimeAdapterRegistry,
   SandboxDto,
   ProviderRegistry,
   SandboxProvider,
@@ -38,6 +41,7 @@ import type {
   ProjectFacade,
   ProjectRuntimeContext,
 } from '@platform/contracts';
+import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { Sandbox } from '../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../domain/entities/state-transition.entity';
@@ -45,20 +49,14 @@ import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
 
-const DEFAULT_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
-
 /**
  * Protocol-agnostic application service (02 §1): REST controller + MCP tools both
- * inject this. It orchestrates the real lifecycle pipeline
- * (pending → scheduling → preparing-workspace → creating → starting → running),
- * persisting EACH transition in a synchronous UoW with its domain event, while
- * the async provider/workspace IO happens BETWEEN transactions (24 §1.3). S1 runs
- * the pipeline inline (awaited) rather than 202+background.
+ * inject this. It owns the SYNCHRONOUS half — the create transaction T1 and teardown
+ * — and hands everything after the 202 to `ProvisionSandboxWorkflow` (26 §1), which
+ * is where the staged pipeline and its per-stage compensation live.
  */
 @Injectable()
 export class SandboxApplicationService {
-  private readonly logger = new Logger('SandboxApplicationService');
-
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
@@ -68,6 +66,8 @@ export class SandboxApplicationService {
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly registry: ProviderRegistry,
     @Inject(WORKSPACE_PREPARER) private readonly workspace: WorkspacePreparer,
     @Inject(PROJECT_FACADE) private readonly projectFacade: ProjectFacade,
+    @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
+    private readonly provision: ProvisionSandboxWorkflow,
   ) {}
 
   private defaultImage(): string {
@@ -105,6 +105,7 @@ export class SandboxApplicationService {
     // 04 §5 「创建前静态校验」: capability mismatches are rejected HERE — before the
     // project lookup, before a row is written, before anything is scheduled.
     this.assertCapabilities(provider, input.require);
+    const imageRef = this.resolveImage(input.image);
 
     // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
     // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -116,8 +117,15 @@ export class SandboxApplicationService {
       id: asSandboxId(this.ids.next()),
       projectId: asProjectId(input.projectId),
       runtime: input.runtime,
+      runtimeLabel: this.runtimeLabel(input.runtime),
       provider: providerName,
+      imageRef,
       headless,
+      // T-1: the instruction is PERSISTED here, in T1. Its consumer
+      // (`bootstrapAgentSession`) runs after the 202 in a workflow whose only input is
+      // a `sandboxId` (26 §1) — anything crossing that boundary needs storage, and the
+      // queue is an in-memory FIFO, i.e. a strictly weaker store than the DB.
+      initialPrompt: input.initialPrompt,
       timeoutMinutes: headless ? (input.timeoutMinutes ?? 30) : null,
       idleTimeoutSec: 1800,
       now: this.clock.now(),
@@ -126,14 +134,42 @@ export class SandboxApplicationService {
 
     // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
     // MUST NOT block on provision→start→agent-readiness — boxlite cold-pull alone
-    // is ~220s. Snapshot the `pending` DTO NOW (before provision runs — it advances
-    // the aggregate synchronously up to its first await), return it immediately, and
-    // let provision drive the state machine in the background (each transition
-    // persists + publishes a SandboxStateChanged event for the WS relay). Failures
-    // land `failed`.
+    // is ~220s, and a cold runtime-CLI install was measured at 753s. Snapshot the
+    // `pending` DTO NOW (before provision runs — it advances the aggregate
+    // synchronously up to its first await), return it immediately, and let provision
+    // drive the state machine in the background (each transition persists + publishes
+    // a SandboxStateChanged event for the WS relay). Failures land `failed`.
     const dto = SandboxMapper.toDto(sandbox, false);
-    void this.runProvision(sandbox, provider, projectCtx.baselinePath);
+    void this.provision.runSafely(sandbox, provider, projectCtx.baselinePath);
     return dto;
+  }
+
+  /**
+   * The image to run (TASK-LAUNCH-DECISIONS §3★1). Until S5 this input was ACCEPTED
+   * on the wire and then silently ignored — every sandbox ran the default image, which
+   * would have made `getInstallPlan(imageSpec)` a permanently constant answer and voided
+   * the entire "(image, runtime) pair" conclusion.
+   *
+   * ⚠️ SCOPE: only shape validation happens here. `I-IMG-2` (reject an `invalid`
+   * manifest) and `I-IMG-3` (only `is_active` images are selectable) are NOT
+   * implementable yet — there is no image context at all: no `images` /
+   * `image_manifests` tables, no `ImageSpecProvider`, and `IMAGE_SPEC_REGISTRY` is a
+   * bare placeholder token (04 §8). Those two invariants land with the image slice.
+   */
+  private resolveImage(requested?: string): string {
+    const ref = (requested ?? '').trim();
+    if (ref === '') return this.defaultImage();
+    // whitespace / control characters in an image ref would flow into a container
+    // runtime call; refuse them up front rather than deep inside `provider.create`.
+    if (/\s/.test(ref)) {
+      throw new BadRequestException(`invalid image reference '${requested}'`);
+    }
+    return ref;
+  }
+
+  /** Human-facing runtime label for the fallback task name (P21-1 §9). */
+  private runtimeLabel(runtimeId: string): string {
+    return this.runtimes.has(runtimeId) ? this.runtimes.get(runtimeId).displayName : runtimeId;
   }
 
   /**
@@ -183,74 +219,6 @@ export class SandboxApplicationService {
         throw new HttpException({ code: e.code, message: e.message }, status);
       }
       throw e;
-    }
-  }
-
-  /** Background provision runner — never rejects into an unhandled promise. */
-  private async runProvision(
-    sandbox: Sandbox,
-    provider: SandboxProvider,
-    baselinePath: string,
-  ): Promise<void> {
-    try {
-      await this.provision(sandbox, provider, baselinePath);
-    } catch (e) {
-      // provision() already marked `failed` + tore down any orphan; just log here.
-      this.logger.error(`provision failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
-    }
-  }
-
-  private async provision(
-    sandbox: Sandbox,
-    provider: SandboxProvider,
-    baselinePath: string,
-  ): Promise<void> {
-    // hoisted so the failure path can tear down a container that WAS created (e.g.
-    // a later `start`/readiness failure) — otherwise it orphans (S1 audit P1-2).
-    let handle: SandboxHandle | undefined;
-    try {
-      this.advance(sandbox, 'scheduling', 'scheduler');
-      this.advance(sandbox, 'preparing-workspace', 'scheduler');
-      const ws = await this.workspace.prepare(sandbox.id, { baselinePath });
-
-      this.advance(sandbox, 'creating', 'scheduler');
-      handle = await provider.create({
-        sandboxId: sandbox.id,
-        quota: DEFAULT_QUOTA,
-        image: { ref: this.defaultImage(), digest: 'sha256:s1-placeholder' },
-        env: {},
-        volumes: [{ source: ws.hostPath, target: '/workspace', mode: 'rw', kind: 'host-path' }],
-        labels: { 'platform.sandboxId': sandbox.id },
-      });
-      sandbox.bindRuntime({
-        providerSandboxId: handle.providerSandboxId,
-        workspacePath: ws.hostPath,
-        // persist any provider runtime binding (boxlite's forwarded agent port,
-        // and the agent bearer token both providers mint) so a backend restart can
-        // rebuild the handle and still reach the instance.
-        agentEndpointPort: handle.agentEndpointPort ?? null,
-        agentAuthToken: handle.agentAuthToken ?? null,
-      });
-      this.persist(sandbox); // save handle (no new transition/event)
-
-      // ── S5 hook (05 §7.1 ②): runtime credential injection wires in HERE, between a
-      // created container and agent readiness — `CREDENTIAL_FACADE.prepareRuntimeCredential`
-      // → adapter `injectCredential(cred, exec)` (writes env/0600 file / feeds stdin) →
-      // `recordRuntimeInjection` (credential_sandbox_bindings ledger, feeds the revoke
-      // coordinator). Left UNWIRED in S4 by design (facade + ledger exist + unit-tested;
-      // no live caller yet) — this is a clean insertion point, not a half-wired state. ──
-
-      this.advance(sandbox, 'starting', 'scheduler');
-      await provider.start(handle);
-
-      this.advance(sandbox, 'running', 'scheduler');
-    } catch (e) {
-      this.tryAdvance(sandbox, 'failed', 'scheduler');
-      // destroy the already-created container/box before cleaning the workspace,
-      // so a mid-pipeline failure never leaks a runtime instance (S1 audit P1-2).
-      if (handle) await provider.destroy(handle).catch(() => undefined);
-      await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
-      throw this.mapProviderError(e);
     }
   }
 
@@ -336,9 +304,24 @@ export class SandboxApplicationService {
     });
   }
 
-  /** Map provider (contract) errors to HTTP (04 §4 interface mapping). */
+  /**
+   * Map contract errors to HTTP (04 §4 interface mapping).
+   *
+   * `INSTALL_FAILED` / `IMAGE_CONTRACT_VIOLATION` are included even though their MAIN
+   * exposure is not HTTP at all — both happen inside the provision workflow, long
+   * after the caller got its 202, and reach the user as `failed` + `failure_reason` +
+   * WS `sandbox.status_changed`. They are mapped anyway for two reasons 04 §4 states
+   * explicitly: a future synchronous entry point (a retry-install endpoint) must have a
+   * rule to follow, and 02 §6.2 forbids any error code without a mapping.
+   */
   private mapProviderError(e: unknown): unknown {
     if (e instanceof HttpException) return e;
+    if (e instanceof RuntimeInstallFailedError || e instanceof ImageContractViolationError) {
+      return new HttpException(
+        { code: e.code, message: e.message, retryable: e.retryable },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
     if (!(e instanceof SandboxProviderError)) return e;
     const status = PROVIDER_HTTP[e.code] ?? HttpStatus.INTERNAL_SERVER_ERROR;
     return new HttpException({ code: e.code, message: e.message, retryable: e.retryable }, status);

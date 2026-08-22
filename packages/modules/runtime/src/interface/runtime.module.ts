@@ -1,10 +1,15 @@
 import { Global, Module } from '@nestjs/common';
 import {
   RUNTIME_ADAPTER_REGISTRY,
+  RUNTIME_INSTALL_ORCHESTRATOR,
   RUNTIME_SETTINGS_READER,
   RUNTIME_SETTINGS_WRITER,
 } from '@platform/contracts';
 import { RUNTIME_SETTINGS_REPOSITORY } from '../domain/repositories/runtime-settings.repository';
+import { RUNTIME_INSTALLATION_REPOSITORY } from '../domain/repositories/runtime-installation.repository';
+import { RuntimeInstallOrchestratorService } from '../application/runtime-install.orchestrator';
+import { RuntimeEventProjector } from '../application/runtime-event.projector';
+import { SqliteRuntimeInstallationRepository } from '../infrastructure/persistence/sqlite/runtime-installation.repository.impl';
 import { RuntimeApplicationService } from '../application/runtime-application.service';
 import { AuthSessionStore } from '../application/auth-session.store';
 import { AUTH_HELPER } from '../domain/ports/auth-helper.port';
@@ -30,6 +35,8 @@ import { RuntimeController } from './http/runtime.controller';
   controllers: [RuntimeController],
   providers: [
     RuntimeApplicationService,
+    RuntimeInstallOrchestratorService,
+    RuntimeEventProjector,
     AuthSessionStore,
     CodexAdapter,
     ClaudeCodeAdapter,
@@ -38,12 +45,15 @@ import { RuntimeController } from './http/runtime.controller';
     { provide: RUNTIME_ADAPTER_REGISTRY, useClass: DefaultRuntimeAdapterRegistry },
     { provide: AUTH_HELPER, useClass: HostAuthHelper },
     { provide: RUNTIME_SETTINGS_REPOSITORY, useClass: SqliteRuntimeSettingsRepository },
+    { provide: RUNTIME_INSTALLATION_REPOSITORY, useClass: SqliteRuntimeInstallationRepository },
+    { provide: RUNTIME_INSTALL_ORCHESTRATOR, useExisting: RuntimeInstallOrchestratorService },
     { provide: RUNTIME_SETTINGS_READER, useExisting: RuntimeSettingsReaderWriter },
     { provide: RUNTIME_SETTINGS_WRITER, useExisting: RuntimeSettingsReaderWriter },
   ],
   exports: [
     RuntimeApplicationService,
     RUNTIME_ADAPTER_REGISTRY,
+    RUNTIME_INSTALL_ORCHESTRATOR,
     RUNTIME_SETTINGS_READER,
     RUNTIME_SETTINGS_WRITER,
   ],

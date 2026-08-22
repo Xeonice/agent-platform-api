@@ -19,3 +19,6 @@ data/
 
 # docker-required e2e scratch workspaces
 tmp-e2e-data-*/
+# boxlite micro-VM e2e DATA_ROOT (mkdtemp'd in cwd; the afterAll rm only runs when the
+# suite completes, so an interrupted run leaves one behind)
+tmp-boxlite-e2e-*/

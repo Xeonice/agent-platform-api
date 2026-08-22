@@ -191,7 +191,9 @@ export class DockerContainerBackend implements SandboxProvider {
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
         const client = new AioSandboxAgentClient(base, handle.agentAuthToken);
-        return spec.tty ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24) : client.exec(spec);
+        return spec.tty
+          ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24, spec.cmd)
+          : client.exec(spec);
       }
       // fallback: agent-less bare image → docker exec.
       const container = this.docker.getContainer(handle.providerSandboxId);

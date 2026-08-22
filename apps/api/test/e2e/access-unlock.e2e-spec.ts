@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { expectPasscodeEnabled, useEnv } from './_env';
 
 /**
  * POST /api/access/unlock (docs/shared/11 §3.1): submit the passcode → receive the
@@ -14,20 +15,38 @@ import { AppModule } from '../../src/app.module';
  */
 const PASSCODE = 'unlock-passcode-abc123';
 let app: INestApplication;
+let restoreEnv: () => void;
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = ':memory:';
-  process.env.ACCESS_PASSCODE = PASSCODE;
+  restoreEnv = useEnv({ DATABASE_URL: ':memory:', ACCESS_PASSCODE: PASSCODE });
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ZodValidationPipe());
   await app.init();
+  await app.listen(0);
+  expectPasscodeEnabled(app, true);
 });
+
+/**
+ * A SEPARATE app (hence a separate `PasscodeAttemptLimiter`) for the lockout case —
+ * it ends by design in a 5-minute lock, and leaving that on the shared app would give
+ * every other test in this file a 429 where it asserts 401, i.e. the file would pass
+ * only in one particular test order.
+ */
+async function buildIsolatedApp(): Promise<INestApplication> {
+  const ref = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const isolated = ref.createNestApplication();
+  isolated.setGlobalPrefix('api');
+  isolated.useGlobalPipes(new ZodValidationPipe());
+  await isolated.init();
+  await isolated.listen(0);
+  return isolated;
+}
 
 afterAll(async () => {
   await app?.close();
-  delete process.env.ACCESS_PASSCODE;
+  restoreEnv?.();
 });
 
 describe('POST /api/access/unlock', () => {
@@ -54,21 +73,27 @@ describe('POST /api/access/unlock', () => {
   });
 
   it('locks out after 5 consecutive failures (429 PASSCODE_LOCKED)', async () => {
-    // fresh IP state is not guaranteed across tests, so drive enough failures to
-    // cross the threshold; the request AFTER the 5th failure must be locked.
-    let locked = false;
-    for (let i = 0; i < 8; i++) {
-      const res = await request(app.getHttpServer())
-        .post('/api/access/unlock')
-        .send({ passcode: 'still-wrong' });
-      if (res.status === 429) {
-        expect(res.body.code).toBe('PASSCODE_LOCKED');
-        expect(res.body.retryAfterSec).toBeGreaterThan(0);
-        locked = true;
-        break;
+    // own app ⇒ a FRESH limiter, so the counts are exact rather than "somewhere in
+    // the next 8 attempts" — and this case cannot leave a 5-minute lock behind on the
+    // app the other tests share.
+    const isolated = await buildIsolatedApp();
+    try {
+      const server = isolated.getHttpServer();
+      for (let i = 0; i < 5; i++) {
+        const res = await request(server)
+          .post('/api/access/unlock')
+          .send({ passcode: 'still-wrong' });
+        expect(res.status, `attempt ${i + 1} of the first five must still be 401`).toBe(401);
+        expect(res.body.code).toBe('PASSCODE_INVALID');
       }
-      expect(res.status).toBe(401);
+      const locked = await request(server)
+        .post('/api/access/unlock')
+        .send({ passcode: 'still-wrong' })
+        .expect(429);
+      expect(locked.body.code).toBe('PASSCODE_LOCKED');
+      expect(locked.body.retryAfterSec).toBeGreaterThan(0);
+    } finally {
+      await isolated.close();
     }
-    expect(locked).toBe(true);
   });
 });

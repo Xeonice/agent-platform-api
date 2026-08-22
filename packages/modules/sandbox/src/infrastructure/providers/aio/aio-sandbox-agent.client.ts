@@ -60,14 +60,84 @@ export class AioSandboxAgentClient {
    * over HTTP and hand the upgrade a ticket. 探明 2026-08 against the real image:
    * no ticket ⇒ the upgrade is refused, a bogus ticket ⇒ refused, ours ⇒ 101.
    */
-  async openTerminal(cols: number, rows: number): Promise<ProcessStream> {
+  async openTerminal(cols: number, rows: number, cmd?: string[]): Promise<ProcessStream> {
     const ticket = this.authToken !== undefined ? await this.issueWsTicket() : undefined;
     const ws = new WebSocket(this.wsUrl(ticket));
     await this.awaitOpen(ws);
     // seed the initial window size (AIO `resize` mapping); the shell PTY is spawned
     // by the agent on connect, so no explicit "start" frame is required.
     this.safeSend(ws, { type: 'resize', data: { cols, rows } });
-    return new AioWsProcessStream(ws);
+    const stream = new AioWsProcessStream(ws);
+    if (cmd !== undefined && cmd.length > 0) await this.runInTerminal(ws, stream, cmd);
+    return stream;
+  }
+
+  /**
+   * Make an interactive session run `cmd` (S5: `tmux attach -t platform-agent`).
+   *
+   * WHY THIS IS TYPED INTO THE SHELL RATHER THAN PASSED AS A PARAMETER: the agent's
+   * `ws /v1/shell/ws` takes NO command — it always spawns its own default shell on
+   * connect (端点能力面探明 2026-08; the uplink frames are only `input` / `resize`).
+   * Until S5 that meant `ProcessSpec.cmd` was silently DROPPED on the tty side (04
+   * §2.3★「仍然存在的限制」), which would have left every terminal on a bare shell
+   * instead of the agent session provision started — i.e. the whole 「打开终端就看到
+   * agent」 promise would have been quietly false.
+   *
+   * `exec` REPLACES that default shell, so the requested command owns the pty: when it
+   * exits the session really ends (no stray shell lingering behind it), and the exit
+   * frame the gateway forwards is the command's own.
+   *
+   * The write waits for the agent's `ready` frame — bytes sent before the pty exists
+   * are simply lost. The wait is bounded: on timeout we write anyway, because an
+   * interactive shell that never announced itself is still far more likely to accept
+   * the line than not, and refusing to attach would be a worse failure than a retry.
+   */
+  private async runInTerminal(ws: WebSocket, stream: ProcessStream, cmd: string[]): Promise<void> {
+    await this.awaitShellReady(ws);
+    stream.write(`exec ${cmd.map(shellQuote).join(' ')}\n`);
+  }
+
+  /**
+   * Wait until the freshly-spawned shell will actually READ what we type.
+   *
+   * The agent's `ready` frame alone is not enough — measured against the real image,
+   * the shell then emits its own init burst (`export PS1=…`, `export SESSION_ID=…`,
+   * `clear`), and anything written into that window is either swallowed by the shell's
+   * startup or wiped by the `clear`. The symptom is nasty precisely because it is
+   * intermittent: the terminal silently shows a bare shell instead of the agent.
+   *
+   * So we wait for `ready` AND for the output to go QUIET, with a hard ceiling. The
+   * quiet detector counts ticks since the last frame rather than reading a clock —
+   * wall-clock calls are banned outside the Clock port (01 §3).
+   */
+  private awaitShellReady(ws: WebSocket): Promise<void> {
+    return new Promise((resolve) => {
+      let ready = false;
+      let quietTicks = 0;
+      let elapsedTicks = 0;
+      const onMessage = (ev: MessageEvent): void => {
+        const raw = typeof ev.data === 'string' ? ev.data : String(ev.data);
+        if (/"type"\s*:\s*"ready"/.test(raw)) ready = true;
+        if (/"type"\s*:\s*"output"/.test(raw)) quietTicks = 0;
+      };
+      const done = (): void => {
+        clearInterval(timer);
+        ws.removeEventListener('message', onMessage);
+        resolve();
+      };
+      const timer = setInterval(() => {
+        quietTicks += 1;
+        elapsedTicks += 1;
+        const quietEnough = quietTicks * PTY_READY_TICK_MS >= PTY_READY_QUIET_MS;
+        const outOfPatience = elapsedTicks * PTY_READY_TICK_MS >= PTY_READY_GRACE_MS;
+        // out of patience ⇒ write anyway: a shell that never announced itself is far
+        // more likely to accept the line than not, and refusing to attach at all is
+        // the worse failure.
+        if ((ready && quietEnough) || outOfPatience) done();
+      }, PTY_READY_TICK_MS);
+      timer.unref?.();
+      ws.addEventListener('message', onMessage);
+    });
   }
 
   /**
@@ -311,6 +381,12 @@ const ABORT_SLACK_MS = 5_000;
 export const KILL_GRACE_MS = 5_000;
 /** Beat between the PTY interrupt/exit writes and closing the socket. */
 export const PTY_KILL_SETTLE_MS = 250;
+/** Ceiling on waiting for the pty to settle before writing the attach command. */
+export const PTY_READY_GRACE_MS = 8_000;
+/** Output must be quiet this long (after `ready`) before the shell is fed a line. */
+export const PTY_READY_QUIET_MS = 400;
+/** Poll beat of the quiet detector (a tick counter — wall clock is banned, 01 §3). */
+const PTY_READY_TICK_MS = 100;
 /** ETX — the tty line discipline turns this into SIGINT for the foreground pgroup. */
 const CTRL_C = '\u0003';
 

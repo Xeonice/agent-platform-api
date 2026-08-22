@@ -11,6 +11,7 @@ import { io, type Socket } from 'socket.io-client';
 import { WS_SCHEMA_HASH } from '@platform/contracts';
 import type { TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 
 /**
@@ -26,6 +27,10 @@ import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
  *   - the local registry at :5001 serving the staged AIO image.
  * First Box boot + image pull is slow — timeouts are generous.
  */
+// NOTE (S5): the runtime matters now — `starting` really installs the CLI (03 §4.3 ③).
+// `agent-infra/sandbox` ships codex preinstalled but NOT claude-code (a measured 753s
+// install, 04 §3 ★1), so these workspace/micro-VM tests use codex: they are about the
+// workspace and the micro-VM, not about spending 12 minutes on an npm install.
 const REGISTRY = process.env.SANDBOX_BOXLITE_REGISTRY ?? 'localhost:5001';
 const IMAGE = process.env.SANDBOX_TEST_IMAGE ?? `${REGISTRY}/agent-infra/sandbox:latest`;
 
@@ -169,7 +174,7 @@ describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws
     // 1) create via REST — registry routes to BoxliteSandboxProvider → BoxLite SDK.
     const created = await request(app.getHttpServer())
       .post('/api/sandboxes')
-      .send({ projectId, runtime: 'claude-code', provider: 'boxlite' })
+      .send({ projectId, runtime: 'codex', provider: 'boxlite' })
       .expect(201);
     const sandboxId = created.body.id as string;
     // ASYNC create (P1-#1): POST returns `pending`; wait out the background
@@ -201,9 +206,19 @@ describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws
       if (session.type === 'session') {
         expect(session.socketSessionKey).toMatch(/^[0-9a-f]{32}$/);
       }
-      sock.emit('frame', { type: 'input', data: 'ls /\n' });
-      const out = await waitForOutput(sock, /\b(bin|etc|usr)\b/);
-      expect(out).toMatch(/\b(bin|etc|usr)\b/);
+      // S5: the gateway ATTACHES the platform tmux session provision started, so the
+      // terminal belongs to the agent CLI, not to a shell (裁决 D-15 / 26 §8). Assert
+      // the attach really happened, then do the shell work over the exec plane.
+      await waitForOutput(sock, /tmux|platform-agent|\[platform/i);
+
+      const shell = await sandboxShell(app, sandboxId);
+      expect(await shell('ls /')).toMatch(/\b(bin|etc|usr)\b/);
+      // The session is held by the micro-VM's OWN tmux server — the reason a platform
+      // restart cannot interrupt a running agent (04 §7 ★). Ask via `has-session` and
+      // echo the code: `tmux ls` reports "no server running" on STDERR, and the
+      // platform's `toExecFn` collects a single demultiplexed stream (04 §2.4), so an
+      // empty result would be indistinguishable from "the probe itself failed".
+      expect(await shell('tmux has-session -t platform-agent; echo rc=$?')).toContain('rc=0');
 
       // workspace bind-mount usable by the non-root agent user inside the micro-VM,
       // while the shared parent stays untraversable to other local users (加固 2).
@@ -211,9 +226,8 @@ describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws
       expect(statSync(resolve(dataRoot, 'workspaces')).mode & 0o777).toBe(0o700);
       expect(statSync(wsDir).mode & 0o777).toBe(0o777);
       writeFileSync(resolve(wsDir, 'host-seed.txt'), 'HOST_SEED_BL\n');
-      sock.emit('frame', { type: 'input', data: 'cat /workspace/host-seed.txt\n' });
-      await waitForOutput(sock, /HOST_SEED_BL/);
-      sock.emit('frame', { type: 'input', data: 'echo BOX_WROTE_BL > /workspace/box-out.txt\n' });
+      expect(await shell('cat /workspace/host-seed.txt')).toContain('HOST_SEED_BL');
+      await shell('echo BOX_WROTE_BL > /workspace/box-out.txt');
       await waitForFileContains(resolve(wsDir, 'box-out.txt'), 'BOX_WROTE_BL');
     } finally {
       sock.disconnect();
