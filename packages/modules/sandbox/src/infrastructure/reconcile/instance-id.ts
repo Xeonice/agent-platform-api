@@ -5,6 +5,20 @@ import { resolve } from 'node:path';
 export const INSTANCE_LABEL = 'platform.instance';
 
 /**
+ * boxlite micro-VM 的名字前缀。**生产者与解析者共用这一个函数**——boxlite 没有
+ * docker 那样的标签机制,身份只能编进名字,而"编进去"和"读出来"分处两个文件。
+ *
+ * ⚠️ 此前两边各自拼字符串:provider 拼 `platform-${this.name}-${id}-`,reconciler 拼
+ * `${BOXLITE_NAME_PREFIX}${id}-`。单测钉住了「生产者 ↔ 测试」,却钉不住
+ * 「生产者 ↔ reconciler」—— 改 reconciler 那个常量,生产者照样产旧格式,测试照样绿,
+ * 而线上一个 box 都不回收。有共享常量可 import 时就没有漂移;退回字符串拼接,
+ * 守卫就只能钉住三方中的两方。
+ */
+export function boxliteNamePrefix(): string {
+  return `platform-boxlite-${platformInstanceId()}-`;
+}
+
+/**
  * 本实例的身份指纹。
  *
  * ── 为什么需要它 ────────────────────────────────────────────────────────────

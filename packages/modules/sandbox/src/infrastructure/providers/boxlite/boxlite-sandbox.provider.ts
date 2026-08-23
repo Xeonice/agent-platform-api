@@ -24,7 +24,7 @@ import {
   withJobSurvivalEnv,
 } from '../aio/agent-auth';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
-import { platformInstanceId } from '../../reconcile/instance-id';
+import { boxliteNamePrefix } from '../../reconcile/instance-id';
 
 const AGENT_GUEST_PORT = 8080;
 
@@ -181,7 +181,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
    * 下面的单测把两边钉在一起。
    */
   private boxName(sandboxId: string): string {
-    return `platform-${this.name}-${platformInstanceId()}-${sandboxId}`;
+    return `${boxliteNamePrefix()}${sandboxId}`;
   }
 
   private agentBase(handle: SandboxHandle): string {

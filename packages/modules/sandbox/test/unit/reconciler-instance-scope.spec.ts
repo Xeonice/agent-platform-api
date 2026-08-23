@@ -8,7 +8,11 @@
 // 修法不是"跑测试前记得关 demo"（那是纪律，靠不住），而是把"孤儿"收窄到**本实例
 // 管的容器** —— 语义上本来也该如此：一个实例凭什么去删另一个实例的东西。
 import { describe, it, expect, afterEach } from 'vitest';
-import { platformInstanceId, INSTANCE_LABEL } from '../../src/infrastructure/reconcile/instance-id';
+import {
+  platformInstanceId,
+  boxliteNamePrefix,
+  INSTANCE_LABEL,
+} from '../../src/infrastructure/reconcile/instance-id';
 import { BoxliteSandboxProvider } from '../../src/infrastructure/providers/boxlite/boxlite-sandbox.provider';
 
 /**
@@ -63,10 +67,12 @@ describe('platformInstanceId — 身份取自"哪个库在裁决孤儿"', () => 
 describe('boxlite 的名字与 reconciler 的前缀必须同源', () => {
   it('provider 造的名字，能被 reconciler 的 minePrefix 认出来', () => {
     process.env['DATABASE_URL'] = '/srv/a/platform.db';
-    const id = platformInstanceId();
     const produced = realBoxName('sbx-42');
-    // reconciler: `${BOXLITE_NAME_PREFIX}${instanceId}-`，BOXLITE_NAME_PREFIX = 'platform-boxlite-'
-    const minePrefix = `platform-boxlite-${id}-`;
+    // ⚠️ 断言的**两侧都取自真来源**：生产者经 Reflect 调 `boxName()`，解析侧调
+    // reconciler 用的同一个 `boxliteNamePrefix()`。第一版这里手写 `platform-boxlite-`，
+    // 于是它钉住的是「生产者 ↔ 测试」，钉不住「生产者 ↔ reconciler」——改后者的常量
+    // 测试照样绿，而线上一个 box 都不回收。
+    const minePrefix = boxliteNamePrefix();
 
     expect(produced.startsWith(minePrefix)).toBe(true);
     expect(produced.slice(minePrefix.length)).toBe('sbx-42');
@@ -74,7 +80,7 @@ describe('boxlite 的名字与 reconciler 的前缀必须同源', () => {
 
   it('⚠️ 别的实例造的名字，本实例认不出来（互不回收）', () => {
     process.env['DATABASE_URL'] = '/srv/a/platform.db';
-    const mine = `platform-boxlite-${platformInstanceId()}-`;
+    const mine = boxliteNamePrefix();
     process.env['DATABASE_URL'] = '/tmp/e2e/platform.db';
     const theirs = realBoxName('sbx-42');
 
@@ -83,7 +89,7 @@ describe('boxlite 的名字与 reconciler 的前缀必须同源', () => {
 
   it('⚠️ 旧格式（无实例段）不被任何实例认领 —— 宁可漏收，不可误删', () => {
     process.env['DATABASE_URL'] = '/srv/a/platform.db';
-    const mine = `platform-boxlite-${platformInstanceId()}-`;
+    const mine = boxliteNamePrefix();
     // 本改动之前建的 box：`platform-boxlite-<sandboxId>`
     expect('platform-boxlite-sbx-42'.startsWith(mine)).toBe(false);
   });

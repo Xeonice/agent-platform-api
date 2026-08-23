@@ -5,11 +5,9 @@ import { DATABASE } from '@platform/shared-kernel';
 import { DOCKER_CLIENT } from '../providers/docker/docker.token';
 import { getSharedBoxliteRuntime } from '../providers/boxlite/boxlite-runtime';
 import { sandboxes } from '../persistence/schema/sandbox.sqlite';
-import { INSTANCE_LABEL, platformInstanceId } from './instance-id';
+import { INSTANCE_LABEL, boxliteNamePrefix, platformInstanceId } from './instance-id';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
-
-const BOXLITE_NAME_PREFIX = 'platform-boxlite-';
 
 /**
  * Startup orphan reconciler (docs/backend/13 §4 privileged reconciliation path).
@@ -102,7 +100,7 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
     // ⚠️ boxlite 侧没有标签机制,身份只能编进**名字**(下面的 prefix)。
     // 名字里带上实例指纹,规则与 docker 侧同构:不同实例的 micro-VM 前缀不同,
     // 彼此的 `startsWith` 都不成立 ⇒ 天然互不回收。
-    const minePrefix = `${BOXLITE_NAME_PREFIX}${platformInstanceId()}-`;
+    const minePrefix = boxliteNamePrefix();
     const boxes = await runtime.listInfo().catch((e: unknown) => {
       this.logger.warn(`boxlite reconcile skipped: ${(e as Error).message}`);
       return [];
