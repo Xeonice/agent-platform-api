@@ -12,4 +12,8 @@ export { agentTasks } from './infrastructure/persistence/schema/agent-task.sqlit
 export { SandboxStatusVO } from './domain/value-objects/sandbox-status.vo';
 export type { SandboxStatus } from './domain/value-objects/sandbox-status.vo';
 // 实例身份（回收作用域）：e2e 需要按真实形状造孤儿,故经公共出口暴露。
-export { INSTANCE_LABEL, platformInstanceId } from './infrastructure/reconcile/instance-id';
+export {
+  INSTANCE_LABEL,
+  boxliteNamePrefix,
+  platformInstanceId,
+} from './infrastructure/reconcile/instance-id';
