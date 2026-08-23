@@ -12,6 +12,7 @@ import {
   TERMINAL_AUTHENTICATOR,
   WS_TASKS_SCHEMA_HASH,
   X_SCHEMA_HASH_HEADER,
+  wsHandshakeError,
 } from '@platform/contracts';
 import type {
   TaskClientFrame,
@@ -21,34 +22,6 @@ import type {
 } from '@platform/contracts';
 import { AgentTaskApplicationService } from '../../application/agent-task.service';
 import { TaskEventHub } from '../../application/task-event.hub';
-
-/**
- * Codes a `/tasks` handshake can be refused with. They are the WIRE contract of the
- * rejection: the client dispatches on them, so they lead the message and are repeated
- * on `err.data`.
- *
- * ⚠️ ONLY `UNAUTHORIZED` MAY LOOK LIKE AN AUTH FAILURE. The client's shared
- * "is this unauthorized?" helper matches the message against
- * /unauthor|forbidden|passcode|401|403/i, so none of those words may appear in a
- * `SCHEMA_MISMATCH` or a `SANDBOX_REQUIRED` message — being mistaken for one pops the
- * unlock dialog, which for a protocol-version drift or a missing query parameter is
- * worse than useless: it sends the user to do the one thing that cannot possibly help.
- *
- * ⚠️ AND `SANDBOX_REQUIRED` IS DELIBERATELY NOT SPELLED `UNAUTHORIZED`. A handshake
- * that omits `sandboxId` presented a perfectly good access passcode; what is missing is
- * ADDRESSING, and the platform has no per-caller scope for this rule to be
- * authorisation OF (the same distinction `requireTask` draws on the REST side). Reusing
- * `UNAUTHORIZED` would be a lie told twice: it would misname the fault AND route the
- * user to the unlock dialog, which cannot add a query parameter the client itself
- * failed to send.
- */
-export type TasksHandshakeRejection = 'UNAUTHORIZED' | 'SCHEMA_MISMATCH' | 'SANDBOX_REQUIRED';
-
-function handshakeError(code: TasksHandshakeRejection, detail: string): Error {
-  const err = new Error(`${code}: ${detail}`) as Error & { data?: { code: string } };
-  err.data = { code };
-  return err;
-}
 
 /** One socket's interest in one task. */
 interface Subscription {
@@ -154,7 +127,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     // channel carries agent OUTPUT — the contents of a private repository, in general
     // — so an unauthenticated socket must never reach the subscribe path.
     if (!this.auth.authorize(this.readCredentials(client))) {
-      return handshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
+      return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
     }
     // Frame-schema agreement, checked AFTER auth so an unauthenticated client cannot
     // use the distinct rejection codes to fingerprint the server (same order as
@@ -169,7 +142,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     // silently DROPPED; the handshake is the only place it can be reported as itself.
     const presented = this.readSchemaHash(client);
     if (presented !== WS_TASKS_SCHEMA_HASH) {
-      return handshakeError(
+      return wsHandshakeError(
         'SCHEMA_MISMATCH',
         `expected ${WS_TASKS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
       );
@@ -192,7 +165,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     // scopes itself, so this is the established shape and not a new one.
     const scope = this.readQuery(client, 'sandboxId');
     if (scope === undefined || scope === '') {
-      return handshakeError(
+      return wsHandshakeError(
         'SANDBOX_REQUIRED',
         'the handshake query must name the sandbox this socket is watching (?sandboxId=…)',
       );

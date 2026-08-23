@@ -5,11 +5,17 @@ import {
   MessageBody,
   type OnGatewayConnection,
   type OnGatewayDisconnect,
+  type OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
 } from '@nestjs/websockets';
-import type { Socket } from 'socket.io';
-import { TERMINAL_AUTHENTICATOR, WS_SCHEMA_HASH, X_SCHEMA_HASH_HEADER } from '@platform/contracts';
+import type { Namespace, Socket } from 'socket.io';
+import {
+  TERMINAL_AUTHENTICATOR,
+  WS_SCHEMA_HASH,
+  X_SCHEMA_HASH_HEADER,
+  wsHandshakeError,
+} from '@platform/contracts';
 import type {
   ProcessStream,
   TerminalAuthenticator,
@@ -30,14 +36,16 @@ interface Attachment {
  *   - `socketSessionKey` is SERVER-generated 128-bit (audit P2-9), sent in the
  *     first `session` frame; never client-chosen.
  *   - Frames follow shared/10 §7.4 (`type` discriminator; data is plain string).
- *   - Handshake carries X-Schema-Hash (14 §2.5 scheme B): loud reject on mismatch.
+ *   - Handshake carries X-Schema-Hash (14 §2.5 scheme B) and is REQUIRED to; it is
+ *     refused in MIDDLEWARE with a machine-readable code (`WsHandshakeRejection`),
+ *     never by accepting the socket and disconnecting it — see `afterInit`.
  *   - Since S5 the gateway ALWAYS ATTACHES the tmux session provision started
  *     (`TerminalSessionService.openSession`); it no longer starts the agent itself.
  *   - tmux re-attach grace window (06 §6) is a SKELETON — S1 kills the pty on
  *     disconnect; `?socketSessionKey=` is accepted for the future reuse path.
  */
 @WebSocketGateway({ namespace: '/terminal' })
-export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger('TerminalGateway');
   private readonly attachments = new Map<string, Attachment>();
 
@@ -46,33 +54,76 @@ export class TerminalGateway implements OnGatewayConnection, OnGatewayDisconnect
     @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
   ) {}
 
-  async handleConnection(client: Socket): Promise<void> {
+  /**
+   * Refuse a bad handshake in socket.io MIDDLEWARE, exactly like `/tasks`.
+   *
+   * ⚠️ WHY NOT `handleConnection` + `disconnect(true)` — MEASURED, not theoretical.
+   * The client identifies an unauthorized handshake from `connect_error`; a server that
+   * accepts the socket and then tears it down never produces one, so `onUnauthorized`
+   * COULD NOT FIRE: with the passcode gate on, the terminal never showed the unlock
+   * dialog and just reconnected forever. The same mechanism swallowed the X-Schema-Hash
+   * mismatch — the entire reason that handshake field exists. A middleware rejection
+   * travels as `connect_error`, which socket.io guarantees to deliver, and it happens
+   * before the socket joins the namespace, so there is nothing to unwind.
+   *
+   * ⚠️ NOTHING ABOUT THE SESSION SEMANTICS MOVES. `socketSessionKey` is still minted
+   * per accepted connection in `handleConnection`, and the reconnect credential
+   * (`?socketSessionKey=`) is still read there and handed to `openSession` as `reuse`
+   * (08 §11.6) — the middleware only ever answers "may this handshake proceed", and it
+   * does not read, require or invalidate that key.
+   */
+  afterInit(server: Namespace): void {
+    server.use((socket, next) => {
+      const rejection = this.rejectHandshake(socket);
+      if (rejection) {
+        this.logger.warn(`terminal handshake rejected: ${rejection.message}`);
+        next(rejection);
+        return;
+      }
+      next();
+    });
+  }
+
+  /** `null` ⇒ the handshake is acceptable. Order is load-bearing — see each comment. */
+  private rejectHandshake(client: Socket): Error | null {
     // access-passcode gate FIRST (S1 audit P1-1): the REST guard self-exempts
     // non-HTTP contexts, so the WS handshake must re-check the passcode/session
     // itself. It runs BEFORE any other probe so an UNAUTHENTICATED client cannot
-    // use the distinct disconnect reasons to fingerprint the server (e.g. probe
+    // use the distinct rejection codes to fingerprint the server (e.g. probe
     // the schema-hash) — every rejection looks the same until it is authorized.
     if (!this.auth.authorize(this.readCredentials(client))) {
-      this.logger.warn('terminal handshake rejected: missing/invalid access passcode');
-      client.disconnect(true);
-      return;
+      return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
     }
-
+    // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. It used to read
+    // `presented && presented !== …`, i.e. it could only ever catch a client that was
+    // already being careful enough to send one — the client that does not need
+    // catching. A `/terminal` frame drift shows up on the other side as frames that
+    // simply do not render; the handshake is the only place it can be reported as
+    // itself.
     const presented = this.readSchemaHash(client);
-    if (presented && presented !== WS_SCHEMA_HASH) {
-      this.logger.warn(
-        `WS schema-hash mismatch (client=${presented} server=${WS_SCHEMA_HASH}); refusing connection`,
+    if (presented !== WS_SCHEMA_HASH) {
+      return wsHandshakeError(
+        'SCHEMA_MISMATCH',
+        `expected ${WS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
       );
-      client.disconnect(true);
-      return;
     }
-
+    // Addressing, checked LAST — a client that cannot agree on the frame shapes is
+    // better told THAT, and it is the older client, so the more useful diagnosis wins.
     const sandboxId = this.readQuery(client, 'sandboxId');
-    if (!sandboxId) {
-      this.logger.warn('terminal connection without sandboxId; refusing');
-      client.disconnect(true);
-      return;
+    if (sandboxId === undefined || sandboxId === '') {
+      return wsHandshakeError(
+        'SANDBOX_REQUIRED',
+        'the handshake query must name the sandbox this terminal attaches to (?sandboxId=…)',
+      );
     }
+    return null;
+  }
+
+  async handleConnection(client: Socket): Promise<void> {
+    // Past the middleware, so the handshake is authorized, version-agreed and addressed.
+    // `sandboxId` cannot be absent here; the fallback keeps this method total rather
+    // than asserting, and `openSession` would reject an empty id anyway.
+    const sandboxId = this.readQuery(client, 'sandboxId') ?? '';
     const cols = Number(this.readQuery(client, 'cols') ?? 80);
     const rows = Number(this.readQuery(client, 'rows') ?? 24);
     const reuse = this.readQuery(client, 'socketSessionKey');

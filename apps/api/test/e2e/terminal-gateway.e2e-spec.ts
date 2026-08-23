@@ -39,6 +39,22 @@ function connect(query: Record<string, string>): Socket {
     query,
     transports: ['websocket'],
     forceNew: true,
+    // a middleware refusal must be observed ONCE, not retried behind the assertion
+    reconnection: false,
+  });
+}
+
+function awaitConnectError(sock: Socket): Promise<Error> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('no connect_error')), 4000);
+    sock.on('connect_error', (e: Error) => {
+      clearTimeout(t);
+      resolve(e);
+    });
+    sock.on('connect', () => {
+      clearTimeout(t);
+      reject(new Error('handshake was ACCEPTED'));
+    });
   });
 }
 
@@ -81,17 +97,51 @@ describe('/terminal socket.io gateway', () => {
     }
   });
 
-  it('refuses a handshake with a mismatched X-Schema-Hash', async () => {
+  /**
+   * ⚠️ THE REFUSAL IS A `connect_error`, NOT A DISCONNECT, AND THAT IS THE POINT.
+   * While this gateway accepted the socket and then called `disconnect(true)`, the
+   * client saw a connection that opened and closed — indistinguishable from a network
+   * blip — so the one thing the X-Schema-Hash handshake exists to report could not be
+   * reported. Asserting "the socket went away" passed under BOTH behaviours, which is
+   * why the old shape survived this test.
+   */
+  it('refuses a mismatched X-Schema-Hash with SCHEMA_MISMATCH on connect_error', async () => {
     const sock = connect({ sandboxId: 'sbx-term-2', xSchemaHash: 'deadbeefdeadbeef' });
     try {
-      const disconnected = await new Promise<boolean>((resolve) => {
-        const t = setTimeout(() => resolve(false), 4000);
-        sock.on('disconnect', () => {
-          clearTimeout(t);
-          resolve(true);
-        });
-      });
-      expect(disconnected).toBe(true);
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('SCHEMA_MISMATCH')).toBe(true);
+      expect((err as Error & { data?: { code?: string } }).data?.code).toBe('SCHEMA_MISMATCH');
+      // ⚠️ AND IT MUST NOT LOOK LIKE AN AUTH FAILURE. The client's shared matcher falls
+      // back to this prose regex, and a version drift shown as "unauthorized" sends the
+      // user to the unlock dialog — which cannot fix a version drift.
+      expect(err.message).not.toMatch(/unauthor|forbidden|passcode|401|403/i);
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('refuses a handshake that OMITS the hash — required, not checked-if-present', async () => {
+    // The old rule was `presented && presented !== …`, so it only ever caught a client
+    // that was already careful enough to send one. The frontend does send it, so the
+    // only clients this admitted were the ones nobody could vouch for.
+    const sock = connect({ sandboxId: 'sbx-term-3' });
+    try {
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('SCHEMA_MISMATCH')).toBe(true);
+      expect(err.message).toContain('none');
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('refuses a handshake with no sandboxId as SANDBOX_REQUIRED — not as UNAUTHORIZED', async () => {
+    // A missing query parameter is an ADDRESSING fault; naming it "unauthorized" would
+    // both misreport it and route the user to a dialog that cannot add a parameter.
+    const sock = connect({ xSchemaHash: WS_SCHEMA_HASH });
+    try {
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('SANDBOX_REQUIRED')).toBe(true);
+      expect(err.message).not.toMatch(/unauthor|forbidden|passcode|401|403/i);
     } finally {
       sock.disconnect();
     }
