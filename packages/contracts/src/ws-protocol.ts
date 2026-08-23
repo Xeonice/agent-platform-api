@@ -174,6 +174,23 @@ export const WS_PROTOCOL_CANONICAL =
 export const WS_SCHEMA_HASH = 'sb-terminal-v1';
 
 /**
+ * `terminal.server:exit{code}` 里表示"**平台没能附着上**"的哨兵码。
+ *
+ * ⚠️ 为什么不能复用 `-1`:`-1` 已经有确切含义 —— `ProcessStream.onExit` 收到 `null`
+ * (进程被信号杀死、退出码未知)时网关就发 `-1`。一个被 OOM kill 的 agent 与"整个沙箱
+ * 已经不在了"会变成**字节级相同**的一帧,而这两件事对用户的下一步完全不同:
+ * 前者等结果/看日志,后者只能重新发起任务。
+ *
+ * 它落在既有帧的既有字段里(`code` 本来就是 number),所以**不动 `WS_PROTOCOL_CANONICAL`、
+ * 不用 bump `WS_SCHEMA_HASH`** —— 老客户端把它当一个未知退出码显示,不会崩。
+ *
+ * ⚠️ 只用于**不可重试**的附着失败。可重试的(`PROVIDER_UNAVAILABLE` 这类,
+ * `SandboxProviderError.retryable` 自己会说)**一帧都不发**,让客户端的退避重连
+ * 照旧自愈 —— 发了就等于把瞬时故障判成永久故障。
+ */
+export const TERMINAL_EXIT_ATTACH_FAILED = -2;
+
+/**
  * The `/tasks` handshake's X-Schema-Hash. A SEPARATE pinned literal from
  * `WS_SCHEMA_HASH` because the two channels version independently: a `/tasks` frame
  * change must not invalidate every open terminal, and vice versa. Same discipline —

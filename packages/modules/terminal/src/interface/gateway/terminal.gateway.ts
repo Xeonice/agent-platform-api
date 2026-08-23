@@ -11,7 +11,9 @@ import {
 } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
 import {
+  SandboxProviderError,
   TERMINAL_AUTHENTICATOR,
+  TERMINAL_EXIT_ATTACH_FAILED,
   WS_SCHEMA_HASH,
   X_SCHEMA_HASH_HEADER,
   wsHandshakeError,
@@ -144,12 +146,42 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       });
     } catch (e) {
       this.logger.error(`openSession failed for sandbox ${sandboxId}: ${(e as Error).message}`);
+      // ⚠️ **先说一声再挂断,但只对不可重试的失败说。**
+      //
+      // 此前这里是一句不说的 `disconnect(true)`,而"连上又断"与网络抖动在客户端看来
+      // 完全一样 —— 于是它只能按抖动处理:退避重连,而每一次都走进同一个 catch。实测:
+      // 连上 → 1ms 后挂断、零帧,前端烧完 9 次退避(约 2 分钟)才停,而那个「手动重连」
+      // 每按一次又清零预算重来一轮。
+      //
+      // 但**不能一律判死**:能从这里抛出来的不只有"容器已被回收"这种永久故障,还有
+      // `PROVIDER_UNAVAILABLE` 这类瞬时故障(名字本身就在说该重试)。一律发终止信号
+      // 等于把本来能自愈的抖动也判成永久故障。判据用 `SandboxProviderError.retryable`
+      // —— 它本来就在契约里,不需要另造一套。
+      //
+      // 码用 `TERMINAL_EXIT_ATTACH_FAILED`(-2)而不是 -1:后者已经表示"进程退出但退出码
+      // 未知"(被信号杀死),复用会让"agent 被 OOM kill"和"沙箱整个不在了"变成字节级
+      // 相同的一帧,而这两件事对用户的下一步完全不同。
+      if (this.isRetryableAttachFailureImpl(e)) {
+        client.disconnect(true); // 保持沉默：让客户端的退避重连照旧自愈
+        return;
+      }
+      this.send(client, { type: 'exit', code: TERMINAL_EXIT_ATTACH_FAILED });
       client.disconnect(true);
     }
   }
 
   /**
-   * WS 断开 = **detach**,不是结束(06 §6.6 / §8.4:"kill 掉的只是网关侧的 `tmux attach`
+   * 这次附着失败值不值得客户端再试一次。
+   *
+   * `SandboxProviderError` 自带 `retryable`,是契约里现成的判据。非 provider 错误
+   * (例如 tmux 探测抛的裸 Error)按**不可重试**处理:宁可让用户看到一句明确的
+   * "会话已结束、请重新发起",也好过让他盯着两分钟注定失败的重连。
+   */
+  private isRetryableAttachFailureImpl(e: unknown): boolean {
+    return e instanceof SandboxProviderError && e.retryable;
+  }
+  /**
+   * WS 断开 = **detach**,不是结束(06 §6.2 / §6.3:"kill 掉的只是网关侧的 `tmux attach`
    * 进程, agent 会话不受影响")。
    *
    * ⚠️ 这里此前调的是 `stream.kill()`。对 PTY 来说 kill 的信号通道**就是 pty 本身**——
@@ -161,8 +193,7 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
    * 这个 bug 当时以一种荒诞的方式暴露:ETX 之后 bash 正在重画提示符,`exit\n` 撞进这个
    * 重画窗口,首字节丢了,于是 shell 收到的是 `xit`——**恰恰是这个丢字节救了会话**,
    * 否则 shell 早就退干净了,现象会变成"刷新一下任务就没了"。
-   */
-  handleDisconnect(client: Socket): void {
+   */ handleDisconnect(client: Socket): void {
     const att = this.attachments.get(client.id);
     if (att) {
       att.stream.detach();
