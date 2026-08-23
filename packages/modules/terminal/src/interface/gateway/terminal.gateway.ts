@@ -144,6 +144,15 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       });
     } catch (e) {
       this.logger.error(`openSession failed for sandbox ${sandboxId}: ${(e as Error).message}`);
+      // ⚠️ **先说一声再挂断。** 此前这里是一句不说的 `disconnect(true)`,而"连上又断"
+      // 与网络抖动在客户端看来**完全一样** —— 于是它只能按抖动处理:退避重连,而每一次
+      // 重连都注定走进同一个 catch。实测:连上 → 1ms 后挂断,一个帧都没有,前端烧完
+      // 9 次退避(约 2 分钟)才停手,然后那个「手动重连」每按一次又清零预算重来一轮。
+      //
+      // `exit` 是**既有帧**(在 WS_PROTOCOL_CANONICAL 里),所以不动协议、不用 bump
+      // WS_SCHEMA_HASH。语义上也正确:要附着的那个东西不在了 = 这条会话结束了,
+      // 不是传输出了问题。`-1` 沿用"退出码未知"的既有约定。
+      this.send(client, { type: 'exit', code: -1 });
       client.disconnect(true);
     }
   }
