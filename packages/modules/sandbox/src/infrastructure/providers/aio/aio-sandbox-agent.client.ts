@@ -1136,6 +1136,33 @@ export class AioWsProcessStream implements ProcessStream {
    * `SandboxProvider.destroy()` / `stop()`, which takes the whole instance with it
    * (03 §8.3).
    */
+  /**
+   * 断开 ≠ 结束。只关本端 socket:沙箱内那个 `tmux attach` 进程随之退出,而 tmux
+   * **session 本身连同里面正在跑的 agent 原样活着**(06 §6.6「WS 断开 = detach」)。
+   *
+   * 这里**不 synthExit**:进程并没有退出,合成一个 exit 等于对上层撒谎。
+   */
+  detach(): void {
+    // ⚠️ **先上锁再关 socket,顺序是承重的。** 构造函数把 ws 的 `'close'` 与 `'error'`
+    // 都接到了 `synthExit(null)` —— 而本端主动 `close()` 之后 `'close'` 照样会触发。
+    // 所以"detach 里不调 synthExit"根本挡不住它:回调会经事件间接跑一遍,上层拿到
+    // 一次"进程已退出"——而 detach 的全部意义就是"进程没退出,我只是松手"。
+    //
+    // 今天它打在真空里(网关是在浏览器已断开之后才 detach),但 `?socketSessionKey=`
+    // 的复用路径就在本文件的 TODO 里:一旦按它复用同一个 ProcessStream 而不是每次
+    // 重开,`exited` 一旦被误置就再也回不去 —— `onExit(cb)` 里 `if (this.exited)
+    // cb(null)` 会让下一次重连在附着的瞬间被判死。
+    //
+    // `exited` 本来就是 synthExit 的幂等锁,置上之后那次由 close 事件引发的
+    // synthExit 会在第一行返回,一个回调都不会跑。
+    this.exited = true;
+    try {
+      this.ws.close();
+    } catch {
+      /* already closing */
+    }
+  }
+
   async kill(signal?: NodeJS.Signals): Promise<void> {
     this.write(CTRL_C);
     if (toAgentSignal(signal) !== 'SIGINT') {
@@ -1188,6 +1215,15 @@ class AioExecProcessStream implements ProcessStream {
   onData(cb: (chunk: Buffer) => void): void {
     this.dataCbs.push(cb);
     if (this.settled && this.output) cb(this.output);
+  }
+
+  /**
+   * 一次性 exec 没有可保活的会话:命令要么已 settle、要么还在跑而调用方不再要结果。
+   * 两种情况都只是**放开回调**,同样一个字节都不往对面写。
+   */
+  detach(): void {
+    this.dataCbs.length = 0;
+    this.exitCbs.length = 0;
   }
 
   write(): void {

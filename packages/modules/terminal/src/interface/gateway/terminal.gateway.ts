@@ -148,10 +148,24 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     }
   }
 
+  /**
+   * WS 断开 = **detach**,不是结束(06 §6.6 / §8.4:"kill 掉的只是网关侧的 `tmux attach`
+   * 进程, agent 会话不受影响")。
+   *
+   * ⚠️ 这里此前调的是 `stream.kill()`。对 PTY 来说 kill 的信号通道**就是 pty 本身**——
+   * 它往终端里写 ETX + `exit\n`。那两下直接落进 tmux 面板里的 shell:先 SIGINT 掉用户
+   * 正在跑的 agent,再试图结束它的 shell。也就是说**每关一次标签页/刷新一次页面,平台
+   * 就打断一次正在跑的任务**——而 tmux 之所以是硬性镜像要求(`IMAGE_CONTRACT_VIOLATION`),
+   * 全部理由就是"会话必须活过前端断连"。
+   *
+   * 这个 bug 当时以一种荒诞的方式暴露:ETX 之后 bash 正在重画提示符,`exit\n` 撞进这个
+   * 重画窗口,首字节丢了,于是 shell 收到的是 `xit`——**恰恰是这个丢字节救了会话**,
+   * 否则 shell 早就退干净了,现象会变成"刷新一下任务就没了"。
+   */
   handleDisconnect(client: Socket): void {
     const att = this.attachments.get(client.id);
     if (att) {
-      void att.stream.kill().catch(() => undefined);
+      att.stream.detach();
       this.attachments.delete(client.id);
     }
   }

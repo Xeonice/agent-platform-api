@@ -8,6 +8,7 @@ import { readUntil } from '../../src/infrastructure/adapters/pty-reader.util';
  * the token does not linger in heap buffers.
  */
 class FakePty implements ProcessStream {
+  detach(): void {}
   readonly ref = 'fake';
   private dataCb?: (c: Buffer) => void;
   private exitCb?: (code: number | null) => void;

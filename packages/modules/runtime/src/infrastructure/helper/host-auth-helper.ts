@@ -81,4 +81,9 @@ class ChildProcessStream implements ProcessStream {
   async kill(signal?: NodeJS.Signals): Promise<void> {
     this.child.kill(signal ?? 'SIGTERM');
   }
+
+  /** 松手但不发信号:让宿主子进程按自己的节奏结束(detach ≠ kill)。 */
+  detach(): void {
+    this.child.unref();
+  }
 }
