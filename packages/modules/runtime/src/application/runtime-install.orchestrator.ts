@@ -1,7 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
-import { RUNTIME_ADAPTER_REGISTRY, RuntimeInstallFailedError } from '@platform/contracts';
+import {
+  RUNTIME_ADAPTER_REGISTRY,
+  RuntimeInstallFailedError,
+  UnknownRuntimeError,
+} from '@platform/contracts';
 import type {
   EnsureRuntimeInstalledInput,
   RuntimeAdapter,
@@ -104,9 +108,15 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     await this.transition(installation, (i, now) => i.markInstalled(version, now));
   }
 
+  /**
+   * ⚠️ `UnknownRuntimeError`, NOT `RuntimeInstallFailedError`. "There is no adapter with
+   * this id" is not an install that went wrong — nothing was installed, nothing could
+   * be. Filing it under `INSTALL_FAILED` made the platform explain a non-existent
+   * runtime as 「CLI 安装失败」 and offer a retry that can never succeed (04 §4 / 14 §10).
+   */
   private adapterFor(runtimeId: string): RuntimeAdapter {
     if (!this.registry.has(runtimeId)) {
-      throw new RuntimeInstallFailedError(`unknown runtime '${runtimeId}'`);
+      throw new UnknownRuntimeError(runtimeId);
     }
     return this.registry.get(runtimeId);
   }

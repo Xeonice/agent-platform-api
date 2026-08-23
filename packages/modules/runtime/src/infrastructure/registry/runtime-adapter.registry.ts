@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { UnknownRuntimeError } from '@platform/contracts';
 import type { RuntimeAdapter, RuntimeAdapterRegistry } from '@platform/contracts';
 import { CodexAdapter } from '../adapters/codex/codex.adapter';
 import { ClaudeCodeAdapter } from '../adapters/claude-code/claude-code.adapter';
@@ -32,9 +33,16 @@ export class DefaultRuntimeAdapterRegistry implements RuntimeAdapterRegistry {
     this.adapters.set(a.id, a);
   }
 
+  /**
+   * ⚠️ A TYPED error, not a bare `Error`. Every caller that skips the `has()` guard —
+   * the task pump re-attaching after a restart, the terminal building an attach command
+   * — funnels its throw into a `code`-reading failure path, and a bare `Error` has no
+   * `code`, so it landed as `INTERNAL`: "内部错误" for a fact the platform knows
+   * exactly ("no adapter is registered under this id", 04 §8 / 14 §10).
+   */
   get(id: string): RuntimeAdapter {
     const a = this.adapters.get(id);
-    if (!a) throw new Error(`unknown runtime '${id}'`);
+    if (!a) throw new UnknownRuntimeError(id);
     return a;
   }
 
