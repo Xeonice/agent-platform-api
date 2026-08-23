@@ -579,32 +579,36 @@ describe('a read that fails — transport is not a verdict', () => {
     expect(h.taskLogs.stdout.get(dto.id)).toContain('after the blip');
   });
 
-  it('a read that never recovers is landed AND released — no leaked session', { timeout: 20_000 }, async () => {
-    const h = harness();
-    const sandboxId = await runningSandbox(h);
-    const plane = h.provider.jobs!;
-    // more faults than the retry budget ⇒ the pump gives up.
-    for (let i = 0; i < 12; i++) plane.readFaults.push(transportFault());
-    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+  it(
+    'a read that never recovers is landed AND released — no leaked session',
+    { timeout: 20_000 },
+    async () => {
+      const h = harness();
+      const sandboxId = await runningSandbox(h);
+      const plane = h.provider.jobs!;
+      // more faults than the retry budget ⇒ the pump gives up.
+      for (let i = 0; i < 12; i++) plane.readFaults.push(transportFault());
+      const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
 
-    // the retry budget is 5 attempts with doubling backoff ⇒ ~3.1s before it gives up.
-    await until(
-      () => (h.taskRepo.store.get(dto.id)?.isRunning ?? true) === false,
-      'the verdict',
-      12_000,
-    );
-    const stored = h.taskRepo.store.get(dto.id)!;
-    expect(stored.status).toBe('failed');
-    expect(stored.errorCode).toBe('PROVIDER_UNAVAILABLE');
-    // ⚠️ THE FAILURE PATH RELEASES TOO. Without this the sandbox-side session and its
-    // attached websocket outlive the task forever: the row is terminal, so nothing
-    // will ever look at it again.
-    await until(() => plane.released.length === 1, 'the failed job to be released', 5_000);
-    // and the subscriber is TOLD, rather than being left on "运行中".
-    const kinds = frames(h).map((f) => f.type);
-    expect(kinds).toContain('error');
-    expect(kinds).toContain('exit');
-  });
+      // the retry budget is 5 attempts with doubling backoff ⇒ ~3.1s before it gives up.
+      await until(
+        () => (h.taskRepo.store.get(dto.id)?.isRunning ?? true) === false,
+        'the verdict',
+        12_000,
+      );
+      const stored = h.taskRepo.store.get(dto.id)!;
+      expect(stored.status).toBe('failed');
+      expect(stored.errorCode).toBe('PROVIDER_UNAVAILABLE');
+      // ⚠️ THE FAILURE PATH RELEASES TOO. Without this the sandbox-side session and its
+      // attached websocket outlive the task forever: the row is terminal, so nothing
+      // will ever look at it again.
+      await until(() => plane.released.length === 1, 'the failed job to be released', 5_000);
+      // and the subscriber is TOLD, rather than being left on "运行中".
+      const kinds = frames(h).map((f) => f.type);
+      expect(kinds).toContain('error');
+      expect(kinds).toContain('exit');
+    },
+  );
 
   it('a NON-retryable read failure is landed immediately, not retried', async () => {
     const h = harness();

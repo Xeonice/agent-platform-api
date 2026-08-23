@@ -263,7 +263,11 @@ describe('positional arguments are DATA — `--` closes the option list', () => 
       '01ARZ3NDEKTSV4RRFFQ69G5FAV',
     ]) {
       expect(() =>
-        new ClaudeCodeAdapter().buildStartCommand({ prompt: 'go', headless: true, resumeFrom: ref }),
+        new ClaudeCodeAdapter().buildStartCommand({
+          prompt: 'go',
+          headless: true,
+          resumeFrom: ref,
+        }),
       ).not.toThrow();
     }
   });

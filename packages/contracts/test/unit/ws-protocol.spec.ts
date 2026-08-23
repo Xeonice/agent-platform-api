@@ -106,7 +106,12 @@ describe('/tasks channel — the hash and the frame shapes it stands for (14 §2
 
   it('every server frame the backend actually sends is in the union', () => {
     const frames: TaskServerFrame[] = [
-      { type: 'event', taskId: 't', seq: 1, event: { type: 'agent-message', timestamp: '', data: {} } },
+      {
+        type: 'event',
+        taskId: 't',
+        seq: 1,
+        event: { type: 'agent-message', timestamp: '', data: {} },
+      },
       { type: 'caught_up', taskId: 't', firstSeq: 1, seq: 0 },
       { type: 'exit', taskId: 't', status: 'killed' },
       { type: 'error', taskId: 't', code: 'TASK_FAILED' },

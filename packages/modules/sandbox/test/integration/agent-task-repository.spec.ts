@@ -154,7 +154,7 @@ describe('SqliteAgentTaskRepository roundtrip', () => {
   });
 });
 
-describe('the cancel write is ONE column, and it is guarded (`WHERE status=\'running\'`)', () => {
+describe("the cancel write is ONE column, and it is guarded (`WHERE status='running'`)", () => {
   let h: ReturnType<typeof makeHarness>;
   beforeEach(() => {
     h = makeHarness();

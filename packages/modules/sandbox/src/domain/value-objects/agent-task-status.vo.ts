@@ -8,13 +8,7 @@
  * them into `failed` would erase the only signal that tells an operator whether the
  * timeout tier is too small or the agent is genuinely broken.
  */
-export const TASK_STATUSES = [
-  'running',
-  'succeeded',
-  'failed',
-  'killed',
-  'timed_out',
-] as const;
+export const TASK_STATUSES = ['running', 'succeeded', 'failed', 'killed', 'timed_out'] as const;
 
 export type AgentTaskStatus = (typeof TASK_STATUSES)[number];
 

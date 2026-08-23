@@ -546,21 +546,23 @@ export class RunAgentTaskWorkflow {
       recursive: true,
       maxEntries: ARTIFACT_LIST_MAX,
     });
-    return entries
-      .filter((e) => e.kind === 'file')
-      .map((e) => ({
-        // relative to the drop box — an absolute in-sandbox path is not something to
-        // hand an API client (`TaskArtifactSchema.name`).
-        name: relativeArtifactName(e.path),
-        size: e.size ?? 0,
-        modifiedAt: e.modifiedAt,
-      }))
-      // ⚠️ A NAME IS DROPPED, NOT SANITISED. `relativeArtifactName` only strips the drop
-      // box prefix, so a listing that reported `../../etc/passwd` under it would put a
-      // traversal string on the DTO. The download endpoint refuses it (`sanitizeArtifactName`),
-      // but a name that can never resolve has no business being advertised either —
-      // defence in depth means the bad value does not exist at BOTH layers.
-      .filter((a) => a.name !== '' && isSafeArtifactName(a.name));
+    return (
+      entries
+        .filter((e) => e.kind === 'file')
+        .map((e) => ({
+          // relative to the drop box — an absolute in-sandbox path is not something to
+          // hand an API client (`TaskArtifactSchema.name`).
+          name: relativeArtifactName(e.path),
+          size: e.size ?? 0,
+          modifiedAt: e.modifiedAt,
+        }))
+        // ⚠️ A NAME IS DROPPED, NOT SANITISED. `relativeArtifactName` only strips the drop
+        // box prefix, so a listing that reported `../../etc/passwd` under it would put a
+        // traversal string on the DTO. The download endpoint refuses it (`sanitizeArtifactName`),
+        // but a name that can never resolve has no business being advertised either —
+        // defence in depth means the bad value does not exist at BOTH layers.
+        .filter((a) => a.name !== '' && isSafeArtifactName(a.name))
+    );
   }
 
   /**
