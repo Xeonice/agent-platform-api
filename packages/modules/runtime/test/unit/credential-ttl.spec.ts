@@ -114,6 +114,7 @@ const noopPty: HelperProcessStream = {
   write: () => {},
   resize: () => {},
   onExit: () => {},
+  detach: () => {},
   kill: async () => {},
 };
 
