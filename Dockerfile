@@ -24,14 +24,23 @@ RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 
 # 先只拷清单与锁文件,让依赖层能被缓存(源码一改不至于重装依赖)
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/api/package.json                     apps/api/
-COPY packages/shared-kernel/package.json       packages/shared-kernel/
-COPY packages/contracts/package.json           packages/contracts/
-COPY packages/modules/credential/package.json  packages/modules/credential/
-COPY packages/modules/project/package.json     packages/modules/project/
-COPY packages/modules/runtime/package.json     packages/modules/runtime/
-COPY packages/modules/sandbox/package.json     packages/modules/sandbox/
-COPY packages/modules/terminal/package.json    packages/modules/terminal/
+# ⚠️ 用 glob 而不是逐行手抄 workspace 成员。手抄的版本与 `pnpm-workspace.yaml` 的
+# glob（`packages/modules/*` + `apps/*`）没有任何机制保持同步：新增一个模块而忘了
+# 在这里加一行，`pnpm install --frozen-lockfile` 会在 builder 阶段直接报锁文件不匹配，
+# 而错误信息不会告诉你少的是哪一个。glob 天然跟着 workspace 走。
+#
+# 仍然只拷 package.json（不拷源码）——这一层的全部意义就是让依赖层能被缓存，
+# 源码一改不至于重装依赖。
+COPY apps/api/package.json ./apps/api/
+COPY packages/shared-kernel/package.json ./packages/shared-kernel/
+COPY packages/contracts/package.json ./packages/contracts/
+COPY packages/modules ./packages/modules-manifests-tmp
+RUN set -eux; \
+    for d in packages/modules-manifests-tmp/*/; do \
+      m="packages/modules/$(basename "$d")"; \
+      mkdir -p "$m"; cp "$d/package.json" "$m/package.json"; \
+    done; \
+    rm -rf packages/modules-manifests-tmp
 RUN pnpm install --frozen-lockfile
 
 COPY . .
