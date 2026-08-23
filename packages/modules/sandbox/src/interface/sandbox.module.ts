@@ -4,10 +4,16 @@ import {
   SANDBOX_PROVIDER_REGISTRY,
   SANDBOX_PTY_PORT,
   SANDBOX_FACADE,
+  TASK_EVENT_BROADCASTER,
+  TASK_LOG_STORE,
   WORKSPACE_PREPARER,
 } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
+import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.repository';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
+import { AgentTaskApplicationService } from '../application/agent-task.service';
+import { RunAgentTaskWorkflow } from '../application/workflows/run-agent-task.workflow';
+import { TaskEventHub } from '../application/task-event.hub';
 import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
 import { SandboxExecAdapter } from '../application/sandbox-exec.adapter';
 import { ProvisionSandboxWorkflow } from '../application/workflows/provision-sandbox.workflow';
@@ -15,6 +21,8 @@ import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
 import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
+import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/agent-task.repository.impl';
+import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
 import { AioSandboxProvider } from '../infrastructure/providers/aio/aio-sandbox.provider';
@@ -23,7 +31,9 @@ import { DOCKER_CLIENT } from '../infrastructure/providers/docker/docker.token';
 import { createDockerClient } from '../infrastructure/providers/docker/docker-client';
 import { RuntimeReconciler } from '../infrastructure/reconcile/runtime-reconciler';
 import { SandboxController } from './http/sandbox.controller';
+import { AgentTaskController } from './http/agent-task.controller';
 import { ProviderController } from './http/provider.controller';
+import { TasksGateway } from './gateway/tasks.gateway';
 import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
 
 /**
@@ -40,12 +50,23 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
  */
 @Global()
 @Module({
-  controllers: [SandboxController, ProviderController],
+  controllers: [SandboxController, AgentTaskController, ProviderController],
   providers: [
     SandboxApplicationService,
+    AgentTaskApplicationService,
     ProvisionSandboxWorkflow,
+    RunAgentTaskWorkflow,
     SandboxMcpTools,
+    // The gateway SUBSCRIBES to the hub rather than being the broadcaster itself:
+    // binding the token straight to the gateway closes gateway → service → workflow →
+    // broadcaster into a cycle, and Nest answers that by hanging at boot without an
+    // error (see TaskEventHub).
+    TaskEventHub,
+    TasksGateway,
+    { provide: TASK_EVENT_BROADCASTER, useExisting: TaskEventHub },
+    { provide: TASK_LOG_STORE, useClass: FsTaskLogStore },
     { provide: SANDBOX_REPOSITORY, useClass: SqliteSandboxRepository },
+    { provide: AGENT_TASK_REPOSITORY, useClass: SqliteAgentTaskRepository },
     { provide: WORKSPACE_PREPARER, useClass: FsWorkspacePreparer },
     { provide: DOCKER_CLIENT, useFactory: createDockerClient },
     AioSandboxProvider,
@@ -60,6 +81,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
   ],
   exports: [
     SandboxApplicationService,
+    AgentTaskApplicationService,
     SANDBOX_PROVIDER_REGISTRY,
     SANDBOX_PTY_PORT,
     SANDBOX_EXEC_PORT,

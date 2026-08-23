@@ -22,6 +22,7 @@ describe('drizzle sqlite migrations', () => {
 
     expect(tables).toContain('sandboxes');
     expect(tables).toContain('sandbox_state_transitions');
+    expect(tables).toContain('agent_tasks');
   });
 });
 

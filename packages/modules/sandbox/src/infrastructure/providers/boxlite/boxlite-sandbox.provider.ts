@@ -5,7 +5,9 @@ import {
   SandboxProviderErrorCode,
   type ProcessSpec,
   type ProcessStream,
+  type SandboxFiles,
   type SandboxHandle,
+  type SandboxJobs,
   type SandboxProvider,
   type SandboxProviderCapabilities,
   type SandboxProviderContext,
@@ -13,11 +15,13 @@ import {
   type SandboxRuntimeStatus,
 } from '@platform/contracts';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
+import { AgentSandboxFiles, AgentSandboxJobs } from '../aio/agent-data-plane';
 import {
   assertAgentRejectsAnonymous,
   authHeader,
   createAgentAuthMaterial,
   withAgentAuthEnv,
+  withJobSurvivalEnv,
 } from '../aio/agent-auth';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
 
@@ -49,7 +53,20 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     pauseResume: false,
     snapshot: false,
     watchEvents: true,
+    headlessTask: true,
   };
+
+  /**
+   * The two optional planes (04 §2.6), over the SAME in-sandbox agent `aio` uses —
+   * only the origin differs (a forwarded host loopback port instead of a published
+   * container port), which is why the implementation is shared rather than copied.
+   */
+  readonly jobs: SandboxJobs = new AgentSandboxJobs(this.name, (handle) =>
+    Promise.resolve(new AioSandboxAgentClient(this.agentBase(handle), handle.agentAuthToken)),
+  );
+  readonly files: SandboxFiles = new AgentSandboxFiles(this.name, (handle) =>
+    Promise.resolve(new AioSandboxAgentClient(this.agentBase(handle), handle.agentAuthToken)),
+  );
 
   /** One shared BoxLite runtime per OS process (BoxLite one-runtime-per-home lock). */
   private getRuntime(): Promise<BoxliteRuntime> {
@@ -75,10 +92,12 @@ export class BoxliteSandboxProvider implements SandboxProvider {
           // the agent. Combined with persisting `agentEndpointPort`, terminal/exec
           // reconnect after a backend restart.
           detach: true,
-          env: Object.entries(withAgentAuthEnv(ctx.env, auth)).map(([key, value]) => ({
-            key,
-            value,
-          })),
+          // 生存义务 (04 §2.6 ★★★): the agent reads its session TTL / session cap at
+          // BOOT, so declaring `headlessTask` obliges us to raise both HERE — polling a
+          // job does NOT refresh the reaper's clock (measured).
+          env: Object.entries(withJobSurvivalEnv(withAgentAuthEnv(ctx.env, auth))).map(
+            ([key, value]) => ({ key, value }),
+          ),
           volumes: (ctx.volumes ?? []).map((v) => ({
             hostPath: v.source,
             guestPath: v.target,

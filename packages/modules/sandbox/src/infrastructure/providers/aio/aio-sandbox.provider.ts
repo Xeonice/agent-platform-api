@@ -24,6 +24,7 @@ export class AioSandboxProvider extends DockerContainerBackend {
         pauseResume: true,
         snapshot: false,
         watchEvents: true,
+        headlessTask: true,
       },
     });
   }

@@ -1,12 +1,15 @@
 import type { RuntimeInstallStatus, SandboxStatus } from './schemas/enums';
+import type { TaskStatus } from './schemas/task.schema';
+import type { RuntimeEvent } from './runtime-adapter.contract';
 
 /**
  * WS frame contract — SYNC WITH shared/10 §7.4 (the single canonical definition).
  *
- * Two channels, two DISCRIMINATOR fields ON PURPOSE (10 §7.4):
+ * Three channels, two DISCRIMINATOR fields ON PURPOSE (10 §7.4):
  *   - /terminal frames discriminate on `type` (a byte-stream frame protocol)
  *   - /events events discriminate on `event` (business projections)
- * so neither is ever mis-parsed as the other.
+ *   - /tasks frames discriminate on `type` (a stream, like /terminal — NOT projections)
+ * so none is ever mis-parsed as another.
  *
  * `data` is PLAIN STRING, not base64 (xterm writes it directly). The `exit`
  * frame is retained so ProcessStream.onExit has an uplink (10 §7.4 decision).
@@ -79,6 +82,70 @@ export type SandboxWsEvent =
       errorCode?: string;
     };
 
+// ── /tasks channel (S6 无头 Task 输出流;discriminator: type) ────────────────
+/**
+ * WHY A THIRD NAMESPACE RATHER THAN AN EIGHTH `/events` EVENT: `/events` frames are
+ * business projections and ride the Outbox for at-least-once delivery (13 §2.8). Task
+ * output is a high-volume BYTE-DERIVED stream — a long task emits thousands of events.
+ * Putting it through the Outbox would be pure write amplification for data that already
+ * has a durable home (the platform's own JSONL log), and would drown the projection
+ * channel that the whole UI depends on. Same reasoning that keeps `/terminal` separate.
+ *
+ * ⚠️ THE CURSOR HERE IS **NOT** THE SANDBOX-SIDE CURSOR. `JobCursor` (04 §2.6) is an
+ * opaque provider-defined byte offset; it stops at the platform boundary. What crosses
+ * to the frontend is `seq` — a plain monotonic per-task counter the platform assigns as
+ * it persists each event. So "resume after a refresh" is `fromSeq`, and the frontend
+ * never learns that a byte offset exists. Two cursors, two layers, on purpose.
+ */
+export type TaskClientFrame =
+  /**
+   * ⚠️ `fromSeq` IS EXCLUSIVE: "I already hold everything up to and including N — send
+   * me what comes AFTER it." Omitting it means "send everything from the start".
+   *
+   * Stated because the boundary is not guessable and both readings are plausible: an
+   * inclusive reading re-delivers the last event the client already rendered, and a
+   * client that pointed `fromSeq` at its own high-water mark would see a duplicate on
+   * every reconnect. The matching consequence is that `AgentTaskDto.lastSeq` is NOT a
+   * resume point (see task.schema.ts) — it is an upper bound to compare against.
+   */
+  | { type: 'subscribe'; taskId: string; fromSeq?: number }
+  | { type: 'unsubscribe'; taskId: string }
+  | { type: 'ping' };
+
+export type TaskServerFrame =
+  /**
+   * One parsed `RuntimeEvent` (04 §3). `seq` is dense and monotonic per task: on
+   * subscribe the platform REPLAYS from `fromSeq` out of its own persisted log, then
+   * switches to live push. A gap in `seq` is a bug, not something to tolerate.
+   */
+  | { type: 'event'; taskId: string; seq: number; event: RuntimeEvent }
+  /**
+   * Replay finished; everything after this frame is live.
+   *
+   * `seq` is the highest event delivered so far (= `fromSeq` when the replay was empty).
+   *
+   * ⚠️ `firstSeq` IS WHAT MAKES A TRUNCATED REPLAY DETECTABLE. It is the seq of the
+   * FIRST event this replay actually sent, or `seq + 1` when it sent none (an empty
+   * range). Without it a subscriber can only notice a gap in the MIDDLE of the stream;
+   * a head that was dropped — because the platform could not replay that far back —
+   * looks exactly like a stream that legitimately starts there. The subscriber compares
+   * `firstSeq` against `fromSeq + 1`: greater ⇒ the beginning is missing, and it must
+   * say so rather than render a partial transcript as if it were whole.
+   */
+  | { type: 'caught_up'; taskId: string; firstSeq: number; seq: number }
+  /**
+   * Terminal state. `exitCode` MAY be absent — a signal-killed process has none.
+   *
+   * ⚠️ IT IS ALSO SENT TO A LATE SUBSCRIBER. Subscribing to an ALREADY-finished task
+   * must still yield an `exit` frame after the replay: the live one fired long ago, and
+   * without a re-send the subscriber would have to reconstruct the outcome from a REST
+   * DTO — i.e. two sources of truth for the same fact, one of which is a stream.
+   */
+  | { type: 'exit'; taskId: string; status: TaskStatus; exitCode?: number }
+  /** Always a CODE, never a sentence — the frontend renders the 人话 (P22 §1). */
+  | { type: 'error'; taskId: string; code: string }
+  | { type: 'pong' };
+
 /**
  * Canonical, order-stable description of the frame shapes. Kept as documentation
  * of what the pinned hash below stands for; changing a frame shape should bump
@@ -91,7 +158,10 @@ export const WS_PROTOCOL_CANONICAL =
   'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
   'project.clone_progress{projectId,phase,receivedBytes?,totalBytes?,percent?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
-  'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}';
+  'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}|' +
+  'tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|' +
+  'tasks.server:event{taskId,seq,event},caught_up{taskId,firstSeq,seq},' +
+  'exit{taskId,status,exitCode?},error{taskId,code},pong';
 
 /**
  * X-Schema-Hash the two repos compare at the /terminal handshake (shared/14 §2.5).
@@ -102,5 +172,28 @@ export const WS_PROTOCOL_CANONICAL =
  * cross-repo sync is deferred to the shared/14 §2.4 X-Schema-Hash toolchain.
  */
 export const WS_SCHEMA_HASH = 'sb-terminal-v1';
+
+/**
+ * The `/tasks` handshake's X-Schema-Hash. A SEPARATE pinned literal from
+ * `WS_SCHEMA_HASH` because the two channels version independently: a `/tasks` frame
+ * change must not invalidate every open terminal, and vice versa. Same discipline —
+ * it must byte-equal the value the frontend presents.
+ *
+ * ⚠️ ON `/tasks` IT IS REQUIRED, NOT OPTIONAL. The gateway refuses a handshake that
+ * presents no hash at all, because a check that only fires when the client bothered to
+ * send one can only ever catch the careful client — the one that does not need
+ * catching. The refusal arrives as a socket.io `connect_error` whose message LEADS with
+ * `SCHEMA_MISMATCH:` (and repeats it on `err.data.code`), deliberately using none of the
+ * words a client's "is this unauthorized?" matcher looks for: a version drift shown as
+ * an auth failure sends the user to unlock something, which cannot fix a version drift.
+ *
+ * ⏳ It is still a HAND-PINNED literal rather than a hash derived from
+ * `WS_PROTOCOL_CANONICAL` — deriving it would produce a value the frontend's own
+ * hardcoded literal could never match, so the two must move together by hand until the
+ * shared/14 §2.4 codegen toolchain exists. What keeps it honest meanwhile is
+ * `ws-protocol.spec.ts`, which pins the hash and the canonical `tasks.*` description
+ * TOGETHER: changing a frame shape fails there until the hash is bumped in lockstep.
+ */
+export const WS_TASKS_SCHEMA_HASH = 'sb-tasks-v1';
 
 export const X_SCHEMA_HASH_HEADER = 'x-schema-hash';

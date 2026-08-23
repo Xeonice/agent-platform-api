@@ -1,5 +1,6 @@
 export * from './schemas/enums';
 export * from './schemas/sandbox.schema';
+export * from './schemas/task.schema';
 export * from './schemas/project.schema';
 export * from './schemas/credential.schema';
 export * from './schemas/runtime.schema';
@@ -15,6 +16,8 @@ export * from './exec-fn';
 export * from './runtime-install.port';
 export * from './agent-session.port';
 export * from './sandbox-events.port';
+export * from './task-events.port';
+export * from './task-log.port';
 export * from './sandbox-facade.port';
 export * from './project-facade.port';
 export * from './credential-facade.port';

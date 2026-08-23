@@ -2,7 +2,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { io, type Socket } from 'socket.io-client';
-import { SANDBOX_PTY_PORT, WS_SCHEMA_HASH } from '@platform/contracts';
+import { SANDBOX_PTY_PORT, WS_SCHEMA_HASH, WS_TASKS_SCHEMA_HASH } from '@platform/contracts';
 import type { TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { expectPasscodeEnabled, useEnv } from './_env';
@@ -133,6 +133,102 @@ describe('/events WS access-passcode gate', () => {
 
   it('accepts a handshake carrying the correct passcode (stays connected)', async () => {
     const sock = connectEvents({ passcode: PASSCODE });
+    try {
+      const connected = await new Promise<boolean>((resolve) => {
+        const t = setTimeout(() => resolve(false), 4000);
+        sock.on('connect', () => {
+          clearTimeout(t);
+          resolve(true);
+        });
+      });
+      expect(connected).toBe(true);
+    } finally {
+      sock.disconnect();
+    }
+  });
+});
+
+function connectTasks(query: Record<string, string>, auth?: Record<string, string>): Socket {
+  return io(`http://127.0.0.1:${port}/tasks`, {
+    query,
+    auth,
+    transports: ['websocket'],
+    forceNew: true,
+    reconnection: false,
+  });
+}
+
+function awaitConnectError(sock: Socket): Promise<Error> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('no connect_error')), 4000);
+    sock.on('connect_error', (e: Error) => {
+      clearTimeout(t);
+      resolve(e);
+    });
+    sock.on('connect', () => {
+      clearTimeout(t);
+      reject(new Error('handshake was ACCEPTED'));
+    });
+  });
+}
+
+/**
+ * `/tasks` carries agent OUTPUT — in general the contents of a private repository — so
+ * its handshake is passcode-gated exactly like the other two namespaces.
+ *
+ * ⚠️ IT REFUSES IN MIDDLEWARE, so the refusal arrives as `connect_error` with a
+ * MACHINE-READABLE code rather than as a frame on a socket that is being torn down. The
+ * code matters: the client's shared "is this unauthorized?" helper is a prose regex, so
+ * `UNAUTHORIZED` must match it while `SCHEMA_MISMATCH` and `SANDBOX_REQUIRED` must NOT —
+ * a version drift, or a forgotten query parameter, read as an auth failure pops the
+ * unlock dialog, which cannot possibly fix either.
+ *
+ * The accepting handshakes below therefore also carry `sandboxId`: it is a REQUIRED part
+ * of the `/tasks` handshake, so a socket without one never gets far enough to prove
+ * anything about the passcode.
+ */
+describe('/tasks WS access-passcode gate', () => {
+  it('refuses a handshake with NO passcode, and says UNAUTHORIZED', async () => {
+    // fully-formed apart from the credential: right hash, a declared sandbox — so the
+    // refusal can only be about the passcode.
+    const sock = connectTasks({ xSchemaHash: WS_TASKS_SCHEMA_HASH, sandboxId: 'sbx-scope' });
+    try {
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('UNAUTHORIZED')).toBe(true);
+      expect((err as Error & { data?: { code?: string } }).data?.code).toBe('UNAUTHORIZED');
+      // the client's shared matcher must recognise this one.
+      expect(err.message).toMatch(/unauthor|forbidden|passcode|401|403/i);
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('refuses a WRONG passcode the same way', async () => {
+    const sock = connectTasks({ xSchemaHash: WS_TASKS_SCHEMA_HASH }, { passcode: 'nope' });
+    try {
+      expect((await awaitConnectError(sock)).message.startsWith('UNAUTHORIZED')).toBe(true);
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('checks auth BEFORE everything else, so the codes cannot fingerprint the server', async () => {
+    // wrong hash AND no declared sandbox AND no passcode ⇒ the answer is the auth one;
+    // an unauthenticated caller learns nothing about which protocol version this server
+    // speaks, nor which of its query parameters it cares about.
+    const sock = connectTasks({ xSchemaHash: 'sb-tasks-FROM-THE-FUTURE' });
+    try {
+      expect((await awaitConnectError(sock)).message.startsWith('UNAUTHORIZED')).toBe(true);
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('accepts the correct passcode with the right hash', async () => {
+    const sock = connectTasks(
+      { xSchemaHash: WS_TASKS_SCHEMA_HASH, sandboxId: 'sbx-scope' },
+      { passcode: PASSCODE },
+    );
     try {
       const connected = await new Promise<boolean>((resolve) => {
         const t = setTimeout(() => resolve(false), 4000);

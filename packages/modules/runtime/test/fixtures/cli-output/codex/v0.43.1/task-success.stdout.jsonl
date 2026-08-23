@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01996b8f-4d21-7a0c-9f3e-2c5d8a1b7e40"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"cat notes.txt","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"cat notes.txt","aggregated_output":"remember 4271\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"file_change","changes":[{"path":"summary.md","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"summary.md","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Wrote summary.md and counted 2 lines."}}
+{"type":"turn.completed","usage":{"input_tokens":1832,"output_tokens":214}}

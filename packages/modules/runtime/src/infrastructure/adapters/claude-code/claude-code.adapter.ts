@@ -8,6 +8,7 @@ import type {
   RuntimeAdapter,
   RuntimeAuthMethod,
   RuntimeCredential,
+  RuntimeEvent,
   RuntimeInstallPlan,
   RuntimeTaskSpec,
   ResolvedImageSpec,
@@ -26,7 +27,12 @@ import {
 } from '../../../domain/services/token-format.validator';
 import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
 import { readUntil } from '../pty-reader.util';
-import { parseClaudeAuthUrl, parseClaudeSetupToken } from './claude-code.output-parser';
+import {
+  parseClaudeAuthUrl,
+  parseClaudeSetupToken,
+  parseClaudeTaskEvents,
+} from './claude-code.output-parser';
+import { assertSessionRef } from '../session-ref.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 5 * 60_000;
@@ -41,6 +47,15 @@ const CLAUDE_BINARY = 'claude';
  * lives per-adapter and never in platform code.
  */
 const PERMISSIONS_OFF_ARGS = ['--dangerously-skip-permissions'];
+/**
+ * `--output-format stream-json` is REFUSED by claude unless `--verbose` is also on
+ * (`Error: --output-format=stream-json requires --verbose`). That is why the platform
+ * adds it here rather than leaving it to the caller: a Task whose whole output
+ * contract is stream-json cannot be one forgotten flag away from producing nothing.
+ * It is also the reason `--verbose` is the ONE value on the `extraArgs` whitelist
+ * (`TaskExtraArgSchema`) — a caller passing it explicitly is de-duplicated below.
+ */
+const STREAM_JSON_ARGS = ['--output-format', 'stream-json', '--verbose'];
 /** `install()` takes no image; the npm commands are image-independent (see codex). */
 const ANY_IMAGE: ResolvedImageSpec = { ref: '', digest: '' };
 
@@ -186,12 +201,36 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   buildStartCommand(task: RuntimeTaskSpec): SandboxCommand {
     const cmd = [CLAUDE_BINARY, ...PERMISSIONS_OFF_ARGS];
     if (task.headless) cmd.push('--print');
-    if (task.headless && task.outputFormat === 'json-stream') {
-      cmd.push('--output-format', 'stream-json');
+    if (task.headless && task.outputFormat === 'json-stream') cmd.push(...STREAM_JSON_ARGS);
+    // Resumption is a FLAG here, where codex needs a whole different subcommand
+    // (04 §3 ★4) — the shapes have nothing in common, which is why this lives per
+    // adapter and never in platform code. Measured: cwd does NOT constrain an
+    // id-based `--resume` (the encoded-cwd bucket only binds `-c/--continue`), so no
+    // workdir pinning is needed.
+    if (task.resumeFrom !== undefined && task.resumeFrom !== '') {
+      // the id is validated at the door (`RunAgentTaskSchema.resumeFrom`), and it is
+      // an option VALUE here rather than a positional, so clap consumes it verbatim.
+      cmd.push('--resume', assertSessionRef(task.resumeFrom));
     }
-    if (task.extraArgs) cmd.push(...task.extraArgs);
-    if (task.prompt !== undefined && task.prompt !== '') cmd.push(task.prompt);
+    if (task.extraArgs) cmd.push(...task.extraArgs.filter((a) => !cmd.includes(a)));
+    // ⚠️ `--` CLOSES THE OPTION LIST, AND IT IS A SECURITY BOUNDARY, NOT TIDINESS.
+    // `prompt` is caller-supplied and lands in argv as a POSITIONAL; without the
+    // terminator a prompt that begins with `-` is parsed as an OPTION instead — which
+    // is a complete bypass of the `extraArgs` whitelist that exists precisely because
+    // "anything appended to argv executes". Everything after `--` is data.
+    if (task.prompt !== undefined && task.prompt !== '') cmd.push('--', task.prompt);
     return { cmd, cwd: task.workdir };
+  }
+
+  /**
+   * Structured stdout → `RuntimeEvent[]` (04 §3 `parseOutput`).
+   *
+   * Fed `JobChunk.stdout` ONLY — never stderr (04 §2.6 裁决 3). Stateless per call:
+   * the job plane guarantees whole lines, so replaying the persisted raw log later
+   * yields the identical event sequence, which is what keeps `fromSeq` replay dense.
+   */
+  parseOutput(chunk: Buffer): RuntimeEvent[] {
+    return parseClaudeTaskEvents(chunk.toString('utf8'));
   }
 
   /** A plain interactive claude session — same permission switch, no instruction. */

@@ -12,8 +12,14 @@ import type {
   BootstrapAgentSessionResult,
   CredentialFacade,
   EnsureRuntimeInstalledInput,
+  FileEntry,
   GitAuthContext,
   InjectableRuntimeCredential,
+  JobChunk,
+  JobCursor,
+  JobHandle,
+  JobReadOptions,
+  JobSpec,
   PreparedWorkspace,
   ProcessSpec,
   ProcessStream,
@@ -22,21 +28,33 @@ import type {
   RefreshableRuntimeCredential,
   RuntimeAdapter,
   RuntimeAdapterRegistry,
+  RuntimeEvent,
   RuntimeInstallOrchestrator,
   RuntimeInstallPlan,
   RuntimeTaskSpec,
   SandboxCommand,
+  SandboxFiles,
   SandboxHandle,
+  SandboxJobs,
   SandboxProvider,
   SandboxProviderCapabilities,
   SandboxProviderContext,
   SandboxRuntimeStatus,
+  TaskEventBroadcaster,
+  TaskLogStore,
+  TaskServerFrame,
   WorkspacePreparer,
 } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
+import { AgentTaskApplicationService } from '../../src/application/agent-task.service';
 import { ProvisionSandboxWorkflow } from '../../src/application/workflows/provision-sandbox.workflow';
+import { RunAgentTaskWorkflow } from '../../src/application/workflows/run-agent-task.workflow';
 import type { Sandbox } from '../../src/domain/entities/sandbox.entity';
+import { AgentTask } from '../../src/domain/entities/agent-task.entity';
+import type { AgentTaskProps } from '../../src/domain/entities/agent-task.entity';
 import type { SandboxRepository } from '../../src/domain/repositories/sandbox.repository';
+import type { AgentTaskRepository } from '../../src/domain/repositories/agent-task.repository';
+import { parseClaudeTaskEvents } from '../../../runtime/src/infrastructure/adapters/claude-code/claude-code.output-parser';
 
 /**
  * Shared in-memory doubles for the sandbox application tests (docs/backend/25) — NO
@@ -50,7 +68,140 @@ export const FULL_CAPS: SandboxProviderCapabilities = {
   pauseResume: true,
   snapshot: true,
   watchEvents: true,
+  // both built-ins advertise it since S6, and CAP-02 pins the bit to the PRESENCE of
+  // the two planes in both directions — so the double carries them too (below).
+  headlessTask: true,
 };
+
+/** One scripted job inside `FakeJobPlane`: a growing byte stream plus a terminal flag. */
+export class FakeJob {
+  stdout = '';
+  stderr = '';
+  exited = false;
+  exitCode?: number;
+  /** Append to the job's stdout, exactly as the real CLI would. */
+  emit(text: string): void {
+    this.stdout += text;
+  }
+  emitStderr(text: string): void {
+    this.stderr += text;
+  }
+  finish(code?: number): void {
+    this.exited = true;
+    this.exitCode = code;
+  }
+}
+
+/**
+ * In-memory job plane that OBEYS the same cursor rules as the real provider — an
+ * opaque JSON cursor and whole-line delivery until the job exits. A looser double
+ * would let a half-line bug through the application tests and only surface in e2e,
+ * which is precisely where it is most expensive to find.
+ */
+export class FakeJobPlane implements SandboxJobs {
+  readonly specs: JobSpec[] = [];
+  readonly jobs = new Map<string, FakeJob>();
+  readonly released: string[] = [];
+  readonly kills: { jobId: string; signal?: string }[] = [];
+  /** How many reads actually spent their `waitMs` — a busy loop drives this to 0. */
+  longPolls = 0;
+  /** Injected transport faults, consumed one per `readJob` call. */
+  readonly readFaults: (Error | undefined)[] = [];
+  private seq = 0;
+
+  constructor(private readonly providerName: string) {}
+
+  async startJob(_h: SandboxHandle, spec: JobSpec): Promise<JobHandle> {
+    this.specs.push(spec);
+    const jobId = `fake-job-${++this.seq}`;
+    this.jobs.set(jobId, new FakeJob());
+    return { provider: this.providerName, jobId };
+  }
+
+  async readJob(
+    _h: SandboxHandle,
+    job: JobHandle,
+    cursor?: JobCursor,
+    opts?: JobReadOptions,
+  ): Promise<JobChunk> {
+    const state = this.jobs.get(job.jobId);
+    if (!state) throw new Error(`no fake job ${job.jobId}`);
+    const fault = this.readFaults.shift();
+    if (fault) throw fault;
+    const at = cursor ? (JSON.parse(cursor) as { o: number; e: number }) : { o: 0, e: 0 };
+    let outAll = Buffer.from(state.stdout, 'utf8').subarray(at.o).toString('utf8');
+    // ⚠️ MIRRORS THE REAL PROVIDER: the long poll is taken when there is no DELIVERABLE
+    // WHOLE LINE, not merely when there are no bytes. A half line makes the slice
+    // non-empty while the delivered chunk is still '' and the cursor still does not
+    // move — testing byte-emptiness here would reproduce the production busy loop
+    // inside the harness and starve the event loop instead of failing loudly.
+    if (!hasWholeLine(outAll) && !state.exited && (opts?.waitMs ?? 0) > 0) {
+      this.longPolls += 1;
+      await new Promise((r) => setTimeout(r, Math.min(opts?.waitMs ?? 0, 15)));
+      outAll = Buffer.from(state.stdout, 'utf8').subarray(at.o).toString('utf8');
+    }
+    const flush = state.exited;
+    const nl = outAll.lastIndexOf('\n');
+    const stdout = flush ? outAll : nl < 0 ? '' : outAll.slice(0, nl + 1);
+    const stderr = Buffer.from(state.stderr, 'utf8').subarray(at.e).toString('utf8');
+    return {
+      stdout,
+      stderr,
+      cursor: JSON.stringify({
+        o: at.o + Buffer.byteLength(stdout, 'utf8'),
+        e: at.e + Buffer.byteLength(stderr, 'utf8'),
+      }),
+      status: state.exited ? 'exited' : 'running',
+      ...(state.exited && state.exitCode !== undefined ? { exitCode: state.exitCode } : {}),
+    };
+  }
+
+  async killJob(_h: SandboxHandle, job: JobHandle, signal?: NodeJS.Signals): Promise<void> {
+    this.kills.push({ jobId: job.jobId, signal });
+    this.jobs.get(job.jobId)?.finish(undefined);
+  }
+
+  async releaseJob(_h: SandboxHandle, job: JobHandle): Promise<void> {
+    this.released.push(job.jobId);
+  }
+}
+
+/** The same predicate the real provider uses: is there a whole line to hand over? */
+function hasWholeLine(s: string): boolean {
+  return s.includes('\n');
+}
+
+/** In-memory file plane keyed by absolute in-sandbox path. */
+export class FakeFilePlane implements SandboxFiles {
+  readonly files = new Map<string, Buffer>();
+
+  async readFile(_h: SandboxHandle, path: string): Promise<Buffer | null> {
+    return this.files.get(path) ?? null;
+  }
+  async openFileStream(_h: SandboxHandle, path: string): Promise<NodeJS.ReadableStream | null> {
+    const buf = this.files.get(path);
+    if (!buf) return null;
+    const { Readable } = await import('node:stream');
+    return Readable.from(buf);
+  }
+  async writeFile(_h: SandboxHandle, path: string, content: string | Buffer): Promise<void> {
+    this.files.set(path, Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8'));
+  }
+  async listFiles(
+    _h: SandboxHandle,
+    path: string,
+    opts?: { recursive?: boolean; maxEntries?: number },
+  ): Promise<FileEntry[]> {
+    const prefix = path.endsWith('/') ? path : `${path}/`;
+    const out: FileEntry[] = [];
+    for (const [p, buf] of this.files) {
+      if (!p.startsWith(prefix)) continue;
+      if (opts?.recursive !== true && p.slice(prefix.length).includes('/')) continue;
+      out.push({ path: p, kind: 'file', size: buf.length, modifiedAt: '2026-08-21T00:00:00.000Z' });
+    }
+    return out.slice(0, opts?.maxEntries ?? out.length);
+  }
+}
 
 export class FakeProvider implements SandboxProvider {
   readonly calls: string[] = [];
@@ -59,12 +210,20 @@ export class FakeProvider implements SandboxProvider {
   readonly execCalls: string[][] = [];
   /** exit codes to answer with, keyed by a substring of the joined argv. */
   execExitCodes: Array<{ match: RegExp; exitCode: number; stdout?: string }> = [];
+  /** Present iff `capabilities.headlessTask` — CAP-02 in both directions. */
+  readonly jobs?: FakeJobPlane;
+  readonly files?: FakeFilePlane;
 
   constructor(
     readonly name: string,
     readonly capabilities: SandboxProviderCapabilities = FULL_CAPS,
     private readonly log: string[] = [],
-  ) {}
+  ) {
+    if (capabilities.headlessTask) {
+      this.jobs = new FakeJobPlane(name);
+      this.files = new FakeFilePlane();
+    }
+  }
 
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
     this.calls.push('create');
@@ -129,6 +288,138 @@ export class InMemorySandboxRepo implements SandboxRepository {
   }
 }
 
+/**
+ * In-memory `AgentTaskRepository` that stores a SNAPSHOT of the persisted columns and
+ * rehydrates a FRESH aggregate on every read.
+ *
+ * ⚠️ STORING THE INSTANCE IS WHAT MADE THE RESTART TESTS VACUOUS. `findById` then
+ * handed back the very object the pump was mutating, so "what survives a restart" was
+ * never actually constrained: a field the repository does not persist looked persisted,
+ * and `AgentTask.rehydrate` — the only code path a real restart takes — had ZERO
+ * coverage. It also made `finalize`'s re-read of the cancel intent dead code, because
+ * the "stored" aggregate WAS the pump's aggregate and the flag was always already
+ * there.
+ *
+ * The snapshot below is exactly the column set `SqliteAgentTaskRepository.saveSync`
+ * writes, with the same two JSON round-trips, so anything the real table cannot carry
+ * cannot survive here either.
+ */
+export class InMemoryAgentTaskRepo implements AgentTaskRepository {
+  readonly rows = new Map<string, AgentTaskProps>();
+  /** Reads rehydrate — a caller can never reach the pump's live instance. */
+  readonly store = {
+    get: (id: string): AgentTask | undefined => {
+      const row = this.rows.get(id);
+      return row ? AgentTask.rehydrate(cloneProps(row)) : undefined;
+    },
+    has: (id: string): boolean => this.rows.has(id),
+    delete: (id: string): boolean => this.rows.delete(id),
+    get size(): number {
+      return 0;
+    },
+  };
+
+  async findById(id: string): Promise<AgentTask | null> {
+    return this.store.get(id) ?? null;
+  }
+  async findBySandbox(sandboxId: string): Promise<AgentTask[]> {
+    return [...this.rows.keys()]
+      .map((id) => this.store.get(id)!)
+      .filter((t) => t.sandboxId === sandboxId);
+  }
+  async findRunning(): Promise<AgentTask[]> {
+    return [...this.rows.keys()].map((id) => this.store.get(id)!).filter((t) => t.isRunning);
+  }
+  saveSync(_tx: Tx, task: AgentTask): void {
+    const previous = this.rows.get(task.id);
+    this.rows.set(task.id, {
+      id: task.id,
+      sandboxId: task.sandboxId,
+      runtime: task.runtime,
+      // immutable after the start — the real table leaves them out of the UPDATE set.
+      jobHandle: previous?.jobHandle ?? { ...task.jobHandle },
+      logPath: previous?.logPath ?? task.logPath,
+      timeoutMs: previous?.timeoutMs ?? task.timeoutMs,
+      startedAt: previous?.startedAt ?? task.startedAt,
+      cursor: task.cursor,
+      status: task.status,
+      exitCode: task.exitCode,
+      sessionRef: task.sessionRef,
+      lastSeq: task.lastSeq,
+      stdoutBytes: task.stdoutBytes,
+      artifacts: JSON.parse(JSON.stringify(task.artifacts)) as AgentTaskProps['artifacts'],
+      errorCode: task.errorCode,
+      finishedAt: task.finishedAt,
+      // mirrors the storage-engine COALESCE: write-once-forward.
+      cancelRequestedAt: previous?.cancelRequestedAt ?? task.cancelRequestedAt,
+    });
+  }
+  /**
+   * The narrow cancel write: ONE column, and only while the row is still running —
+   * the same shape (and the same guard) as the SQL `UPDATE ... WHERE status='running'`.
+   */
+  requestCancelSync(_tx: Tx, taskId: string, at: Date): void {
+    const row = this.rows.get(taskId);
+    if (!row || row.status !== 'running') return;
+    row.cancelRequestedAt = row.cancelRequestedAt ?? at;
+  }
+}
+
+/** Deep-enough copy so a rehydrated aggregate shares nothing mutable with the row. */
+function cloneProps(row: AgentTaskProps): AgentTaskProps {
+  return {
+    ...row,
+    jobHandle: { ...row.jobHandle },
+    artifacts: row.artifacts.map((a) => ({ ...a })),
+    startedAt: new Date(row.startedAt.getTime()),
+    finishedAt: row.finishedAt === null ? null : new Date(row.finishedAt.getTime()),
+    cancelRequestedAt:
+      row.cancelRequestedAt === null ? null : new Date(row.cancelRequestedAt.getTime()),
+  };
+}
+
+/** In-memory `TaskLogStore` — the raw JSONL that replay is rebuilt from. */
+export class InMemoryTaskLogStore implements TaskLogStore {
+  readonly stdout = new Map<string, string>();
+  readonly stderr = new Map<string, string>();
+  async prepare(taskId: string): Promise<string> {
+    return `/tmp/logs/agent-tasks/${taskId}`;
+  }
+  async appendStdout(taskId: string, chunk: string): Promise<void> {
+    this.stdout.set(taskId, (this.stdout.get(taskId) ?? '') + chunk);
+  }
+  async appendStderr(taskId: string, chunk: string): Promise<void> {
+    this.stderr.set(taskId, (this.stderr.get(taskId) ?? '') + chunk);
+  }
+  /** Roll the raw log back to its durable length — the real store truncates the file. */
+  async truncateStdout(taskId: string, bytes: number): Promise<void> {
+    const buf = Buffer.from(this.stdout.get(taskId) ?? '', 'utf8');
+    if (buf.length <= bytes) return;
+    this.stdout.set(taskId, buf.subarray(0, bytes).toString('utf8'));
+  }
+  async *streamStdoutLines(taskId: string): AsyncIterable<string> {
+    if (this.failReads) throw this.failReads;
+    for (const line of (this.stdout.get(taskId) ?? '').split('\n')) {
+      if (line !== '') yield line;
+    }
+  }
+  /** Injected read fault — the store must NOT turn it into an empty replay. */
+  failReads?: Error;
+  async flush(): Promise<void> {}
+  async release(taskId: string): Promise<void> {
+    this.released.push(taskId);
+  }
+  readonly released: string[] = [];
+}
+
+/** Records every frame the `/tasks` channel would have sent. */
+export class RecordingTaskBroadcaster implements TaskEventBroadcaster {
+  readonly frames: { taskId: string; frame: TaskServerFrame }[] = [];
+  publish(taskId: string, frame: TaskServerFrame): void {
+    this.frames.push({ taskId, frame });
+  }
+}
+
 /** A minimal RuntimeAdapter double covering the S5 run half. */
 export class FakeAdapter implements RuntimeAdapter {
   readonly displayName: string;
@@ -180,6 +471,18 @@ export class FakeAdapter implements RuntimeAdapter {
     this.attachCommandCalls += 1;
     this.log.push('buildAttachCommand');
     return { cmd: [this.id] };
+  }
+
+  /**
+   * The REAL claude stream-json parser, on purpose.
+   *
+   * Stubbing it would make every orchestration assertion below a test of the stub:
+   * the platform's `seq` numbering, its `session-started` absorption and its replay
+   * equality are all downstream of what a genuine `parseOutput` produces from genuine
+   * CLI lines. The parser's own golden coverage lives in the runtime module.
+   */
+  parseOutput(chunk: Buffer): RuntimeEvent[] {
+    return parseClaudeTaskEvents(chunk.toString('utf8'));
   }
 }
 
@@ -315,7 +618,20 @@ export function harness(opts: HarnessOptions = {}) {
   const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
   let n = 0;
   const ids: IdGenerator = { next: () => `sbx-${++n}` };
-  const clock: Clock = { now: () => opts.now ?? new Date('2026-08-21T00:00:00.000Z') };
+  /**
+   * ⚠️ A MOVABLE CLOCK, NOT A CONSTANT. With `now` frozen, `overdue()` is identically
+   * false and the platform-side hard-timeout backstop is STRUCTURALLY untestable — the
+   * one branch that turns a 4-hour run that stopped answering into a landed task.
+   */
+  let currentNow = opts.now ?? new Date('2026-08-21T00:00:00.000Z');
+  const clock: Clock = { now: () => currentNow };
+  const advanceClock = (ms: number): void => {
+    currentNow = new Date(currentNow.getTime() + ms);
+  };
+
+  const taskRepo = new InMemoryAgentTaskRepo();
+  const taskLogs = new InMemoryTaskLogStore();
+  const taskBroadcaster = new RecordingTaskBroadcaster();
 
   const provision = new ProvisionSandboxWorkflow(
     repo,
@@ -340,6 +656,44 @@ export function harness(opts: HarnessOptions = {}) {
     runtimes,
     provision,
   );
+  /**
+   * Build a workflow that shares NOTHING but the persisted state — this is how a
+   * platform restart is simulated: a brand-new object whose only knowledge of the
+   * running jobs is what the repository holds.
+   */
+  /**
+   * ⚠️ THE PREVIOUS WORKFLOW IS RETIRED FIRST, AND THAT IS THE WHOLE SIMULATION.
+   *
+   * Constructing a second object does not stop the first: its `for(;;)` keeps reading
+   * the same job, so a test that only news up a replacement watches the OLD pump finish
+   * the work and proves nothing about recovery. Measured on the version without this:
+   * gutting `resumeRunning()` to `return 1` left 25 of 26 tests GREEN.
+   */
+  let live: RunAgentTaskWorkflow | null = null;
+  const newTaskWorkflow = (): RunAgentTaskWorkflow => {
+    live?.shutdown();
+    live = new RunAgentTaskWorkflow(
+      taskRepo,
+      repo,
+      uow,
+      events,
+      clock,
+      ids,
+      registry,
+      runtimes,
+      taskLogs,
+      taskBroadcaster,
+    );
+    return live;
+  };
+  const taskWorkflow = newTaskWorkflow();
+  const taskService = new AgentTaskApplicationService(
+    taskRepo,
+    repo,
+    registry,
+    runtimes,
+    taskWorkflow,
+  );
 
   return {
     service,
@@ -347,6 +701,15 @@ export function harness(opts: HarnessOptions = {}) {
     registry,
     runtimes,
     repo,
+    taskService,
+    taskWorkflow,
+    newTaskWorkflow,
+    advanceClock,
+    /** Retire whatever pump is live — used by the suite teardown. */
+    stopPumps: (): void => live?.shutdown(),
+    taskRepo,
+    taskLogs,
+    taskBroadcaster,
     provider: providers[0],
     adapter: adapters[0],
     calls,

@@ -132,6 +132,38 @@ function stripAnsi(s: string): string {
   return s.replace(/\[[0-9;?]*[A-Za-z]/g, '');
 }
 
+/**
+ * host → micro-VM 方向的等待。
+ *
+ * 为什么只有 boxlite 这条加、aio 那条（`terminal-container.e2e-spec.ts`）不加：**实测**
+ * 这一步在全量套件下会偶发拿到空串（`cat` 既不报错也没内容），单跑从不复现；aio 那条从
+ * 未观察到同样现象。
+ *
+ * ⚠️ **真因尚未查明，不要在这里写一个听起来合理的机制。** 曾经写过"跨 VM 边界 virtio-fs
+ * 传播非瞬时"——**已被实测推翻**：直接量宿主写入到 guest 可见的延迟是 **3ms**（经
+ * `/v1/file/download` 通道，2026-08）。而本函数用的是 `spawn({tty:false})` →
+ * `/v1/bash/exec` 同步通道，两者不是一条路，所以那个测量既没证实也没否定这条路上的机制。
+ *
+ * 这个等待**不削弱断言**：内容仍然必须出现，只是像反方向的 `waitForFileContains` 一样
+ * 给它时间。挂载真坏了，重试到超时照样红——它区分的是"慢/有竞态"和"坏"，不是把坏藏起来。
+ * 真因查明前，这里是**缓解**不是修复。
+ */
+async function waitForShellContains(
+  shell: (cmd: string) => Promise<string>,
+  cmd: string,
+  needle: string,
+  ms = 10000,
+): Promise<string> {
+  const deadline = Date.now() + ms;
+  let last = '';
+  while (Date.now() < deadline) {
+    last = await shell(cmd);
+    if (last.includes(needle)) return last;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error(`in-sandbox \`${cmd}\` never contained ${needle}; last: ${JSON.stringify(last)}`);
+}
+
 async function waitForFileContains(path: string, needle: string, ms = 10000): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -226,7 +258,8 @@ describe.skipIf(!ready)('boxlite micro-VM: REST → BoxLite Box → /v1/shell/ws
       expect(statSync(resolve(dataRoot, 'workspaces')).mode & 0o777).toBe(0o700);
       expect(statSync(wsDir).mode & 0o777).toBe(0o777);
       writeFileSync(resolve(wsDir, 'host-seed.txt'), 'HOST_SEED_BL\n');
-      expect(await shell('cat /workspace/host-seed.txt')).toContain('HOST_SEED_BL');
+      // 跨 VM 边界，要等传播——理由见 `waitForShellContains` 的注释。
+      await waitForShellContains(shell, 'cat /workspace/host-seed.txt', 'HOST_SEED_BL');
       await shell('echo BOX_WROTE_BL > /workspace/box-out.txt');
       await waitForFileContains(resolve(wsDir, 'box-out.txt'), 'BOX_WROTE_BL');
     } finally {

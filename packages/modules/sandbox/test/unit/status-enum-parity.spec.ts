@@ -1,8 +1,13 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { SANDBOX_STATUSES as CONTRACT_STATUSES } from '@platform/contracts';
+import {
+  SANDBOX_STATUSES as CONTRACT_STATUSES,
+  SandboxProviderErrorCode,
+  TaskErrorCodeSchema,
+} from '@platform/contracts';
 import { SANDBOX_STATUSES as DOMAIN_STATUSES } from '../../src/domain/value-objects/sandbox-status.vo';
+import { TASK_STATUSES as DOMAIN_TASK_STATUSES } from '../../src/domain/value-objects/agent-task-status.vo';
 
 /**
  * Equivalence guard (P1-3): the 12-value SandboxStatus enum is duplicated across
@@ -45,5 +50,54 @@ describe('SandboxStatus enum parity across its 4 copies', () => {
     expect(DOMAIN_STATUSES).not.toContain('waiting-input');
     expect(CONTRACT_STATUSES).not.toContain('waiting-input');
     expect(dbCheckStatuses()).not.toContain('waiting-input');
+  });
+});
+
+/**
+ * `TaskErrorCodeSchema` is the CLOSED SET the frontend generates its vocabulary from
+ * (it rides `AgentTaskDto.errorCode` into openapi.json). A closed set is only useful
+ * while it is actually closed, and nothing about writing `errorCode: someString` in the
+ * workflow would make this file fail — so the producers are enumerated here instead.
+ *
+ * There are exactly three of them:
+ *   `TASK_${status.toUpperCase()}` for every non-succeeded terminal status (finalize),
+ *   the platform's own recovery codes (`SANDBOX_GONE`, `RESUME_FAILED`),
+ *   and every `SandboxProviderErrorCode`, because `failWith` copies `e.code` verbatim.
+ */
+describe('the task error-code enum is the CLOSED set the frontend can rely on', () => {
+  const declared = new Set<string>(TaskErrorCodeSchema.options);
+
+  it('covers every `TASK_<STATUS>` the finalize path can mint', () => {
+    const produced = DOMAIN_TASK_STATUSES.filter((s) => s !== 'running' && s !== 'succeeded').map(
+      (s) => `TASK_${s.toUpperCase()}`,
+    );
+    expect(produced.length).toBeGreaterThan(0);
+    for (const code of produced) expect(declared).toContain(code);
+  });
+
+  it('covers every provider error code, because `failWith` copies `e.code` verbatim', () => {
+    for (const code of Object.values(SandboxProviderErrorCode)) expect(declared).toContain(code);
+  });
+
+  it('covers the platform’s own recovery codes and the INTERNAL fallback', () => {
+    for (const code of ['SANDBOX_GONE', 'RESUME_FAILED', 'INTERNAL']) {
+      expect(declared).toContain(code);
+    }
+  });
+
+  it('declares NOTHING the backend cannot produce — a code with no producer is a lie', () => {
+    const producible = new Set<string>([
+      ...DOMAIN_TASK_STATUSES.filter((s) => s !== 'running' && s !== 'succeeded').map(
+        (s) => `TASK_${s.toUpperCase()}`,
+      ),
+      ...Object.values(SandboxProviderErrorCode),
+      'SANDBOX_GONE',
+      'RESUME_FAILED',
+    ]);
+    expect([...declared].filter((c) => !producible.has(c))).toEqual([]);
+  });
+
+  it('is a set of CODES, never sentences (P22 §1)', () => {
+    for (const code of declared) expect(code).toMatch(/^[A-Z][A-Z0-9_]*$/);
   });
 });

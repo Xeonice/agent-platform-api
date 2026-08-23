@@ -1,0 +1,2 @@
+2026-08-19T09:12:44.118Z  INFO codex_core::config: loaded config from /home/gem/.codex/config.toml
+2026-08-19T09:12:44.402Z ERROR codex_exec: stream error: You have hit your usage limit.

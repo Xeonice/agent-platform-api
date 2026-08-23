@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"9b7a4c31-52ee-4a08-b0d5-7f2c8e1a6b93","tools":["Read"],"model":"claude-opus-5"}
+{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low to run this request."}

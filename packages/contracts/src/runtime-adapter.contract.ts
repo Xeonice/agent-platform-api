@@ -271,6 +271,38 @@ export interface RuntimeTaskSpec {
   extraArgs?: string[];
   /** Working directory inside the sandbox — the platform's workspace mount. */
   workdir?: string;
+  /**
+   * The previous turn's session reference (see `'session-started'` below). Present ⇒
+   * "carry on from that conversation"; absent ⇒ a fresh one.
+   *
+   * WHY IT LIVES IN THE ADAPTER AND NOT IN PLATFORM-GENERIC CODE: each CLI spells
+   * resumption differently — codex takes a SUBCOMMAND (`codex exec resume <ref>
+   * [prompt]`), claude takes a FLAG (`claude -p --resume <ref>`, with `--session-id
+   * <uuid>` additionally able to pin the id up front). Same reason `buildStartCommand`
+   * owns switching each CLI's inner sandbox off (04 §3 ★2): the shapes have nothing
+   * in common, so no generic wrapper can hold them.
+   *
+   * WHAT MAKES IT CHEAP: both CLIs persist conversation state INSIDE the sandbox by
+   * default (codex under `$CODEX_HOME/sessions/<date>/rollout-<ts>-<id>.jsonl`; claude
+   * under `$CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session_id>.jsonl`). So resuming
+   * within one sandbox needs no export/import at all — only the reference travels.
+   * Verified end to end on both CLIs with real credentials (2026-08).
+   *
+   * ⚠️ THE RESUME INVOCATION IS NOT THE START INVOCATION WITH A FLAG ADDED. Measured:
+   * `codex exec resume` accepts a DIFFERENT option set from `codex exec` — it has
+   * neither `-s/--sandbox` nor `-C/--cd`. Since `-s danger-full-access` is exactly how
+   * this adapter switches codex's inner sandbox off (★2), a resume built by appending
+   * to the start argv dies with `unexpected argument '-s' found`; the equivalent must
+   * go through `-c sandbox_mode="danger-full-access"` instead. Assume nothing carries
+   * over between the two subcommands.
+   *
+   * CONFIRMATION SIGNAL: both CLIs echo the SAME id back on a successful resume
+   * (codex in `thread.started`, claude in `system/init`), so the platform can verify a
+   * resume really attached rather than trusting that it did. A reference that no longer
+   * exists fails LOUDLY on both — exit 1, with codex writing nothing at all to stdout
+   * and claude emitting `result/error_during_execution` with `is_error: true`.
+   */
+  resumeFrom?: string;
 }
 
 /**
@@ -287,14 +319,134 @@ export interface SandboxCommand {
   cwd?: string;
 }
 
+/**
+ * Measured event surfaces on the SUCCESS path (2026-08, real credentials, a task that
+ * forces tool use). Both stay 100% clean JSONL on stdout with an empty stderr.
+ *
+ *   codex   top level  thread.started · turn.started · item.started · item.completed ·
+ *                      turn.completed          (failure: turn.failed · error)
+ *           item.type  agent_message{id,type,text}
+ *                      command_execution{id,type,command,aggregated_output,exit_code,status}
+ *                      file_change{id,type,changes:[{path,kind}],status}
+ *
+ *   claude  top level  system/init · system/thinking_tokens · assistant · user ·
+ *                      result/success
+ *           blocks     text · thinking{thinking,signature} ·
+ *                      tool_use{id,name,input,caller} ·
+ *                      tool_result{tool_use_id,content}   ← in a FOLLOWING `user` message
+ *
+ * ⚠️ The two shapes are NOT isomorphic: codex reports one item per call carrying its own
+ * output, while claude splits call and result across two messages correlated by
+ * `tool_use_id`. A shared parser cannot be written over these; each adapter maps its own
+ * onto the union below, which is where they finally agree.
+ */
 export type RuntimeEventType =
-  'stdout-chunk' | 'tool-call' | 'task-complete' | 'error' | 'auth-required';
+  | 'session-started'
+  | 'agent-message'
+  | 'stdout-chunk'
+  | 'tool-call'
+  | 'task-complete'
+  | 'error'
+  | 'auth-required';
 
-export interface RuntimeEvent {
-  type: RuntimeEventType;
-  timestamp: string;
-  data: unknown;
-}
+/**
+ * ⚠️ THE PAYLOAD IS PINNED PER MEMBER, NOT `unknown`.
+ *
+ * This union used to be `{ type: RuntimeEventType; timestamp: string; data: unknown }`,
+ * and that was a real defect rather than a stylistic one: with `data` opaque, a
+ * consumer can only GUESS which field holds the text (`text`? `chunk`? `content`?
+ * `message`?), so whether output renders at all depends on which name a producer
+ * happened to pick — and renaming it breaks nothing at compile time and nothing in a
+ * schema check. It fails silently, in the one place a user would notice first.
+ *
+ * Pinning the payload makes producer and consumer fail TOGETHER, at build time.
+ *
+ * ── `'agent-message'` vs `'stdout-chunk'` ────────────────────────────────────────
+ * 04 §3 ★4 deferred this member with "do not guess one before a consumer needs it".
+ * A consumer now does: the UI renders the agent's prose differently from its tool
+ * calls. So codex's `agent_message` items and claude's `text` blocks map to
+ * `'agent-message'`, and `'stdout-chunk'` is left for what its name says — RAW bytes
+ * from a runtime with no structured mode.
+ *
+ * ── `'tool-call'` covers BOTH halves of a call ───────────────────────────────────
+ * `status` distinguishes them, and `id` is the correlation key. codex fills both
+ * halves from one item; claude emits `started` from a `tool_use` block and
+ * `completed` later from the `tool_result` in a FOLLOWING `user` message.
+ *
+ * ⚠️ On claude's `completed` half the tool NAME is empty: `tool_result` carries only
+ * `tool_use_id`, and the parser is stateless per line ON PURPOSE — a lookup table
+ * would make a live parse and a replayed parse produce different payloads. Consumers
+ * correlate by `id`, where the name already arrived with the `started` event.
+ *
+ * `timestamp` is ISO-8601 and may be EMPTY as produced: `parseOutput` runs in
+ * infrastructure, which has no `Clock` (01 §3), and none of the CLI events carries a
+ * time of its own. The application layer stamps it before the event goes anywhere.
+ */
+export type RuntimeEvent =
+  /** The CLI's own conversation id — store it, hand it back as `resumeFrom` next turn. */
+  | { type: 'session-started'; timestamp: string; data: { ref: string } }
+  /** The agent's own prose. */
+  | { type: 'agent-message'; timestamp: string; data: { text: string } }
+  /** Raw bytes from a runtime with no structured output mode. */
+  | { type: 'stdout-chunk'; timestamp: string; data: { text: string } }
+  /**
+   * One HALF of a tool call. `id` correlates the two halves; `status` discriminates
+   * the payload.
+   *
+   * ⚠️ `name` LIVES ONLY ON `started`, AND THAT IS THE POINT. It was briefly on both
+   * halves, which forced claude's completed half to send an EMPTY name — `tool_result`
+   * carries only `tool_use_id`, and the parser is stateless per line ON PURPOSE (an
+   * id→name table would make a live parse and a replayed parse produce DIFFERENT
+   * payloads for the same bytes, which is the one thing `seq` replay must never do).
+   * A required field that is sometimes a lie is the same silent-payload defect this
+   * union was pinned to remove — so the field simply is not there when it is not
+   * knowable. Consumers pair by `id`, where the name already arrived.
+   */
+  | {
+      type: 'tool-call';
+      timestamp: string;
+      data:
+        | { status: 'started'; id: string; name: string; input?: unknown }
+        | {
+            status: 'completed';
+            id: string;
+            /**
+             * A REAL process exit code, or absent. It is NEVER synthesised.
+             */
+            exitCode?: number;
+            /**
+             * The tool itself reported failure.
+             *
+             * ⚠️ THE ONLY REASON THIS FIELD EXISTS IS TO KEEP SYNTHESISED VALUES OUT OF
+             * `exitCode`. codex reports a real exit code; claude reports a boolean
+             * (`tool_result.is_error`) and no code at all. Folding the boolean into
+             * `exitCode` as a 1 would put a MEASURED 1 and a MANUFACTURED 1 in the same
+             * field, indistinguishable to every consumer — the same silent-payload
+             * defect this union was pinned to remove, just relocated. (It is NOT
+             * comparable to reporting a sandbox-side hard timeout as 124: that is a real
+             * process's real exit code, not a boolean dressed up as one.)
+             *
+             * So each runtime says what it actually knows and neither impersonates the
+             * other. Absent means "no failure was reported", not "it succeeded".
+             * Consumers judge failure as:
+             *   `isError === true || (exitCode !== undefined && exitCode !== 0)`
+             */
+            isError?: boolean;
+            output?: string;
+          };
+    }
+  /**
+   * The runtime says the turn finished. The payload is EMPTY, deliberately.
+   *
+   * ⚠️ THE EXIT CODE IS NOT HERE — it is on the `/tasks` `exit` frame. Measured:
+   * neither CLI puts one in its completion event, because the process's exit status is
+   * the JOB's fact, not the turn's. An optional field with no producer only sends the
+   * next reader looking for something that is never populated.
+   */
+  | { type: 'task-complete'; timestamp: string; data: Record<string, never> }
+  | { type: 'error'; timestamp: string; data: { message: string } }
+  /** ⏳ Not produced by either built-in adapter yet — no measured shape to map from. */
+  | { type: 'auth-required'; timestamp: string; data: { method?: string } };
 
 export interface RuntimeAdapter {
   readonly id: string;

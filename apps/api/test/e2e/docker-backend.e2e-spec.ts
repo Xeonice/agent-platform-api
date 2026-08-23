@@ -52,6 +52,7 @@ describe.skipIf(!dockerUp)('DockerContainerBackend — aio 本机容器后端 (r
       pauseResume: true,
       snapshot: false,
       watchEvents: true,
+      headlessTask: false,
     },
   });
   let handle: SandboxHandle | undefined;

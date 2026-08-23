@@ -36,12 +36,18 @@ export const CreateSandboxSchema = z.object({
   initialPrompt: z.string().optional(),
   headless: z.boolean().optional(),
   timeoutMinutes: TimeoutMinutesSchema.optional(),
-  /** Capability preconditions; checked against the provider before scheduling (04 §5). */
+  /**
+   * Capability preconditions; checked against the provider before scheduling (04 §5).
+   *
+   * `headlessTask` is deliberately NOT requestable here, for the same reason
+   * `watchEvents` is not: `headless: true` already IMPLIES it, so the platform derives
+   * the requirement instead of making every caller restate it.
+   */
   require: RequiredCapabilitiesSchema.optional(),
 });
 export type CreateSandboxInput = z.infer<typeof CreateSandboxSchema>;
 
-/** Wire mirror of the SPI capability struct (04 §2.5) — all 6 bits, none optional. */
+/** Wire mirror of the SPI capability struct (04 §2.5) — all 7 bits, none optional. */
 export const SandboxProviderCapabilitiesSchema = z.object({
   spawnTty: z.boolean(),
   volumeMount: z.boolean(),
@@ -49,13 +55,14 @@ export const SandboxProviderCapabilitiesSchema = z.object({
   pauseResume: z.boolean(),
   snapshot: z.boolean(),
   watchEvents: z.boolean(),
+  headlessTask: z.boolean(),
 });
 
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 type AssertTrue<T extends true> = T;
 
 /**
- * Compile-time parity guard: adding a 7th bit to `SandboxProviderCapabilities` (or
+ * Compile-time parity guard: adding an 8th bit to `SandboxProviderCapabilities` (or
  * renaming one) fails typecheck HERE until the wire schema follows, so `GET /providers`
  * can never quietly under-report what a provider advertises. Exported only so it is a
  * checked declaration rather than dead code — nothing needs to import it.
@@ -92,6 +99,18 @@ export const SandboxDtoSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   runtime: z.string(),
+  /**
+   * WHICH provider this sandbox actually runs on (`aio` / `boxlite` / a third-party
+   * registry key).
+   *
+   * It is on the DTO because the frontend gates controls on provider CAPABILITIES —
+   * e.g. whether the "start a headless Task" entry point is enabled at all depends on
+   * `headlessTask`, which is looked up per provider through `GET /api/providers`.
+   * Without this field that lookup has no key after a page reload, and the UI can only
+   * degrade to "enable it and let the backend answer 409" — i.e. an error path used as
+   * a feature check.
+   */
+  provider: z.string(),
   /**
    * Task display name. The DEFAULT is derived BY THE BACKEND at create time from
    * `initialPrompt` (first non-blank line, first 20 UTF-8 code points, + `…`;

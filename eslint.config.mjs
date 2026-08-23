@@ -160,8 +160,18 @@ export default tseslint.config(
   },
   // Port implementations are the ONLY sanctioned place for time/random (01 §3 exemption).
   // `as unknown as` stays banned even here.
+  //
+  // `shared-kernel/src/ports/time.util.ts` joins them for a DIFFERENT reason, spelled
+  // out at `fromEpochMs`: it never reads a clock, it converts an ABSOLUTE timestamp
+  // handed to us by a third party (the in-sandbox agent reports file mtimes as epoch
+  // seconds). The ban exists to keep "now" behind the Clock port so tests can pin it;
+  // a pure `epoch → Date` function is outside what that ban is protecting.
   {
-    files: ['apps/api/src/platform/time/**/*.ts', 'apps/api/src/platform/access-passcode/**/*.ts'],
+    files: [
+      'apps/api/src/platform/time/**/*.ts',
+      'apps/api/src/platform/access-passcode/**/*.ts',
+      'packages/shared-kernel/src/ports/time.util.ts',
+    ],
     rules: { 'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS] },
   },
   // Tests may use wall-clock time and cross layers freely — but NOT `as unknown as`.
