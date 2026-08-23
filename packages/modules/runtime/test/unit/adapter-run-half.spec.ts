@@ -81,7 +81,15 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       headless: false,
       workdir: '/workspace',
     });
-    expect(cmd.cmd).toEqual(['codex', '-s', 'danger-full-access', '--', 'fix the login bug']);
+    expect(cmd.cmd).toEqual([
+      'codex',
+      '-s',
+      'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
+      '--',
+      'fix the login bug',
+    ]);
     expect(cmd.cwd).toBe('/workspace');
   });
 
@@ -126,6 +134,8 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       'codex',
       '-s',
       'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
     ]);
   });
 
@@ -134,6 +144,8 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       'codex',
       '-s',
       'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
     ]);
     expect(new ClaudeCodeAdapter().buildAttachCommand().cmd).toEqual([
       'claude',
@@ -269,6 +281,48 @@ describe('positional arguments are DATA — `--` closes the option list', () => 
           resumeFrom: ref,
         }),
       ).not.toThrow();
+    }
+  });
+});
+
+describe('codex 启动闸门（实测 codex-cli 0.139.0，三道都会卡住 agent）', () => {
+  it('无头路径带 --skip-git-repo-check —— 否则空项目一次都跑不起来', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      prompt: 'run the suite',
+      headless: true,
+      workdir: '/workspace',
+    });
+    // 实测：非 git 目录里 `codex exec` 不是"提示"而是**直接退出**：
+    //   Not inside a trusted directory and --skip-git-repo-check was not specified.
+    // 空项目（sourceType: 'empty'）的工作区就是普通目录 ⇒ S6 整条无头链路在空项目上全废。
+    expect(cmd.cmd).toContain('--skip-git-repo-check');
+  });
+
+  it('⚠️ 交互路径**不带**这个 flag —— 顶层命令没有它，加了会 unexpected argument 直接死', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      prompt: 'hi',
+      headless: false,
+      workdir: '/workspace',
+    });
+    expect(cmd.cmd).not.toContain('--skip-git-repo-check');
+  });
+
+  it('resume 也要带（`codex exec resume` 有这个 flag，实测 --help）', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      headless: true,
+      workdir: '/workspace',
+      resumeFrom: '01a02e77-0f93-7582-b6ae-d788de241eae',
+    });
+    expect(cmd.cmd).toContain('--skip-git-repo-check');
+  });
+
+  it('两条路径都关掉启动版本检查 —— 不关会弹一个需要按键的升级菜单把 agent 卡住', () => {
+    for (const headless of [true, false]) {
+      const cmd = new CodexAdapter().buildStartCommand({ prompt: 'hi', headless, workdir: '/w' });
+      const i = cmd.cmd.indexOf('check_for_update_on_startup=false');
+      expect(i).toBeGreaterThan(0);
+      // 它是 `-c` 的值，不是裸参数：位置紧跟在一个 `-c` 后面。
+      expect(cmd.cmd[i - 1]).toBe('-c');
     }
   });
 });

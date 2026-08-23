@@ -58,6 +58,29 @@ const SANDBOX_OFF_ARGS = ['-s', 'danger-full-access'];
  */
 const RESUME_SANDBOX_OFF_ARGS = ['-c', 'sandbox_mode="danger-full-access"'];
 /**
+ * 无头路径的**硬闸门**（实测 codex-cli 0.139.0）：在非 git 目录里 `codex exec` 直接拒跑——
+ *
+ *   Not inside a trusted directory and --skip-git-repo-check was not specified.
+ *
+ * 这不是提示、是**退出**。空项目（`sourceType: 'empty'`）的工作区就是一个普通目录,
+ * 于是 S6 整条无头 Task 链路在空项目上一次都跑不起来。
+ *
+ * ⚠️ 实测过的两条错路,别再走:
+ *   ① `-c projects."<dir>".trust_level="trusted"` —— **对这道闸门无效**。它认的是
+ *      "是不是 git 仓库",与目录信任是**两道不同的闸门**（交互路径那道见 §信任预置）;
+ *   ② 让工作区变成 git 仓库 —— 那会污染用户的产物,而且空项目本来就不该有 .git。
+ *
+ * 这个 flag 只在 `exec` / `exec resume` 上存在,顶层交互命令没有（实测 `--help`）。
+ */
+const SKIP_GIT_REPO_CHECK = '--skip-git-repo-check';
+/**
+ * 关掉启动时的版本检查。不关的话交互会话会先弹一个**需要按键**的升级菜单
+ * （"Update available! 0.139.0 -> 0.149.0 / 1. Update now …"）,把 agent 卡在那里;
+ * 而且平台管着 CLI 的安装（`getInstallPlan`）,让 agent 自己 `npm install -g` 换版本
+ * 会绕过平台对版本的掌控。与 `-c` 同族,两条路径都能用。
+ */
+const NO_UPDATE_CHECK_ARGS = ['-c', 'check_for_update_on_startup=false'];
+/**
  * `install()` takes no image (04 §3), while `getInstallPlan` is keyed on one. The
  * install COMMANDS are image-independent for an npm-distributed CLI — only the
  * strategy/estimate differ — so a neutral spec is used to read them back.
@@ -326,6 +349,9 @@ export class CodexAdapter implements RuntimeAdapter {
     // nothing carries over between the two subcommands.
     if (resume) cmd.push('resume', ...RESUME_SANDBOX_OFF_ARGS);
     else cmd.push(...SANDBOX_OFF_ARGS);
+    cmd.push(...NO_UPDATE_CHECK_ARGS);
+    // 只有 exec 一族有这个 flag；顶层交互命令加了会 `unexpected argument` 直接死。
+    if (task.headless) cmd.push(SKIP_GIT_REPO_CHECK);
     if (task.headless && task.outputFormat === 'json-stream') cmd.push('--json');
     if (task.extraArgs) cmd.push(...task.extraArgs);
     // ⚠️ `--` CLOSES THE OPTION LIST BEFORE THE FIRST POSITIONAL, AND IT IS A SECURITY
@@ -362,7 +388,8 @@ export class CodexAdapter implements RuntimeAdapter {
 
   /** A plain interactive codex session — same inner-sandbox switch, no instruction. */
   buildAttachCommand(): SandboxCommand {
-    return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS] };
+    // attach 起的同样是**交互** codex ⇒ 同样会撞上启动版本检查那个需要按键的菜单。
+    return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS, ...NO_UPDATE_CHECK_ARGS] };
   }
 
   /**
