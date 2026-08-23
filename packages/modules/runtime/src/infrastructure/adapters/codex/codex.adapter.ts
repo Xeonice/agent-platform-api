@@ -38,10 +38,10 @@ import {
   sanitizeCodexAuthJson,
 } from './codex.output-parser';
 import { assertSessionRef } from '../session-ref.util';
+import { probeSandboxHome } from '../home-probe.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
-const HOME_PROBE_TIMEOUT_MS = 15_000;
 const WRITE_FILE_TIMEOUT_MS = 30_000;
 
 const CODEX_BINARY = 'codex';
@@ -136,7 +136,6 @@ const MODE_RE = /^[0-7]{3,4}$/;
  * Ask the LIVE sandbox for its `$HOME` (05 §4.3 裁决 D-19). `printf` (not `echo`) so
  * there is no trailing newline to guess at, and no shell expansion of the value.
  */
-const HOME_PROBE_CMD = ['sh', '-c', 'printf %s "$HOME"'];
 
 /**
  * Write `$1` with mode `$2`, taking the CONTENT FROM STDIN — the content never appears
@@ -317,7 +316,7 @@ export class CodexAdapter implements RuntimeAdapter {
    * 就原样跳过。
    */
   async seedStartupFiles(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void> {
-    const home = await this.probeHome(exec);
+    const home = await probeSandboxHome(exec, (m) => new AdapterAuthError('AUTH_REJECTED', m));
     const absolutePath = `${home}/${CODEX_CONFIG_PATH.slice(2)}`;
     const r = await exec(
       ['sh', '-c', SEED_TRUST_SCRIPT, 'codex-seed', absolutePath, TRUST_SECTION(spec.workdir)],
@@ -331,7 +330,7 @@ export class CodexAdapter implements RuntimeAdapter {
   async injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void> {
     // ① default: 0600 credential files, content written out VERBATIM.
     if (cred.credentialFiles.length > 0) {
-      const home = await this.probeHome(exec);
+      const home = await probeSandboxHome(exec, (m) => new AdapterAuthError('AUTH_REJECTED', m));
       for (const file of cred.credentialFiles) {
         await this.writeFile(exec, file, home);
       }
@@ -446,25 +445,6 @@ export class CodexAdapter implements RuntimeAdapter {
   buildAttachCommand(): SandboxCommand {
     // attach 起的同样是**交互** codex ⇒ 同样会撞上启动版本检查那个需要按键的菜单。
     return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS, ...NO_UPDATE_CHECK_ARGS] };
-  }
-
-  /**
-   * Resolve THIS sandbox's `$HOME` (05 §4.3 裁决 D-19). Probed per injection through the
-   * caller's `exec`, never hard-coded and never cached across sandboxes: the two
-   * built-in providers happen to agree on `/home/gem` today, but 04 §7 is explicit that
-   * HOME is not part of the image contract — a third-party image or a base-image bump
-   * breaks any constant, and `/root` (the old guess) is wrong on BOTH providers.
-   */
-  private async probeHome(exec: SandboxExecFn): Promise<string> {
-    const r = await exec(HOME_PROBE_CMD, { timeoutMs: HOME_PROBE_TIMEOUT_MS });
-    const home = r.stdout.trim();
-    if (r.exitCode !== 0 || !home.startsWith('/')) {
-      throw new AdapterAuthError(
-        'AUTH_REJECTED',
-        `could not resolve $HOME inside the sandbox (exit ${r.exitCode})`,
-      );
-    }
-    return home.endsWith('/') ? home.slice(0, -1) : home;
   }
 
   /** Materialize ONE credential file at its `~/`-expanded path, owner-only. */

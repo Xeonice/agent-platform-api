@@ -10,6 +10,7 @@ import type {
   RuntimeCredential,
   RuntimeEvent,
   RuntimeInstallPlan,
+  RuntimeStartupSpec,
   RuntimeTaskSpec,
   ResolvedImageSpec,
   SandboxCommand,
@@ -33,6 +34,7 @@ import {
   parseClaudeTaskEvents,
 } from './claude-code.output-parser';
 import { assertSessionRef } from '../session-ref.util';
+import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 5 * 60_000;
@@ -47,6 +49,52 @@ const CLAUDE_BINARY = 'claude';
  * lives per-adapter and never in platform code.
  */
 const PERMISSIONS_OFF_ARGS = ['--dangerously-skip-permissions'];
+/**
+ * claude 的交互路径上有**四道**需要按键的闸门(实测 claude-code 2.1.241),平台一道
+ * 都没处理 —— agent 会停在第一道上,界面上只是一个不动的终端:
+ *
+ *   ① 主题选择器  ② 登录方式选择  ③ 文件夹信任  ④ Bypass Permissions 警告
+ *
+ * ⚠️ 实测澄清的三件事:
+ *   · ①② **不是凭证门控**。带真 token(`CLAUDE_CODE_OAUTH_TOKEN`)照样先弹主题、
+ *     再问登录方式——onboarding 与"是否已鉴权"是两回事;
+ *   · **无头路径完全不受影响**。同一个 token 走 `--print` 直接出结果,一道闸门都没有。
+ *     所以这四道只挡交互终端;
+ *   · `--allow-dangerously-skip-permissions` **不能**预先接受 ④(它的语义是"允许启用
+ *     这个模式",不是"我已接受警告"),`--settings '{"theme":…}'` 也压不住 ①。
+ *
+ * 四道全由 `~/.claude.json` 里的三个键清掉(逐个从二进制 strings 里挖出来、逐个实测):
+ * ①② ← `hasCompletedOnboarding`，③ ← `projects["<workdir>"].hasTrustDialogAccepted`
+ *（按路径记,与 codex 的 `[projects."<dir>"]` 同构）,④ ← `bypassPermissionsModeAccepted`。
+ * `~/.claude/settings.json`(主题)**不需要**——实测只写这一个文件就够。
+ */
+const CLAUDE_CONFIG_PATH = '~/.claude.json';
+const claudeSeedJson = (workdir: string): string =>
+  `${JSON.stringify(
+    {
+      hasCompletedOnboarding: true,
+      bypassPermissionsModeAccepted: true,
+      projects: { [workdir]: { hasTrustDialogAccepted: true } },
+    },
+    null,
+    2,
+  )}\n`;
+/**
+ * **只在文件不存在时写**。理由:
+ *   · 镜像不预置这个文件(实测),所以全新容器上这一步必然生效;
+ *   · 文件已存在 ⇒ 要么是上一次 provision 落的(键已在),要么是 claude 自己写的
+ *     (那说明它已经跑过、状态更全)。两种情况都不该覆盖 —— 那会把 claude 攒的
+ *     会话/缓存状态抹掉。
+ * 无论走哪条都把 stdin 读干净,否则写端拿 EPIPE。
+ */
+const SEED_CLAUDE_SCRIPT = [
+  'set -e',
+  'f="$1"',
+  'if [ -f "$f" ]; then cat >/dev/null; exit 0; fi',
+  'mkdir -p "$(dirname "$f")"',
+  'umask 077',
+  'cat > "$f"',
+].join('\n');
 /**
  * `--output-format stream-json` is REFUSED by claude unless `--verbose` is also on
  * (`Error: --output-format=stream-json requires --verbose`). That is why the platform
@@ -244,6 +292,19 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * no `authFile` (05 §4.3 裁决 D-18); claude's setup-token has no refresh token at all,
    * so this adapter has nothing to sanitize, but it obeys the same injection contract.
    */
+  /** 启动前清掉四道交互闸门（理由与实测见 `CLAUDE_CONFIG_PATH` 上方）。每次 provision 都跑，幂等。 */
+  async seedStartupFiles(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void> {
+    const home = await probeSandboxHome(exec, (m) => new Error(m));
+    const absolutePath = `${home}/${CLAUDE_CONFIG_PATH.slice(2)}`;
+    const r = await exec(['sh', '-c', SEED_CLAUDE_SCRIPT, 'claude-seed', absolutePath], {
+      stdin: claudeSeedJson(spec.workdir),
+      timeoutMs: SEED_WRITE_TIMEOUT_MS,
+    });
+    if (r.exitCode !== 0) {
+      throw new Error(`seeding claude .claude.json failed (exit ${r.exitCode})`);
+    }
+  }
+
   async injectCredential(cred: InjectableRuntimeCredential, _exec: SandboxExecFn): Promise<void> {
     if (!cred.env || Object.keys(cred.env).length === 0) {
       throw new AdapterAuthError('AUTH_REJECTED', 'no injectable claude credential material');

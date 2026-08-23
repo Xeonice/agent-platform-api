@@ -326,3 +326,43 @@ describe('codex 启动闸门（实测 codex-cli 0.139.0，三道都会卡住 age
     }
   });
 });
+
+describe('claude-code 启动闸门（实测 claude-code 2.1.241，交互路径四道）', () => {
+  /** 收集 exec 调用，供断言"落了什么文件、什么内容"。 */
+  function recordingExec() {
+    const calls: { cmd: string[]; stdin?: string }[] = [];
+    const exec = async (cmd: string[], opts?: { stdin?: string }) => {
+      calls.push({ cmd, ...(opts?.stdin === undefined ? {} : { stdin: opts.stdin }) });
+      // 第一次是 $HOME 探针。
+      return cmd.join(' ').includes('$HOME')
+        ? { stdout: '/home/gem', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 };
+    };
+    return { calls, exec };
+  }
+
+  it('把清掉四道闸门的三个键写进 ~/.claude.json（按 workdir 记信任）', async () => {
+    const { calls, exec } = recordingExec();
+    await new ClaudeCodeAdapter().seedStartupFiles({ workdir: '/workspace' }, exec as never);
+
+    const write = calls.find((c) => c.stdin !== undefined);
+    expect(write?.cmd).toContain('/home/gem/.claude.json');
+    const seeded = JSON.parse(write?.stdin ?? '{}') as Record<string, unknown>;
+    // ①② 主题 + 登录方式：实测**不是凭证门控**——带真 token 照样弹。
+    expect(seeded['hasCompletedOnboarding']).toBe(true);
+    // ④ Bypass Permissions 警告：`--allow-dangerously-skip-permissions` 压不住它
+    //（那个 flag 的语义是"允许启用该模式"，不是"我已接受警告"）。
+    expect(seeded['bypassPermissionsModeAccepted']).toBe(true);
+    // ③ 文件夹信任：按路径记，与 codex 的 `[projects."<dir>"]` 同构。
+    expect(seeded['projects']).toEqual({ '/workspace': { hasTrustDialogAccepted: true } });
+  });
+
+  it('⚠️ 文件已存在就不覆盖 —— 覆盖会抹掉 claude 自己攒的会话/缓存状态', async () => {
+    const { calls, exec } = recordingExec();
+    await new ClaudeCodeAdapter().seedStartupFiles({ workdir: '/workspace' }, exec as never);
+    const script = calls.find((c) => c.stdin !== undefined)?.cmd.join('\n') ?? '';
+    expect(script).toContain('if [ -f "$f" ]; then');
+    // 跳过时也必须把 stdin 读干净，否则写端拿 EPIPE。
+    expect(script).toContain('cat >/dev/null');
+  });
+});
