@@ -2,7 +2,6 @@ import { beforeEach, afterEach, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
 import { DATABASE } from '@platform/shared-kernel';
 import {
@@ -10,6 +9,7 @@ import {
   PROJECT_FACADE,
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
+  WS_SCHEMA_HASH,
 } from '@platform/contracts';
 import type {
   ProcessSpec,
@@ -25,6 +25,7 @@ import type {
 import { AppModule } from '../../src/app.module';
 import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import {
   EchoProcessStream,
   FakeExecProcessStream,
@@ -123,7 +124,7 @@ async function boot(hasTmux: boolean): Promise<void> {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
@@ -348,7 +349,9 @@ describe('E2E-8-attachOnly — the terminal gateway attaches, it never starts th
 
 function connectTerminal(sandboxId: string): Promise<Socket> {
   const sock = io(`http://127.0.0.1:${port}/terminal`, {
-    query: { sandboxId, cols: '80', rows: '24' },
+    // `xSchemaHash` is REQUIRED on `/terminal`, exactly as it is on `/tasks`: a
+    // handshake without it is refused, so a test client presents it like the real one.
+    query: { sandboxId, cols: '80', rows: '24', xSchemaHash: WS_SCHEMA_HASH },
     transports: ['websocket'],
     forceNew: true,
   });

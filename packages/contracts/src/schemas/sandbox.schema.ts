@@ -33,7 +33,16 @@ export const CreateSandboxSchema = z.object({
   runtime: z.string().min(1),
   image: z.string().optional(),
   provider: z.string().optional(),
-  initialPrompt: z.string().optional(),
+  /**
+   * 可选任务指令。上限 8000 与 `RunAgentTaskSchema.prompt` 同一口径(10 §7.3
+   * 「≤8000 字符」明确写的是 `initialPrompt`),**两处必须同步**。
+   *
+   * ⚠️ 之前这里是裸 `z.string().optional()` —— 契约文档写着上限、Task 面照做了、
+   * 而创建面没有,于是同一段文字走 `POST /api/sandboxes` 无上限、走
+   * `POST .../tasks` 8000 截断。它会原样落进 `sandboxes.initial_prompt`,再被
+   * `buildStartCommand` 拼进 argv;门口不收,后面每一层都只能替它承担。
+   */
+  initialPrompt: z.string().max(8000).optional(),
   headless: z.boolean().optional(),
   timeoutMinutes: TimeoutMinutesSchema.optional(),
   /**

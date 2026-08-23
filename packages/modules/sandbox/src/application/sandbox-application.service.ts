@@ -1,11 +1,4 @@
-import {
-  BadRequestException,
-  HttpException,
-  HttpStatus,
-  Inject,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
   CLOCK,
   ID_GENERATOR,
@@ -23,6 +16,7 @@ import {
   ProjectAccessError,
   SandboxProviderError,
   SandboxProviderErrorCode,
+  UnknownRuntimeError,
 } from '@platform/contracts';
 import type {
   CreateSandboxInput,
@@ -41,12 +35,26 @@ import type {
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { mapProviderErrorToHttp } from './provider-error.http';
+import {
+  INVALID_IMAGE_REFERENCE_CODE,
+  UNKNOWN_PROVIDER_CODE,
+  atDoor,
+  doorRejection,
+} from './door-rejection.http';
 import { Sandbox } from '../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
+
+/** What the create door hands to the transaction once a request is admitted. */
+interface AdmittedCreate {
+  providerName: string;
+  provider: SandboxProvider;
+  imageRef: string;
+  baselinePath: ProjectRuntimeContext['baselinePath'];
+}
 
 /**
  * Protocol-agnostic application service (02 §1): REST controller + MCP tools both
@@ -97,20 +105,7 @@ export class SandboxApplicationService {
   }
 
   async create(input: CreateSandboxInput): Promise<SandboxDto> {
-    const providerName = input.provider ?? this.registry.defaultProvider;
-    if (!this.registry.has(providerName)) {
-      throw new BadRequestException(`unknown provider '${providerName}'`);
-    }
-    const provider = this.registry.get(providerName);
-    // 04 §5 「创建前静态校验」: capability mismatches are rejected HERE — before the
-    // project lookup, before a row is written, before anything is scheduled.
-    this.assertCapabilities(provider, input.require, input.headless ?? false);
-    const imageRef = this.resolveImage(input.image);
-
-    // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
-    // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
-    // which we surface as HTTP BEFORE any sandbox row is written.
-    const projectCtx = await this.resolveProject(input.projectId);
+    const admitted = await this.admit(input);
 
     const headless = input.headless ?? false;
     const sandbox = Sandbox.create({
@@ -118,8 +113,8 @@ export class SandboxApplicationService {
       projectId: asProjectId(input.projectId),
       runtime: input.runtime,
       runtimeLabel: this.runtimeLabel(input.runtime),
-      provider: providerName,
-      imageRef,
+      provider: admitted.providerName,
+      imageRef: admitted.imageRef,
       headless,
       // T-1: the instruction is PERSISTED here, in T1. Its consumer
       // (`bootstrapAgentSession`) runs after the 202 in a workflow whose only input is
@@ -140,8 +135,50 @@ export class SandboxApplicationService {
     // drive the state machine in the background (each transition persists + publishes
     // a SandboxStateChanged event for the WS relay). Failures land `failed`.
     const dto = SandboxMapper.toDto(sandbox, false);
-    void this.provision.runSafely(sandbox, provider, projectCtx.baselinePath);
+    void this.provision.runSafely(sandbox, admitted.provider, admitted.baselinePath);
     return dto;
+  }
+
+  /**
+   * THE CREATE DOOR (04 §5 「创建前静态校验」) — every check that decides whether the
+   * request is admissible AT ALL, and nothing else.
+   *
+   * ⚠️ IT IS ONE METHOD BECAUSE 「零副作用」 IS A POSITIONAL PROPERTY. Read the body:
+   * it holds no `uow`, writes nothing, schedules nothing and never touches
+   * `provider.create` — so 不进调度、不落库、不调 `provider.create` is true of every
+   * rejection here by construction, not by promise. `atDoor` turns that structural fact
+   * into `ErrorEnvelope.sideEffectFree` on the way out, which is why a door check added
+   * to this method later is flagged correctly without its author doing anything (and
+   * why a door check added OUTSIDE it would not be — see `door-rejection.http.ts`).
+   *
+   * The six rejections it can produce today, all of them 零副作用:
+   *   `UNKNOWN_PROVIDER` 400 · `UNSUPPORTED_CAPABILITY` 409 · `UNKNOWN_RUNTIME` 400 ·
+   *   `INVALID_IMAGE_REFERENCE` 400 · `PROJECT_NOT_FOUND` 404 · `PROJECT_NOT_READY` 409.
+   */
+  private admit(input: CreateSandboxInput): Promise<AdmittedCreate> {
+    return atDoor(async () => {
+      const providerName = input.provider ?? this.registry.defaultProvider;
+      if (!this.registry.has(providerName)) {
+        throw doorRejection(
+          HttpStatus.BAD_REQUEST,
+          UNKNOWN_PROVIDER_CODE,
+          `unknown provider '${providerName}'`,
+        );
+      }
+      const provider = this.registry.get(providerName);
+      // capability mismatches are rejected HERE — before the project lookup, before a
+      // row is written, before anything is scheduled.
+      this.assertCapabilities(provider, input.require, input.headless ?? false);
+      this.assertRuntimeRegistered(input.runtime);
+      const imageRef = this.resolveImage(input.image);
+
+      // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
+      // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
+      // which we surface as HTTP BEFORE any sandbox row is written.
+      const projectCtx = await this.resolveProject(input.projectId);
+
+      return { providerName, provider, imageRef, baselinePath: projectCtx.baselinePath };
+    });
   }
 
   /**
@@ -161,13 +198,65 @@ export class SandboxApplicationService {
     if (ref === '') return this.defaultImage();
     // whitespace / control characters in an image ref would flow into a container
     // runtime call; refuse them up front rather than deep inside `provider.create`.
-    if (/\s/.test(ref)) {
-      throw new BadRequestException(`invalid image reference '${requested}'`);
+    //
+    // ⚠️ `\s` ALONE DOES NOT SAY "control characters" — it covers tab/newline/space
+    // and friends, but NUL, BEL and ESC are none of those. An image ref is
+    // concatenated into a registry reference and echoed into logs, so an embedded
+    // `\x1b[` is a terminal-escape injection into anything that renders them, and a
+    // `\x00` truncates the ref for a C-string consumer. The comment promised this
+    // check; now it is one.
+    if (/[\s\p{Cc}]/u.test(ref)) {
+      throw doorRejection(
+        HttpStatus.BAD_REQUEST,
+        INVALID_IMAGE_REFERENCE_CODE,
+        `invalid image reference '${requested}'`,
+      );
     }
     return ref;
   }
 
-  /** Human-facing runtime label for the fallback task name (P21-1 §9). */
+  /**
+   * The runtime must EXIST in the registry — checked HERE, at the door, in the same
+   * 段 as `assertCapabilities` and for the same reason (04 §5 「创建前静态校验」:
+   * 不进调度、不落库、不调 `provider.create`).
+   *
+   * ⚠️ WHY THE TYPE SYSTEM CANNOT DO THIS AND SHOULD NOT TRY (14 §10). `runtime` is
+   * `z.string().min(1)` on the wire because the adapter registry is an OPEN set —
+   * `RuntimeAdapterRegistry` is keyed by a plain id, *not a closed enum* (04 §8), so a
+   * third-party adapter can register at RUNTIME. Narrowing the contract to an enum
+   * would delete that extension point; codegen therefore hands the frontend
+   * `runtime: string`, and every literal it can spell type-checks. The measured
+   * consequence was a frontend `S2_DEFAULT_RUNTIME = 'shell'` reaching a backend that
+   * has only `codex` / `claude-code`: every sandbox created from that entry point died
+   * — asynchronously, in provision, filed under `INSTALL_FAILED`, i.e. told the user
+   * "the CLI failed to install" about a runtime that never existed.
+   *
+   * So the defence is a DOOR CHECK, not a type: same shape as the `unknown provider`
+   * line a few statements up, because it is the same problem about the sibling
+   * registry.
+   *
+   * ⚠️ IT THROWS THE TYPED CONTRACT ERROR, NOT A HAND-BUILT 400. `UnknownRuntimeError`
+   * already IS this fact — it carries `UNKNOWN_RUNTIME` and `retryable:false`, and 04 §4's
+   * one table already maps it to 400 (`mapProviderErrorToHttp`, applied by `atDoor`).
+   * Restating it as `BadRequestException('unknown runtime …')` produced a body with
+   * neither field, which the frontend discards as "not an envelope" — so the platform's
+   * one precise sentence about this failure never reached the person who could act on it.
+   */
+  private assertRuntimeRegistered(runtimeId: string): void {
+    if (!this.runtimes.has(runtimeId)) {
+      throw new UnknownRuntimeError(runtimeId);
+    }
+  }
+
+  /**
+   * Human-facing runtime label for the fallback task name (P21-1 §9).
+   *
+   * The `has()` fallback is DEFENSIVE ONLY on the create path — `assertRuntimeRegistered`
+   * has already refused an unregistered id by the time this runs. It is deliberately
+   * kept rather than replaced by a bare `get()`: this reads as "no label ⇒ show the id",
+   * which is a display decision, and it must never again be the place where "this
+   * runtime does not exist" is silently absorbed.
+   */
   private runtimeLabel(runtimeId: string): string {
     return this.runtimes.has(runtimeId) ? this.runtimes.get(runtimeId).displayName : runtimeId;
   }
@@ -229,14 +318,24 @@ export class SandboxApplicationService {
     );
   }
 
-  /** Resolve + validate the project via the cross-context facade (maps errors). */
+  /**
+   * Resolve + validate the project via the cross-context facade (maps errors).
+   *
+   * ⚠️ THESE TWO ARE DOOR REJECTIONS TOO, AND THE ENVELOPE SAID SO ABOUT NEITHER.
+   * `getRuntimeContextForTask` only READS (it runs `Project.assertCanAcceptTask`), so a
+   * project that does not exist / is still cloning / failed to clone is refused with the
+   * same 零副作用 guarantee as the two registry checks above — yet the body carried no
+   * `retryable`, which makes it a non-envelope to the frontend exactly like the bare
+   * 400s did. `retryable:false` for both, per `doorRejection`: a project has to BECOME
+   * ready, and no number of identical re-sends of THIS request causes that.
+   */
   private async resolveProject(projectId: string): Promise<ProjectRuntimeContext> {
     try {
       return await this.projectFacade.getRuntimeContextForTask(projectId);
     } catch (e) {
       if (e instanceof ProjectAccessError) {
         const status = e.code === 'PROJECT_NOT_FOUND' ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
-        throw new HttpException({ code: e.code, message: e.message }, status);
+        throw doorRejection(status, e.code, e.message);
       }
       throw e;
     }

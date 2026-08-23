@@ -1240,7 +1240,8 @@
             "type": "string"
           },
           "initialPrompt": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 8000
           },
           "headless": {
             "type": "boolean"
@@ -1540,6 +1541,7 @@
               "TASK_TIMED_OUT",
               "SANDBOX_GONE",
               "RESUME_FAILED",
+              "UNKNOWN_RUNTIME",
               "IMAGE_PULL_FAILED",
               "RESOURCE_EXHAUSTED",
               "NOT_FOUND",
@@ -2126,6 +2128,9 @@
             "type": "string"
           },
           "retryable": {
+            "type": "boolean"
+          },
+          "sideEffectFree": {
             "type": "boolean"
           },
           "traceId": {

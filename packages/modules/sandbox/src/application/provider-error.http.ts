@@ -4,6 +4,7 @@ import {
   RuntimeInstallFailedError,
   SandboxProviderError,
   SandboxProviderErrorCode,
+  UnknownRuntimeError,
 } from '@platform/contracts';
 
 /**
@@ -32,6 +33,16 @@ export const PROVIDER_HTTP: Record<SandboxProviderErrorCode, number> = {
 /** Map a thrown contract error onto the envelope + status the wire expects. */
 export function mapProviderErrorToHttp(e: unknown): unknown {
   if (e instanceof HttpException) return e;
+  // 400, NOT 500: an id that is not in the registry is the CALLER's input, and the
+  // server is working exactly as designed when it refuses it (04 §4 / 14 §10). It is
+  // also not retryable, so the envelope must not invite a [重试] — which is precisely
+  // what borrowing `INSTALL_FAILED`'s row used to do.
+  if (e instanceof UnknownRuntimeError) {
+    return new HttpException(
+      { code: e.code, message: e.message, retryable: e.retryable },
+      HttpStatus.BAD_REQUEST,
+    );
+  }
   if (e instanceof RuntimeInstallFailedError || e instanceof ImageContractViolationError) {
     return new HttpException(
       { code: e.code, message: e.message, retryable: e.retryable },

@@ -2,7 +2,6 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
 import {
   PROJECT_FACADE,
@@ -15,6 +14,7 @@ import { SandboxMcpTools } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
 import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import {
   FakeProvider,
   fakeProjectFacade,
@@ -65,7 +65,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
@@ -273,6 +273,106 @@ describe('the headless admission branch (04 §2.6, 409)', () => {
     const sandboxId = await runningSandbox();
     const sandbox = await http().get(`/api/sandboxes/${sandboxId}`).expect(200);
     expect(sandbox.body.provider).toBe('aio');
+  });
+});
+
+/**
+ * The rest of the create door (04 §5 「创建前静态校验」), asserted ON THE WIRE next to
+ * the 409 above — the two registries and the field lengths are one gate, and a caller
+ * only ever meets it as an HTTP status.
+ */
+describe('the create door: the open registries and the field ceilings (04 §5 / 14 §10)', () => {
+  it('REFUSES a runtime that is not registered — 400, synchronously, not a failed sandbox', async () => {
+    // ⚠️ THE REGRESSION THIS PINS. `runtime` is `z.string().min(1)` because the adapter
+    // registry is an open set (04 §8), so `'shell'` type-checks on both sides of the
+    // wire — a real frontend shipped exactly that, and every sandbox created from that
+    // entry point 201'd, then died in the ASYNC provision as `INSTALL_FAILED`.
+    // 201-then-fail and 400 are not the same answer: only one of them is true.
+    const res = await http()
+      .post('/api/sandboxes')
+      .send({ projectId: PROJECT, runtime: 'shell' })
+      .expect(400);
+    expect(String(res.body.message)).toMatch(/unknown runtime/i);
+    // …and it arrives as a REAL envelope, which is what makes that sentence readable.
+    expect(res.body).toMatchObject({
+      code: 'UNKNOWN_RUNTIME',
+      retryable: false,
+      sideEffectFree: true,
+    });
+  });
+
+  it('REFUSES an unknown provider the same way (the sibling registry, unchanged)', async () => {
+    const res = await http()
+      .post('/api/sandboxes')
+      .send({ projectId: PROJECT, runtime: RUNTIME, provider: 'nope' })
+      .expect(400);
+    expect(res.body).toMatchObject({
+      code: 'UNKNOWN_PROVIDER',
+      retryable: false,
+      sideEffectFree: true,
+    });
+  });
+
+  it('REFUSES an image reference carrying a control character', async () => {
+    const res = await http()
+      .post('/api/sandboxes')
+      // built from an escape, never pasted raw (a literal 0x1b makes git treat the file
+      // as binary): an ESC in a ref is a terminal-escape injection into every log.
+      .send({
+        projectId: PROJECT,
+        runtime: RUNTIME,
+        image: `alpine:3.20${String.fromCharCode(0x1b)}[2J`,
+      })
+      .expect(400);
+    expect(res.body).toMatchObject({
+      code: 'INVALID_IMAGE_REFERENCE',
+      retryable: false,
+      sideEffectFree: true,
+    });
+  });
+
+  /**
+   * ⚠️ THE ONE THIS ENDPOINT MOST NEEDED, AND THE REASON THE FIELD EXISTS ON THE WIRE
+   * RATHER THAN IN THE FRONTEND'S HEAD (shared/10 §6.8).
+   *
+   * All four rejections above are 零副作用 — nothing was scheduled, stored or handed to
+   * `provider.create`, so there is no sandbox id and no `failed` row for the user to
+   * find. The frontend used to tell them apart from real failures by `httpStatus === 409`,
+   * a proxy that matched only ONE of them; the other three were rendered as "创建失败，
+   * 可重试" about requests that created nothing. `sideEffectFree` is the platform stating
+   * the fact instead of the client guessing at it — asserted HERE, on the wire, because
+   * that is the only place the guess used to be made.
+   */
+  it('every create-door rejection carries `sideEffectFree` — the 409 included', async () => {
+    const res = await http()
+      .post('/api/sandboxes')
+      .send({
+        projectId: PROJECT,
+        runtime: RUNTIME,
+        provider: registryProviders.noHeadless.name,
+        headless: true,
+        timeoutMinutes: 30,
+      })
+      .expect(409);
+    expect(res.body).toMatchObject({
+      code: 'UNSUPPORTED_CAPABILITY',
+      retryable: false,
+      sideEffectFree: true,
+    });
+  });
+
+  it('holds `initialPrompt` to the SAME 8000 ceiling the task prompt has (10 §7.3)', async () => {
+    // The two are one 口径 in the contract; while only the task side enforced it, the
+    // same text was bounded through `POST .../tasks` and unbounded through
+    // `POST /api/sandboxes` — where it is persisted and later concatenated into argv.
+    await http()
+      .post('/api/sandboxes')
+      .send({ projectId: PROJECT, runtime: RUNTIME, initialPrompt: 'x'.repeat(8001) })
+      .expect(400);
+    await http()
+      .post('/api/sandboxes')
+      .send({ projectId: PROJECT, runtime: RUNTIME, initialPrompt: 'x'.repeat(8000) })
+      .expect(201);
   });
 });
 

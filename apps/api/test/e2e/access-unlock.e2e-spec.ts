@@ -2,8 +2,8 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import { expectPasscodeEnabled, useEnv } from './_env';
 
 /**
@@ -22,7 +22,7 @@ beforeAll(async () => {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
   expectPasscodeEnabled(app, true);
@@ -38,7 +38,7 @@ async function buildIsolatedApp(): Promise<INestApplication> {
   const ref = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const isolated = ref.createNestApplication();
   isolated.setGlobalPrefix('api');
-  isolated.useGlobalPipes(new ZodValidationPipe());
+  isolated.useGlobalPipes(platformValidationPipe());
   await isolated.init();
   await isolated.listen(0);
   return isolated;

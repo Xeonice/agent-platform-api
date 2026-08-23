@@ -561,3 +561,36 @@ export interface RuntimeAdapterRegistry {
   has(id: string): boolean;
   list(): RuntimeAdapter[];
 }
+
+/**
+ * "This id is not in the registry" — the registry's OWN failure, with its own code.
+ *
+ * ⚠️ WHY IT IS NOT `INSTALL_FAILED` (04 §4). It used to be: `ensureRuntimeInstalled`
+ * raised `RuntimeInstallFailedError('unknown runtime …')`, so a request naming a
+ * runtime that does not exist reached the user as 「运行时 CLI 安装失败(该镜像未预装,
+ * 现装未成功)」 — a sentence about an install that was never attempted, for a CLI that
+ * has no adapter. The code is what the frontend keys its 人话 on (P22 §1), so a wrong
+ * code is a wrong explanation, every time, with no way for the reader to tell.
+ *
+ * ⚠️ AND WHY IT IS NOT `retryable`. `INSTALL_FAILED` is retryable — an npm install can
+ * work on the second try. An unregistered id cannot: nothing about waiting or retrying
+ * puts an adapter in the registry. Inheriting `retryable: true` would have rendered a
+ * [重试] button whose every press is guaranteed to fail.
+ *
+ * Since the create door now refuses an unregistered runtime SYNCHRONOUSLY
+ * (`SandboxApplicationService.create`, 04 §5 / 14 §10), this should be UNREACHABLE from
+ * a fresh create. It stays because the door is not the only entrance: a task resumed
+ * after a restart, or a terminal attaching to an existing sandbox, can name a runtime
+ * whose out-of-tree module is no longer loaded (04 §8) — and that is exactly the case
+ * that must say what it is instead of borrowing a neighbour's code.
+ */
+export const UNKNOWN_RUNTIME = 'UNKNOWN_RUNTIME';
+
+export class UnknownRuntimeError extends Error {
+  readonly code = UNKNOWN_RUNTIME;
+  readonly retryable = false;
+  constructor(readonly runtimeId: string) {
+    super(`unknown runtime '${runtimeId}'`);
+    this.name = 'UnknownRuntimeError';
+  }
+}

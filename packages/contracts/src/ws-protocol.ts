@@ -197,3 +197,43 @@ export const WS_SCHEMA_HASH = 'sb-terminal-v1';
 export const WS_TASKS_SCHEMA_HASH = 'sb-tasks-v1';
 
 export const X_SCHEMA_HASH_HEADER = 'x-schema-hash';
+
+/**
+ * How a socket.io handshake is REFUSED — the same three codes on all three namespaces.
+ *
+ * ⚠️ THE REFUSAL IS PART OF THE WIRE CONTRACT, which is why it lives here and not in
+ * one gateway. It is delivered as `connect_error` from socket.io MIDDLEWARE, with the
+ * code LEADING the message (`UNAUTHORIZED: …`) and repeated on `err.data.code`; the
+ * frontend's shared matcher (`services/ws/socketAuth.ts`) reads exactly those two, in
+ * that order, for all three channels.
+ *
+ * ⚠️ ONLY `UNAUTHORIZED` MAY LOOK LIKE AN AUTH FAILURE. That matcher's last resort is a
+ * prose regex — `/unauthor|forbidden|passcode|401|403/i` — so none of those words may
+ * appear in a `SCHEMA_MISMATCH` or `SANDBOX_REQUIRED` message. Being mistaken for one
+ * pops the unlock dialog, and for a protocol-version drift (or a missing query
+ * parameter) that sends the user to do the one thing that cannot possibly help.
+ *
+ * ⚠️ AND `SANDBOX_REQUIRED` IS DELIBERATELY NOT SPELLED `UNAUTHORIZED`. A handshake that
+ * omits `sandboxId` presented a perfectly good passcode; what is missing is ADDRESSING.
+ * Reusing `UNAUTHORIZED` would misname the fault AND route the user to a dialog that
+ * cannot add a query parameter the client itself failed to send.
+ */
+export type WsHandshakeRejection = 'UNAUTHORIZED' | 'SCHEMA_MISMATCH' | 'SANDBOX_REQUIRED';
+
+/**
+ * Build the `Error` a gateway hands to socket.io's `next(err)`.
+ *
+ * `err.data` is the structured half: socket.io copies it to the client verbatim, so a
+ * client never has to parse prose. The message still LEADS with the code because a
+ * client that only has the message must still be able to tell the three apart.
+ */
+export function wsHandshakeError(
+  code: WsHandshakeRejection,
+  detail: string,
+): Error & { data: { code: WsHandshakeRejection } } {
+  const err = new Error(`${code}: ${detail}`) as Error & {
+    data: { code: WsHandshakeRejection };
+  };
+  err.data = { code };
+  return err;
+}

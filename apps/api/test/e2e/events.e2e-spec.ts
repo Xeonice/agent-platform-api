@@ -2,7 +2,6 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
 import {
   SANDBOX_PROVIDER_REGISTRY,
@@ -14,6 +13,7 @@ import type { SandboxWsEvent, TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
@@ -42,7 +42,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   setupWebsockets(app);
   await app.init();
   await app.listen(0);

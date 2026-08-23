@@ -6,13 +6,13 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { io, type Socket } from 'socket.io-client';
 import { WS_SCHEMA_HASH } from '@platform/contracts';
 import type { TerminalServerFrame } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 
 /**
  * BOXLITE-REQUIRED e2e (SANDBOX-RUNTIME-DECISIONS 决策 B). Full chain for the REAL
@@ -97,7 +97,7 @@ beforeAll(async () => {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
@@ -147,6 +147,18 @@ function stripAnsi(s: string): string {
  * 这个等待**不削弱断言**：内容仍然必须出现，只是像反方向的 `waitForFileContains` 一样
  * 给它时间。挂载真坏了，重试到超时照样红——它区分的是"慢/有竞态"和"坏"，不是把坏藏起来。
  * 真因查明前，这里是**缓解**不是修复。
+ *
+ * ── 已排除的候选（2026-08 复查，写下来是为了不再查第二遍）────────────────────────
+ * ① **`AioExecProcessStream` 的"晚订阅丢数据"竞态**：不成立。它对 settle 之后才注册的
+ *    `onData`/`onExit` 都会**补发**（`if (this.settled …) cb(…)`），且 `settle` 有幂等
+ *    守卫；`_sandbox-shell.ts` 的 `collect` 先 `onData` 后 `onExit`，两种时序都拿得到。
+ * ② **`cat` 报错被吞**：不成立。客户端把 `output` 拼成 `stdout + stderr`
+ *    （`aio-sandbox-agent.client.ts#runExec`），所以 `cat: No such file` 会**出现在**结果里。
+ *    观察到的却是**纯空串**——这反而把"文件真没有"排除掉了。
+ *
+ * ⇒ 剩下的候选集中在 agent 侧：`{success:true}` 但 `data` 缺失（⇒ exitCode `null`），
+ *   或 `hard_timeout`（⇒ 124）。两者之前都被 `collect` 压成空串，无从分辨；现在
+ *   `collect` 会在空输出时带上 exitCode，**下一次偶发就能自证是哪一种**。
  */
 async function waitForShellContains(
   shell: (cmd: string) => Promise<string>,

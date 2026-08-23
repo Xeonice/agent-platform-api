@@ -5,6 +5,7 @@ import {
   SANDBOX_STATUSES as CONTRACT_STATUSES,
   SandboxProviderErrorCode,
   TaskErrorCodeSchema,
+  UnknownRuntimeError,
 } from '@platform/contracts';
 import { SANDBOX_STATUSES as DOMAIN_STATUSES } from '../../src/domain/value-objects/sandbox-status.vo';
 import { TASK_STATUSES as DOMAIN_TASK_STATUSES } from '../../src/domain/value-objects/agent-task-status.vo';
@@ -61,7 +62,7 @@ describe('SandboxStatus enum parity across its 4 copies', () => {
  *
  * There are exactly three of them:
  *   `TASK_${status.toUpperCase()}` for every non-succeeded terminal status (finalize),
- *   the platform's own recovery codes (`SANDBOX_GONE`, `RESUME_FAILED`),
+ *   the platform's own recovery codes (`SANDBOX_GONE`, `RESUME_FAILED`, `UNKNOWN_RUNTIME`),
  *   and every `SandboxProviderErrorCode`, because `failWith` copies `e.code` verbatim.
  */
 describe('the task error-code enum is the CLOSED set the frontend can rely on', () => {
@@ -85,6 +86,24 @@ describe('the task error-code enum is the CLOSED set the frontend can rely on', 
     }
   });
 
+  /**
+   * `UNKNOWN_RUNTIME` is declared because a REAL class mints it, not because someone
+   * liked the name — the code is read off the error itself, so this fails if the class
+   * is renamed, retyped, or deleted.
+   *
+   * It reaches `AgentTaskDto.errorCode` through `failWith`, which copies `e.code`
+   * verbatim: `runtimes.get(task.runtime)` throws it when a task outlives the
+   * out-of-tree module that registered its adapter (04 §8). Before it existed that
+   * throw was a bare `Error` and landed as `INTERNAL`; on the install path it was
+   * borrowed from `INSTALL_FAILED`, which says an install failed — and is retryable,
+   * which this is not.
+   */
+  it('covers UNKNOWN_RUNTIME, and its producer really is the error class', () => {
+    expect(new UnknownRuntimeError('nope').code).toBe('UNKNOWN_RUNTIME');
+    expect(new UnknownRuntimeError('nope').retryable).toBe(false);
+    expect(declared).toContain('UNKNOWN_RUNTIME');
+  });
+
   it('declares NOTHING the backend cannot produce — a code with no producer is a lie', () => {
     const producible = new Set<string>([
       ...DOMAIN_TASK_STATUSES.filter((s) => s !== 'running' && s !== 'succeeded').map(
@@ -93,6 +112,7 @@ describe('the task error-code enum is the CLOSED set the frontend can rely on', 
       ...Object.values(SandboxProviderErrorCode),
       'SANDBOX_GONE',
       'RESUME_FAILED',
+      new UnknownRuntimeError('x').code,
     ]);
     expect([...declared].filter((c) => !producible.has(c))).toEqual([]);
   });

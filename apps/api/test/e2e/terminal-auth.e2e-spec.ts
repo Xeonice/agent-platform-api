@@ -48,16 +48,7 @@ function connect(query: Record<string, string>, auth?: Record<string, string>): 
     auth,
     transports: ['websocket'],
     forceNew: true,
-  });
-}
-
-function awaitDisconnect(sock: Socket): Promise<boolean> {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(false), 4000);
-    sock.on('disconnect', () => {
-      clearTimeout(t);
-      resolve(true);
-    });
+    reconnection: false,
   });
 }
 
@@ -78,23 +69,46 @@ function nextFrame(
   });
 }
 
+/**
+ * ⚠️ THESE USED TO ASSERT "the socket disconnected", AND THAT IS WHY THE PRODUCT BUG
+ * SURVIVED THEM. `disconnect(true)` and a middleware refusal both make the socket go
+ * away, so the assertion could not tell them apart — but the CLIENT can only recognise
+ * an unauthorized handshake from `connect_error`, so with `disconnect(true)` the unlock
+ * dialog never opened and the terminal just reconnected forever behind the passcode
+ * gate. What is asserted now is the thing the frontend actually reads.
+ */
 describe('/terminal WS access-passcode gate (P1-1)', () => {
-  it('refuses a handshake with NO passcode when ACCESS_PASSCODE is set', async () => {
+  it('refuses a handshake with NO passcode, and says UNAUTHORIZED', async () => {
     const sock = connect({ sandboxId: 'sbx-auth-1', xSchemaHash: WS_SCHEMA_HASH });
     try {
-      expect(await awaitDisconnect(sock)).toBe(true);
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('UNAUTHORIZED')).toBe(true);
+      expect((err as Error & { data?: { code?: string } }).data?.code).toBe('UNAUTHORIZED');
+      // the client's shared matcher must recognise THIS one (and only this one).
+      expect(err.message).toMatch(/unauthor|forbidden|passcode|401|403/i);
     } finally {
       sock.disconnect();
     }
   });
 
-  it('refuses a handshake with a WRONG passcode', async () => {
+  it('refuses a handshake with a WRONG passcode the same way', async () => {
     const sock = connect(
       { sandboxId: 'sbx-auth-2', xSchemaHash: WS_SCHEMA_HASH },
       { passcode: 'nope' },
     );
     try {
-      expect(await awaitDisconnect(sock)).toBe(true);
+      expect((await awaitConnectError(sock)).message.startsWith('UNAUTHORIZED')).toBe(true);
+    } finally {
+      sock.disconnect();
+    }
+  });
+
+  it('checks auth BEFORE the hash, so the codes cannot fingerprint the server', async () => {
+    // wrong hash AND no passcode ⇒ the answer is the auth one: an unauthenticated
+    // caller learns nothing about which protocol version this server speaks.
+    const sock = connect({ sandboxId: 'sbx-auth-4', xSchemaHash: 'sb-terminal-FROM-THE-FUTURE' });
+    try {
+      expect((await awaitConnectError(sock)).message.startsWith('UNAUTHORIZED')).toBe(true);
     } finally {
       sock.disconnect();
     }
@@ -118,14 +132,28 @@ describe('/terminal WS access-passcode gate (P1-1)', () => {
 });
 
 function connectEvents(auth?: Record<string, string>): Socket {
-  return io(`http://127.0.0.1:${port}/events`, { auth, transports: ['websocket'], forceNew: true });
+  return io(`http://127.0.0.1:${port}/events`, {
+    auth,
+    transports: ['websocket'],
+    forceNew: true,
+    reconnection: false,
+  });
 }
 
 describe('/events WS access-passcode gate', () => {
-  it('refuses a handshake with NO passcode when ACCESS_PASSCODE is set', async () => {
+  /**
+   * ⚠️ THE SAME CORRECTION, AND HERE IT MATTERED MOST. `/events` is the only realtime
+   * projection source in the product, and it deliberately never stops retrying — so a
+   * refusal the client could not classify produced an endless silent reconnect with the
+   * whole workbench frozen on 「启动中…」 and no unlock dialog in sight.
+   */
+  it('refuses a handshake with NO passcode, and says UNAUTHORIZED', async () => {
     const sock = connectEvents();
     try {
-      expect(await awaitDisconnect(sock)).toBe(true);
+      const err = await awaitConnectError(sock);
+      expect(err.message.startsWith('UNAUTHORIZED')).toBe(true);
+      expect((err as Error & { data?: { code?: string } }).data?.code).toBe('UNAUTHORIZED');
+      expect(err.message).toMatch(/unauthor|forbidden|passcode|401|403/i);
     } finally {
       sock.disconnect();
     }

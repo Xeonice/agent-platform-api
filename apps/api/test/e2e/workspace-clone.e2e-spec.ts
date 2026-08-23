@@ -6,10 +6,10 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
 import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import {
   createDockerClient,
   isDockerAvailable,
@@ -168,7 +168,7 @@ for (const p of PROVIDERS) {
         const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-        app.useGlobalPipes(new ZodValidationPipe());
+        app.useGlobalPipes(platformValidationPipe());
         setupWebsockets(app);
         await app.init();
         // Keep the server LISTENING even though the workspace assertions now use the
