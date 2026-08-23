@@ -1,6 +1,12 @@
 import { beforeEach, describe, it, expect } from 'vitest';
+import { HttpException } from '@nestjs/common';
 import type { SandboxId } from '@platform/shared-kernel';
-import { RuntimeInstallFailedError, ImageContractViolationError } from '@platform/contracts';
+import {
+  RuntimeInstallFailedError,
+  ImageContractViolationError,
+  UnknownRuntimeError,
+} from '@platform/contracts';
+import { mapProviderErrorToHttp } from '../../src/application/provider-error.http';
 import { FakeAdapter, FakeProvider, harness, waitForStatus } from './_harness';
 
 /**
@@ -8,6 +14,10 @@ import { FakeAdapter, FakeProvider, harness, waitForStatus } from './_harness';
  * Covers the full provision pipeline plus the S5 `starting` 段 cases
  * T-SBX-31 / 32 / 33 / 34 / 35 and E2E-1-bootstrap's application half.
  */
+/** Control characters BUILT FROM ESCAPES — never pasted raw into a source file. */
+const ESC = String.fromCharCode(0x1b);
+const NUL = String.fromCharCode(0x00);
+
 describe('SandboxApplicationService provision pipeline (in-memory doubles)', () => {
   let h: ReturnType<typeof harness>;
   beforeEach(() => {
@@ -51,6 +61,69 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
     await expect(
       h.service.create({ projectId: 'prj-1', runtime: 'x', provider: 'nope' }),
     ).rejects.toThrow(/unknown provider/i);
+  });
+
+  /**
+   * The sibling of the check above, for the OTHER open registry (14 §10).
+   *
+   * ⚠️ THIS IS THE ONE THE TYPE SYSTEM CANNOT COVER AND MUST NOT TRY TO. `runtime` is
+   * `z.string().min(1)` on purpose — the adapter registry is *not a closed enum*
+   * (04 §8) — so `'shell'` is a perfectly well-typed value on both sides of the wire,
+   * and a real frontend shipped exactly that. Without a door check it travelled all the
+   * way into the ASYNC provision and came back as `INSTALL_FAILED`, i.e. the platform
+   * told the user its CLI failed to install.
+   */
+  it('rejects an unknown runtime before creating anything (04 §5 / 14 §10)', async () => {
+    await expect(h.service.create({ projectId: 'prj-1', runtime: 'shell' })).rejects.toThrow(
+      /unknown runtime/i,
+    );
+  });
+
+  it('…and refusing it means NOTHING was scheduled, stored or provisioned', async () => {
+    await expect(h.service.create({ projectId: 'prj-1', runtime: 'shell' })).rejects.toThrow();
+    // 04 §5「不进调度、不落库、不调 provider.create」— all three, stated separately so a
+    // regression says WHICH half of the promise broke.
+    expect(h.provider.calls).toEqual([]);
+    expect(h.wsCalls).toEqual([]);
+    expect(h.repo.store.size).toBe(0);
+    // and the project was never even looked up — the door closed before the facade.
+    expect(h.projectLookups()).toBe(0);
+  });
+
+  it('accepts a runtime a third party registered at RUNTIME (the registry is the authority)', async () => {
+    // The mirror image of the test above, and the reason this is a registry lookup
+    // rather than a hard-coded list: an out-of-tree adapter registers through the same
+    // `register()` (04 §8) and must be creatable without editing this service.
+    h.runtimes.register(new FakeAdapter('acme-agent', 'Acme Agent'));
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'acme-agent' });
+    expect(dto.runtime).toBe('acme-agent');
+    // …and the display name comes from the adapter, not from a platform-side table.
+    expect(dto.name).toMatch(/^Acme Agent · /);
+  });
+
+  it('rejects an image ref carrying a control character (not just whitespace)', async () => {
+    // `\s` never covered NUL/BEL/ESC, though the comment claimed "control characters".
+    // An ESC in a ref is a terminal-escape injection into every log that renders it.
+    //
+    // ⚠️ Built from escapes, never pasted raw: a literal 0x1b/0x00 in a source file makes
+    // git treat it as BINARY (no diff, no review) and does not survive most editors.
+    await expect(
+      h.service.create({
+        projectId: 'prj-1',
+        runtime: 'claude-code',
+        image: `alpine:3.20${ESC}[2J`,
+      }),
+    ).rejects.toThrow(/invalid image reference/i);
+    await expect(
+      h.service.create({ projectId: 'prj-1', runtime: 'claude-code', image: `alpine:3.20${NUL}` }),
+    ).rejects.toThrow(/invalid image reference/i);
+    // a perfectly ordinary ref still passes — the rule is control characters, not punctuation
+    const ok = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      image: 'registry.example.com:5000/team/img@sha256:abc123',
+    });
+    expect(ok.status).toBe('pending');
   });
 
   it('destroys the already-created container when start fails (P1-2, no orphan)', async () => {
@@ -206,6 +279,29 @@ describe('async failures expose a CODE on both of their two outlets (04 §4)', (
     const dto = await h.service.get(created.id);
     expect(dto.failureCode).toBeUndefined();
     expect(dto.failureMessage).toBeUndefined();
+  });
+
+  /**
+   * The SYNCHRONOUS outlet of the same table (04 §4). `UNKNOWN_RUNTIME` has no
+   * synchronous producer today — the create door refuses first — but 02 §6.2 forbids a
+   * code with no mapping, and the row it would otherwise inherit is wrong in both
+   * halves: `INSTALL_FAILED` maps to 500 (a server fault, when this is the caller's
+   * input) and is retryable (when nothing about retrying can ever help).
+   */
+  it('UNKNOWN_RUNTIME maps to 400 + non-retryable, NOT to INSTALL_FAILED’s 500', () => {
+    const mapped = mapProviderErrorToHttp(new UnknownRuntimeError('shell'));
+    expect(mapped).toBeInstanceOf(HttpException);
+    const http = mapped as HttpException;
+    expect(http.getStatus()).toBe(400);
+    expect(http.getResponse()).toMatchObject({
+      code: 'UNKNOWN_RUNTIME',
+      retryable: false,
+    });
+    // the neighbouring row is unchanged — a real install failure is still a 500 the
+    // caller may retry.
+    const install = mapProviderErrorToHttp(new RuntimeInstallFailedError('npm exited 1'));
+    expect((install as HttpException).getStatus()).toBe(500);
+    expect((install as HttpException).getResponse()).toMatchObject({ retryable: true });
   });
 });
 

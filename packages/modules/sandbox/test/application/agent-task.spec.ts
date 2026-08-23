@@ -255,6 +255,37 @@ describe('平台重启不丢正在跑的任务 — job_handle + cursor are the w
     expect(stored.status).toBe('failed');
     expect(stored.errorCode).toBe('SANDBOX_GONE');
   });
+
+  /**
+   * The sibling of the case above, for the OTHER thing a restart can lose: the ADAPTER.
+   * A third-party runtime registers at runtime (04 §8), so a task row can outlive the
+   * module that knows how to read its output.
+   *
+   * ⚠️ THE ASSERTION IS THE CODE, NOT MERELY THE FAILURE. Before `UnknownRuntimeError`
+   * existed this threw a bare `Error`, and `failWith` files a code-less error as
+   * `INTERNAL` — so the platform reported "内部错误" for a fact it knew precisely. And it
+   * is a value the frontend can actually render only because it is in the
+   * `TaskErrorCodeSchema` closed set that reaches it through openapi.
+   */
+  it('a task whose runtime adapter is no longer registered fails as UNKNOWN_RUNTIME', async () => {
+    const h = harness();
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+    await until(() => h.taskRepo.store.has(dto.id), 'the task row');
+
+    // the module that registered this adapter is not loaded in the new process
+    expect(h.forgetRuntime(RUNTIME)).toBe(true);
+    const revived = h.newTaskWorkflow();
+    await revived.resumeRunning();
+
+    await until(() => h.taskRepo.store.get(dto.id)?.status === 'failed', 'the task to land');
+    const stored = h.taskRepo.store.get(dto.id)!;
+    expect(stored.errorCode).toBe('UNKNOWN_RUNTIME');
+    // NOT the two codes it used to borrow: neither an install that never happened…
+    expect(stored.errorCode).not.toBe('INSTALL_FAILED');
+    // …nor the "we have no idea" bucket.
+    expect(stored.errorCode).not.toBe('INTERNAL');
+  });
 });
 
 describe('admission — the platform’s first externally-triggered execution path', () => {
