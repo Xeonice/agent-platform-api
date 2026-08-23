@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { boxliteNamePrefix } from '@platform/sandbox';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -198,12 +199,17 @@ for (const p of PROVIDERS) {
         if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
       });
 
+      // ⚠️ boxlite 的名字里现在带**实例指纹**（回收作用域，见 reconcile/instance-id）。
+      // 照旧拼 `platform-boxlite-<id>` 的话，`afterAll` 里 `has(b.name)` 永远不成立、
+      // 清理循环静默 no-op —— e2e 每跑一轮泄漏一批 micro-VM，而这个分支的动机恰恰
+      // 是"e2e 不该乱删东西"。用与生产者同一个前缀函数。
+      const boxNameOf = (sandboxId: string): string => `${boxliteNamePrefix()}${sandboxId}`;
       function trackRuntimeEntity(sandboxId: string): void {
-        if (p.provider === 'boxlite') createdBoxNames.add(`platform-boxlite-${sandboxId}`);
+        if (p.provider === 'boxlite') createdBoxNames.add(boxNameOf(sandboxId));
         else createdContainers.add(`platform-${p.provider}-${sandboxId}`);
       }
       function untrackRuntimeEntity(sandboxId: string): void {
-        createdBoxNames.delete(`platform-boxlite-${sandboxId}`);
+        createdBoxNames.delete(boxNameOf(sandboxId));
         createdContainers.delete(`platform-${p.provider}-${sandboxId}`);
       }
 

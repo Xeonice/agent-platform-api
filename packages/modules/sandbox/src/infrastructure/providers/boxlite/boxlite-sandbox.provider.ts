@@ -24,6 +24,7 @@ import {
   withJobSurvivalEnv,
 } from '../aio/agent-auth';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
+import { boxliteNamePrefix } from '../../reconcile/instance-id';
 
 const AGENT_GUEST_PORT = 8080;
 
@@ -171,8 +172,16 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     });
   }
 
+  /**
+   * micro-VM 的名字里编进**实例指纹**。boxlite 没有 docker 那样的标签机制,名字是
+   * 唯一能带身份的地方 —— 而启动对账要靠它区分"这个 box 归谁管"(见
+   * `reconcile/instance-id.ts`:不加区分的话,e2e 一跑就把开发者 demo 的 box 全清了)。
+   *
+   * ⚠️ 格式与 `RuntimeReconciler` 的 `minePrefix` **必须同源**,改一处就要改另一处;
+   * 下面的单测把两边钉在一起。
+   */
   private boxName(sandboxId: string): string {
-    return `platform-${this.name}-${sandboxId}`;
+    return `${boxliteNamePrefix()}${sandboxId}`;
   }
 
   private agentBase(handle: SandboxHandle): string {

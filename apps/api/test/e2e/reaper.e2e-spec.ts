@@ -14,6 +14,7 @@ import {
 import { RuntimeReconciler } from '../../../../packages/modules/sandbox/src/infrastructure/reconcile/runtime-reconciler';
 import { getSharedBoxliteRuntime } from '../../../../packages/modules/sandbox/src/infrastructure/providers/boxlite/boxlite-runtime';
 import { sandboxes } from '../../../../packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite';
+import { INSTANCE_LABEL, platformInstanceId } from '@platform/sandbox';
 
 /**
  * Startup orphan reconciler (docs/backend/13 §4). A crash between provider
@@ -88,6 +89,10 @@ async function makeOrphanContainer(name: string, sandboxId: string): Promise<voi
       'platform.managed': 'true',
       'platform.provider': 'aio',
       'platform.sandboxId': sandboxId,
+      // 回收现在**按实例作用域**：不带本实例这一位的容器一律不动（"宁可漏收不可
+      // 误删"）。孤儿要想被回收，就得是**本实例造的**孤儿——这条替身必须照搬
+      // 真实的打标签方式，否则它测的是一个平台永远不会产出的形状。
+      [INSTANCE_LABEL]: platformInstanceId(),
     },
   });
   createdContainers.add(name);
@@ -164,7 +169,8 @@ describe.skipIf(!dockerUp)('RuntimeReconciler (startup orphan reaper)', () => {
       const rt = await getSharedBoxliteRuntime();
       const box = await rt.create(
         { image: BOXLITE_IMAGE, memoryMib: 2048, cpus: 2, autoRemove: false, detach: true },
-        `platform-boxlite-${orphanId}`,
+        // 同上：名字里必须带实例指纹，否则本实例不认领（boxlite 没有标签，身份编在名字里）。
+        `platform-boxlite-${platformInstanceId()}-${orphanId}`,
       );
       createdBoxIds.add(box.id);
 
