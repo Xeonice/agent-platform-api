@@ -31,6 +31,7 @@ import type {
   RuntimeEvent,
   RuntimeInstallOrchestrator,
   RuntimeInstallPlan,
+  RuntimeStartupSpec,
   RuntimeTaskSpec,
   SandboxCommand,
   SandboxFiles,
@@ -450,6 +451,12 @@ export class FakeAdapter implements RuntimeAdapter {
   }
   async injectCredential(): Promise<void> {
     this.log.push('injectCredential');
+  }
+  /** 落启动文件（可选钩子）。`seedThrows` 用来验"失败不阻断 provision"。 */
+  seedThrows = false;
+  async seedStartupFiles(spec: RuntimeStartupSpec): Promise<void> {
+    this.log.push(`seedStartupFiles:${spec.workdir}`);
+    if (this.seedThrows) throw new Error('seed boom');
   }
   getInstallPlan(): RuntimeInstallPlan {
     return {

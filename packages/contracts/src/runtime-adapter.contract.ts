@@ -86,6 +86,15 @@ export interface RuntimeCredentialFile {
 }
 
 /**
+ * `seedStartupFiles` 的入参。当前只需要工作目录：codex 的目录信任是**按路径**记的
+ * （`[projects."<workdir>"] trust_level`），所以要落什么内容取决于 agent 会 cd 到哪。
+ */
+export interface RuntimeStartupSpec {
+  /** 沙箱内的工作目录绝对路径（如 `/workspace`）。 */
+  workdir: string;
+}
+
+/**
  * InjectableRuntimeCredential — the ONLY credential shape the injection path ever
  * sees (04 §3, 05 §4.3 裁决 D-18, 23 §8.2 I-CRD-9).
  *
@@ -507,6 +516,22 @@ export interface RuntimeAdapter {
    * the live sandbox through `exec` (裁决 D-19) — never hard-coded, never reused
    * across sandboxes.
    */
+  /**
+   * 启动前把 runtime 需要的文件落进它的 HOME —— **与凭证无关**。
+   *
+   * 为什么不能挂在 `injectCredential` 上（这是本钩子存在的全部理由）：那条路**只在
+   * 有凭证时才跑**（`prepareRuntimeCredential` 抛 `NO_CREDENTIAL` 时整步跳过），
+   * 而这里要处理的闸门在**没有凭证时照样拦**。实测的那个：codex 首次在某目录里启动
+   * 会停在 "Do you trust the contents of this directory?" 等人按键 —— 没凭证也一样停，
+   * 于是 agent 连"我没登录"都报不出来，界面上只是一个不动的终端。
+   *
+   * 可选：绝大多数 runtime 不需要。没实现 = 不落任何文件，与本钩子出现之前完全一致
+   * （所以它不是"每个 adapter 都要补一遍"的负担）。
+   *
+   * ⚠️ 实现方注意：这一步跑在**每次 provision** 上（含重启），必须幂等。
+   */
+  seedStartupFiles?(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void>;
+
   injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void>;
 
   // ── run half (04 §3; added in S5) ────────────────────────────────────────────

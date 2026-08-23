@@ -200,6 +200,11 @@ export class ProvisionSandboxWorkflow {
       exec,
     });
 
+    // ③.5 落 runtime 启动前需要的文件。**刻意排在 ④ 之前、且与 ④ 无关**:
+    // ④ 只在有凭证时才跑,而这一步要处理的闸门(codex 的目录信任提示)在**没有凭证时
+    // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
+    await this.seedStartupFiles(sandbox, exec);
+
     // ④ materialise the credential inside the sandbox.
     await this.injectCredential(sandbox, credential, exec);
 
@@ -260,6 +265,24 @@ export class ProvisionSandboxWorkflow {
    * so this can only run after `provider.start()`. The older design had injection
    * before `start` — which cannot work at all.
    */
+  /**
+   * 可选钩子:绝大多数 runtime 不需要落任何文件,没实现即跳过(与本钩子出现之前一致)。
+   * 失败**不阻断 provision**:落不下这份文件顶多是 agent 停在一个交互提示上,
+   * 而把整个 Task 判死显然更糟——记一条 WARN,与凭证缺席那条同一处置。
+   */
+  private async seedStartupFiles(sandbox: Sandbox, exec: SandboxExecFn): Promise<void> {
+    const adapter = this.runtimes.get(sandbox.runtime);
+    if (!adapter.seedStartupFiles) return;
+    try {
+      await adapter.seedStartupFiles({ workdir: SANDBOX_WORKSPACE_MOUNT }, exec);
+    } catch (e) {
+      this.logger.warn(
+        `sandbox ${sandbox.id}: seeding '${sandbox.runtime}' startup files failed ` +
+          `(${(e as Error).message}); the agent may stop at an interactive prompt`,
+      );
+    }
+  }
+
   private async injectCredential(
     sandbox: Sandbox,
     credential: InjectableRuntimeCredential | null,

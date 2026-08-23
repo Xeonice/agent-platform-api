@@ -157,6 +157,9 @@ describe('T-SBX-31 — the `starting` 段 runs its five steps in the pinned orde
       'provider.start',
       'agent-readiness-probe',
       'ensureRuntimeInstalled',
+      // ③.5：落 runtime 启动前需要的文件。排在注入**之前**且与它无关——
+      // 注入只在有凭证时跑，而这一步要拆的闸门没凭证照样拦。
+      'seedStartupFiles:/workspace',
       'injectCredential',
       'recordRuntimeInjection',
       'bootstrapAgentSession',
@@ -470,3 +473,36 @@ function injectableCredential() {
     zeroize(): void {},
   };
 }
+
+describe('启动文件落盘（③.5）—— 与凭证无关的那一步', () => {
+  it('每次 provision 都落，并把工作目录传下去', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.adapter.log).toContain('seedStartupFiles:/workspace');
+  });
+
+  it('⚠️ **没有凭证时照样落** —— 这正是它不能挂在 injectCredential 上的理由', async () => {
+    // `credential: null` ⇒ prepareRuntimeCredential 抛 NO_CREDENTIAL ⇒ injectCredential 整步跳过。
+    const h = harness({ credential: null });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.adapter.log).not.toContain('injectCredential');
+    // 而 codex 的目录信任提示在没凭证时**照样拦**，agent 会停在那儿连"我没登录"
+    // 都报不出来。所以这一步必须与凭证解耦。
+    expect(h.adapter.log).toContain('seedStartupFiles:/workspace');
+  });
+
+  it('落盘失败**不判死整个 Task** —— 顶多停在一个交互提示上，比整单失败轻', async () => {
+    const h = harness();
+    h.adapter.seedThrows = true;
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+
+    await waitForStatus(h.service, dto.id, 'running');
+    // 后续步骤照常推进。用 `bootstrapAgentSession` 当证物而不是 `injectCredential`：
+    // 默认 harness 本来就没凭证，注入那步无论如何都不会跑，拿它当证物会**恒假**。
+    expect(h.adapter.log).toContain('bootstrapAgentSession');
+  });
+});
