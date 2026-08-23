@@ -90,9 +90,30 @@ const claudeSeedJson = (workdir: string): string =>
 const SEED_CLAUDE_SCRIPT = [
   'set -e',
   'f="$1"',
-  'if [ -f "$f" ]; then cat >/dev/null; exit 0; fi',
+  // ⚠️ 判据是**这个 workdir 的信任项在不在**,不是"文件在不在"。
+  //
+  // 第一版写的是 `if [ -f "$f" ]; then …skip`,于是只要 `~/.claude.json` 存在(上一轮
+  // provision 写的、或 claude 自己写的)就整体跳过 —— **不检查这次传进来的 workdir
+  // 对应的那一项是否真的在里面**。今天不触发的唯一原因是 `SANDBOX_WORKSPACE_MOUNT`
+  // 全仓硬编码成 `/workspace`,workdir 事实上从没变过;而 `RuntimeStartupSpec.workdir`
+  // 这个字段的存在本身就说明契约预期它可变。一旦支持按项目自定义 workdir,
+  // "文件在、但里面是旧 workdir 那份"的沙箱会**静默**复现这个钩子要修的
+  // "卡在交互提示、界面上一个不动的终端",而且连 WARN 都不会有(脚本判定"跳过"
+  // 是正常退出)。改成与 codex 侧同构的内容匹配。
+  'if [ -f "$f" ] && grep -qF "$2" "$f"; then cat >/dev/null; exit 0; fi',
   'mkdir -p "$(dirname "$f")"',
   'umask 077',
+  // 文件已存在但缺这个 workdir 的信任项：交给 node 合并，不能整体覆盖——那会抹掉
+  // claude 自己攒的会话/缓存状态。没有 node 时退回"只在文件不存在时写"，
+  // 至少不破坏已有内容。
+  'if [ -f "$f" ]; then',
+  '  if command -v node >/dev/null 2>&1; then',
+  '    node -e \'const fs=require("fs"),f=process.argv[1];const cur=JSON.parse(fs.readFileSync(f,"utf8"));const add=JSON.parse(fs.readFileSync(0,"utf8"));cur.projects={...(cur.projects??{}),...add.projects};for(const k of Object.keys(add))if(k!=="projects")cur[k]??=add[k];fs.writeFileSync(f,JSON.stringify(cur,null,2)+"\\n")\' "$f"',
+  '  else',
+  '    cat >/dev/null',
+  '  fi',
+  '  exit 0',
+  'fi',
   'cat > "$f"',
 ].join('\n');
 /**
@@ -294,9 +315,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   /** 启动前清掉四道交互闸门（理由与实测见 `CLAUDE_CONFIG_PATH` 上方）。每次 provision 都跑，幂等。 */
   async seedStartupFiles(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void> {
+    // ⚠️ 探不到 HOME 是**基础设施失败**，不是鉴权失败。codex 侧把它包成
+    // `AdapterAuthError('AUTH_REJECTED')` 其实是误标（那条路径的历史包袱）；
+    // 这里保持裸 Error，由 workflow 统一 catch 成 WARN。两处语义不同是有意的，
+    // 不是漏改 —— 别为了"一致"把这里也贴上 AUTH_REJECTED。
     const home = await probeSandboxHome(exec, (m) => new Error(m));
     const absolutePath = `${home}/${CLAUDE_CONFIG_PATH.slice(2)}`;
-    const r = await exec(['sh', '-c', SEED_CLAUDE_SCRIPT, 'claude-seed', absolutePath], {
+    // needle：这次 workdir 对应的那一项。命中即认为已经种过。
+    const needle = `"${spec.workdir}"`;
+    const r = await exec(['sh', '-c', SEED_CLAUDE_SCRIPT, 'claude-seed', absolutePath, needle], {
       stdin: claudeSeedJson(spec.workdir),
       timeoutMs: SEED_WRITE_TIMEOUT_MS,
     });

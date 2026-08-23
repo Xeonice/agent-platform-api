@@ -38,11 +38,10 @@ import {
   sanitizeCodexAuthJson,
 } from './codex.output-parser';
 import { assertSessionRef } from '../session-ref.util';
-import { probeSandboxHome } from '../home-probe.util';
+import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
-const WRITE_FILE_TIMEOUT_MS = 30_000;
 
 const CODEX_BINARY = 'codex';
 /**
@@ -320,7 +319,7 @@ export class CodexAdapter implements RuntimeAdapter {
     const absolutePath = `${home}/${CODEX_CONFIG_PATH.slice(2)}`;
     const r = await exec(
       ['sh', '-c', SEED_TRUST_SCRIPT, 'codex-seed', absolutePath, TRUST_SECTION(spec.workdir)],
-      { stdin: TRUST_BLOCK(spec.workdir), timeoutMs: WRITE_FILE_TIMEOUT_MS },
+      { stdin: TRUST_BLOCK(spec.workdir), timeoutMs: SEED_WRITE_TIMEOUT_MS },
     );
     if (r.exitCode !== 0) {
       throw new Error(`seeding codex config.toml failed (exit ${r.exitCode})`);
@@ -340,7 +339,7 @@ export class CodexAdapter implements RuntimeAdapter {
     if (cred.accessToken && cred.accessToken.length > 0) {
       const r = await exec(['codex', 'login', '--with-access-token'], {
         stdin: cred.accessToken,
-        timeoutMs: WRITE_FILE_TIMEOUT_MS,
+        timeoutMs: SEED_WRITE_TIMEOUT_MS,
       });
       if (r.exitCode !== 0) {
         throw new AdapterAuthError('AUTH_REJECTED', `codex --with-access-token exit ${r.exitCode}`);
@@ -466,7 +465,7 @@ export class CodexAdapter implements RuntimeAdapter {
     const absolutePath = `${home}/${file.containerPath.slice(2)}`;
     const r = await exec(['sh', '-c', WRITE_FILE_SCRIPT, 'codex-inject', absolutePath, mode], {
       stdin: file.content,
-      timeoutMs: WRITE_FILE_TIMEOUT_MS,
+      timeoutMs: SEED_WRITE_TIMEOUT_MS,
     });
     if (r.exitCode !== 0) {
       throw new AdapterAuthError(
