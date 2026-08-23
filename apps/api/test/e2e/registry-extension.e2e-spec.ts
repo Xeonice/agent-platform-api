@@ -60,6 +60,7 @@ const ACME_CAPS: SandboxProviderCapabilities = {
   pauseResume: true,
   snapshot: false,
   watchEvents: false,
+  headlessTask: false,
 };
 
 /** A third-party provider — implements the 6 required methods, nothing platform-side. */

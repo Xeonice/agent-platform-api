@@ -16,6 +16,9 @@ export const SandboxMapper = {
       id: agg.id as string,
       projectId: agg.projectId as string,
       runtime: agg.runtime,
+      // the registry key the frontend needs to look this sandbox's capabilities up
+      // against `GET /api/providers` after a reload.
+      provider: agg.provider,
       name: agg.name,
       status: agg.status,
       headless: agg.headless,

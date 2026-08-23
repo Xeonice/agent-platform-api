@@ -439,6 +439,218 @@
         ]
       }
     },
+    "/api/sandboxes/{id}/runtimes/{rt}/tasks": {
+      "post": {
+        "operationId": "AgentTaskController_run",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunAgentTaskDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTaskResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Start a headless agent Task in a sandbox",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/tasks": {
+      "get": {
+        "operationId": "AgentTaskController_list",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentTaskResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the headless Tasks of a sandbox, newest first",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/tasks/{taskId}": {
+      "get": {
+        "operationId": "AgentTaskController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTaskResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get a headless Task by id",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/tasks/{taskId}/cancel": {
+      "post": {
+        "operationId": "AgentTaskController_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTaskResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Ask a running headless Task to stop (SIGTERM → 5s → SIGKILL)",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/tasks/{taskId}/artifacts/{name}": {
+      "get": {
+        "operationId": "AgentTaskController_artifact",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact bytes (application/octet-stream)",
+            "headers": {
+              "content-length": {
+                "required": false,
+                "description": "Total bytes, present only when the platform could measure the file without guessing (a finished Task whose file plane reported a size). A client MUST treat its absence as normal and stream without a progress indicator.",
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "summary": "Download one artifact a headless Task produced",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
     "/api/providers": {
       "get": {
         "operationId": "ProviderController_list",
@@ -1095,6 +1307,9 @@
           "runtime": {
             "type": "string"
           },
+          "provider": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -1167,6 +1382,7 @@
           "id",
           "projectId",
           "runtime",
+          "provider",
           "name",
           "status",
           "headless",
@@ -1183,6 +1399,176 @@
             "type": "boolean"
           }
         }
+      },
+      "RunAgentTaskDto": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          },
+          "resumeFrom": {
+            "type": "string",
+            "pattern": "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-7][0-9A-HJKMNP-TV-Z]{25})$"
+          },
+          "extraArgs": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "enum": [
+                "--verbose"
+              ]
+            }
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      },
+      "AgentTaskResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sandboxId": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "killed",
+              "timed_out"
+            ]
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "sessionRef": {
+            "type": "string"
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          },
+          "lastSeq": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                },
+                "modifiedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "size",
+                "modifiedAt"
+              ]
+            }
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "TASK_FAILED",
+              "TASK_KILLED",
+              "TASK_TIMED_OUT",
+              "SANDBOX_GONE",
+              "RESUME_FAILED",
+              "IMAGE_PULL_FAILED",
+              "RESOURCE_EXHAUSTED",
+              "NOT_FOUND",
+              "ALREADY_EXISTS",
+              "TIMEOUT",
+              "PERMISSION_DENIED",
+              "INVALID_STATE",
+              "PROVIDER_UNAVAILABLE",
+              "UNSUPPORTED_CAPABILITY",
+              "INTERNAL"
+            ]
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sandboxId",
+          "runtime",
+          "status",
+          "timeoutMinutes",
+          "lastSeq",
+          "artifacts",
+          "startedAt"
+        ]
       },
       "ProviderResponseDto": {
         "type": "object",
@@ -1210,6 +1596,9 @@
               },
               "watchEvents": {
                 "type": "boolean"
+              },
+              "headlessTask": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -1218,7 +1607,8 @@
               "updateResources",
               "pauseResume",
               "snapshot",
-              "watchEvents"
+              "watchEvents",
+              "headlessTask"
             ]
           },
           "isDefault": {

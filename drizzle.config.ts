@@ -9,6 +9,7 @@ export default defineConfig({
   dialect: 'sqlite',
   schema: [
     './packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite.ts',
+    './packages/modules/sandbox/src/infrastructure/persistence/schema/agent-task.sqlite.ts',
     './packages/modules/project/src/infrastructure/persistence/schema/project.sqlite.ts',
     './packages/modules/credential/src/infrastructure/persistence/schema/credential.sqlite.ts',
     './packages/modules/credential/src/infrastructure/persistence/schema/credential-sandbox-binding.sqlite.ts',

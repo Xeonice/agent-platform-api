@@ -26,6 +26,7 @@ const CAPS: SandboxProviderCapabilities = {
   pauseResume: true,
   snapshot: true,
   watchEvents: false,
+  headlessTask: false,
 };
 
 class ThirdPartyProvider implements SandboxProvider {

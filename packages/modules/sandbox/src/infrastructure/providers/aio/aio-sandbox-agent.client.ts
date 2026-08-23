@@ -1,10 +1,17 @@
 import { randomBytes } from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
   SandboxProviderError,
   SandboxProviderErrorCode,
+  type FileEntry,
+  type JobChunk,
+  type JobCursor,
+  type JobSpec,
+  type JobStatus,
   type ProcessSpec,
   type ProcessStream,
 } from '@platform/contracts';
+import { epochSecondsToIso } from '@platform/shared-kernel';
 
 /**
  * Data-plane client for the in-sandbox AIO Sandbox agent (SANDBOX-RUNTIME-DECISIONS
@@ -229,7 +236,7 @@ export class AioSandboxAgentClient {
   }
 
   /** POST /v1/bash/exec, unwrapping the agent's `{success,message,data}` envelope. */
-  private async postBashExec(body: BashExecRequest, signal: AbortSignal): Promise<BashExecResult> {
+  private async postBashExec(body: BashExecRequest, signal?: AbortSignal): Promise<BashExecResult> {
     const res = await this.fetchAgent('/v1/bash/exec', body, signal);
     if (res.status === 404) {
       throw new SandboxProviderError(
@@ -255,7 +262,7 @@ export class AioSandboxAgentClient {
    * readable in the sandbox's own `ps` / `/proc/<pid>/cmdline` — the exact leak
    * RA-14 forbids for secrets (05 §7 #3).
    */
-  private async writeFile(file: string, content: string, signal: AbortSignal): Promise<void> {
+  private async writeFile(file: string, content: string, signal?: AbortSignal): Promise<void> {
     const res = await this.fetchAgent('/v1/file/write', { file, content }, signal);
     const parsed = await readEnvelope(res);
     if (!res.ok || !parsed.success) {
@@ -317,9 +324,7 @@ export class AioSandboxAgentClient {
 
   /** Every agent call carries the sandbox's bearer token when one was minted. */
   private headers(): Record<string, string> {
-    const h: Record<string, string> = { 'content-type': 'application/json' };
-    if (this.authToken !== undefined) h.authorization = `Bearer ${this.authToken}`;
-    return h;
+    return { 'content-type': 'application/json', ...authOnlyHeaders(this.authToken) };
   }
 
   private async fetchAgent(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
@@ -328,7 +333,7 @@ export class AioSandboxAgentClient {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify(body),
-        signal,
+        signal: signal ?? AbortSignal.timeout(AGENT_HTTP_TIMEOUT_MS),
       });
     } catch (e) {
       throw new SandboxProviderError(
@@ -341,6 +346,10 @@ export class AioSandboxAgentClient {
   }
 
   private awaitOpen(ws: WebSocket): Promise<void> {
+    return this.awaitOpenAt(ws, this.wsUrl());
+  }
+
+  private awaitOpenAt(ws: WebSocket, url: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const onOpen = (): void => {
         cleanup();
@@ -351,7 +360,7 @@ export class AioSandboxAgentClient {
         reject(
           new SandboxProviderError(
             SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-            `AIO agent websocket failed to open at ${this.wsUrl()}`,
+            `AIO agent websocket failed to open at ${url}`,
             undefined,
             true,
           ),
@@ -373,10 +382,528 @@ export class AioSandboxAgentClient {
       /* socket not open — ignore, exit will be synthesised on close */
     }
   }
+
+  // ── 作业面 / job plane (SandboxJobs, 04 §2.6) ────────────────────────────────
+
+  /**
+   * Start a long-lived job and return the OPAQUE id the platform persists.
+   *
+   * ⚠️ THE THREE-STEP ORDER IS THE IMPLEMENTATION, NOT A DETAIL (04 §2.6 ★★).
+   * The agent's websocket closes the session it CREATED when it disconnects
+   * (`if created_by_ws: await manager.close_session(...)`), and closing a session
+   * destroys its recorded output AND kills the running command. So:
+   *
+   *   ① POST /v1/bash/sessions/create   session exists ⇒ created_by_ws = false
+   *   ② POST /v1/bash/exec async_mode   the command starts, we get a command_id
+   *   ③ ws /v1/bash/ws?session_id=…     ATTACH only — see `ensureJobStream`
+   *
+   * Written the intuitive way round (connect, then exec) nothing fails until the
+   * first platform restart, at which point every running job dies silently.
+   *
+   * stderr is REDIRECTED into a sandbox file rather than left on the session's own
+   * stderr channel, because the streaming socket forwards `result.stdout` ONLY —
+   * and on the failure path codex writes ZERO bytes to stdout and puts everything on
+   * stderr. A file keeps the two streams separated (which is what lets `parseOutput`
+   * stay `JSON.parse`-per-line, 04 §2.6 裁决 3) and, unlike session-held output,
+   * SURVIVES `releaseJob`.
+   */
+  async startJob(spec: JobSpec): Promise<string> {
+    const sessionId = `platform-job-${randomBytes(8).toString('hex')}`;
+    const scratchDir = `/tmp/.platform-job-${randomBytes(16).toString('hex')}`;
+    const stderrPath = `${scratchDir}/stderr`;
+    await this.createBashSession(sessionId);
+    // `mkdir -m 700` (no -p) is atomic and fails on a pre-existing path, so the
+    // scratch dir cannot be squatted before the stdin payload lands in it.
+    await this.postBashExec(
+      { session_id: sessionId, command: `mkdir -m 700 -- ${shellQuote(scratchDir)}` },
+      undefined,
+    );
+    await this.assertSurvivesTheJob(sessionId, scratchDir, spec.timeoutMs);
+    // pre-create the sink so `readJob` can read it before the job has written a byte
+    // (a missing file answers 404 ⇒ `null`, which is fine, but this keeps the
+    // "file plane returns null" path for genuinely absent artifacts).
+    await this.writeFile(stderrPath, '');
+
+    let command = `${spec.cmd.map(shellQuote).join(' ')} 2> ${shellQuote(stderrPath)}`;
+    if (spec.stdin !== undefined) {
+      const stdinPath = `${scratchDir}/stdin`;
+      // content travels in an HTTP BODY; only the PATH ever reaches argv, which is
+      // world-readable inside the sandbox via `ps` / `/proc/<pid>/cmdline` (05 §7 #3).
+      await this.writeFile(stdinPath, spec.stdin);
+      command = `${command} < ${shellQuote(stdinPath)}`;
+    }
+
+    const data = await this.postBashExec(
+      {
+        session_id: sessionId,
+        command,
+        exec_dir: spec.cwd,
+        env: spec.env,
+        async_mode: true,
+        hard_timeout: spec.timeoutMs !== undefined ? spec.timeoutMs / 1000 : undefined,
+      },
+      undefined,
+    );
+    const commandId = typeof data.command_id === 'string' ? data.command_id : '';
+    if (commandId === '') {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        'in-sandbox agent accepted an async exec but returned no command_id',
+      );
+    }
+    return encodeJobId({ sessionId, commandId, stderrPath, scratchDir });
+  }
+
+  /**
+   * Read forward from `cursor`. Omitting it reads from the very beginning — refresh
+   * recovery, reconnect-after-disconnect and "the platform restarted" are all that,
+   * and nothing more.
+   *
+   * ── WHY THE BYTES COME OFF THE CURSOR READ AND NEVER OFF THE SOCKET ──────────
+   * The socket is attached as a WAKEUP channel, not as a data channel. That is a
+   * deliberate departure from "read the stream off the ws", and the reason is
+   * arithmetic, not taste: the agent's cursor is a BYTE OFFSET, while the socket
+   * never reveals the offset at which it attached (it does not replay history —
+   * measured: on connect the offset is wherever the stream happens to be). So a byte
+   * that arrives on the socket cannot be placed on the same axis as the cursor, and
+   * any attempt to splice the two has an unclosable race: the gap read and the first
+   * live frame can overlap by an unknown amount. Taking every byte from the cursor
+   * read makes BOTH documented gaps — ① between start and attach, ② a disconnect —
+   * disappear structurally instead of being patched, and it is ONE code path for
+   * both, exactly as 04 §2.6 ★★ requires.
+   *
+   * What the socket buys is the thing polling cannot: an instant wakeup. A 40-minute
+   * task that emits an event every few seconds costs ~2400 empty round-trips at 1s
+   * polling; here it costs one read per event. When no socket can be established we
+   * fall back to the agent's own `wait`/`wait_timeout` long-poll, so `waitMs` is
+   * honoured either way and busy polling never happens.
+   *
+   * ⚠️ HALF LINES. `offset` counts BYTES, so a read can land mid-line (measured:
+   * a 32-byte first line answers offset 32 — nothing rounds to a line). Since the
+   * whole point of the plane is that `parseOutput` is `JSON.parse` per line, this
+   * method emits only up to the LAST NEWLINE and leaves the cursor there; the tail is
+   * re-read next time. The buffering is therefore in the CURSOR, not in memory, which
+   * is what makes it survive a platform restart. Once the job has exited the final
+   * (possibly unterminated) line is flushed — nothing more is coming to complete it.
+   */
+  async readJob(jobId: string, cursor?: JobCursor, waitMs?: number): Promise<JobChunk> {
+    const job = decodeJobId(jobId);
+    const at = decodeCursor(cursor);
+    const budget = waitMs ?? 0;
+
+    let raw = await this.readBashOutput(job, at.stdout, 0);
+    // ⚠️ THE TEST IS "IS THERE A DELIVERABLE WHOLE LINE", NOT "ARE THERE BYTES".
+    // A half line sitting in the agent's buffer makes `raw.stdout` NON-EMPTY while
+    // `trimToLineBoundary` still yields '' and the cursor still does not move — so a
+    // byte-emptiness test would skip the wait and hand the pump an empty chunk it
+    // instantly re-reads. Measured before the fix: ~150k reads/second, each carrying a
+    // POST /v1/bash/output plus a whole-file stderr download.
+    if (trimToLineBoundary(raw.stdout, false) === '' && raw.status === 'running' && budget > 0) {
+      const stream = await this.ensureJobStream(job.sessionId);
+      if (stream) {
+        await stream.wait(budget);
+        raw = await this.readBashOutput(job, at.stdout, 0);
+      } else {
+        // no socket ⇒ the agent's native long-poll. This is the branch that makes
+        // "never busy poll" TRUE rather than aspirational.
+        raw = await this.readBashOutput(job, at.stdout, budget);
+      }
+    }
+    const exited = raw.status === 'exited';
+    if (exited) closeJobStream(this.streamKey(job.sessionId));
+
+    const stdout = trimToLineBoundary(raw.stdout, exited);
+    const stderr = await this.readStderrIncrement(job.stderrPath, at.stderr);
+    return {
+      stdout,
+      stderr: stderr.text,
+      cursor: encodeCursor({
+        stdout: at.stdout + Buffer.byteLength(stdout, 'utf8'),
+        stderr: stderr.next,
+      }),
+      status: raw.status,
+      ...(raw.exitCode !== undefined ? { exitCode: raw.exitCode } : {}),
+    };
+  }
+
+  /**
+   * Two-phase kill (03 §8.3): SIGTERM → 5s grace → SIGKILL. An explicit signal is
+   * delivered as asked and still escalates unless it already was SIGKILL.
+   *
+   * It deliberately does NOT release the job: the exit code and the tail of the
+   * output are exactly what a caller wants AFTER killing something, and releasing
+   * would destroy both (see `releaseJob`).
+   */
+  async killJob(
+    jobId: string,
+    signal?: NodeJS.Signals,
+    /**
+     * The grace window. Parameterised ONLY so the escalation can be proven without a
+     * five-second unit test; production always takes the default, and a test pins that
+     * the default really is `KILL_GRACE_MS` so nobody can shrink it by accident.
+     */
+    graceMs: number = KILL_GRACE_MS,
+  ): Promise<void> {
+    const job = decodeJobId(jobId);
+    const requested = toAgentSignal(signal);
+    await this.killSession(job.sessionId, requested);
+    if (requested === 'SIGKILL') return;
+    if (await this.waitForExit(job, graceMs)) return;
+    await this.killSession(job.sessionId, 'SIGKILL');
+  }
+
+  /**
+   * Drop the job's server-side state. Idempotent — a released or unknown job is a
+   * silent success, same discipline as `destroy`.
+   *
+   * ⚠️ CALLING THIS EARLY LOSES DATA. Measured: closing the session DESTROYS the
+   * recorded output — a later read answers `Session <id> not found`, not an empty
+   * chunk. So the platform releases only once it has persisted everything, and
+   * `killJob` never releases implicitly. It exists because sessions are server-side
+   * state that accumulates: a sandbox running many Tasks would leak one per Task.
+   */
+  async releaseJob(jobId: string): Promise<void> {
+    const job = decodeJobId(jobId);
+    closeJobStream(this.streamKey(job.sessionId));
+    // shred the scratch dir FIRST: it may hold the job's stdin payload, and after
+    // the session is closed there is no longer a shell in which to remove it.
+    await this.bestEffort(job.sessionId, `rm -rf -- ${shellQuote(job.scratchDir)}`);
+    await this.closeSession(job.sessionId);
+  }
+
+  /**
+   * Refuse to start a job the sandbox cannot keep alive long enough to finish.
+   *
+   * ⚠️ THE OBLIGATION IS SET AT CREATE TIME, SO A SANDBOX CREATED BEFORE S6 DOES NOT
+   * HAVE IT. `BASH_SESSION_TIMEOUT` reaps a session on IDLE, the clock is refreshed by
+   * SUBMITTING a command and never by reading its output, and the reaper does not check
+   * whether the command is still running — so on such a sandbox a 60/120/240-minute
+   * tier is destroyed at the agent's 3600-second default, taking the output AND the
+   * exit code with it. Nothing else notices: the next read simply 404s, hours in.
+   *
+   * The env is read from inside the session rather than trusted from the sandbox row,
+   * because the row records what the platform ASKED for and this needs what the agent
+   * actually BOOTED with. An ABSENT variable is not "unknown" — it is the agent's
+   * documented 3600s default, which is exactly the pre-S6 shape being caught here.
+   *
+   * It costs one synchronous exec per job start, against a run measured in minutes to
+   * hours.
+   */
+  private async assertSurvivesTheJob(
+    sessionId: string,
+    scratchDir: string,
+    timeoutMs?: number,
+  ): Promise<void> {
+    if (timeoutMs === undefined) return;
+    // ⚠️ THE ANSWER GOES TO A FILE, NOT TO stdout. Measured: `/v1/bash/output` replays
+    // the SESSION's recorded output from a byte offset, and a `command_id` does not
+    // scope it — so anything this probe printed would be handed to the pump as the
+    // job's own first bytes and fed straight into `parseOutput`. The scratch dir is
+    // already created, already 0700, and already shredded by `releaseJob`.
+    const probePath = `${scratchDir}/session-ttl`;
+    const wrote = await this.postBashExec(
+      {
+        session_id: sessionId,
+        command: `printf %s "\${BASH_SESSION_TIMEOUT-}" > ${shellQuote(probePath)}`,
+      },
+      undefined,
+    ).then(
+      () => true,
+      () => false,
+    );
+    // an agent that cannot answer is a problem the first read reports; do not turn an
+    // unverifiable answer into a refusal.
+    if (!wrote) return;
+    const buf = await this.readFileBytes(probePath).catch(() => null);
+    if (buf === null) return;
+    const raw = buf.toString('utf8').trim();
+    const ttlSeconds = raw === '' ? AGENT_DEFAULT_SESSION_TTL_SECONDS : Number(raw);
+    if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return;
+    if (ttlSeconds * 1000 > timeoutMs) return;
+    throw new SandboxProviderError(
+      SandboxProviderErrorCode.INVALID_STATE,
+      `this sandbox's in-sandbox agent reaps idle sessions after ${ttlSeconds}s, which is not ` +
+        `longer than the ${Math.round(timeoutMs / 1000)}s this job asked for — the job would be ` +
+        'destroyed mid-run together with its output and exit code (04 §2.6 生存义务). The ' +
+        'survival env is set at CREATE time, so recreate the sandbox rather than lowering the tier.',
+    );
+  }
+
+  /** `POST /v1/bash/sessions/create` — step ① of the ordering above. */
+  private async createBashSession(sessionId: string): Promise<void> {
+    const res = await this.fetchAgent('/v1/bash/sessions/create', { session_id: sessionId });
+    const parsed = await readEnvelope(res);
+    if (!res.ok || parsed.success === false) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent could not create a bash session: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      );
+    }
+  }
+
+  /** `POST /v1/bash/output` — the ONE authoritative byte source for a job. */
+  private async readBashOutput(
+    job: DecodedJobId,
+    offset: number,
+    waitMs: number,
+  ): Promise<{ stdout: string; status: JobStatus; exitCode?: number }> {
+    const res = await this.fetchAgent(
+      '/v1/bash/output',
+      {
+        session_id: job.sessionId,
+        command_id: job.commandId,
+        offset,
+        // stderr rides the redirect file, so the session's own stderr channel is empty
+        // by construction; asking for it anyway would only cost bytes.
+        stderr_offset: 0,
+        ...(waitMs > 0 ? { wait: true, wait_timeout: Math.ceil(waitMs / 1000) } : {}),
+      },
+      // ⚠️ THE ONE CALL THAT MAY LEGITIMATELY HANG, so it gets its OWN deadline rather
+      // than the default: it is ASKING the agent to hold the connection for `waitMs`.
+      // The slack is what distinguishes "the long poll ran to its budget" from "the
+      // agent stopped answering", which is the difference between a pump that keeps
+      // going and a 4-hour task whose backstop granularity collapses to undici's
+      // 300-second default.
+      AbortSignal.timeout(waitMs + AGENT_HTTP_TIMEOUT_MS),
+    );
+    if (res.status === 404) {
+      // the session is gone — the survival obligation was broken (or the job was
+      // already released). Louder than an empty chunk on purpose: silently reporting
+      // "no new output, still running" would hang the caller forever.
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.NOT_FOUND,
+        `in-sandbox agent no longer knows job session ${job.sessionId} — its output ` +
+          'and exit status are gone (04 §2.6 生存义务)',
+      );
+    }
+    const parsed = await readEnvelope(res);
+    if (!res.ok || parsed.success === false) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent job read failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      );
+    }
+    const data = parsed.data ?? {};
+    const command = data.command ?? {};
+    const running = command.status === undefined ? true : command.status === 'running';
+    const exitCode = jobExitCodeOf(command);
+    return {
+      stdout: data.stdout ?? '',
+      status: running ? 'running' : 'exited',
+      ...(running || exitCode === undefined ? {} : { exitCode }),
+    };
+  }
+
+  /** Poll ONLY the terminal flag, for the kill grace window. Cheap: offset = end. */
+  private async waitForExit(job: DecodedJobId, ms: number): Promise<boolean> {
+    const deadlineTicks = Math.max(1, Math.round(ms / KILL_POLL_MS));
+    for (let i = 0; i < deadlineTicks; i++) {
+      await new Promise((r) => setTimeout(r, KILL_POLL_MS));
+      try {
+        const r = await this.readBashOutput(job, Number.MAX_SAFE_INTEGER, 0);
+        if (r.status === 'exited') return true;
+      } catch {
+        // session vanished ⇒ nothing left to escalate against
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The stderr increment, taken from the redirect file through the FILE plane.
+   *
+   * It reads the whole file and slices from the cursor rather than range-requesting,
+   * which is O(n) per read. That is a deliberate trade: on the measured success path
+   * stderr is EMPTY for both CLIs, on the failure path it is a handful of tracing
+   * lines, and the read is a loopback GET (8 MB in ~36 ms). Slicing whole-file also
+   * means no byte can be lost to a partial range — and unlike the session channel,
+   * this file still answers after `releaseJob`.
+   */
+  private async readStderrIncrement(
+    path: string,
+    from: number,
+  ): Promise<{ text: string; next: number }> {
+    const buf = await this.readFileBytes(path);
+    if (!buf || buf.length <= from) return { text: '', next: from };
+    const slice = buf.subarray(from);
+    return { text: slice.toString('utf8'), next: from + slice.length };
+  }
+
+  // ── 文件面 / file plane (SandboxFiles, 04 §2.6) ──────────────────────────────
+
+  /**
+   * Whole-file read, BINARY SAFE. It must go through `GET /v1/file/download`
+   * (`application/octet-stream`): the agent's text-oriented `POST /v1/file/read`
+   * raises `'utf-8' codec can't decode byte 0xa3` on binary content, so it cannot
+   * back this method at all.
+   *
+   * A MISSING FILE IS `null`, NOT AN ERROR — that is a normal path: codex's
+   * `-o/--output-last-message <FILE>` is simply not created when the task fails. The
+   * two agent endpoints disagree on how they report it (download answers 404, read
+   * answers HTTP 200 with `success:false` + `error_type:"not_found"`); both are
+   * normalised here so no caller ever sees the difference.
+   */
+  async readFileBytes(path: string): Promise<Buffer | null> {
+    const res = await this.getAgent(`/v1/file/download?path=${encodeURIComponent(path)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent file download failed: HTTP ${res.status} for ${path}`,
+      );
+    }
+    const body = Buffer.from(await res.arrayBuffer());
+    return isNotFoundEnvelope(res, body) ? null : body;
+  }
+
+  /** Streaming read for artifacts too large to hold in memory. `null` when absent. */
+  async openFileStream(path: string): Promise<NodeJS.ReadableStream | null> {
+    const res = await this.getAgent(`/v1/file/download?path=${encodeURIComponent(path)}`);
+    if (res.status === 404) return null;
+    if (!res.ok || res.body === null) {
+      if (res.ok) return null;
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent file download failed: HTTP ${res.status} for ${path}`,
+      );
+    }
+    // A JSON `not_found` envelope arrives with a 200, so it cannot be detected from
+    // headers alone without consuming the body — only the JSON content type can
+    // possibly be one, and an artifact served as octet-stream never is.
+    if (isJsonResponse(res)) {
+      const body = Buffer.from(await res.arrayBuffer());
+      return isNotFoundEnvelope(res, body) ? null : Readable.from(body);
+    }
+    return Readable.fromWeb(res.body);
+  }
+
+  /**
+   * Write through the agent's file API so the content travels in an HTTP BODY.
+   * Measured: missing parent directories are created for us, and `encoding:"base64"`
+   * round-trips binary intact — which is why `mkdir` is absent from the plane rather
+   * than merely discouraged.
+   */
+  async writeFileContent(path: string, content: string | Buffer): Promise<void> {
+    const body = Buffer.isBuffer(content)
+      ? { file: path, content: content.toString('base64'), encoding: 'base64' }
+      : { file: path, content };
+    const res = await this.fetchAgent('/v1/file/write', body);
+    const parsed = await readEnvelope(res);
+    if (!res.ok || parsed.success === false) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent file write failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      );
+    }
+  }
+
+  /**
+   * Directory listing, normalised to `FileEntry`. Two agent encodings are converted
+   * HERE so they never leak into the contract (04 §2.6): `size` is `null` for
+   * directories (⇒ the field is ABSENT, not 0), and `modified_time` is epoch SECONDS
+   * WRAPPED IN A STRING (⇒ ISO-8601). A missing directory lists as EMPTY rather than
+   * throwing — "the task produced no artifacts" is a normal outcome, not a fault.
+   */
+  async listFiles(
+    path: string,
+    opts?: { recursive?: boolean; maxEntries?: number },
+  ): Promise<FileEntry[]> {
+    const res = await this.fetchAgent('/v1/file/list', {
+      path,
+      recursive: opts?.recursive ?? false,
+      include_size: true,
+    });
+    if (res.status === 404) return [];
+    const parsed = await readEnvelope(res);
+    if (!res.ok || parsed.success === false) {
+      if (isNotFoundMessage(parsed.message)) return [];
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INTERNAL,
+        `AIO agent file list failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      );
+    }
+    const rows = agentFileRows(parsed.data);
+    const limit = opts?.maxEntries;
+    const capped = limit !== undefined && limit >= 0 ? rows.slice(0, limit) : rows;
+    return capped.map((row) => toFileEntry(row));
+  }
+
+  /**
+   * ATTACH to an existing job session — never create one.
+   *
+   * The `?session_id=` is what makes the agent treat this socket as an attachment
+   * (`created_by_ws = false`), so disconnecting leaves the session, its buffered
+   * output and the running command untouched. Without it the socket owns the
+   * session and closing it destroys the job. Verified end to end: 33-minute run,
+   * 100 s of silence × 20 rounds, zero disconnects; three client SIGKILLs left the
+   * session and the job alive.
+   *
+   * Failure to attach is NOT fatal — `readJob` falls back to the agent's own
+   * long-poll — so this returns `null` instead of throwing.
+   */
+  private async ensureJobStream(sessionId: string): Promise<JobStream | null> {
+    const key = this.streamKey(sessionId);
+    const existing = jobStreams.get(key);
+    if (existing?.alive) return existing;
+    try {
+      const ticket = this.authToken !== undefined ? await this.issueWsTicket() : undefined;
+      const base = `${this.baseHttpUrl.replace(/^http/i, 'ws')}/v1/bash/ws`;
+      const query = new URLSearchParams({ session_id: sessionId });
+      if (ticket !== undefined) query.set('ticket', ticket);
+      const url = `${base}?${query.toString()}`;
+      const ws = new WebSocket(url);
+      await this.awaitOpenAt(ws, url);
+      const stream = new JobStream(ws, key);
+      jobStreams.set(key, stream);
+      return stream;
+    } catch {
+      return null;
+    }
+  }
+
+  private streamKey(sessionId: string): string {
+    return `${this.baseHttpUrl}|${sessionId}`;
+  }
+
+  /** GET against the agent, carrying the bearer token like every other call. */
+  private async getAgent(path: string, signal?: AbortSignal): Promise<Response> {
+    try {
+      return await fetch(`${this.baseHttpUrl}${path}`, {
+        method: 'GET',
+        headers: authOnlyHeaders(this.authToken),
+        signal: signal ?? AbortSignal.timeout(AGENT_HTTP_TIMEOUT_MS),
+      });
+    } catch (e) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        `AIO agent ${path} unreachable: ${(e as Error).message}`,
+        e,
+        true,
+      );
+    }
+  }
 }
 
 /** Extra wall-time the transport gets beyond the agent's own `hard_timeout`. */
 const ABORT_SLACK_MS = 5_000;
+/**
+ * Deadline on ANY single agent HTTP call.
+ *
+ * ⚠️ WITHOUT ONE, A WEDGED AGENT HANGS THE CALLER FOR undici's 300-SECOND DEFAULT.
+ * That is not merely slow: the pump's platform-side backstop only gets to run between
+ * reads, so a 4-hour task's "is it overdue?" check would fire at 5-minute granularity
+ * at best — and `readFileBytes` (the whole-file stderr download on EVERY read) has the
+ * same exposure. 30s is far beyond any measured loopback call (8 MB in ~36 ms) and far
+ * below the granularity the backstop needs.
+ */
+const AGENT_HTTP_TIMEOUT_MS = 30_000;
+/**
+ * What the agent falls back to when `BASH_SESSION_TIMEOUT` is unset — measured, and
+ * documented in `agent-auth.ts`. An ABSENT variable therefore means 3600s, not
+ * "unlimited", which is why `assertSurvivesTheJob` treats the two identically.
+ */
+const AGENT_DEFAULT_SESSION_TTL_SECONDS = 3600;
 /** SIGTERM → grace → SIGKILL window (03 §8.3 两阶段 kill). */
 export const KILL_GRACE_MS = 5_000;
 /** Beat between the PTY interrupt/exit writes and closing the socket. */
@@ -443,13 +970,33 @@ async function readEnvelope(res: Response): Promise<AgentEnvelope> {
 interface AgentEnvelope {
   success?: boolean;
   message?: string;
-  data?: BashExecResult;
+  error_type?: string;
+  data?: AgentData;
+}
+
+/**
+ * The union of the envelope payloads this client reads. Kept as ONE optional-field
+ * shape rather than a discriminated union because the agent's envelope carries no
+ * discriminator — every endpoint answers `{success,message,data}` and the caller
+ * already knows which fields it asked for.
+ */
+interface AgentData extends BashExecResult {
+  command?: BashCommandState;
+  files?: unknown;
+  entries?: unknown;
+  items?: unknown;
 }
 
 interface BashExecResult {
   status?: string;
   stdout?: string | null;
   stderr?: string | null;
+  exit_code?: number | null;
+  command_id?: string;
+}
+
+interface BashCommandState {
+  status?: string;
   exit_code?: number | null;
 }
 
@@ -459,6 +1006,7 @@ interface BashExecRequest {
   exec_dir?: string;
   env?: Record<string, string>;
   hard_timeout?: number;
+  async_mode?: boolean;
 }
 
 interface ExecResult {
@@ -697,4 +1245,265 @@ class AioExecProcessStream implements ProcessStream {
       this.settleWaiters.push(onSettle);
     });
   }
+}
+
+// ── job-plane helpers ────────────────────────────────────────────────────────
+
+/** Beat of the kill grace poll (ticks, not a wall clock — 01 §3). */
+const KILL_POLL_MS = 250;
+
+/**
+ * What a `JobHandle.jobId` actually carries. The platform NEVER parses it (04 §2.6
+ * 裁决 1) — it stores the string and hands it back — so the encoding is free to be
+ * whatever this provider needs, as long as it survives a round trip through the
+ * database. JSON is chosen over a delimiter because a path can contain anything.
+ */
+interface DecodedJobId {
+  sessionId: string;
+  commandId: string;
+  stderrPath: string;
+  scratchDir: string;
+}
+
+function encodeJobId(job: DecodedJobId): string {
+  return JSON.stringify({
+    s: job.sessionId,
+    c: job.commandId,
+    e: job.stderrPath,
+    d: job.scratchDir,
+  });
+}
+
+function decodeJobId(jobId: string): DecodedJobId {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(jobId);
+  } catch {
+    raw = null;
+  }
+  if (typeof raw !== 'object' || raw === null) {
+    throw new SandboxProviderError(
+      SandboxProviderErrorCode.INVALID_STATE,
+      'job handle was not minted by this provider (unreadable jobId)',
+    );
+  }
+  const o = raw as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const decoded = {
+    sessionId: str(o.s),
+    commandId: str(o.c),
+    stderrPath: str(o.e),
+    scratchDir: str(o.d),
+  };
+  if (decoded.sessionId === '' || decoded.commandId === '') {
+    throw new SandboxProviderError(
+      SandboxProviderErrorCode.INVALID_STATE,
+      'job handle is missing its session/command identity',
+    );
+  }
+  return decoded;
+}
+
+/**
+ * The two independent byte offsets a job read carries. Opaque to the platform for the
+ * reason 04 §2.6 裁决 2 gives: a byte offset is THIS provider's encoding of "where I
+ * left off", another may count lines or frames, and a number on the wire invites
+ * arithmetic that breaks on the next provider.
+ */
+interface DecodedCursor {
+  stdout: number;
+  stderr: number;
+}
+
+function encodeCursor(c: DecodedCursor): JobCursor {
+  return JSON.stringify({ o: c.stdout, e: c.stderr });
+}
+
+function decodeCursor(cursor?: JobCursor): DecodedCursor {
+  if (cursor === undefined || cursor === '') return { stdout: 0, stderr: 0 };
+  try {
+    const raw: unknown = JSON.parse(cursor);
+    if (typeof raw !== 'object' || raw === null) return { stdout: 0, stderr: 0 };
+    const o = raw as Record<string, unknown>;
+    const num = (v: unknown): number => (typeof v === 'number' && v >= 0 ? v : 0);
+    return { stdout: num(o.o), stderr: num(o.e) };
+  } catch {
+    // An unreadable cursor reads from the START rather than throwing: re-delivering
+    // output is recoverable (the platform's own seq de-duplicates), losing the rest
+    // of a running job's output is not.
+    return { stdout: 0, stderr: 0 };
+  }
+}
+
+/**
+ * Emit only whole lines while the job is alive; flush everything once it has exited.
+ *
+ * Returning a half line would hand `parseOutput` an unparseable fragment, and there
+ * is no in-memory place to keep it that survives a platform restart — so the tail is
+ * left BEHIND THE CURSOR and re-read next time instead.
+ */
+function trimToLineBoundary(s: string, flush: boolean): string {
+  if (flush) return s;
+  const i = s.lastIndexOf('\n');
+  return i < 0 ? '' : s.slice(0, i + 1);
+}
+
+/**
+ * `timed_out` is the agent's HARD-timeout kill; report the conventional 124 the
+ * platform already speaks (03 §8.3) rather than the agent's internal -1, so a
+ * sandbox-side timeout is distinguishable from an ordinary non-zero exit.
+ * A `null` exit code stays ABSENT — a signal-killed process genuinely has none.
+ */
+function jobExitCodeOf(command: {
+  status?: string;
+  exit_code?: number | null;
+}): number | undefined {
+  if (command.status === 'timed_out') return 124;
+  return typeof command.exit_code === 'number' ? command.exit_code : undefined;
+}
+
+/** `Authorization` only — for GETs, which carry no JSON body. */
+function authOnlyHeaders(token: string | undefined): Record<string, string> {
+  return token === undefined ? {} : { authorization: `Bearer ${token}` };
+}
+
+function isJsonResponse(res: Response): boolean {
+  return (res.headers.get('content-type') ?? '').includes('json');
+}
+
+/**
+ * The agent's OTHER way of saying "no such file": HTTP 200 with
+ * `{success:false, error_type:"not_found"}`. Normalised to `null` alongside the
+ * download endpoint's plain 404 so callers never learn the two disagree.
+ */
+function isNotFoundEnvelope(res: Response, body: Buffer): boolean {
+  if (!isJsonResponse(res)) return false;
+  try {
+    const parsed: unknown = JSON.parse(body.toString('utf8'));
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    const o = parsed as Record<string, unknown>;
+    return o.success === false && isNotFoundMessage(String(o.error_type ?? o.message ?? ''));
+  } catch {
+    return false;
+  }
+}
+
+function isNotFoundMessage(message?: string): boolean {
+  return message !== undefined && /not[_ ]?found|no such file|does not exist/i.test(message);
+}
+
+/** Locate the row array whichever key this agent build puts it under. */
+function agentFileRows(data: unknown): Record<string, unknown>[] {
+  const candidates: unknown[] = [data];
+  if (typeof data === 'object' && data !== null) {
+    const o = data as Record<string, unknown>;
+    candidates.push(o.files, o.entries, o.items);
+  }
+  for (const c of candidates) {
+    if (Array.isArray(c)) {
+      return c.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null);
+    }
+  }
+  return [];
+}
+
+function toFileEntry(row: Record<string, unknown>): FileEntry {
+  const isDir = row.is_directory === true;
+  const size = typeof row.size === 'number' ? row.size : undefined;
+  return {
+    path: typeof row.path === 'string' ? row.path : String(row.name ?? ''),
+    kind: isDir ? 'dir' : 'file',
+    // measured: the agent reports `size: null` for a directory ⇒ ABSENT, not 0.
+    ...(isDir || size === undefined ? {} : { size }),
+    modifiedAt: epochSecondsToIso(row.modified_time) ?? '',
+  };
+}
+
+/**
+ * An ATTACHED job websocket, used purely as a wakeup channel (see `readJob` for why
+ * no byte is ever taken off it).
+ *
+ * It is pooled at MODULE scope rather than per client instance because a fresh
+ * `AioSandboxAgentClient` is constructed for every provider call — a per-instance
+ * socket would be opened and thrown away on each read, which is strictly worse than
+ * the polling it replaces. The pool key includes the agent origin, so two sandboxes
+ * can never share an entry, and an entry removes itself the moment the socket dies.
+ */
+class JobStream {
+  alive = true;
+  private done = false;
+  private readonly waiters: (() => void)[] = [];
+
+  constructor(
+    private readonly ws: WebSocket,
+    readonly key: string,
+  ) {
+    ws.addEventListener('message', (ev: MessageEvent) => this.onMessage(ev));
+    ws.addEventListener('close', () => this.die());
+    ws.addEventListener('error', () => this.die());
+  }
+
+  private onMessage(ev: MessageEvent): void {
+    const raw = typeof ev.data === 'string' ? ev.data : String(ev.data);
+    let frame: { type?: string };
+    try {
+      frame = JSON.parse(raw) as { type?: string };
+    } catch {
+      return;
+    }
+    if (frame.type === 'command_done') this.done = true;
+    if (frame.type === 'output' || frame.type === 'command_done') this.wake();
+  }
+
+  /** Resolve as soon as the job produced output or finished, else after `ms`. */
+  wait(ms: number): Promise<void> {
+    if (this.done || !this.alive) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(onWake);
+        if (i >= 0) this.waiters.splice(i, 1);
+        resolve();
+      }, ms);
+      timer.unref?.();
+      const onWake = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.waiters.push(onWake);
+    });
+  }
+
+  close(): void {
+    try {
+      this.ws.close();
+    } catch {
+      /* already closing */
+    }
+    this.die();
+  }
+
+  private die(): void {
+    if (!this.alive) return;
+    this.alive = false;
+    if (jobStreams.get(this.key) === this) jobStreams.delete(this.key);
+    this.wake();
+  }
+
+  private wake(): void {
+    for (const w of this.waiters.splice(0)) w();
+  }
+}
+
+const jobStreams = new Map<string, JobStream>();
+
+function closeJobStream(key: string): void {
+  jobStreams.get(key)?.close();
+}
+
+/**
+ * Drop every attached job socket. Exported for the process-teardown path (and for
+ * tests, which must not leave a live socket keeping the event loop busy).
+ */
+export function closeAllJobStreams(): void {
+  for (const stream of [...jobStreams.values()]) stream.close();
 }

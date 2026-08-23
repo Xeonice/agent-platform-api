@@ -125,3 +125,51 @@ export async function assertAgentRejectsAnonymous(
     );
   }
 }
+
+/**
+ * ── 生存义务 (the `SandboxJobs` survival obligation, 04 §2.6 ★★★) ──────────────
+ *
+ * A provider that advertises `headlessTask` promises a job stays startable, readable
+ * and killable for its whole `JobSpec.timeoutMs`. The backing agent BREAKS that
+ * promise by default, in two independent ways (both measured 2026-08):
+ *
+ *   ① `BASH_SESSION_TIMEOUT` (default 3600s) reaps a session on IDLE — and the clock
+ *      is refreshed by SUBMITTING a command, never by reading its output, and the
+ *      reaper does not check whether the command is still running. So the 2h and 4h
+ *      timeout tiers (P20 §0) would be destroyed mid-run, taking the output AND the
+ *      exit code with them; the 1h tier sits exactly on the line. "Poll more often"
+ *      is not a fix — polling does not touch the clock.
+ *   ② `MAX_BASH_SESSIONS` (default 50) EVICTS THE OLDEST session when a new one is
+ *      created, so a sandbox that runs many Tasks silently loses the early ones.
+ *
+ * Both are plain env ints read at agent boot ⇒ the fix is to set them at CREATE time,
+ * through the very channel `JWT_PUBLIC_KEY` already uses. This is the whole reason
+ * `create()` — not `startJob` — carries the obligation: by the time a job starts, the
+ * agent has long since read its config.
+ */
+export const AGENT_SESSION_TTL_ENV = 'BASH_SESSION_TIMEOUT';
+export const AGENT_MAX_SESSIONS_ENV = 'MAX_BASH_SESSIONS';
+
+/**
+ * Seconds. The longest tier a Task may ask for is 240 minutes (`TaskTimeoutMinutesSchema`),
+ * so the ceiling is that plus enough slack to survive a platform restart and a slow
+ * artifact collection before `releaseJob` — 24h, i.e. 6× the longest tier. It is a
+ * ceiling on IDLE time inside a sandbox that the platform destroys anyway, not a
+ * resource reservation, so buying margin here costs nothing.
+ */
+export const AGENT_SESSION_TTL_SECONDS = 24 * 60 * 60;
+/** Enough Tasks per sandbox that eviction stops being a silent data-loss path. */
+export const AGENT_MAX_SESSIONS = 512;
+
+/**
+ * Merge the survival settings into the sandbox env. Ours WIN over caller-set values
+ * for the same reason `withAgentAuthEnv` does: a context that could lower these could
+ * re-arm the exact failure the job plane exists to prevent.
+ */
+export function withJobSurvivalEnv(env: Record<string, string>): Record<string, string> {
+  return {
+    ...env,
+    [AGENT_SESSION_TTL_ENV]: String(AGENT_SESSION_TTL_SECONDS),
+    [AGENT_MAX_SESSIONS_ENV]: String(AGENT_MAX_SESSIONS),
+  };
+}

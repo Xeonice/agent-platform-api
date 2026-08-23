@@ -16,8 +16,6 @@ import {
 } from '@platform/shared-kernel';
 import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-kernel';
 import {
-  ImageContractViolationError,
-  RuntimeInstallFailedError,
   RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
@@ -42,6 +40,7 @@ import type {
   ProjectRuntimeContext,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
+import { mapProviderErrorToHttp } from './provider-error.http';
 import { Sandbox } from '../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../domain/entities/state-transition.entity';
@@ -91,6 +90,7 @@ export class SandboxApplicationService {
         pauseResume: p.capabilities.pauseResume,
         snapshot: p.capabilities.snapshot,
         watchEvents: p.capabilities.watchEvents,
+        headlessTask: p.capabilities.headlessTask,
       },
       isDefault: p.name === defaultProvider,
     }));
@@ -104,7 +104,7 @@ export class SandboxApplicationService {
     const provider = this.registry.get(providerName);
     // 04 §5 「创建前静态校验」: capability mismatches are rejected HERE — before the
     // project lookup, before a row is written, before anything is scheduled.
-    this.assertCapabilities(provider, input.require);
+    this.assertCapabilities(provider, input.require, input.headless ?? false);
     const imageRef = this.resolveImage(input.image);
 
     // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
@@ -181,10 +181,23 @@ export class SandboxApplicationService {
    *   ② `spawnTty` is required UNCONDITIONALLY (04 §2.5 spawnTty row): every agent
    *     runtime here needs a TTY for the terminal page and the runtime auth entry, so a
    *     provider that cannot spawn one can never host a sandbox on this platform.
+   *   ③ `headless: true` DERIVES a `headlessTask` requirement (04 §2.5): a headless
+   *     Task's entire execution is the job plane plus the file plane, so a provider
+   *     without them could accept the request and then have no way to run, stream or
+   *     collect anything. `headlessTask` is deliberately not in `require` — restating
+   *     an implication is the caller's job to get wrong, not the platform's.
    *
-   * Both throw BEFORE scheduling, so `provider.create` is never reached.
+   * ⚠️ THIS BRANCH SHIPS WITH THE TWO PLANES, NOT BEFORE THEM (04 §2.6). Landing it
+   * alone would turn today's working `headless:true` create into a 409, because the
+   * provision workflow's step ⑤ simply returns for headless sandboxes.
+   *
+   * All three throw BEFORE scheduling, so `provider.create` is never reached.
    */
-  private assertCapabilities(provider: SandboxProvider, require?: RequiredCapabilities): void {
+  private assertCapabilities(
+    provider: SandboxProvider,
+    require: RequiredCapabilities | undefined,
+    headless: boolean,
+  ): void {
     const caps = provider.capabilities;
     for (const [bit, demanded] of Object.entries(require ?? {})) {
       if (demanded === true && !caps[bit as keyof SandboxProviderCapabilities]) {
@@ -192,6 +205,13 @@ export class SandboxApplicationService {
           `provider '${provider.name}' does not support '${bit}', which this request requires`,
         );
       }
+    }
+    if (headless && !caps.headlessTask) {
+      throw this.unsupported(
+        `provider '${provider.name}' does not support 'headlessTask', which a headless ` +
+          'Task requires — it has no job plane to run the agent in and no file plane to ' +
+          'fetch its artifacts from (04 §2.6)',
+      );
     }
     if (!caps.spawnTty) {
       throw this.unsupported(
@@ -304,39 +324,8 @@ export class SandboxApplicationService {
     });
   }
 
-  /**
-   * Map contract errors to HTTP (04 §4 interface mapping).
-   *
-   * `INSTALL_FAILED` / `IMAGE_CONTRACT_VIOLATION` are included even though their MAIN
-   * exposure is not HTTP at all — both happen inside the provision workflow, long
-   * after the caller got its 202, and reach the user as `failed` + `failure_reason` +
-   * WS `sandbox.status_changed`. They are mapped anyway for two reasons 04 §4 states
-   * explicitly: a future synchronous entry point (a retry-install endpoint) must have a
-   * rule to follow, and 02 §6.2 forbids any error code without a mapping.
-   */
+  /** Map contract errors to HTTP through the ONE shared table (04 §4). */
   private mapProviderError(e: unknown): unknown {
-    if (e instanceof HttpException) return e;
-    if (e instanceof RuntimeInstallFailedError || e instanceof ImageContractViolationError) {
-      return new HttpException(
-        { code: e.code, message: e.message, retryable: e.retryable },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-    if (!(e instanceof SandboxProviderError)) return e;
-    const status = PROVIDER_HTTP[e.code] ?? HttpStatus.INTERNAL_SERVER_ERROR;
-    return new HttpException({ code: e.code, message: e.message, retryable: e.retryable }, status);
+    return mapProviderErrorToHttp(e);
   }
 }
-
-const PROVIDER_HTTP: Record<SandboxProviderErrorCode, number> = {
-  [SandboxProviderErrorCode.IMAGE_PULL_FAILED]: HttpStatus.BAD_GATEWAY,
-  [SandboxProviderErrorCode.PROVIDER_UNAVAILABLE]: HttpStatus.SERVICE_UNAVAILABLE,
-  [SandboxProviderErrorCode.RESOURCE_EXHAUSTED]: HttpStatus.TOO_MANY_REQUESTS,
-  [SandboxProviderErrorCode.NOT_FOUND]: HttpStatus.NOT_FOUND,
-  [SandboxProviderErrorCode.ALREADY_EXISTS]: HttpStatus.CONFLICT,
-  [SandboxProviderErrorCode.INVALID_STATE]: HttpStatus.CONFLICT,
-  [SandboxProviderErrorCode.PERMISSION_DENIED]: HttpStatus.FORBIDDEN,
-  [SandboxProviderErrorCode.TIMEOUT]: HttpStatus.GATEWAY_TIMEOUT,
-  [SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY]: HttpStatus.CONFLICT,
-  [SandboxProviderErrorCode.INTERNAL]: HttpStatus.INTERNAL_SERVER_ERROR,
-};

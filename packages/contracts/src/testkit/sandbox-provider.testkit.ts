@@ -7,7 +7,7 @@ import type {
 
 /**
  * Runtime manifest of `SandboxProviderCapabilities` (04 §2.5). Declared as a
- * `Record<keyof …, true>` on purpose: adding a 7th capability bit to the interface
+ * `Record<keyof …, true>` on purpose: adding an 8th capability bit to the interface
  * breaks THIS file at compile time, so the completeness check below can never
  * silently fall behind the contract.
  */
@@ -18,6 +18,7 @@ const CAPABILITY_MANIFEST: Record<keyof SandboxProviderCapabilities, true> = {
   pauseResume: true,
   snapshot: true,
   watchEvents: true,
+  headlessTask: true,
 };
 const CAPABILITY_KEYS = Object.keys(CAPABILITY_MANIFEST) as (keyof SandboxProviderCapabilities)[];
 
@@ -42,7 +43,7 @@ export interface SandboxProviderTestOptions {
  * double standard. Clause ids follow 04 §10.2.
  *
  * Clause split:
- *   - STATIC (always run, no host needed): SP-00, CAP-01 (structural half).
+ *   - STATIC (always run, no host needed): SP-00, CAP-01 (structural half), CAP-02.
  *   - LIVE   (need `opts.context` + a reachable host): SP-01.
  */
 export function runSandboxProviderContractTests(
@@ -69,6 +70,22 @@ export function runSandboxProviderContractTests(
           );
         }
       }
+    });
+
+    it('CAP-02 (MUST): every capability bit backed by a plane agrees with that plane', () => {
+      const provider = factory();
+      // A bit that lies in either direction is a real failure, not a nit: `true` with no
+      // plane makes the application layer call `undefined`, and `false` with a plane
+      // present hides a working capability from `GET /api/providers` — and therefore
+      // from the UI, which drives its controls off exactly these bits.
+      expect(
+        provider.jobs !== undefined,
+        '`capabilities.headlessTask` must equal the presence of `jobs`',
+      ).toBe(provider.capabilities.headlessTask);
+      expect(
+        provider.files !== undefined,
+        '`capabilities.headlessTask` must equal the presence of `files`',
+      ).toBe(provider.capabilities.headlessTask);
     });
 
     const context = opts.context;

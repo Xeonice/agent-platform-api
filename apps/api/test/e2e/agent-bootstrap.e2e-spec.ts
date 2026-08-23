@@ -51,6 +51,7 @@ const CAPS: SandboxProviderCapabilities = {
   pauseResume: false,
   snapshot: false,
   watchEvents: false,
+  headlessTask: false,
 };
 
 /** Records every exec the `starting` 段 runs, and can make `command -v tmux` miss. */

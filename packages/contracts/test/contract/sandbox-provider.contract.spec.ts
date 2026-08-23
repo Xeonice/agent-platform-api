@@ -22,6 +22,7 @@ const capabilities: SandboxProviderCapabilities = {
   pauseResume: false,
   snapshot: false,
   watchEvents: true,
+  headlessTask: false,
 };
 
 class FakeSandboxProvider implements SandboxProvider {

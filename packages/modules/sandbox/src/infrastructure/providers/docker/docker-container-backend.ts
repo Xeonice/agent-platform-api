@@ -2,6 +2,8 @@ import type Docker from 'dockerode';
 import {
   SandboxProviderError,
   SandboxProviderErrorCode,
+  type SandboxFiles,
+  type SandboxJobs,
   type SandboxProvider,
   type SandboxProviderCapabilities,
   type SandboxProviderContext,
@@ -13,11 +15,13 @@ import {
 } from '@platform/contracts';
 import { DockerExecAgentClient } from './docker-exec-agent.client';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
+import { AgentSandboxFiles, AgentSandboxJobs } from '../aio/agent-data-plane';
 import {
   assertAgentRejectsAnonymous,
   authHeader,
   createAgentAuthMaterial,
   withAgentAuthEnv,
+  withJobSurvivalEnv,
 } from '../aio/agent-auth';
 
 export interface DockerContainerConfig {
@@ -57,6 +61,15 @@ export interface DockerContainerConfig {
 export class DockerContainerBackend implements SandboxProvider {
   readonly name: string;
   readonly capabilities: SandboxProviderCapabilities;
+  /**
+   * The two optional planes (04 §2.6). Present iff `headlessTask` — CAP-02 pins the
+   * agreement in BOTH directions, so a bit that lies is a contract-test failure, not
+   * a nit: `true` with no plane makes the application layer call `undefined`, and
+   * `false` with a plane hides a working capability from `GET /api/providers` (and
+   * therefore from the UI, which drives its controls off exactly these bits).
+   */
+  readonly jobs?: SandboxJobs;
+  readonly files?: SandboxFiles;
 
   constructor(
     private readonly docker: Docker,
@@ -64,6 +77,20 @@ export class DockerContainerBackend implements SandboxProvider {
   ) {
     this.name = config.name;
     this.capabilities = config.capabilities;
+    if (config.capabilities.headlessTask) {
+      if (config.agentPort === undefined) {
+        // fail at construction, not at the first Task: both planes are the in-sandbox
+        // agent's HTTP API, so an agent-less image cannot honour the bit at all.
+        throw new SandboxProviderError(
+          SandboxProviderErrorCode.INVALID_STATE,
+          `provider '${config.name}' declares headlessTask but has no in-sandbox agent port`,
+        );
+      }
+      const clientFor = async (handle: SandboxHandle): Promise<AioSandboxAgentClient> =>
+        new AioSandboxAgentClient(await this.resolveAgentHttpBase(handle), handle.agentAuthToken);
+      this.jobs = new AgentSandboxJobs(this.name, clientFor);
+      this.files = new AgentSandboxFiles(this.name, clientFor);
+    }
   }
 
   private containerName(sandboxId: string): string {
@@ -80,7 +107,11 @@ export class DockerContainerBackend implements SandboxProvider {
       // the loopback-published port is an unauthenticated shell for every local
       // process on the host (ADR 安全姿态). Bare images have no agent to protect.
       const auth = agentPort !== undefined ? createAgentAuthMaterial(ctx.sandboxId) : undefined;
-      const env = auth ? withAgentAuthEnv(ctx.env, auth) : ctx.env;
+      const authed = auth ? withAgentAuthEnv(ctx.env, auth) : ctx.env;
+      // 生存义务 (04 §2.6 ★★★): a provider that advertises `headlessTask` must make the
+      // agent's session reaper and session cap outlast the longest job it accepts, and
+      // the agent reads both at BOOT — so this is the only moment it can be done.
+      const env = this.capabilities.headlessTask ? withJobSurvivalEnv(authed) : authed;
       const container = await this.docker.createContainer({
         name: this.containerName(ctx.sandboxId),
         Image: ctx.image.ref,

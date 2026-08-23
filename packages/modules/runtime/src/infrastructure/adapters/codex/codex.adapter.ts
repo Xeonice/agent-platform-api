@@ -12,6 +12,7 @@ import type {
   RuntimeAuthMethod,
   RuntimeCredential,
   RuntimeCredentialFile,
+  RuntimeEvent,
   RuntimeInstallPlan,
   RuntimeRefreshCapability,
   RuntimeTaskSpec,
@@ -32,8 +33,10 @@ import {
   codexLoginSucceeded,
   parseCodexAuthJson,
   parseCodexDeviceChallenge,
+  parseCodexTaskEvents,
   sanitizeCodexAuthJson,
 } from './codex.output-parser';
+import { assertSessionRef } from '../session-ref.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
@@ -47,6 +50,13 @@ const CODEX_BINARY = 'codex';
  * verified live in S5.
  */
 const SANDBOX_OFF_ARGS = ['-s', 'danger-full-access'];
+/**
+ * The same capability for `codex exec resume`, which does NOT accept `-s/--sandbox`
+ * (04 §3 ★4, measured). The value keeps its TOML quotes because argv reaches the CLI
+ * WITHOUT shell processing — the provider quotes each element for transport, so what
+ * codex sees is the literal `sandbox_mode="danger-full-access"`, a valid TOML string.
+ */
+const RESUME_SANDBOX_OFF_ARGS = ['-c', 'sandbox_mode="danger-full-access"'];
 /**
  * `install()` takes no image (04 §3), while `getInstallPlan` is keyed on one. The
  * install COMMANDS are image-independent for an npm-distributed CLI — only the
@@ -306,13 +316,48 @@ export class CodexAdapter implements RuntimeAdapter {
    * granting the container `SYS_ADMIN` — weakening the layer that actually works.
    */
   buildStartCommand(task: RuntimeTaskSpec): SandboxCommand {
+    const resume = task.resumeFrom !== undefined && task.resumeFrom !== '';
     const cmd = [CODEX_BINARY];
     if (task.headless) cmd.push('exec');
-    cmd.push(...SANDBOX_OFF_ARGS);
+    // ⚠️ RESUME IS A DIFFERENT SUBCOMMAND WITH A DIFFERENT OPTION SET, not the start
+    // argv with a flag added (04 §3 ★4, measured): `codex exec resume` has neither
+    // `-s/--sandbox` nor `-C/--cd`, so appending `-s danger-full-access` dies with
+    // `unexpected argument '-s' found`. The equivalent goes through `-c`. Assume
+    // nothing carries over between the two subcommands.
+    if (resume) cmd.push('resume', ...RESUME_SANDBOX_OFF_ARGS);
+    else cmd.push(...SANDBOX_OFF_ARGS);
     if (task.headless && task.outputFormat === 'json-stream') cmd.push('--json');
     if (task.extraArgs) cmd.push(...task.extraArgs);
+    // ⚠️ `--` CLOSES THE OPTION LIST BEFORE THE FIRST POSITIONAL, AND IT IS A SECURITY
+    // BOUNDARY. Both values after it are caller-supplied; without the terminator clap
+    // reads any leading `-` as an option, which is a total bypass of the `extraArgs`
+    // whitelist. The concrete case: `resumeFrom = "-cmodel_provider.base_url=http://…"`
+    // is accepted as `-c` config override, and codex's credentials live in
+    // `~/.codex/auth.json` — i.e. the injected key is sent to an attacker's endpoint.
+    // (The format check below refuses that value too; both layers stay.)
+    if (resume || (task.prompt !== undefined && task.prompt !== '')) cmd.push('--');
+    // the reference is a POSITIONAL of `resume`, so it precedes the prompt.
+    if (resume) cmd.push(assertSessionRef(task.resumeFrom as string));
     if (task.prompt !== undefined && task.prompt !== '') cmd.push(task.prompt);
+    // `resume` also drops `-C/--cd`; `cwd` still travels because the platform sets the
+    // working directory through the sandbox job, not through a codex flag.
     return { cmd, cwd: task.workdir };
+  }
+
+  /**
+   * Structured stdout → `RuntimeEvent[]` (04 §3 `parseOutput`).
+   *
+   * ⚠️ IT IS FED `JobChunk.stdout` AND NEVER stderr (04 §2.6 裁决 3): merging the two
+   * turns a measured 14/14 clean-JSONL run into 14 parseable + 8 garbage lines, which
+   * is precisely the "write a regex and guess" fragility RA-04 names.
+   *
+   * It also relies on the job plane handing over WHOLE LINES — the provider keeps a
+   * half line behind its cursor for exactly this reason — so no state is carried
+   * between calls and the same bytes replayed later produce the same events, which is
+   * what makes `fromSeq` replay off the platform's own log dense and stable.
+   */
+  parseOutput(chunk: Buffer): RuntimeEvent[] {
+    return parseCodexTaskEvents(chunk.toString('utf8'));
   }
 
   /** A plain interactive codex session — same inner-sandbox switch, no instruction. */
