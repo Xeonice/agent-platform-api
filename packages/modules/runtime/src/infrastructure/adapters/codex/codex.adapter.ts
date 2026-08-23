@@ -12,6 +12,7 @@ import type {
   RuntimeAuthMethod,
   RuntimeCredential,
   RuntimeCredentialFile,
+  RuntimeStartupSpec,
   RuntimeEvent,
   RuntimeInstallPlan,
   RuntimeRefreshCapability,
@@ -80,6 +81,44 @@ const SKIP_GIT_REPO_CHECK = '--skip-git-repo-check';
  * 会绕过平台对版本的掌控。与 `-c` 同族,两条路径都能用。
  */
 const NO_UPDATE_CHECK_ARGS = ['-c', 'check_for_update_on_startup=false'];
+/**
+ * 第三道闸门:首次在某目录里启动,codex 会停在 "Do you trust the contents of this
+ * directory?" 等人按键——**没凭证也一样停**,于是 agent 连"我没登录"都报不出来,
+ * 界面上只是一个不动的终端。
+ *
+ * 实测(codex-cli 0.139.0)确认这道闸门**只认配置文件**:
+ *   · `-c projects."<dir>".trust_level="trusted"` —— 无效;
+ *   · `--dangerously-bypass-approvals-and-sandbox` —— 也无效;
+ *   · 手工答一次 Yes 之后,codex 往 `$CODEX_HOME/config.toml` 写的正是下面这两行,
+ *     预置它再起就直接进 TUI。
+ *
+ * ── 替用户答"信任"安全吗:实测过,不是推的 ──────────────────────────────────
+ * 真正值得担心的是恶意仓库借**项目级** `.codex/config.toml` 把模型端点改道,
+ * 把平台注入的凭证送去攻击者那里(本文件 `--` 那段注释防的就是同一类攻击)。
+ * 实测:在工作区放一份带 `openai_base_url` + `model_providers` 的项目级配置,
+ * codex 自己拒绝加载并打印
+ *   `warning: Ignored unsupported project-local config keys … openai_base_url,
+ *    model_providers. If you want these settings to apply, manually set them in
+ *    your user-level config.toml.`
+ * 请求仍然发往 `wss://api.openai.com`。**这条外泄路径由 codex 自己关掉了。**
+ * 残余的 hooks / exec policies 不给 agent 任何它在容器里没有的能力
+ * (`-s danger-full-access` 已经全开,容器本身才是隔离边界)。
+ */
+const TRUST_SECTION = (workdir: string): string => `[projects."${workdir}"]`;
+const TRUST_BLOCK = (workdir: string): string =>
+  `\n${TRUST_SECTION(workdir)}\ntrust_level = "trusted"\n`;
+const CODEX_CONFIG_PATH = '~/.codex/config.toml';
+/**
+ * 幂等且**不覆盖**:配置文件可能已有用户自己的设置(或上一轮 provision 落的同一段)。
+ * 命中则原样跳过——但仍然把 stdin 读干净,否则写端拿 EPIPE。
+ */
+const SEED_TRUST_SCRIPT = [
+  'set -e',
+  'f="$1"',
+  'mkdir -p "$(dirname "$f")"',
+  'if grep -qF "$2" "$f" 2>/dev/null; then cat >/dev/null; exit 0; fi',
+  'cat >> "$f"',
+].join('\n');
 /**
  * `install()` takes no image (04 §3), while `getInstallPlan` is keyed on one. The
  * install COMMANDS are image-independent for an npm-distributed CLI — only the
@@ -272,6 +311,23 @@ export class CodexAdapter implements RuntimeAdapter {
    * the real refresh token is not something this method may forget to strip — it is
    * something this method cannot see (05 §4.3 裁决 D-18 ①).
    */
+  /**
+   * 启动前把"这个工作目录是可信的"写进 codex 的用户级配置(见 `TRUST_BLOCK` 上方
+   * 那段实测记录)。每次 provision 都跑(含重启),故必须幂等——脚本里 `grep -qF` 命中
+   * 就原样跳过。
+   */
+  async seedStartupFiles(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void> {
+    const home = await this.probeHome(exec);
+    const absolutePath = `${home}/${CODEX_CONFIG_PATH.slice(2)}`;
+    const r = await exec(
+      ['sh', '-c', SEED_TRUST_SCRIPT, 'codex-seed', absolutePath, TRUST_SECTION(spec.workdir)],
+      { stdin: TRUST_BLOCK(spec.workdir), timeoutMs: WRITE_FILE_TIMEOUT_MS },
+    );
+    if (r.exitCode !== 0) {
+      throw new Error(`seeding codex config.toml failed (exit ${r.exitCode})`);
+    }
+  }
+
   async injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void> {
     // ① default: 0600 credential files, content written out VERBATIM.
     if (cred.credentialFiles.length > 0) {
