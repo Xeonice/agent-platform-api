@@ -7,6 +7,7 @@
 //
 // 修法不是"跑测试前记得关 demo"（那是纪律，靠不住），而是把"孤儿"收窄到**本实例
 // 管的容器** —— 语义上本来也该如此：一个实例凭什么去删另一个实例的东西。
+import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   platformInstanceId,
@@ -55,6 +56,19 @@ describe('platformInstanceId — 身份取自"哪个库在裁决孤儿"', () => 
     process.env['DATABASE_URL'] = '/srv/a/platform.db';
     delete process.env['DATA_ROOT'];
     expect(platformInstanceId()).toBe(viaRoot);
+  });
+
+  it('⚠️ `:memory:` 不能退化成全局常量 —— 19 个 e2e 文件把它当标准配置', () => {
+    // 内存库没有"位置"可言：按字符串哈希算，所有用它的进程会得到**同一个**指纹，
+    // 于是"按实例过滤"形同虚设。两次独立的 `pnpm test:e2e` 共享同一个 docker daemon
+    // 时会互相把对方正在跑的容器当孤儿删掉 —— 正是本模块要修的那类事故。
+    process.env['DATABASE_URL'] = ':memory:';
+    const id = platformInstanceId();
+    // 同进程内必须恒定：打标签与过滤用的得是同一个值。
+    expect(platformInstanceId()).toBe(id);
+    // 而它不能等于"把 ':memory:' 这个字符串直接哈希"的结果——那正是退化本身。
+    const naive = createHash('sha256').update(':memory:').digest('hex').slice(0, 16);
+    expect(id).not.toBe(naive);
   });
 
   it('标签值短且只做相等比较（16 位十六进制）', () => {

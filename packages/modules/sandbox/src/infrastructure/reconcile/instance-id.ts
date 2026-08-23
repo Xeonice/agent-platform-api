@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 
 /** 容器上标记"我属于哪个平台实例"的标签名。 */
@@ -35,8 +35,28 @@ export function boxliteNamePrefix(): string {
  * (重启前后、多进程),它们必须互认;库不同 = 两套账,谁也不该管谁。
  * 取 sha256 前 16 位:标签值要短、只做相等比较,不需要可逆。
  */
+/**
+ * 内存库没有"位置"可言,所有用它的进程算出来的指纹会**完全相同** —— 那不是"每个
+ * 实例不同",是"过滤形同虚设"。而 `:memory:` 不是边缘取值:**19 个 e2e 文件把它当
+ * 标准配置**。两次独立的 `pnpm test:e2e` 共享同一个 docker daemon 时(两个 CI job、
+ * 两个开发者用同一个远程 daemon),指纹相同 ⇒ 互相把对方正在跑的容器当孤儿删掉 ——
+ * 正是本模块要修的那类事故,只是触发条件从"没有实例过滤"变成了"用内存库时过滤
+ * 不起作用"。
+ *
+ * 所以内存库走**每进程一个随机 nonce**:同进程内恒定(容器打的标签与 reconciler
+ * 过滤用的必须是同一个值),跨进程必然不同(谁也管不着谁)。落库的实例不受影响 ——
+ * 它们必须靠库的位置互认(重启前后、多进程)。
+ */
+const IN_MEMORY_DB = ':memory:';
+let inMemoryNonce: string | null = null;
+
 export function platformInstanceId(): string {
   const dataRoot = process.env.DATA_ROOT ?? resolve(process.cwd(), 'data');
   const db = process.env.DATABASE_URL ?? resolve(dataRoot, 'platform.db');
+  if (db === IN_MEMORY_DB) {
+    // 惰性生成并缓存：同一个进程内必须恒定，否则打标签与过滤用的会是两个值。
+    inMemoryNonce ??= randomBytes(16).toString('hex');
+    return createHash('sha256').update(inMemoryNonce).digest('hex').slice(0, 16);
+  }
   return createHash('sha256').update(db).digest('hex').slice(0, 16);
 }
