@@ -99,6 +99,34 @@ describe('e2e HTTP hygiene (an ephemeral port must not be shared by accident)', 
   });
 });
 
+describe('e2e validation hygiene (tests must boot the pipe production boots)', () => {
+  it('no spec constructs `nestjs-zod`’s bare ZodValidationPipe', () => {
+    // WHY THIS IS MECHANICAL RATHER THAN TRUSTED: this pipe used to be `new`-ed 17
+    // times — `main.ts` once, and 16 more times by e2e files each booting their own
+    // app. When the platform swapped it for one that emits a real `ErrorEnvelope`
+    // (04 §4: `code` / `message` / `retryable` / `sideEffectFree`), changing only
+    // `main.ts` would have left PRODUCTION on the envelope pipe and every e2e on the
+    // bare one — i.e. the suite would keep passing against a pipe nobody ships, and
+    // no test could ever notice the envelope regressing.
+    //
+    // That is not a thing to remember; it is a thing to make impossible. Every app —
+    // production and test — goes through `platformValidationPipe()`.
+    const offenders = e2eSources()
+      .filter(({ text }) =>
+        /\bnew\s+ZodValidationPipe\b|from\s+'nestjs-zod'/.test(stripComments(text)),
+      )
+      .map(({ file }) => file);
+
+    expect(
+      offenders,
+      `${offenders.join(', ')} build a validation pipe out of nestjs-zod directly. Use ` +
+        '`platformValidationPipe()` from ../../src/bootstrap/validation.pipe — it is the ' +
+        'pipe `main.ts` installs, and the only one that answers a DTO violation with an ' +
+        'ErrorEnvelope instead of `{statusCode, message:"Validation failed", errors}`.',
+    ).toEqual([]);
+  });
+});
+
 /** Drop line/block comments so prose ABOUT the rule never trips the rule. */
 function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');

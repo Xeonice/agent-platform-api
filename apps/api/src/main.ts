@@ -1,9 +1,9 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import { setupSwagger } from './bootstrap/swagger.setup';
+import { platformValidationPipe } from './bootstrap/validation.pipe';
 import { setupWebsockets } from './bootstrap/websocket.setup';
 import { env, isExposedBind } from './platform/config/env';
 
@@ -16,8 +16,9 @@ async function bootstrap(): Promise<void> {
 
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).
   app.setGlobalPrefix('api');
-  // zod single source validation for every createZodDto DTO (02 §3).
-  app.useGlobalPipes(new ZodValidationPipe());
+  // zod single source validation for every createZodDto DTO (02 §3); failures come
+  // out as a real ErrorEnvelope (04 §4) — see bootstrap/validation.pipe.ts.
+  app.useGlobalPipes(platformValidationPipe());
 
   setupWebsockets(app);
   setupSwagger(app);

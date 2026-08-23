@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 
 /**
  * Project context REST e2e (docs/backend/03 §7, shared/10 §6). Empty projects are
@@ -60,7 +60,7 @@ beforeAll(async () => {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
 }, 30_000);

@@ -2,10 +2,10 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
 import { SandboxMcpTools } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
@@ -27,7 +27,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
 });

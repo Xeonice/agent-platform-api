@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 
 /**
  * S3 ACCEPTANCE (docs/backend/25 §4.4): a PRIVATE git repo is cloned using a REAL
@@ -75,7 +75,7 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
     app.setGlobalPrefix('api');
-    app.useGlobalPipes(new ZodValidationPipe());
+    app.useGlobalPipes(platformValidationPipe());
     await app.init();
     await app.listen(0);
   }, 60_000);

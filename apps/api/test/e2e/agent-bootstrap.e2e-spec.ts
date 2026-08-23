@@ -25,7 +25,7 @@ import type {
 import { AppModule } from '../../src/app.module';
 import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
-import { ZodValidationPipe } from 'nestjs-zod';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import {
   EchoProcessStream,
   FakeExecProcessStream,
@@ -124,7 +124,7 @@ async function boot(hasTmux: boolean): Promise<void> {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   setupWebsockets(app);
   await app.init();
   await app.listen(0);

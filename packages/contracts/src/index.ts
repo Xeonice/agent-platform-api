@@ -6,6 +6,7 @@ export * from './schemas/credential.schema';
 export * from './schemas/runtime.schema';
 export * from './schemas/system.schema';
 export * from './errors';
+export * from './validation-envelope';
 export * from './registry.tokens';
 export * from './reserved-env';
 export * from './sandbox-provider.contract';

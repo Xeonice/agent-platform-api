@@ -4,9 +4,9 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
 /**
@@ -32,7 +32,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
 });
@@ -72,12 +72,29 @@ describe('ProjectDto.taskCount', () => {
 
     // destroying a sandbox drops the count (destroyed sandboxes are not live).
     // wait until it is running so destroy walks a legal transition path.
+    //
+    // ⚠️ THE WAIT MUST FAIL LOUDLY WHEN IT EXPIRES. It used to `break` on the deadline
+    // and fall through, which made the timeout INVISIBLE: `DELETE` is only legal from
+    // running/idle/starting/stopping (23 I-SBX-1), so from `creating` the aggregate
+    // refuses `creating -> destroying`, the service marks the sandbox `failed` and
+    // rethrows — and the next line fails as `expected 204, got 500`. That reads as a
+    // teardown bug, names nothing, and reproduces only on a loaded machine. Verified by
+    // driving the transition directly: `Illegal sandbox transition: creating ->
+    // destroying`.
     const deadline = Date.now() + 3000;
+    let status: string | undefined;
     while (Date.now() < deadline) {
       const s = await request(app.getHttpServer()).get(`/api/sandboxes/${sandboxIds[0]}`);
-      if (s.body?.status === 'running') break;
+      status = s.body?.status as string | undefined;
+      if (status === 'running') break;
       await new Promise((r) => setTimeout(r, 10));
     }
+    expect(
+      status,
+      'sandbox never reached `running` within 3s — DELETE below is only ' +
+        'legal from running/idle/starting/stopping, so everything after this point would ' +
+        'fail as an unrelated 500',
+    ).toBe('running');
     await request(app.getHttpServer())
       .delete(`/api/sandboxes/${sandboxIds[0]}`)
       .send({})

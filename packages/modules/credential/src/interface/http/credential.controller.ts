@@ -20,7 +20,6 @@ import {
   ApiTags,
   getSchemaPath,
 } from '@nestjs/swagger';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { GitTestRequestSchema } from '@platform/contracts';
 import type {
   GitTestRequestInput,
@@ -37,6 +36,7 @@ import {
   StoredGitTestDto,
   StoreGitCredentialResponseDto,
 } from './dto/credential.dto';
+import { ZodBodyPipe } from './zod-body.pipe';
 
 /**
  * REST protocol shell for Git credentials (02 §5.1, 27 §5). Git credentials are
@@ -95,7 +95,7 @@ export class CredentialController {
   })
   @ApiOkResponse({ type: GitTestResultResponseDto })
   test(
-    @Body(new ZodValidationPipe(GitTestRequestSchema)) dto: GitTestRequestInput,
+    @Body(new ZodBodyPipe(GitTestRequestSchema)) dto: GitTestRequestInput,
   ): Promise<GitTestResult> {
     return this.app.testGitCredential(dto);
   }

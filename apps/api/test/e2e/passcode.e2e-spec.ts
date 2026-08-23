@@ -2,10 +2,10 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from '../../src/app.module';
 import { expectPasscodeEnabled, useEnv } from './_env';
 import { PasscodeService } from '../../src/platform/access-passcode/passcode.service';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 
 /**
  * Access passcode Guard enforcement e2e (docs/shared/11 §3.1, MVP). Proves the
@@ -23,7 +23,7 @@ beforeAll(async () => {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
   // fail HERE, naming the cause, rather than 20 lines later as `expected 200 to be 401`
@@ -43,7 +43,7 @@ async function buildIsolatedApp(): Promise<INestApplication> {
   const ref = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const isolated = ref.createNestApplication();
   isolated.setGlobalPrefix('api');
-  isolated.useGlobalPipes(new ZodValidationPipe());
+  isolated.useGlobalPipes(platformValidationPipe());
   await isolated.init();
   await isolated.listen(0);
   return isolated;
