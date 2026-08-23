@@ -23,6 +23,8 @@ export interface HelperProcessStream {
   resize(cols: number, rows: number): void;
   onExit(cb: (code: number | null) => void): void;
   kill(signal?: NodeJS.Signals): Promise<void>;
+  /** 与 contracts 侧同义:松手但不触碰对面进程(结构孪生必须同步,否则赋值处当场编译红)。 */
+  detach(): void;
 }
 
 export interface AuthHelperSession {

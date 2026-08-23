@@ -139,6 +139,28 @@ export interface ProcessStream {
   resize(cols: number, rows: number): void;
   onExit(cb: (code: number | null) => void): void;
   kill(signal?: NodeJS.Signals): Promise<void>;
+  /**
+   * Let go of this stream WITHOUT touching the process on the other side: close the
+   * transport, drop the callbacks, leave whatever is running exactly as it is.
+   *
+   * ── Why this cannot just be `kill()` ─────────────────────────────────────────────
+   * The interactive terminal is a `tmux attach` onto a session that must SURVIVE the
+   * browser going away — that is the entire reason tmux is a hard image requirement
+   * (`IMAGE_CONTRACT_VIOLATION`: without it a platform restart loses the running agent
+   * session). 06 §6.6/§8.4 spell out the rule: "WS 断开 = detach", and what gets killed
+   * is "只是网关侧的 `tmux attach` 进程, agent 会话不受影响".
+   *
+   * `kill()` cannot express that, because for a PTY the only real signal channel IS the
+   * pty: it writes ETX + `exit\n` INTO the terminal (see `AioWsProcessStream.kill`).
+   * Those bytes land in the tmux pane — i.e. they SIGINT the agent the user is running
+   * and then try to end its shell. Calling `kill()` on disconnect therefore does the
+   * exact opposite of detaching, and it does it every time a tab closes or reloads.
+   *
+   * ⚠️ Implementations MUST NOT write anything to the process here. If a stream has no
+   * process of its own to let go of (a one-shot exec that already finished), detaching
+   * is just closing the transport.
+   */
+  detach(): void;
 }
 
 /**

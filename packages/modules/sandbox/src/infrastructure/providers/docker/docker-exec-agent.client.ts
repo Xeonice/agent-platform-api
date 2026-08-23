@@ -95,4 +95,9 @@ class DockerExecProcessStream implements ProcessStream {
     // exec has no direct kill; end the attach stream (session detach, 06 §6)
     this.stream.end();
   }
+
+  /** 这条路本来就只有"结束附着"这一个动作,不往对面写任何字节 —— 与 kill 同形。 */
+  detach(): void {
+    this.stream.end();
+  }
 }

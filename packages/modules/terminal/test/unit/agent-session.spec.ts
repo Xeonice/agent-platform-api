@@ -94,6 +94,7 @@ function harness(rules: ExecRule[] = []) {
         onExit: () => {},
         write: () => {},
         resize: () => {},
+        detach: () => {},
         kill: async () => {},
       };
     },
