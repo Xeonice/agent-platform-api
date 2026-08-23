@@ -36,13 +36,34 @@ export async function sandboxShell(
     collect(await provider.spawn(handle, { cmd: ['sh', '-c', script], tty: false }));
 }
 
-/** Collect a one-shot exec stream's output to EOF. */
+/**
+ * Collect a one-shot exec stream's output to EOF.
+ *
+ * ⚠️ AN EMPTY RESULT IS REPORTED AS A DIAGNOSTIC, NOT AS `''` — INSTRUMENTATION FOR AN
+ * OPEN QUESTION (the `boxlite-microvm` intermittent, whose symptom is that a `cat`
+ * "既不报错也没内容"). Three different outcomes reach this function as an empty string
+ * and `''` cannot tell them apart:
+ *   ① the file really is empty / absent — but then `cat`'s stderr would be here, since
+ *     the agent client returns `stdout + stderr` concatenated, so this is the case an
+ *     empty result actually ARGUES AGAINST;
+ *   ② the agent answered `{success:true}` with no `data` at all ⇒ exitCode `null`;
+ *   ③ the exec hit its hard timeout ⇒ exitCode 124.
+ * This helper used to discard the exit code entirely, so every one of them rendered as
+ * `''` and the failure message carried no information about which had happened — which
+ * is precisely why that intermittent still has no root cause.
+ *
+ * Appending only on EMPTY output cannot affect any assertion: every caller matches for
+ * CONTENT (`toContain` / `toMatch`), and an empty string satisfies none of those, so a
+ * green can never become red nor a red green. Only the failure message changes.
+ */
 function collect(stream: ProcessStream): Promise<string> {
   return new Promise((resolve) => {
     let out = '';
     stream.onData((c) => {
       out += c.toString('utf8');
     });
-    stream.onExit(() => resolve(out));
+    stream.onExit((code) =>
+      resolve(out === '' ? `[exec produced no output; exitCode=${code ?? 'null'}]` : out),
+    );
   });
 }

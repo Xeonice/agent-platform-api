@@ -161,6 +161,19 @@ export class FakeFilePlane implements SandboxFiles {
 
 /** A ProcessStream that echoes stdin to stdout — lets the terminal e2e assert a round-trip. */
 export class EchoProcessStream implements ProcessStream {
+  /**
+   * 断开 = detach：替身要照搬真实语义——**不往对面写任何东西**。
+   *
+   * ⚠️ 这个方法不是形式主义。`ProcessStream.detach()` 是**必选**的，而 `typecheck`
+   * 跑的是 `tsc -b`，三个 tsconfig 的 `include` 只覆盖 src ——**测试文件从来
+   * 不在类型检查范围内**，vitest 又走 SWC 不做类型检查。于是替身漏实现在两道门禁下
+   * 都是隐形的：网关 `handleDisconnect` 无条件调 `detach()`，e2e 里真的抛
+   * `TypeError`，被 socket.io 的 disconnect 回调吞掉，测试**照样全绿**。
+   */
+  detach(): void {
+    /* 没有真实传输可关；关键是它存在、且一个字节都不写 */
+  }
+
   readonly ref = 'echo-ref-1';
   private readonly dataCbs: ((c: Buffer) => void)[] = [];
   private readonly exitCbs: ((c: number | null) => void)[] = [];
@@ -190,6 +203,8 @@ export class EchoProcessStream implements ProcessStream {
  */
 export class FakeExecProcessStream implements ProcessStream {
   readonly ref = 'fake-exec-ref';
+  /** 一次性 exec：没有可保活的会话，松手即可。 */
+  detach(): void {}
   constructor(
     private readonly output: string = '',
     private readonly code: number = 0,

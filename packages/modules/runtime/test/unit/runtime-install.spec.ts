@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Clock, EventBus, IdGenerator, Tx, UnitOfWork } from '@platform/shared-kernel';
-import { RuntimeInstallFailedError } from '@platform/contracts';
+import { RuntimeInstallFailedError, UnknownRuntimeError } from '@platform/contracts';
 import type {
   ResolvedImageSpec,
   RuntimeAdapter,
@@ -241,10 +241,25 @@ describe('ensureRuntimeInstalled — the three steps (03 §4.3 ③)', () => {
     expect(await h.repo.listBySandbox('s1')).toHaveLength(1);
   });
 
-  it('an unknown runtime is an INSTALL_FAILED, not a crash', async () => {
+  /**
+   * ⚠️ THIS TEST USED TO ASSERT `INSTALL_FAILED`, AND THAT WAS THE BUG IT PINNED IN
+   * PLACE (14 §10 / 04 §4). An id with no adapter is not a failed install: nothing was
+   * installed and nothing could be, so the platform was telling the user 「运行时 CLI
+   * 安装失败(该镜像未预装,现装未成功)」 about a runtime that has no CLI to install —
+   * and, because `INSTALL_FAILED` is retryable, offering a retry that cannot ever work.
+   */
+  it('an unknown runtime is UNKNOWN_RUNTIME — its own code, not INSTALL_FAILED', async () => {
     const h = harness(new StubAdapter('stub', plan()));
-    await expect(
-      h.service.ensureInstalled({ sandboxId: 's1', runtimeId: 'nope', image: IMAGE, exec: h.exec }),
-    ).rejects.toBeInstanceOf(RuntimeInstallFailedError);
+    const call = h.service.ensureInstalled({
+      sandboxId: 's1',
+      runtimeId: 'nope',
+      image: IMAGE,
+      exec: h.exec,
+    });
+    await expect(call).rejects.toBeInstanceOf(UnknownRuntimeError);
+    await expect(call).rejects.toMatchObject({ code: 'UNKNOWN_RUNTIME', retryable: false });
+    // …and it is still not a crash: it carries a code, so `failureOf` can file it
+    // (02 §6.2 forbids a code-less failure).
+    await expect(call).rejects.not.toBeInstanceOf(RuntimeInstallFailedError);
   });
 });

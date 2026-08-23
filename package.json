@@ -24,10 +24,10 @@
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
     "test:contract": "vitest run --project contract",
-    "start": "node apps/api/dist/main.js",
-    "start:dev": "tsc -b && node apps/api/dist/main.js",
+    "start": "node --env-file-if-exists=.env apps/api/dist/main.js",
+    "start:dev": "tsc -b && node --env-file-if-exists=.env apps/api/dist/main.js",
     "db:generate": "apps/api/node_modules/.bin/drizzle-kit generate",
-    "db:migrate": "node apps/api/dist/platform/persistence/migrate.js",
+    "db:migrate": "node --env-file-if-exists=.env apps/api/dist/platform/persistence/migrate.js",
     "openapi:emit": "node apps/api/dist/tooling/emit-openapi.js"
   },
   "devDependencies": {

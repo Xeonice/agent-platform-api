@@ -1,0 +1,11 @@
+# 构建上下文只需要源码 + 锁文件。以下几类要么体积巨大、要么会污染镜像:
+node_modules/          # 宿主平台编译的原生模块(better-sqlite3),进镜像必然 ABI 不匹配
+**/node_modules/
+dist/                  # 镜像内自己 tsc -b,不带宿主产物
+**/dist/
+**/*.tsbuildinfo
+data/                  # 本机 DATA_ROOT:sqlite / 主密钥 / 工作区,绝不能进镜像
+.env                   # 本地配置(含口令),绝不能进镜像
+.git/
+test-results/
+coverage/

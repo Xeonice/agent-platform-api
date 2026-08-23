@@ -174,6 +174,23 @@ export const WS_PROTOCOL_CANONICAL =
 export const WS_SCHEMA_HASH = 'sb-terminal-v1';
 
 /**
+ * `terminal.server:exit{code}` 里表示"**平台没能附着上**"的哨兵码。
+ *
+ * ⚠️ 为什么不能复用 `-1`:`-1` 已经有确切含义 —— `ProcessStream.onExit` 收到 `null`
+ * (进程被信号杀死、退出码未知)时网关就发 `-1`。一个被 OOM kill 的 agent 与"整个沙箱
+ * 已经不在了"会变成**字节级相同**的一帧,而这两件事对用户的下一步完全不同:
+ * 前者等结果/看日志,后者只能重新发起任务。
+ *
+ * 它落在既有帧的既有字段里(`code` 本来就是 number),所以**不动 `WS_PROTOCOL_CANONICAL`、
+ * 不用 bump `WS_SCHEMA_HASH`** —— 老客户端把它当一个未知退出码显示,不会崩。
+ *
+ * ⚠️ 只用于**不可重试**的附着失败。可重试的(`PROVIDER_UNAVAILABLE` 这类,
+ * `SandboxProviderError.retryable` 自己会说)**一帧都不发**,让客户端的退避重连
+ * 照旧自愈 —— 发了就等于把瞬时故障判成永久故障。
+ */
+export const TERMINAL_EXIT_ATTACH_FAILED = -2;
+
+/**
  * The `/tasks` handshake's X-Schema-Hash. A SEPARATE pinned literal from
  * `WS_SCHEMA_HASH` because the two channels version independently: a `/tasks` frame
  * change must not invalidate every open terminal, and vice versa. Same discipline —
@@ -197,3 +214,43 @@ export const WS_SCHEMA_HASH = 'sb-terminal-v1';
 export const WS_TASKS_SCHEMA_HASH = 'sb-tasks-v1';
 
 export const X_SCHEMA_HASH_HEADER = 'x-schema-hash';
+
+/**
+ * How a socket.io handshake is REFUSED — the same three codes on all three namespaces.
+ *
+ * ⚠️ THE REFUSAL IS PART OF THE WIRE CONTRACT, which is why it lives here and not in
+ * one gateway. It is delivered as `connect_error` from socket.io MIDDLEWARE, with the
+ * code LEADING the message (`UNAUTHORIZED: …`) and repeated on `err.data.code`; the
+ * frontend's shared matcher (`services/ws/socketAuth.ts`) reads exactly those two, in
+ * that order, for all three channels.
+ *
+ * ⚠️ ONLY `UNAUTHORIZED` MAY LOOK LIKE AN AUTH FAILURE. That matcher's last resort is a
+ * prose regex — `/unauthor|forbidden|passcode|401|403/i` — so none of those words may
+ * appear in a `SCHEMA_MISMATCH` or `SANDBOX_REQUIRED` message. Being mistaken for one
+ * pops the unlock dialog, and for a protocol-version drift (or a missing query
+ * parameter) that sends the user to do the one thing that cannot possibly help.
+ *
+ * ⚠️ AND `SANDBOX_REQUIRED` IS DELIBERATELY NOT SPELLED `UNAUTHORIZED`. A handshake that
+ * omits `sandboxId` presented a perfectly good passcode; what is missing is ADDRESSING.
+ * Reusing `UNAUTHORIZED` would misname the fault AND route the user to a dialog that
+ * cannot add a query parameter the client itself failed to send.
+ */
+export type WsHandshakeRejection = 'UNAUTHORIZED' | 'SCHEMA_MISMATCH' | 'SANDBOX_REQUIRED';
+
+/**
+ * Build the `Error` a gateway hands to socket.io's `next(err)`.
+ *
+ * `err.data` is the structured half: socket.io copies it to the client verbatim, so a
+ * client never has to parse prose. The message still LEADS with the code because a
+ * client that only has the message must still be able to tell the three apart.
+ */
+export function wsHandshakeError(
+  code: WsHandshakeRejection,
+  detail: string,
+): Error & { data: { code: WsHandshakeRejection } } {
+  const err = new Error(`${code}: ${detail}`) as Error & {
+    data: { code: WsHandshakeRejection };
+  };
+  err.data = { code };
+  return err;
+}

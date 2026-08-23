@@ -6,7 +6,6 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import { Inject, Module } from '@nestjs/common';
 import type { INestApplication, OnModuleInit } from '@nestjs/common';
-import { ZodValidationPipe } from 'nestjs-zod';
 import {
   PROJECT_FACADE,
   RUNTIME_ADAPTER_REGISTRY,
@@ -31,6 +30,7 @@ import type {
   SandboxRuntimeStatus,
 } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
 import { useEnv } from './_env';
 import { FakeExecProcessStream, fakeProjectFacade, fakeWorkspace } from './_fakes';
 
@@ -184,7 +184,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ZodValidationPipe());
+  app.useGlobalPipes(platformValidationPipe());
   await app.init();
   await app.listen(0);
 });

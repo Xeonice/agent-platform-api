@@ -11,10 +11,25 @@ services:
     environment:
       HOST: 0.0.0.0 # inside the container; host-side exposure is gated by the ports bind above
       PORT: '3000'
-      DATA_ROOT: /data # host path MUST equal container path under DooD (11 §1.2)
-      DATABASE_URL: /data/platform.db
+      # ⚠️ 没有这一行,`createDockerClient()` 会回落到 `/var/run/docker.sock` ——
+      # 而那个 socket **没有**挂进 api 容器,于是下面那个 docker-socket-proxy 白挂了:
+      # api 根本连不上 docker,第一个 Task 就起不来。代码注释里写的就是这个值。
+      DOCKER_HOST: tcp://docker-proxy:2375
+      # ⚠️ 必须显式给。平台内置默认是 `alpine:3.20`(见 SandboxApplicationService),
+      # 而 alpine 里没有沙箱内 API、没有 tmux、也**没有常驻进程会立刻退出** ——
+      # 容器一退 `NetworkSettings.Ports` 就空,第一个 Task 直接死在
+      # `agent port 8080 is not published`(11 §1.3 坑二,本次 compose 验证当场复现)。
+      # 不设这一行 ⇒ 照着本文件部署出来的平台**开箱即坏**。
+      SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-ghcr.io/agent-infra/sandbox:latest}
+      # ⚠️ 宿主路径 = 容器路径,这是 bind mount 方案的**硬约束**(11 §1.2):
+      # DooD 下 api 请求挂载 `${DATA_ROOT}/workspaces/<id>` 时,这个路径由**宿主的**
+      # 容器运行时解析,而不是 api 容器的命名空间。两边不同名 ⇒ 挂载源找不到。
+      # 此前这里写死 `/data` 而卷是 `${DATA_ROOT}:/data`,默认值下两边并不相等。
+      DATA_ROOT: ${DATA_ROOT:-/srv/agent-platform/data}
+      DATABASE_URL: ${DATA_ROOT:-/srv/agent-platform/data}/platform.db
     volumes:
-      - ${DATA_ROOT:-/srv/agent-platform/data}:/data # workspaces / baselines / sqlite / master key
+      # 同名挂载（见上）：宿主的 $DATA_ROOT 落到容器内**同一个绝对路径**。
+      - ${DATA_ROOT:-/srv/agent-platform/data}:${DATA_ROOT:-/srv/agent-platform/data}
     depends_on:
       - docker-proxy
 

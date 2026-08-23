@@ -61,7 +61,16 @@ class DockerExecProcessStream implements ProcessStream {
     for (const cb of this.dataCbs) cb(chunk);
   }
 
+  /**
+   * detach 之后不得再报"进程已退出"。与 AIO 那条同一个道理:`detach()` 调的
+   * `stream.end()` 会触发构造函数里注册的 `'end'` 监听器 → `reportExit`,
+   * 于是"松手"被报成了"退出"。这一位既是那道闸门,也顺带给 reportExit 补上了
+   * 它本来就该有的幂等锁(此前重复触发会把回调跑两遍)。
+   */
+  private detached = false;
+
   private async reportExit(execId: string): Promise<void> {
+    if (this.detached) return;
     let code: number | null = null;
     try {
       const info = await this.docker.getExec(execId).inspect();
@@ -93,6 +102,16 @@ class DockerExecProcessStream implements ProcessStream {
 
   async kill(): Promise<void> {
     // exec has no direct kill; end the attach stream (session detach, 06 §6)
+    this.stream.end();
+  }
+
+  /**
+   * 这条路本来就只有"结束附着"这一个动作,不往对面写任何字节。
+   * ⚠️ 先上锁再 end():`end()` 会触发 `'end'` 监听器 → `reportExit`,不挡住的话
+   * 上层会收到一次它不该收到的"进程已退出"(理由见 `detached` 字段)。
+   */
+  detach(): void {
+    this.detached = true;
     this.stream.end();
   }
 }

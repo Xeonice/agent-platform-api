@@ -12,6 +12,7 @@ import type {
   RuntimeAuthMethod,
   RuntimeCredential,
   RuntimeCredentialFile,
+  RuntimeStartupSpec,
   RuntimeEvent,
   RuntimeInstallPlan,
   RuntimeRefreshCapability,
@@ -37,11 +38,10 @@ import {
   sanitizeCodexAuthJson,
 } from './codex.output-parser';
 import { assertSessionRef } from '../session-ref.util';
+import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
 
 const BEGIN_TIMEOUT_MS = 60_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
-const HOME_PROBE_TIMEOUT_MS = 15_000;
-const WRITE_FILE_TIMEOUT_MS = 30_000;
 
 const CODEX_BINARY = 'codex';
 /**
@@ -57,6 +57,67 @@ const SANDBOX_OFF_ARGS = ['-s', 'danger-full-access'];
  * codex sees is the literal `sandbox_mode="danger-full-access"`, a valid TOML string.
  */
 const RESUME_SANDBOX_OFF_ARGS = ['-c', 'sandbox_mode="danger-full-access"'];
+/**
+ * 无头路径的**硬闸门**（实测 codex-cli 0.139.0）：在非 git 目录里 `codex exec` 直接拒跑——
+ *
+ *   Not inside a trusted directory and --skip-git-repo-check was not specified.
+ *
+ * 这不是提示、是**退出**。空项目（`sourceType: 'empty'`）的工作区就是一个普通目录,
+ * 于是 S6 整条无头 Task 链路在空项目上一次都跑不起来。
+ *
+ * ⚠️ 实测过的两条错路,别再走:
+ *   ① `-c projects."<dir>".trust_level="trusted"` —— **对这道闸门无效**。它认的是
+ *      "是不是 git 仓库",与目录信任是**两道不同的闸门**（交互路径那道见 §信任预置）;
+ *   ② 让工作区变成 git 仓库 —— 那会污染用户的产物,而且空项目本来就不该有 .git。
+ *
+ * 这个 flag 只在 `exec` / `exec resume` 上存在,顶层交互命令没有（实测 `--help`）。
+ */
+const SKIP_GIT_REPO_CHECK = '--skip-git-repo-check';
+/**
+ * 关掉启动时的版本检查。不关的话交互会话会先弹一个**需要按键**的升级菜单
+ * （"Update available! 0.139.0 -> 0.149.0 / 1. Update now …"）,把 agent 卡在那里;
+ * 而且平台管着 CLI 的安装（`getInstallPlan`）,让 agent 自己 `npm install -g` 换版本
+ * 会绕过平台对版本的掌控。与 `-c` 同族,两条路径都能用。
+ */
+const NO_UPDATE_CHECK_ARGS = ['-c', 'check_for_update_on_startup=false'];
+/**
+ * 第三道闸门:首次在某目录里启动,codex 会停在 "Do you trust the contents of this
+ * directory?" 等人按键——**没凭证也一样停**,于是 agent 连"我没登录"都报不出来,
+ * 界面上只是一个不动的终端。
+ *
+ * 实测(codex-cli 0.139.0)确认这道闸门**只认配置文件**:
+ *   · `-c projects."<dir>".trust_level="trusted"` —— 无效;
+ *   · `--dangerously-bypass-approvals-and-sandbox` —— 也无效;
+ *   · 手工答一次 Yes 之后,codex 往 `$CODEX_HOME/config.toml` 写的正是下面这两行,
+ *     预置它再起就直接进 TUI。
+ *
+ * ── 替用户答"信任"安全吗:实测过,不是推的 ──────────────────────────────────
+ * 真正值得担心的是恶意仓库借**项目级** `.codex/config.toml` 把模型端点改道,
+ * 把平台注入的凭证送去攻击者那里(本文件 `--` 那段注释防的就是同一类攻击)。
+ * 实测:在工作区放一份带 `openai_base_url` + `model_providers` 的项目级配置,
+ * codex 自己拒绝加载并打印
+ *   `warning: Ignored unsupported project-local config keys … openai_base_url,
+ *    model_providers. If you want these settings to apply, manually set them in
+ *    your user-level config.toml.`
+ * 请求仍然发往 `wss://api.openai.com`。**这条外泄路径由 codex 自己关掉了。**
+ * 残余的 hooks / exec policies 不给 agent 任何它在容器里没有的能力
+ * (`-s danger-full-access` 已经全开,容器本身才是隔离边界)。
+ */
+const TRUST_SECTION = (workdir: string): string => `[projects."${workdir}"]`;
+const TRUST_BLOCK = (workdir: string): string =>
+  `\n${TRUST_SECTION(workdir)}\ntrust_level = "trusted"\n`;
+const CODEX_CONFIG_PATH = '~/.codex/config.toml';
+/**
+ * 幂等且**不覆盖**:配置文件可能已有用户自己的设置(或上一轮 provision 落的同一段)。
+ * 命中则原样跳过——但仍然把 stdin 读干净,否则写端拿 EPIPE。
+ */
+const SEED_TRUST_SCRIPT = [
+  'set -e',
+  'f="$1"',
+  'mkdir -p "$(dirname "$f")"',
+  'if grep -qF "$2" "$f" 2>/dev/null; then cat >/dev/null; exit 0; fi',
+  'cat >> "$f"',
+].join('\n');
 /**
  * `install()` takes no image (04 §3), while `getInstallPlan` is keyed on one. The
  * install COMMANDS are image-independent for an npm-distributed CLI — only the
@@ -74,7 +135,6 @@ const MODE_RE = /^[0-7]{3,4}$/;
  * Ask the LIVE sandbox for its `$HOME` (05 §4.3 裁决 D-19). `printf` (not `echo`) so
  * there is no trailing newline to guess at, and no shell expansion of the value.
  */
-const HOME_PROBE_CMD = ['sh', '-c', 'printf %s "$HOME"'];
 
 /**
  * Write `$1` with mode `$2`, taking the CONTENT FROM STDIN — the content never appears
@@ -249,10 +309,27 @@ export class CodexAdapter implements RuntimeAdapter {
    * the real refresh token is not something this method may forget to strip — it is
    * something this method cannot see (05 §4.3 裁决 D-18 ①).
    */
+  /**
+   * 启动前把"这个工作目录是可信的"写进 codex 的用户级配置(见 `TRUST_BLOCK` 上方
+   * 那段实测记录)。每次 provision 都跑(含重启),故必须幂等——脚本里 `grep -qF` 命中
+   * 就原样跳过。
+   */
+  async seedStartupFiles(spec: RuntimeStartupSpec, exec: SandboxExecFn): Promise<void> {
+    const home = await probeSandboxHome(exec, (m) => new AdapterAuthError('AUTH_REJECTED', m));
+    const absolutePath = `${home}/${CODEX_CONFIG_PATH.slice(2)}`;
+    const r = await exec(
+      ['sh', '-c', SEED_TRUST_SCRIPT, 'codex-seed', absolutePath, TRUST_SECTION(spec.workdir)],
+      { stdin: TRUST_BLOCK(spec.workdir), timeoutMs: SEED_WRITE_TIMEOUT_MS },
+    );
+    if (r.exitCode !== 0) {
+      throw new Error(`seeding codex config.toml failed (exit ${r.exitCode})`);
+    }
+  }
+
   async injectCredential(cred: InjectableRuntimeCredential, exec: SandboxExecFn): Promise<void> {
     // ① default: 0600 credential files, content written out VERBATIM.
     if (cred.credentialFiles.length > 0) {
-      const home = await this.probeHome(exec);
+      const home = await probeSandboxHome(exec, (m) => new AdapterAuthError('AUTH_REJECTED', m));
       for (const file of cred.credentialFiles) {
         await this.writeFile(exec, file, home);
       }
@@ -262,7 +339,7 @@ export class CodexAdapter implements RuntimeAdapter {
     if (cred.accessToken && cred.accessToken.length > 0) {
       const r = await exec(['codex', 'login', '--with-access-token'], {
         stdin: cred.accessToken,
-        timeoutMs: WRITE_FILE_TIMEOUT_MS,
+        timeoutMs: SEED_WRITE_TIMEOUT_MS,
       });
       if (r.exitCode !== 0) {
         throw new AdapterAuthError('AUTH_REJECTED', `codex --with-access-token exit ${r.exitCode}`);
@@ -326,6 +403,9 @@ export class CodexAdapter implements RuntimeAdapter {
     // nothing carries over between the two subcommands.
     if (resume) cmd.push('resume', ...RESUME_SANDBOX_OFF_ARGS);
     else cmd.push(...SANDBOX_OFF_ARGS);
+    cmd.push(...NO_UPDATE_CHECK_ARGS);
+    // 只有 exec 一族有这个 flag；顶层交互命令加了会 `unexpected argument` 直接死。
+    if (task.headless) cmd.push(SKIP_GIT_REPO_CHECK);
     if (task.headless && task.outputFormat === 'json-stream') cmd.push('--json');
     if (task.extraArgs) cmd.push(...task.extraArgs);
     // ⚠️ `--` CLOSES THE OPTION LIST BEFORE THE FIRST POSITIONAL, AND IT IS A SECURITY
@@ -362,26 +442,8 @@ export class CodexAdapter implements RuntimeAdapter {
 
   /** A plain interactive codex session — same inner-sandbox switch, no instruction. */
   buildAttachCommand(): SandboxCommand {
-    return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS] };
-  }
-
-  /**
-   * Resolve THIS sandbox's `$HOME` (05 §4.3 裁决 D-19). Probed per injection through the
-   * caller's `exec`, never hard-coded and never cached across sandboxes: the two
-   * built-in providers happen to agree on `/home/gem` today, but 04 §7 is explicit that
-   * HOME is not part of the image contract — a third-party image or a base-image bump
-   * breaks any constant, and `/root` (the old guess) is wrong on BOTH providers.
-   */
-  private async probeHome(exec: SandboxExecFn): Promise<string> {
-    const r = await exec(HOME_PROBE_CMD, { timeoutMs: HOME_PROBE_TIMEOUT_MS });
-    const home = r.stdout.trim();
-    if (r.exitCode !== 0 || !home.startsWith('/')) {
-      throw new AdapterAuthError(
-        'AUTH_REJECTED',
-        `could not resolve $HOME inside the sandbox (exit ${r.exitCode})`,
-      );
-    }
-    return home.endsWith('/') ? home.slice(0, -1) : home;
+    // attach 起的同样是**交互** codex ⇒ 同样会撞上启动版本检查那个需要按键的菜单。
+    return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS, ...NO_UPDATE_CHECK_ARGS] };
   }
 
   /** Materialize ONE credential file at its `~/`-expanded path, owner-only. */
@@ -403,7 +465,7 @@ export class CodexAdapter implements RuntimeAdapter {
     const absolutePath = `${home}/${file.containerPath.slice(2)}`;
     const r = await exec(['sh', '-c', WRITE_FILE_SCRIPT, 'codex-inject', absolutePath, mode], {
       stdin: file.content,
-      timeoutMs: WRITE_FILE_TIMEOUT_MS,
+      timeoutMs: SEED_WRITE_TIMEOUT_MS,
     });
     if (r.exitCode !== 0) {
       throw new AdapterAuthError(

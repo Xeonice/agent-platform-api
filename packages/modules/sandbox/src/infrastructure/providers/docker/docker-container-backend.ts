@@ -23,6 +23,7 @@ import {
   withAgentAuthEnv,
   withJobSurvivalEnv,
 } from '../aio/agent-auth';
+import { INSTANCE_LABEL, platformInstanceId } from '../../reconcile/instance-id';
 
 export interface DockerContainerConfig {
   name: string;
@@ -123,6 +124,9 @@ export class DockerContainerBackend implements SandboxProvider {
         Labels: {
           ...(ctx.labels ?? {}),
           'platform.managed': 'true',
+          // 谁能回收这个容器（见 instance-id.ts）。不打这一位的容器**永远不会被
+          // 自动回收**——那是本改动的保守面：升级前建的容器宁可漏收,也不能误删。
+          [INSTANCE_LABEL]: platformInstanceId(),
           'platform.provider': this.name,
           'platform.isolation': this.config.isolationLabel,
           'platform.sandboxId': ctx.sandboxId,

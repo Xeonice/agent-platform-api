@@ -31,6 +31,7 @@ import type {
   RuntimeEvent,
   RuntimeInstallOrchestrator,
   RuntimeInstallPlan,
+  RuntimeStartupSpec,
   RuntimeTaskSpec,
   SandboxCommand,
   SandboxFiles,
@@ -45,6 +46,7 @@ import type {
   TaskServerFrame,
   WorkspacePreparer,
 } from '@platform/contracts';
+import { UnknownRuntimeError } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
 import { AgentTaskApplicationService } from '../../src/application/agent-task.service';
 import { ProvisionSandboxWorkflow } from '../../src/application/workflows/provision-sandbox.workflow';
@@ -450,6 +452,12 @@ export class FakeAdapter implements RuntimeAdapter {
   async injectCredential(): Promise<void> {
     this.log.push('injectCredential');
   }
+  /** 落启动文件（可选钩子）。`seedThrows` 用来验"失败不阻断 provision"。 */
+  seedThrows = false;
+  async seedStartupFiles(spec: RuntimeStartupSpec): Promise<void> {
+    this.log.push(`seedStartupFiles:${spec.workdir}`);
+    if (this.seedThrows) throw new Error('seed boom');
+  }
   getInstallPlan(): RuntimeInstallPlan {
     return {
       strategy: 'install-on-start',
@@ -496,6 +504,13 @@ export interface HarnessOptions {
   bootstrapError?: Error;
   /** What `prepareRuntimeCredential` returns; `null` ⇒ throws NO_CREDENTIAL. */
   credential?: InjectableRuntimeCredential | null;
+  /**
+   * Make the project facade refuse. It is the LAST check in the create door, so it is
+   * also the only seam through which a test can inject a door rejection the door's own
+   * code has never seen — which is what `create-door.spec.ts` uses to prove that the
+   * 零副作用 flag is earned by POSITION rather than by each throw site remembering it.
+   */
+  projectError?: Error;
   now?: Date;
 }
 
@@ -529,12 +544,29 @@ export function harness(opts: HarnessOptions = {}) {
     },
     get: (id) => {
       const a = byId.get(id);
-      if (!a) throw new Error(`no adapter ${id}`);
+      // the SAME typed error the real `DefaultRuntimeAdapterRegistry` raises — a bare
+      // `Error` here would give the double no `code`, and every application-layer test
+      // would then be asserting against `INTERNAL` while production says
+      // `UNKNOWN_RUNTIME` (25: a double that is looser than the contract hides exactly
+      // the behaviour the tests exist to pin).
+      if (!a) throw new UnknownRuntimeError(id);
       return a;
     },
     has: (id) => byId.has(id),
     list: () => [...byId.values()],
   };
+  /**
+   * Drop an adapter from the registry — the ONE thing `RuntimeAdapterRegistry` cannot
+   * do on purpose (registration is one-way, 04 §8), and therefore not part of the
+   * double's `RuntimeAdapterRegistry` surface.
+   *
+   * It exists to reproduce a real state the platform can find itself in: a task row
+   * survives a restart, but the out-of-tree module that registered its adapter is no
+   * longer loaded — so `runtimes.get(task.runtime)` throws on a task that was perfectly
+   * valid when it started. That is the ONLY way to reach `UNKNOWN_RUNTIME` on the task
+   * plane now that the create door refuses an unregistered runtime up front.
+   */
+  const forgetRuntime = (id: string): boolean => byId.delete(id);
 
   const wsCalls: string[] = [];
   const workspace: WorkspacePreparer = {
@@ -551,6 +583,7 @@ export function harness(opts: HarnessOptions = {}) {
   const projectFacade: ProjectFacade = {
     async getRuntimeContextForTask(projectId) {
       projectLookups += 1;
+      if (opts.projectError) throw opts.projectError;
       return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
     },
   };
@@ -700,6 +733,7 @@ export function harness(opts: HarnessOptions = {}) {
     provision,
     registry,
     runtimes,
+    forgetRuntime,
     repo,
     taskService,
     taskWorkflow,

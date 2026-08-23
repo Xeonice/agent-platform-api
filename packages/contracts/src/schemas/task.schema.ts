@@ -80,6 +80,19 @@ export const TaskErrorCodeSchema = z.enum([
   // 平台侧恢复路径
   'SANDBOX_GONE',
   'RESUME_FAILED',
+  /**
+   * 任务命名的 runtime 在注册表里没有(`UnknownRuntimeError`,04 §8)。
+   *
+   * ⚠️ **它必须与 `INSTALL_FAILED` 分开**,而不是复用。二者的用户可见含义相反:
+   * 「装这个 CLI 没装成」是可重试的环境问题;「根本没有这个 runtime」是入参问题,
+   * 重试一万次也不会让适配器出现在注册表里。之前它们共用一个码,于是前端对
+   * `runtime: 'shell'` 渲染出「运行时 CLI 安装失败(该镜像未预装,现装未成功)」——
+   * 一句关于从未发生过的安装的话。
+   *
+   * 创建面已经在门口 400 拦掉(14 §10),所以这条码在**新建**路径上不该再出现;
+   * 它留给另外两个入口:重启后 resume 一个 runtime 已被卸载的任务、以及终端 attach。
+   */
+  'UNKNOWN_RUNTIME',
   // provider 契约错误(SandboxProviderErrorCode 全集)
   'IMAGE_PULL_FAILED',
   'RESOURCE_EXHAUSTED',

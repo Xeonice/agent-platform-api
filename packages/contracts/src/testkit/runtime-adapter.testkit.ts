@@ -135,6 +135,7 @@ function inertAuthSession(): AuthSessionContext {
     write(): void {},
     resize(): void {},
     onExit(): void {},
+    detach(): void {},
     async kill(): Promise<void> {},
   };
   return {

@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import type { ResolvedImageSpec, SandboxExecFn } from '@platform/contracts';
 import { CodexAdapter } from '../../src/infrastructure/adapters/codex/codex.adapter';
@@ -81,7 +85,15 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       headless: false,
       workdir: '/workspace',
     });
-    expect(cmd.cmd).toEqual(['codex', '-s', 'danger-full-access', '--', 'fix the login bug']);
+    expect(cmd.cmd).toEqual([
+      'codex',
+      '-s',
+      'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
+      '--',
+      'fix the login bug',
+    ]);
     expect(cmd.cwd).toBe('/workspace');
   });
 
@@ -126,6 +138,8 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       'codex',
       '-s',
       'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
     ]);
   });
 
@@ -134,6 +148,8 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
       'codex',
       '-s',
       'danger-full-access',
+      '-c',
+      'check_for_update_on_startup=false',
     ]);
     expect(new ClaudeCodeAdapter().buildAttachCommand().cmd).toEqual([
       'claude',
@@ -270,5 +286,195 @@ describe('positional arguments are DATA — `--` closes the option list', () => 
         }),
       ).not.toThrow();
     }
+  });
+});
+
+describe('codex 启动闸门（实测 codex-cli 0.139.0，三道都会卡住 agent）', () => {
+  it('无头路径带 --skip-git-repo-check —— 否则空项目一次都跑不起来', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      prompt: 'run the suite',
+      headless: true,
+      workdir: '/workspace',
+    });
+    // 实测：非 git 目录里 `codex exec` 不是"提示"而是**直接退出**：
+    //   Not inside a trusted directory and --skip-git-repo-check was not specified.
+    // 空项目（sourceType: 'empty'）的工作区就是普通目录 ⇒ S6 整条无头链路在空项目上全废。
+    expect(cmd.cmd).toContain('--skip-git-repo-check');
+  });
+
+  it('⚠️ 交互路径**不带**这个 flag —— 顶层命令没有它，加了会 unexpected argument 直接死', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      prompt: 'hi',
+      headless: false,
+      workdir: '/workspace',
+    });
+    expect(cmd.cmd).not.toContain('--skip-git-repo-check');
+  });
+
+  it('resume 也要带（`codex exec resume` 有这个 flag，实测 --help）', () => {
+    const cmd = new CodexAdapter().buildStartCommand({
+      headless: true,
+      workdir: '/workspace',
+      resumeFrom: '01a02e77-0f93-7582-b6ae-d788de241eae',
+    });
+    expect(cmd.cmd).toContain('--skip-git-repo-check');
+  });
+
+  it('两条路径都关掉启动版本检查 —— 不关会弹一个需要按键的升级菜单把 agent 卡住', () => {
+    for (const headless of [true, false]) {
+      const cmd = new CodexAdapter().buildStartCommand({ prompt: 'hi', headless, workdir: '/w' });
+      const i = cmd.cmd.indexOf('check_for_update_on_startup=false');
+      expect(i).toBeGreaterThan(0);
+      // 它是 `-c` 的值，不是裸参数：位置紧跟在一个 `-c` 后面。
+      expect(cmd.cmd[i - 1]).toBe('-c');
+    }
+  });
+});
+
+describe('claude-code 启动闸门（实测 claude-code 2.1.241，交互路径四道）', () => {
+  /** 收集 exec 调用，供断言"落了什么文件、什么内容"。 */
+  function recordingExec() {
+    const calls: { cmd: string[]; stdin?: string }[] = [];
+    const exec = async (cmd: string[], opts?: { stdin?: string }) => {
+      calls.push({ cmd, ...(opts?.stdin === undefined ? {} : { stdin: opts.stdin }) });
+      // 第一次是 $HOME 探针。
+      return cmd.join(' ').includes('$HOME')
+        ? { stdout: '/home/gem', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 };
+    };
+    return { calls, exec };
+  }
+
+  it('把清掉四道闸门的三个键写进 ~/.claude.json（按 workdir 记信任）', async () => {
+    const { calls, exec } = recordingExec();
+    await new ClaudeCodeAdapter().seedStartupFiles({ workdir: '/workspace' }, exec as never);
+
+    const write = calls.find((c) => c.stdin !== undefined);
+    expect(write?.cmd).toContain('/home/gem/.claude.json');
+    const seeded = JSON.parse(write?.stdin ?? '{}') as Record<string, unknown>;
+    // ①② 主题 + 登录方式：实测**不是凭证门控**——带真 token 照样弹。
+    expect(seeded['hasCompletedOnboarding']).toBe(true);
+    // ④ Bypass Permissions 警告：`--allow-dangerously-skip-permissions` 压不住它
+    //（那个 flag 的语义是"允许启用该模式"，不是"我已接受警告"）。
+    expect(seeded['bypassPermissionsModeAccepted']).toBe(true);
+    // ③ 文件夹信任：按路径记，与 codex 的 `[projects."<dir>"]` 同构。
+    expect(seeded['projects']).toEqual({ '/workspace': { hasTrustDialogAccepted: true } });
+  });
+
+  it('⚠️ 幂等判据是**这个 workdir 的信任项在不在**，不是"文件在不在"', async () => {
+    // 第一版这条用例只对脚本字符串做子串匹配（`expect(script).toContain('if [ -f "$f" ]')`），
+    // 而 `recordingExec()` 从不模拟文件系统 —— 那条 shell 逻辑**从头到尾没被执行过**。
+    // 把条件写反（`if [ ! -f ... ]`）它照样绿：断言的是格式的副本，不是行为。
+    //
+    // 改成**真的把脚本跑起来**：用 node 起一个真 sh，喂真文件，看三种情形的产物。
+    const { calls, exec } = recordingExec();
+    await new ClaudeCodeAdapter().seedStartupFiles({ workdir: '/workspace' }, exec as never);
+    const write = calls.find((c) => c.stdin !== undefined);
+    const script = (write?.cmd ?? [])[2] ?? '';
+    const needle = (write?.cmd ?? [])[5] ?? '';
+    // needle 必须是"这次 workdir 那一项"，否则内容匹配匹配的是别的东西。
+    expect(needle).toBe('"/workspace"');
+
+    const dir = mkdtempSync(join(tmpdir(), 'seed-'));
+    const f = join(dir, '.claude.json');
+    const runSeed = (): void => {
+      execFileSync('sh', ['-c', script, 'claude-seed', f, needle], {
+        input: write?.stdin ?? '',
+      });
+    };
+
+    // ① 文件不存在 → 写。
+    runSeed();
+    expect(JSON.parse(readFileSync(f, 'utf8'))).toMatchObject({
+      hasCompletedOnboarding: true,
+      projects: { '/workspace': { hasTrustDialogAccepted: true } },
+    });
+
+    // ② 已有同一个 workdir 的信任项 → **原样跳过**。
+    // ⚠️ 判据是**字节不变**，不是"marker 还在"：合并那条路也保得住 marker（只是重新
+    // 格式化一遍），所以宽判据抓不住"该跳过却没跳过"。把条件写反（`if [ ! -f ]`）时
+    // 恰恰就是走了合并路径 —— 只有字节比较能把它照出来。
+    const untouched = JSON.stringify({
+      marker: 'keep-me',
+      projects: { '/workspace': { hasTrustDialogAccepted: true } },
+    });
+    writeFileSync(f, untouched);
+    runSeed();
+    expect(readFileSync(f, 'utf8')).toBe(untouched);
+
+    // ③ ⚠️ 文件在、但里面是**别的 workdir** → 必须合并进去，而不是整体跳过。
+    // 这一条是这次修复的核心：`RuntimeStartupSpec.workdir` 是可变的（契约里有这个
+    // 字段就说明预期它变），"文件在就跳过"会让换了 workdir 的沙箱静默卡在交互提示上。
+    writeFileSync(
+      f,
+      JSON.stringify({
+        marker: 'keep-me',
+        projects: { '/other': { hasTrustDialogAccepted: true } },
+      }),
+    );
+    runSeed();
+    const merged = JSON.parse(readFileSync(f, 'utf8')) as {
+      marker: string;
+      projects: Record<string, unknown>;
+    };
+    expect(merged.projects['/workspace']).toEqual({ hasTrustDialogAccepted: true });
+    expect(merged.projects['/other']).toEqual({ hasTrustDialogAccepted: true }); // 旧项不能被抹掉
+    expect(merged.marker).toBe('keep-me'); // 用户自己的内容不能被抹掉
+
+    // ④ 反复执行必须收敛：跑第二遍不得再改动任何东西（幂等的真正判据）。
+    // ⚠️ 这一条挡住"条件写反"那种改法——`if [ ! -f ]` 在前三种情形下碰巧都对，
+    // 只有"同一份输入连跑两次"才把它暴露出来（第二遍会重新合并/覆盖）。
+    const afterFirst = readFileSync(f, 'utf8');
+    runSeed();
+    expect(readFileSync(f, 'utf8')).toBe(afterFirst);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('codex seedStartupFiles（此前一条单测都没有）', () => {
+  it('把 workdir 写进信任表，且**真的跑一遍脚本**验证幂等与不覆盖', async () => {
+    // review 指出：codex 这条恰恰是本轮最长、最依赖实测的一段（`[projects."<dir>"]`
+    // trust_level、`grep -qF` 幂等、EPIPE 排空），而自动化测试里从没跑过一次 `sh -c`。
+    const calls: { cmd: string[]; stdin?: string }[] = [];
+    const exec = async (
+      cmd: string[],
+      opts?: { stdin?: string },
+    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      calls.push({ cmd, ...(opts?.stdin === undefined ? {} : { stdin: opts.stdin }) });
+      return cmd.join(' ').includes('$HOME')
+        ? { stdout: '/home/gem', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 0 };
+    };
+    await new CodexAdapter().seedStartupFiles({ workdir: '/workspace' }, exec as never);
+
+    const write = calls.find((c) => c.stdin !== undefined);
+    expect(write?.cmd[4]).toBe('/home/gem/.codex/config.toml');
+    const script = write?.cmd[2] ?? '';
+    const needle = write?.cmd[5] ?? '';
+    expect(needle).toBe('[projects."/workspace"]');
+
+    const dir = mkdtempSync(join(tmpdir(), 'codex-seed-'));
+    const f = join(dir, 'config.toml');
+    const runSeed = (): void => {
+      execFileSync('sh', ['-c', script, 'codex-seed', f, needle], { input: write?.stdin ?? '' });
+    };
+
+    runSeed();
+    expect(readFileSync(f, 'utf8')).toContain('trust_level = "trusted"');
+
+    // 幂等：连跑两次不得追加第二段（`grep -qF` 命中即跳过）。
+    const once = readFileSync(f, 'utf8');
+    runSeed();
+    expect(readFileSync(f, 'utf8')).toBe(once);
+
+    // 不覆盖用户已有配置：追加而非重写。
+    writeFileSync(f, 'model = "gpt-5.5"\n');
+    runSeed();
+    const merged = readFileSync(f, 'utf8');
+    expect(merged).toContain('model = "gpt-5.5"');
+    expect(merged).toContain('[projects."/workspace"]');
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });

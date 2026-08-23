@@ -1,6 +1,12 @@
 import { beforeEach, describe, it, expect } from 'vitest';
+import { HttpException } from '@nestjs/common';
 import type { SandboxId } from '@platform/shared-kernel';
-import { RuntimeInstallFailedError, ImageContractViolationError } from '@platform/contracts';
+import {
+  RuntimeInstallFailedError,
+  ImageContractViolationError,
+  UnknownRuntimeError,
+} from '@platform/contracts';
+import { mapProviderErrorToHttp } from '../../src/application/provider-error.http';
 import { FakeAdapter, FakeProvider, harness, waitForStatus } from './_harness';
 
 /**
@@ -8,6 +14,10 @@ import { FakeAdapter, FakeProvider, harness, waitForStatus } from './_harness';
  * Covers the full provision pipeline plus the S5 `starting` 段 cases
  * T-SBX-31 / 32 / 33 / 34 / 35 and E2E-1-bootstrap's application half.
  */
+/** Control characters BUILT FROM ESCAPES — never pasted raw into a source file. */
+const ESC = String.fromCharCode(0x1b);
+const NUL = String.fromCharCode(0x00);
+
 describe('SandboxApplicationService provision pipeline (in-memory doubles)', () => {
   let h: ReturnType<typeof harness>;
   beforeEach(() => {
@@ -53,6 +63,69 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
     ).rejects.toThrow(/unknown provider/i);
   });
 
+  /**
+   * The sibling of the check above, for the OTHER open registry (14 §10).
+   *
+   * ⚠️ THIS IS THE ONE THE TYPE SYSTEM CANNOT COVER AND MUST NOT TRY TO. `runtime` is
+   * `z.string().min(1)` on purpose — the adapter registry is *not a closed enum*
+   * (04 §8) — so `'shell'` is a perfectly well-typed value on both sides of the wire,
+   * and a real frontend shipped exactly that. Without a door check it travelled all the
+   * way into the ASYNC provision and came back as `INSTALL_FAILED`, i.e. the platform
+   * told the user its CLI failed to install.
+   */
+  it('rejects an unknown runtime before creating anything (04 §5 / 14 §10)', async () => {
+    await expect(h.service.create({ projectId: 'prj-1', runtime: 'shell' })).rejects.toThrow(
+      /unknown runtime/i,
+    );
+  });
+
+  it('…and refusing it means NOTHING was scheduled, stored or provisioned', async () => {
+    await expect(h.service.create({ projectId: 'prj-1', runtime: 'shell' })).rejects.toThrow();
+    // 04 §5「不进调度、不落库、不调 provider.create」— all three, stated separately so a
+    // regression says WHICH half of the promise broke.
+    expect(h.provider.calls).toEqual([]);
+    expect(h.wsCalls).toEqual([]);
+    expect(h.repo.store.size).toBe(0);
+    // and the project was never even looked up — the door closed before the facade.
+    expect(h.projectLookups()).toBe(0);
+  });
+
+  it('accepts a runtime a third party registered at RUNTIME (the registry is the authority)', async () => {
+    // The mirror image of the test above, and the reason this is a registry lookup
+    // rather than a hard-coded list: an out-of-tree adapter registers through the same
+    // `register()` (04 §8) and must be creatable without editing this service.
+    h.runtimes.register(new FakeAdapter('acme-agent', 'Acme Agent'));
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'acme-agent' });
+    expect(dto.runtime).toBe('acme-agent');
+    // …and the display name comes from the adapter, not from a platform-side table.
+    expect(dto.name).toMatch(/^Acme Agent · /);
+  });
+
+  it('rejects an image ref carrying a control character (not just whitespace)', async () => {
+    // `\s` never covered NUL/BEL/ESC, though the comment claimed "control characters".
+    // An ESC in a ref is a terminal-escape injection into every log that renders it.
+    //
+    // ⚠️ Built from escapes, never pasted raw: a literal 0x1b/0x00 in a source file makes
+    // git treat it as BINARY (no diff, no review) and does not survive most editors.
+    await expect(
+      h.service.create({
+        projectId: 'prj-1',
+        runtime: 'claude-code',
+        image: `alpine:3.20${ESC}[2J`,
+      }),
+    ).rejects.toThrow(/invalid image reference/i);
+    await expect(
+      h.service.create({ projectId: 'prj-1', runtime: 'claude-code', image: `alpine:3.20${NUL}` }),
+    ).rejects.toThrow(/invalid image reference/i);
+    // a perfectly ordinary ref still passes — the rule is control characters, not punctuation
+    const ok = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      image: 'registry.example.com:5000/team/img@sha256:abc123',
+    });
+    expect(ok.status).toBe('pending');
+  });
+
   it('destroys the already-created container when start fails (P1-2, no orphan)', async () => {
     class FailingStartProvider extends FakeProvider {
       override async start(): Promise<void> {
@@ -84,6 +157,9 @@ describe('T-SBX-31 — the `starting` 段 runs its five steps in the pinned orde
       'provider.start',
       'agent-readiness-probe',
       'ensureRuntimeInstalled',
+      // ③.5：落 runtime 启动前需要的文件。排在注入**之前**且与它无关——
+      // 注入只在有凭证时跑，而这一步要拆的闸门没凭证照样拦。
+      'seedStartupFiles:/workspace',
       'injectCredential',
       'recordRuntimeInjection',
       'bootstrapAgentSession',
@@ -206,6 +282,29 @@ describe('async failures expose a CODE on both of their two outlets (04 §4)', (
     const dto = await h.service.get(created.id);
     expect(dto.failureCode).toBeUndefined();
     expect(dto.failureMessage).toBeUndefined();
+  });
+
+  /**
+   * The SYNCHRONOUS outlet of the same table (04 §4). `UNKNOWN_RUNTIME` has no
+   * synchronous producer today — the create door refuses first — but 02 §6.2 forbids a
+   * code with no mapping, and the row it would otherwise inherit is wrong in both
+   * halves: `INSTALL_FAILED` maps to 500 (a server fault, when this is the caller's
+   * input) and is retryable (when nothing about retrying can ever help).
+   */
+  it('UNKNOWN_RUNTIME maps to 400 + non-retryable, NOT to INSTALL_FAILED’s 500', () => {
+    const mapped = mapProviderErrorToHttp(new UnknownRuntimeError('shell'));
+    expect(mapped).toBeInstanceOf(HttpException);
+    const http = mapped as HttpException;
+    expect(http.getStatus()).toBe(400);
+    expect(http.getResponse()).toMatchObject({
+      code: 'UNKNOWN_RUNTIME',
+      retryable: false,
+    });
+    // the neighbouring row is unchanged — a real install failure is still a 500 the
+    // caller may retry.
+    const install = mapProviderErrorToHttp(new RuntimeInstallFailedError('npm exited 1'));
+    expect((install as HttpException).getStatus()).toBe(500);
+    expect((install as HttpException).getResponse()).toMatchObject({ retryable: true });
   });
 });
 
@@ -374,3 +473,36 @@ function injectableCredential() {
     zeroize(): void {},
   };
 }
+
+describe('启动文件落盘（③.5）—— 与凭证无关的那一步', () => {
+  it('每次 provision 都落，并把工作目录传下去', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.adapter.log).toContain('seedStartupFiles:/workspace');
+  });
+
+  it('⚠️ **没有凭证时照样落** —— 这正是它不能挂在 injectCredential 上的理由', async () => {
+    // `credential: null` ⇒ prepareRuntimeCredential 抛 NO_CREDENTIAL ⇒ injectCredential 整步跳过。
+    const h = harness({ credential: null });
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.adapter.log).not.toContain('injectCredential');
+    // 而 codex 的目录信任提示在没凭证时**照样拦**，agent 会停在那儿连"我没登录"
+    // 都报不出来。所以这一步必须与凭证解耦。
+    expect(h.adapter.log).toContain('seedStartupFiles:/workspace');
+  });
+
+  it('落盘失败**不判死整个 Task** —— 顶多停在一个交互提示上，比整单失败轻', async () => {
+    const h = harness();
+    h.adapter.seedThrows = true;
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+
+    await waitForStatus(h.service, dto.id, 'running');
+    // 后续步骤照常推进。用 `bootstrapAgentSession` 当证物而不是 `injectCredential`：
+    // 默认 harness 本来就没凭证，注入那步无论如何都不会跑，拿它当证物会**恒假**。
+    expect(h.adapter.log).toContain('bootstrapAgentSession');
+  });
+});
