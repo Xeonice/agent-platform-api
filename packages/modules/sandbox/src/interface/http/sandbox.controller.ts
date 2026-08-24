@@ -4,6 +4,7 @@ import {
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
 import type { SandboxDto } from '@platform/contracts';
@@ -39,6 +40,10 @@ export class SandboxController {
 
   @Get()
   @ApiOperation({ summary: 'List sandboxes, optionally filtered by projectId' })
+  // ⚠️ 没有这行 `@ApiQuery`，`projectId` **不会进 openapi**（`parameters: []`）——
+  // `@Query()` + createZodDto 不足以让 swagger 认出查询参数。后果不是"文档不全"：
+  // 前端用的是按 openapi 生成类型收紧的 typed client，参数不在契约里就**根本传不了**。
+  @ApiQuery({ name: 'projectId', required: false, type: String })
   @ApiOkResponse({ type: SandboxResponseDto, isArray: true })
   list(@Query() query: ListSandboxesQueryDto): Promise<SandboxDto[]> {
     return this.app.list(query.projectId);

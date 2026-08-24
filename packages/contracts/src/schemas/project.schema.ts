@@ -3,10 +3,6 @@ import { z } from 'zod';
 /**
  * Project zod single source (docs/backend/02 §3, 13 §2.2, shared/10 §6). One place
  * produces the REST DTO, the OpenAPI reflection, and the MCP tool inputSchema.
- *
- * IMPORTANT product decision: `ProjectDto` does NOT expose `repoUrl`/`repoBranch`
- * — the project's SOURCE is never shown to clients (shared/10 §6). The create
- * request accepts them (git needs a url), but they never round-trip out.
  */
 export const ProjectSourceTypeSchema = z.enum(['git', 'empty']);
 export type ProjectSourceType = z.infer<typeof ProjectSourceTypeSchema>;
@@ -48,10 +44,18 @@ export const DeleteProjectSchema = z.object({ keepBaseline: z.boolean().optional
 export type DeleteProjectInput = z.infer<typeof DeleteProjectSchema>;
 
 /**
- * ProjectDto — the OUTBOUND shape (shared/10 §7). MINIMAL: no source (repoUrl/
- * repoBranch), no internal fields (workspaceMode / baselineSizeBytes / updatedAt).
- * `taskCount` is the aggregated count of live Tasks (= sandboxes, 23 D-1) under the
- * project, filled by the application via the cross-context SandboxFacade.
+ * ProjectDto — the OUTBOUND shape (shared/10 §7.3). `taskCount` is the aggregated
+ * count of live Tasks (= sandboxes, 23 D-1) under the project, filled by the
+ * application via the cross-context SandboxFacade.
+ *
+ * ⚠️ THE LAST FOUR FIELDS OVERTURN 「「来源」字段不对外展示（产品定案）——repoUrl 不入
+ * DTO」 (shared/10 §7.3, this repo's own header comment used to restate it). That
+ * ruling assumed the user never needs to know where the code came from; the product
+ * now wants the project's read-only bar to show the remote AND to answer "how old is
+ * my baseline" (P21-6), and a full clone (03 §7.2★) makes the baseline's SIZE a number
+ * worth showing. All four values were ALREADY in the table (`projects.repo_url` /
+ * `repo_branch` / `baseline_size_bytes` / `updated_at`, 13 §2.2) — they were simply
+ * never projected. `workspaceMode` stays internal (v1.1 shared-volume switch).
  */
 export const ProjectDtoSchema = z.object({
   id: z.string(),
@@ -61,5 +65,22 @@ export const ProjectDtoSchema = z.object({
   cloneErrorCode: CloneErrorCodeSchema.nullable(),
   taskCount: z.number().int().nonnegative(),
   createdAt: z.string(),
+  /** absent for an empty project (and after convert-to-empty). */
+  repoUrl: z.string().optional(),
+  /** absent when the project was created without pinning a branch (= remote default). */
+  repoBranch: z.string().optional(),
+  /** bytes on disk under the baseline dir; the full clone made this worth showing. */
+  baselineSizeBytes: z.number().int().nonnegative().optional(),
+  /** last `POST /:id/sync` (or the last clone-status change / creation). */
+  updatedAt: z.string(),
 });
 export type ProjectDto = z.infer<typeof ProjectDtoSchema>;
+
+/**
+ * `GET /api/projects/:id/branches` → a bare `string[]` (shared/10 §7.3
+ * `ProjectBranches`). Short branch names (`main`, `feature/x`) read from the
+ * baseline's LOCAL remote-tracking refs — never `git ls-remote`. Empty project or a
+ * baseline that is not `ready` ⇒ `[]`.
+ */
+export const ProjectBranchesSchema = z.array(z.string());
+export type ProjectBranches = z.infer<typeof ProjectBranchesSchema>;

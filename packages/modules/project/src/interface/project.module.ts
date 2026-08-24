@@ -2,12 +2,15 @@ import { Global, Module } from '@nestjs/common';
 import { PROJECT_FACADE } from '@platform/contracts';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
 import { GIT_CLONER } from '../domain/ports/git-cloner.port';
+import { BASELINE_GIT } from '../domain/ports/baseline-git.port';
 import { BASELINE_MANAGER } from '../domain/ports/baseline-manager.port';
 import { ProjectApplicationService } from '../application/project-application.service';
 import { CloneProjectWorkflow } from '../application/clone-project.workflow';
+import { SyncBaselineWorkflow } from '../application/sync-baseline.workflow';
 import { ProjectFacadeAdapter } from '../application/project-facade.adapter';
 import { SqliteProjectRepository } from '../infrastructure/persistence/sqlite/project.repository.impl';
 import { SimpleGitCloner } from '../infrastructure/git/git-cloner';
+import { SimpleGitBaseline } from '../infrastructure/git/baseline-git';
 import { FsBaselineDirManager } from '../infrastructure/baseline/baseline-dir.manager';
 import { ProjectController } from './http/project.controller';
 import { ProjectMcpTools } from './mcp/project.mcp-tools';
@@ -25,9 +28,11 @@ import { ProjectMcpTools } from './mcp/project.mcp-tools';
   providers: [
     ProjectApplicationService,
     CloneProjectWorkflow,
+    SyncBaselineWorkflow,
     ProjectMcpTools,
     { provide: PROJECT_REPOSITORY, useClass: SqliteProjectRepository },
     { provide: GIT_CLONER, useClass: SimpleGitCloner },
+    { provide: BASELINE_GIT, useClass: SimpleGitBaseline },
     { provide: BASELINE_MANAGER, useClass: FsBaselineDirManager },
     { provide: PROJECT_FACADE, useClass: ProjectFacadeAdapter },
   ],

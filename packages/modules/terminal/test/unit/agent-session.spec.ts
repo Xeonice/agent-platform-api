@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ImageContractViolationError, PLATFORM_AGENT_TMUX_SESSION } from '@platform/contracts';
+import { DEFAULT_AGENT_TMUX_SIZE } from '../../src/domain/services/tmux-command.policy';
 import type {
   ProcessStream,
   RuntimeAdapter,
@@ -148,17 +149,26 @@ describe('bootstrapAgentSession — which command the session runs', () => {
     expect(h.adapter.startCalls[0]).toMatchObject({ headless: false, workdir: '/workspace' });
 
     const start = h.execCalls.find((c) => c.includes('new-session'))!;
-    expect(start.slice(0, 5)).toEqual([
+    expect(start.slice(0, 9)).toEqual([
       'tmux',
       'new-session',
       '-d',
+      // ★ `-x/-y` 不能省：detached 会话默认 **80x24**（实测），agent 一启动就按 80 列
+      // 画横幅，而终端不会回流已输出的字节 ⇒ 之后 attach 撑到 247 列也救不回第一屏。
+      '-x',
+      String(DEFAULT_AGENT_TMUX_SIZE.cols),
+      '-y',
+      String(DEFAULT_AGENT_TMUX_SIZE.rows),
       '-s',
       PLATFORM_AGENT_TMUX_SESSION,
     ]);
     // the whole payload is ONE tmux argument (tmux joins several with spaces)
-    expect(start).toHaveLength(6);
-    expect(start[5]).toContain('把 README 翻译成英文');
-    expect(start[5]).toContain('danger-full-access');
+    expect(start).toHaveLength(10);
+    expect(start[9]).toContain('把 README 翻译成英文');
+    expect(start[9]).toContain('danger-full-access');
+    // 默认值必须**明显大于** 80x24，否则这条改动等于没做。
+    expect(DEFAULT_AGENT_TMUX_SIZE.cols).toBeGreaterThan(80);
+    expect(DEFAULT_AGENT_TMUX_SIZE.rows).toBeGreaterThan(24);
   });
 
   it('without an initialPrompt it still starts a session, from buildAttachCommand', async () => {

@@ -203,4 +203,40 @@ describe('Project aggregate', () => {
     const empty = Project.create({ ...base, sourceType: 'empty' });
     expect(() => empty.assertCanAcceptTask()).not.toThrow();
   });
+
+  // ── 基线同步 (03 §7.2★) ────────────────────────────────────────────────────────
+  it('syncBaseline refreshes size + updatedAt WITHOUT moving the clone state', () => {
+    const p = Project.create({ ...base, sourceType: 'git', repoUrl: 'https://h/x.git' });
+    p.markCloneReady(1_000, NOW);
+    const later = new Date(NOW.getTime() + 86_400_000);
+
+    p.syncBaseline(7_777, later);
+
+    expect(p.baselineSizeBytes).toBe(7_777);
+    expect(p.updatedAt).toEqual(later);
+    // `ready → ready` is NOT a transition: `CloneStatusVO` treats `ready` as terminal,
+    // so routing a sync through `transition()` would throw InvalidProjectTransition and
+    // make the endpoint permanently 409.
+    expect(p.cloneStatus).toBe('ready');
+  });
+
+  it('syncBaseline is refused on a project with nothing to fetch', () => {
+    const cloning = Project.create({ ...base, sourceType: 'git', repoUrl: 'https://h/x.git' });
+    expect(() => cloning.syncBaseline(1, NOW)).toThrow(ProjectStateError);
+    expect(() => cloning.assertCanSync()).toThrow(ProjectStateError);
+
+    // an EMPTY project is `ready` — the STATE alone would let it through, and then
+    // `git fetch` would run inside a directory that is not a repository. The source
+    // type is the second half of the guard, and it is the half a state check misses.
+    const empty = Project.create({ ...base, sourceType: 'empty' });
+    expect(empty.cloneStatus).toBe('ready');
+    expect(() => empty.assertCanSync()).toThrow(ProjectStateError);
+  });
+
+  it('convert-to-empty then sync: the source is gone, so the sync is too', () => {
+    const p = Project.create({ ...base, sourceType: 'git', repoUrl: 'https://h/x.git' });
+    p.markCloneFailed('CLONE_FAILED_NETWORK', NOW);
+    p.convertToEmpty(NOW);
+    expect(() => p.assertCanSync()).toThrow(ProjectStateError);
+  });
 });

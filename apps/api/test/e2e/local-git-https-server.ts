@@ -19,9 +19,12 @@ import {
  * HERMETIC, and the credential helper key is SCHEME-AWARE (http AND https both work).
  *
  * The scaffolding traps this deliberately avoids (all empirically confirmed):
- *  1. SMART http only — the clone uses `git clone --depth=1`; dumb http reports
- *     "does not support shallow capabilities". So every request is proxied through
- *     the `git-http-backend` CGI.
+ *  1. SMART http only — every request is proxied through the `git-http-backend` CGI.
+ *     (The original reason was that the clone passed `--depth=1` and dumb http reports
+ *     "does not support shallow capabilities". The clone is FULL since 03 §7.2★, so
+ *     that particular symptom is gone — but smart http stays: dumb http cannot serve
+ *     `git-upload-pack`, which is how authentication is exercised at all, and a dumb
+ *     remote would quietly turn this suite into a test of static file serving.)
  *  2. Scheme-aware credential helper — the materializer keys the helper
  *     `credential.<scheme>://<authority>.helper`, so the helper key MUST match the
  *     remote's actual scheme. The HTTPS variant generates a CA + server cert (SAN =

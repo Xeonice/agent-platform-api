@@ -50,6 +50,18 @@ export class SqliteSandboxRepository implements SandboxRepository {
     });
   }
 
+  async findAll(): Promise<Sandbox[]> {
+    const rows = this.db.select().from(sandboxes).all();
+    return rows.map((row) => {
+      const transitions = this.db
+        .select()
+        .from(sandboxStateTransitions)
+        .where(eq(sandboxStateTransitions.sandboxId, row.id))
+        .all();
+      return this.toDomain(row, transitions);
+    });
+  }
+
   async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
     const out: Record<string, number> = {};
     for (const id of projectIds) out[id] = 0; // ensure every requested id is present

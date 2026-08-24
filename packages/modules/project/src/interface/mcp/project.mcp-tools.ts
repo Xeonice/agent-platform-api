@@ -18,7 +18,7 @@ export class ProjectMcpTools {
 
   @Tool({
     name: 'create_project',
-    description: 'Create a project (git ⇒ async shallow clone; empty ⇒ ready)',
+    description: 'Create a project (git ⇒ async full clone; empty ⇒ ready)',
     parameters: CreateProjectSchema,
   })
   async createProject(params: CreateProjectInput) {

@@ -30,8 +30,10 @@ import type {
   SandboxProviderCapabilities,
   SandboxHandle,
   WorkspacePreparer,
+  ProjectAccessErrorCode,
   ProjectFacade,
   ProjectRuntimeContext,
+  WorkspaceSource,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { mapProviderErrorToHttp } from './provider-error.http';
@@ -48,12 +50,28 @@ import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
 
+/**
+ * HTTP status for each way the project facade can refuse (10 §6.8 「门口拒绝」).
+ * A table rather than a ternary: adding a code to `ProjectAccessErrorCode` now fails
+ * TYPECHECK here until its status is decided, instead of silently inheriting whatever
+ * the `else` branch happened to be — which is how `BRANCH_NOT_FOUND` would otherwise
+ * have shipped as a 409 「项目状态不对」 for what is a bad ARGUMENT.
+ */
+const PROJECT_ACCESS_STATUS: Record<ProjectAccessErrorCode, HttpStatus> = {
+  PROJECT_NOT_FOUND: HttpStatus.NOT_FOUND,
+  PROJECT_NOT_READY: HttpStatus.CONFLICT,
+  // 400, alongside `UNKNOWN_PROVIDER` / `UNKNOWN_RUNTIME`: the request named something
+  // that is not in the set the platform offers. The project itself is perfectly fine.
+  BRANCH_NOT_FOUND: HttpStatus.BAD_REQUEST,
+};
+
 /** What the create door hands to the transaction once a request is admitted. */
 interface AdmittedCreate {
   providerName: string;
   provider: SandboxProvider;
   imageRef: string;
-  baselinePath: ProjectRuntimeContext['baselinePath'];
+  /** where the workspace comes from, and which branch it must end up on (03 §7.2★). */
+  workspaceSource: WorkspaceSource;
 }
 
 /**
@@ -135,7 +153,7 @@ export class SandboxApplicationService {
     // drive the state machine in the background (each transition persists + publishes
     // a SandboxStateChanged event for the WS relay). Failures land `failed`.
     const dto = SandboxMapper.toDto(sandbox, false);
-    void this.provision.runSafely(sandbox, admitted.provider, admitted.baselinePath);
+    void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
     return dto;
   }
 
@@ -151,9 +169,16 @@ export class SandboxApplicationService {
    * to this method later is flagged correctly without its author doing anything (and
    * why a door check added OUTSIDE it would not be — see `door-rejection.http.ts`).
    *
-   * The six rejections it can produce today, all of them 零副作用:
+   * The seven rejections it can produce today, all of them 零副作用:
    *   `UNKNOWN_PROVIDER` 400 · `UNSUPPORTED_CAPABILITY` 409 · `UNKNOWN_RUNTIME` 400 ·
-   *   `INVALID_IMAGE_REFERENCE` 400 · `PROJECT_NOT_FOUND` 404 · `PROJECT_NOT_READY` 409.
+   *   `INVALID_IMAGE_REFERENCE` 400 · `PROJECT_NOT_FOUND` 404 · `PROJECT_NOT_READY` 409 ·
+   *   `BRANCH_NOT_FOUND` 400.
+   *
+   * ⚠️ `BRANCH_NOT_FOUND` IS THE PROOF THAT THE POSITIONAL RULE WORKS. It was added by
+   * extending the project lookup below with one more argument — nobody wrote
+   * `sideEffectFree` anywhere — and it is stamped correctly because it is thrown from
+   * inside this region. 10 §6.8's 「门口拒绝」 table still lists six rows; this is the
+   * seventh, and it obeys the same 「retryable:false」 rule for the same reason.
    */
   private admit(input: CreateSandboxInput): Promise<AdmittedCreate> {
     return atDoor(async () => {
@@ -174,10 +199,16 @@ export class SandboxApplicationService {
 
       // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
       // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
-      // which we surface as HTTP BEFORE any sandbox row is written.
-      const projectCtx = await this.resolveProject(input.projectId);
+      // which we surface as HTTP BEFORE any sandbox row is written. `branch` is
+      // validated in the SAME call — against the baseline's local refs (03 §7.2★).
+      const projectCtx = await this.resolveProject(input.projectId, input.branch);
 
-      return { providerName, provider, imageRef, baselinePath: projectCtx.baselinePath };
+      return {
+        providerName,
+        provider,
+        imageRef,
+        workspaceSource: { baselinePath: projectCtx.baselinePath, branch: projectCtx.branch },
+      };
     });
   }
 
@@ -321,21 +352,21 @@ export class SandboxApplicationService {
   /**
    * Resolve + validate the project via the cross-context facade (maps errors).
    *
-   * ⚠️ THESE TWO ARE DOOR REJECTIONS TOO, AND THE ENVELOPE SAID SO ABOUT NEITHER.
+   * ⚠️ THESE ARE DOOR REJECTIONS TOO, AND THE ENVELOPE SAID SO ABOUT NONE OF THEM.
    * `getRuntimeContextForTask` only READS (it runs `Project.assertCanAcceptTask`), so a
    * project that does not exist / is still cloning / failed to clone is refused with the
    * same 零副作用 guarantee as the two registry checks above — yet the body carried no
    * `retryable`, which makes it a non-envelope to the frontend exactly like the bare
    * 400s did. `retryable:false` for both, per `doorRejection`: a project has to BECOME
-   * ready, and no number of identical re-sends of THIS request causes that.
+   * ready, and no number of identical re-sends of THIS request causes that. The same
+   * holds for `BRANCH_NOT_FOUND`: the caller must pick a branch that exists.
    */
-  private async resolveProject(projectId: string): Promise<ProjectRuntimeContext> {
+  private async resolveProject(projectId: string, branch?: string): Promise<ProjectRuntimeContext> {
     try {
-      return await this.projectFacade.getRuntimeContextForTask(projectId);
+      return await this.projectFacade.getRuntimeContextForTask(projectId, branch);
     } catch (e) {
       if (e instanceof ProjectAccessError) {
-        const status = e.code === 'PROJECT_NOT_FOUND' ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
-        throw doorRejection(status, e.code, e.message);
+        throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
       }
       throw e;
     }
@@ -347,10 +378,24 @@ export class SandboxApplicationService {
     return SandboxMapper.toDto(sandbox, false);
   }
 
+  /**
+   * List sandboxes; `projectId` 缺省 = **全部项目**（工作台左侧任务树要的就是这个）。
+   *
+   * ★ 2026-08 修正：此前是 `if (!projectId) return [];` —— 不带过滤直接回空。
+   * 前端工作台发的正是裸 `GET /api/sandboxes`，于是树里永远 0 个任务，而计数走的是
+   * `ProjectDto.taskCount`（另一条路，来自 countActiveByProject）⇒ 出现"计数是 1 但
+   * 展开一条都没有"的割裂。控制器自己的 summary 写的也是 "optionally filtered"。
+   *
+   * ⚠️ **`destroyed` 必须排除**，因为 `taskCount` 走的 `countActiveByProject` 就排除了它。
+   * 两条路径共用这一处过滤，谁改都得一起改——不然计数与列表又会各说各话。
+   */
   async list(projectId?: string): Promise<SandboxDto[]> {
-    if (!projectId) return [];
-    const sandboxes = await this.repo.findByProject(asProjectId(projectId));
-    return sandboxes.map((s) => SandboxMapper.toDto(s, false));
+    const sandboxes = projectId
+      ? await this.repo.findByProject(asProjectId(projectId))
+      : await this.repo.findAll();
+    return sandboxes
+      .filter((s) => s.status !== 'destroyed')
+      .map((s) => SandboxMapper.toDto(s, false));
   }
 
   /**

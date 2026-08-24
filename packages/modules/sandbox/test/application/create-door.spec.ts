@@ -32,7 +32,13 @@ import { FULL_CAPS as FULL, FakeProvider, harness, type HarnessOptions } from '.
 
 const base = { projectId: 'prj-1', runtime: 'claude-code' };
 
-/** Every door rejection `create()` can produce today, each with the envelope it owes. */
+/**
+ * Every door rejection `create()` can produce today, each with the envelope it owes.
+ *
+ * ⚠️ 10 §6.8's 「门口拒绝」 table still lists SIX rows; `BRANCH_NOT_FOUND` is the seventh
+ * and the doc table has not caught up. That is a doc gap, not a behaviour gap — the
+ * guard below is precisely the reason the code did not need the table to be right.
+ */
 const DOOR_REJECTIONS: {
   what: string;
   status: number;
@@ -83,6 +89,26 @@ const DOOR_REJECTIONS: {
     },
     input: base,
   },
+  {
+    // 03 §7.2★: the branch is checked at the DOOR because after a full clone it costs
+    // one local `git branch -r` — no network, no credential. The alternative insertion
+    // point is `preparing-workspace`, i.e. after the 202, after a row and after a copy:
+    // a 「失败」 card with a [重试] button for something no retry can fix.
+    //
+    // 400, not 409, and not 404: the project is fine, the REQUEST named a branch that
+    // is not in the set on offer — the same shape as `UNKNOWN_PROVIDER` /
+    // `UNKNOWN_RUNTIME` about their sibling registries.
+    what: 'a branch the project does not have (03 §7.2★ 建 Task 选分支)',
+    status: 400,
+    code: 'BRANCH_NOT_FOUND',
+    opts: {
+      projectError: new ProjectAccessError(
+        'BRANCH_NOT_FOUND',
+        "project prj-1 has no branch 'nope'",
+      ),
+    },
+    input: { ...base, branch: 'nope' },
+  },
 ];
 
 async function reject(opts: HarnessOptions, input: Record<string, unknown>) {
@@ -127,7 +153,7 @@ describe('the create door answers every rejection with a 零副作用 envelope',
 /**
  * ── THE GUARD ─────────────────────────────────────────────────────────────────────
  *
- * The table above pins the six rejections that exist TODAY. It cannot pin the seventh,
+ * The table above pins the rejections that exist TODAY. It cannot pin the NEXT one,
  * because a list of known cases is exactly the thing a new case is missing from — and
  * "three of the four were never marked" is what that failure mode looks like in
  * practice.

@@ -68,6 +68,7 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     await mkdir(hostPath, { recursive: true });
     await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
     await this.importBaseline(source.baselinePath, hostPath);
+    await this.checkoutBranch(hostPath, source.branch);
     await writeFile(resolve(hostPath, STATE_FILE), 'ready');
     // writable by the non-root in-sandbox agent user; unreachable to other host
     // users thanks to the 0700 parent (see class doc).
@@ -96,6 +97,39 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     await cp(baselinePath, workspacePath, { recursive: true, force: true });
   }
 
+  /**
+   * 建 Task 时选分支 (03 §7.2★): switch the FRESH COPY to the requested branch. Ordered
+   * strictly after the baseline import and strictly before the instance is created,
+   * exactly as 03 §7.6's pipeline says — there is no container yet, and nothing has
+   * opened the workspace, so a checkout here is invisible to everything downstream.
+   *
+   * ⚠️ IT IS A PURELY LOCAL COMMAND, AND THAT IS THE ENTIRE POINT OF THE FULL CLONE.
+   * The copy carries every remote-tracking ref, so `git checkout <name>` DWIMs into a
+   * local branch tracking `origin/<name>` without contacting anything. Against a
+   * `--depth=1 --single-branch` baseline the same command dies with
+   * `pathspec '<name>' did not match any file(s) known to git` (measured), which is
+   * why the shallow option is gone rather than configurable.
+   *
+   * ⚠️ THE TRAILING `--` IS NOT DECORATION AND IT MUST NOT MOVE. `git checkout X --`
+   * means 「X is a REV, no pathspecs follow」; `git checkout -- X` means the opposite —
+   * 「X is a PATH」 — i.e. "throw away local edits to the file named X". Written the
+   * second way, a branch name that also names a tracked file would silently revert a
+   * file instead of switching branch, and the workspace would start on the WRONG code
+   * with no error at all. Without any `--`, git guesses, and refuses when the name is
+   * ambiguous.
+   *
+   * `GIT_TERMINAL_PROMPT=0` because a local checkout has no business asking for
+   * credentials — if some config ever made it try, it must fail rather than hang the
+   * whole provision on a prompt nobody can answer.
+   */
+  private async checkoutBranch(workspacePath: string, branch?: string): Promise<void> {
+    if (branch === undefined || branch === '') return;
+    await execFileAsync('git', ['checkout', branch, '--'], {
+      cwd: workspacePath,
+      env: checkoutEnv(),
+    });
+  }
+
   async cleanup(sandboxId: string, opts: { keep: boolean }): Promise<void> {
     const hostPath = this.dir(sandboxId);
     if (opts.keep) {
@@ -104,4 +138,36 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     }
     await rm(hostPath, { recursive: true, force: true });
   }
+}
+
+/**
+ * Env for the workspace checkout: ambient repo-location overrides REMOVED.
+ *
+ * ⚠️ `cwd` DOES NOT PIN WHICH REPOSITORY GIT ACTS ON. `GIT_DIR` / `GIT_WORK_TREE` /
+ * `GIT_INDEX_FILE` and friends outrank it, so a platform process that inherited any of
+ * them — launched from a git hook, or from a harness that sets them (vitest already
+ * leaks `EDITOR` into children, which is how the clone path's guard list was found) —
+ * would run this checkout against SOMEONE ELSE'S repository while reporting success.
+ * The workspace would then start on the baseline's default branch with no error at all,
+ * which is the silent-wrong-code failure this whole step exists to prevent.
+ *
+ * The clone path solves the same class of problem with a much longer list (03 §7.3,
+ * `project/…/git-env.ts`); this is only the repo-location subset, because a local
+ * checkout touches no credential, no transport and no remote.
+ */
+function checkoutEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  for (const key of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_COMMON_DIR',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_NAMESPACE',
+    'GIT_CEILING_DIRECTORIES',
+  ]) {
+    delete env[key];
+  }
+  return env;
 }
