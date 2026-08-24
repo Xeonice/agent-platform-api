@@ -45,6 +45,7 @@ import type {
   TaskLogStore,
   TaskServerFrame,
   WorkspacePreparer,
+  WorkspaceSource,
 } from '@platform/contracts';
 import { UnknownRuntimeError } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
@@ -273,7 +274,13 @@ export class InMemorySandboxRepo implements SandboxRepository {
   async findById(id: SandboxId): Promise<Sandbox | null> {
     return this.store.get(id) ?? null;
   }
-  async findByProject(): Promise<Sandbox[]> {
+  // ⚠️ 这个替身以前**忽略 projectId 直接返回全部**，比真实 sqlite 实现宽松
+  // （后者 `where(eq(sandboxes.projectId, ...))`）。于是任何"按项目过滤"的断言在
+  // 单测里都是假的——测的是替身的行为，不是产品的。
+  async findByProject(projectId: ProjectId): Promise<Sandbox[]> {
+    return [...this.store.values()].filter((s) => s.projectId === projectId);
+  }
+  async findAll(): Promise<Sandbox[]> {
     return [...this.store.values()];
   }
   async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
@@ -569,9 +576,16 @@ export function harness(opts: HarnessOptions = {}) {
   const forgetRuntime = (id: string): boolean => byId.delete(id);
 
   const wsCalls: string[] = [];
+  /**
+   * The `WorkspaceSource` each `prepare` was handed, in order. Separate from `wsCalls`
+   * because the branch (03 §7.2★) has to survive THREE hand-offs — door → admitted →
+   * provision → preparer — and a string log can only show that prepare was reached.
+   */
+  const wsSources: WorkspaceSource[] = [];
   const workspace: WorkspacePreparer = {
-    async prepare(id: string): Promise<PreparedWorkspace> {
+    async prepare(id: string, source: WorkspaceSource): Promise<PreparedWorkspace> {
       wsCalls.push(`prepare:${id}`);
+      wsSources.push(source);
       return { hostPath: `/tmp/ws/${id}` };
     },
     async cleanup(id, o): Promise<void> {
@@ -580,11 +594,19 @@ export function harness(opts: HarnessOptions = {}) {
   };
 
   let projectLookups = 0;
+  /** Branch argument of each facade call — `undefined` when the request named none. */
+  const branchesAsked: (string | undefined)[] = [];
   const projectFacade: ProjectFacade = {
-    async getRuntimeContextForTask(projectId) {
+    async getRuntimeContextForTask(projectId, branch) {
       projectLookups += 1;
+      branchesAsked.push(branch);
       if (opts.projectError) throw opts.projectError;
-      return { projectId, baselinePath: `/tmp/baseline/${projectId}`, sourceType: 'empty' };
+      return {
+        projectId,
+        baselinePath: `/tmp/baseline/${projectId}`,
+        sourceType: 'empty',
+        branch,
+      };
     },
   };
 
@@ -749,6 +771,8 @@ export function harness(opts: HarnessOptions = {}) {
     calls,
     txLog,
     wsCalls,
+    wsSources,
+    branchesAsked,
     installInputs,
     bootstrapInputs,
     injections,

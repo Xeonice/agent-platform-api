@@ -13,7 +13,11 @@ import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
  * failure path (bad URL) → retry → convert-to-empty works offline. The successful
  * clone of a PUBLIC repo needs network — it SKIPS LOUDLY when offline.
  *
- * Asserts the product rule that `ProjectDto` never carries `repoUrl`.
+ * ⚠️ THE 「never carries repoUrl」 ASSERTION THIS FILE USED TO MAKE IS GONE ON PURPOSE.
+ * 10 §7.3 overturned that ruling: the project's read-only bar now shows the remote and
+ * the baseline's freshness (P21-6), so `repoUrl` / `repoBranch` / `baselineSizeBytes` /
+ * `updatedAt` are ON the DTO. What still must NOT leak is the pair below — a host
+ * filesystem path and a v1.1 internal switch.
  */
 const PUBLIC_REPO = process.env.E2E_PUBLIC_REPO ?? 'https://github.com/octocat/Hello-World.git';
 
@@ -71,7 +75,7 @@ afterAll(async () => {
 });
 
 describe('projects REST', () => {
-  it('empty project is ready immediately and never exposes repoUrl', async () => {
+  it('empty project is ready immediately; its DTO carries updatedAt but no source', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/projects')
       .send({ name: 'empty-one', sourceType: 'empty' })
@@ -79,22 +83,63 @@ describe('projects REST', () => {
     expect(res.body.cloneStatus).toBe('ready');
     expect(res.body.sourceType).toBe('empty');
     expect(res.body.taskCount).toBe(0);
-    // minimal DTO (shared/10 §7): no source, no internal fields
+    // `updatedAt` is unconditional (10 §7.3) — an empty project has one too.
+    expect(typeof res.body.updatedAt).toBe('string');
+    // …but an empty project has NO remote, so the three source/size fields are absent
+    // rather than null (the wire contract writes them `?:`).
     expect(res.body).not.toHaveProperty('repoUrl');
     expect(res.body).not.toHaveProperty('repoBranch');
-    expect(res.body).not.toHaveProperty('baselineSizeBytes');
+    // internal, and staying internal: a host path and the v1.1 shared-volume switch.
+    expect(res.body).not.toHaveProperty('baselinePath');
     expect(res.body).not.toHaveProperty('workspaceMode');
-    expect(res.body).not.toHaveProperty('updatedAt');
 
     const id = res.body.id as string;
     const got = await request(app.getHttpServer()).get(`/api/projects/${id}`).expect(200);
     expect(got.body).not.toHaveProperty('repoUrl');
+
+    // an empty project has no baseline repo to read refs from ⇒ [] (10 §6.2)
+    const branches = await request(app.getHttpServer())
+      .get(`/api/projects/${id}/branches`)
+      .expect(200);
+    expect(branches.body).toEqual([]);
+    // …and nothing to sync: 409, not a silent no-op (27 §3 INVALID_STATE)
+    const synced = await request(app.getHttpServer()).post(`/api/projects/${id}/sync`).send({});
+    expect(synced.status).toBe(409);
 
     const list = await request(app.getHttpServer()).get('/api/projects').expect(200);
     expect((list.body as Array<{ id: string }>).map((p) => p.id)).toContain(id);
 
     await request(app.getHttpServer()).delete(`/api/projects/${id}`).send({}).expect(204);
     await request(app.getHttpServer()).get(`/api/projects/${id}`).expect(404);
+  });
+
+  it('a git project echoes its source back on the DTO (10 §7.3 overturns 「来源不外露」)', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/projects')
+      .send({
+        name: 'source-echo',
+        sourceType: 'git',
+        repoUrl: 'https://example.invalid/org/repo.git',
+        repoBranch: 'release/2.0',
+      })
+      .expect(202);
+    // the clone will fail (host does not resolve) — irrelevant: these four come from
+    // the row, which is written in the create transaction.
+    expect(res.body.repoUrl).toBe('https://example.invalid/org/repo.git');
+    expect(res.body.repoBranch).toBe('release/2.0');
+    expect(typeof res.body.updatedAt).toBe('string');
+    // still cloning ⇒ no baseline measured yet, and the branch list is empty rather
+    // than an error the picker would have to special-case (10 §6.2).
+    const branches = await request(app.getHttpServer())
+      .get(`/api/projects/${res.body.id as string}/branches`)
+      .expect(200);
+    expect(branches.body).toEqual([]);
+
+    await poll(res.body.id as string, 'failed');
+    await request(app.getHttpServer())
+      .delete(`/api/projects/${res.body.id as string}`)
+      .send({})
+      .expect(204);
   });
 
   it('rejects git without repoUrl (400) and empty with repoUrl (400)', async () => {

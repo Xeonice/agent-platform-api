@@ -39,8 +39,43 @@ export function attachSessionCmd(session: string): string[] {
  * arguments with spaces, so handing it a pre-quoted script is the only way an argv
  * containing spaces survives intact.
  */
-export function newSessionCmd(session: string, command: AgentCommand): string[] {
-  return ['tmux', 'new-session', '-d', '-s', session, agentScript(command)];
+/**
+ * ★ Detached tmux 会话的默认尺寸是 **80x24**（实测：容器内 `tmux new-session -d`
+ * 之后 `list-sessions` 报 `80x24`）。而 agent 会话在 **provision 阶段**就创建
+ * （03 §4.3：起容器时 agent 就跑起来，所以打开终端时可能已经有一屏输出）——那一刻
+ * **还没有任何客户端连上来**，真实尺寸无从得知。
+ *
+ * 后果不是"小一点"：agent CLI 一启动就按 80 列画欢迎横幅/边框，而终端协议里没有
+ * "回流"——之后客户端 attach、tmux 把窗口撑到 247x140，**已经吐出的字节不会重排**。
+ * 屏幕上就是一个 80 列的窄框浮在一大片空白里。
+ *
+ * 所以这里给一个**宽松的默认值**：让第一屏在常见屏幕上就是宽的。
+ *
+ * ⚠️ **它不能彻底消除错位**，因为真实尺寸只有 attach 那一刻才知道：客户端比这个默认
+ * 高时，旧内容仍会被留在底部（tmux 把窗口撑高、历史往上填）。要彻底解决只能把客户端
+ * 尺寸随创建请求传下来——那要动 `CreateSandboxRequest` 契约，且**创建任务时浏览器里
+ * 还没有终端**，量不出 cols/rows（xterm 的格子尺寸要有实例才知道）。本轮的取舍：
+ * 用默认值把**宽度**这一半修好（视觉损伤的大头），纵向错位记为已知限制。
+ */
+export const DEFAULT_AGENT_TMUX_SIZE = { cols: 200, rows: 50 } as const;
+
+export function newSessionCmd(
+  session: string,
+  command: AgentCommand,
+  size: { cols: number; rows: number } = DEFAULT_AGENT_TMUX_SIZE,
+): string[] {
+  return [
+    'tmux',
+    'new-session',
+    '-d',
+    '-x',
+    String(size.cols),
+    '-y',
+    String(size.rows),
+    '-s',
+    session,
+    agentScript(command),
+  ];
 }
 
 /**

@@ -51,6 +51,7 @@ function harness(opts: {
       return status === null ? null : { status };
     },
     findByProject: async () => [],
+    findAll: async () => [],
     countActiveByProject: async () => ({}),
     saveSync: () => {},
   } as never;

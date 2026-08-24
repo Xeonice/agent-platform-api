@@ -7,14 +7,18 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
-import type { ProjectDto } from '@platform/contracts';
+import type { ProjectBranches, ProjectDto } from '@platform/contracts';
 import { ProjectApplicationService } from '../../application/project-application.service';
 import { CreateProjectDto, DeleteProjectDto, ProjectResponseDto } from './dto/project.dto';
 
 /**
  * REST protocol shell for projects (02 §5.1, shared/10 §6). Thin adapter over the
  * SAME ProjectApplicationService the MCP tools use. git create is 202 (clone runs
- * in the background); empty create is 201. `ProjectDto` never carries repoUrl.
+ * in the background); empty create is 201.
+ *
+ * `branches` and `sync` are REST-only on purpose (27 §3 lists 「—」 for their MCP
+ * column): the branch list is UI plumbing for a picker, and a sync is a long remote
+ * operation whose only caller is a person looking at the project bar.
  */
 @ApiTags('project')
 @Controller('projects')
@@ -66,6 +70,24 @@ export class ProjectController {
   @ApiOkResponse({ type: ProjectResponseDto })
   cancelClone(@Param('id') id: string): Promise<ProjectDto> {
     return this.app.cancelClone(id);
+  }
+
+  @Get(':id/branches')
+  @ApiOperation({
+    summary: "List the branches in the project's baseline (local refs; no network)",
+  })
+  @ApiOkResponse({ schema: { type: 'array', items: { type: 'string' } } })
+  listBranches(@Param('id') id: string): Promise<ProjectBranches> {
+    return this.app.listBranches(id);
+  }
+
+  @Post(':id/sync')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Sync the baseline from its remote (git fetch --all)' })
+  @ApiOkResponse({ type: ProjectResponseDto })
+  @ApiConflictResponse({ description: 'the project is not ready (or has no remote)' })
+  sync(@Param('id') id: string): Promise<ProjectDto> {
+    return this.app.syncBaseline(id);
   }
 
   @Delete(':id')

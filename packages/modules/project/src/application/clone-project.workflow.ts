@@ -1,14 +1,13 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK, UNIT_OF_WORK, asProjectId } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
-import { CREDENTIAL_FACADE, CredentialPreparationError } from '@platform/contracts';
+import { CREDENTIAL_FACADE } from '@platform/contracts';
 import type {
   CredentialFacade,
   GitAuthContext,
   SandboxEventBroadcaster,
 } from '@platform/contracts';
 import { SANDBOX_EVENT_BROADCASTER } from '@platform/contracts';
-import { RepoUrl } from '../domain/value-objects/repo-url.vo';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
 import type { ProjectRepository } from '../domain/repositories/project.repository';
 import { GIT_CLONER } from '../domain/ports/git-cloner.port';
@@ -17,10 +16,24 @@ import { CloneError } from '../domain/ports/git-cloner.port';
 import { BASELINE_MANAGER } from '../domain/ports/baseline-manager.port';
 import type { BaselineManager } from '../domain/ports/baseline-manager.port';
 import type { CloneErrorCode, Project } from '../domain/entities/project.entity';
+import { prepareGitAuth } from './git-auth';
 
 const MAX_CONCURRENT_CLONES = 2;
 const CLONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard cap (03 §7.2)
 const PROGRESS_THROTTLE_MS = 1000;
+/**
+ * Free-space floor the target filesystem must clear BEFORE a clone starts
+ * (03 §7.2★ 磁盘预检). Overridable with `CLONE_MIN_FREE_BYTES`.
+ *
+ * ⚠️ WHY A FLOOR AND NOT 「仓库体积 × N」. 03 §7.5 phrases the rule as 「剩余空间 < 需求」,
+ * but the need is UNKNOWABLE before the clone: nothing has asked the remote how big it
+ * is, and the only honest way to find out (`ls-remote` + a size API) is per-forge,
+ * needs a credential, and reintroduces exactly the network dependency 03 §7.2★ just
+ * removed. A floor is the part that can be checked truthfully, and it catches the case
+ * that actually happens — a disk already at the brim before the full clone (now
+ * potentially ten times the shallow size) makes it worse.
+ */
+const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
 /**
  * Background clone orchestrator (docs/backend/03 §7.2). Runs in-process with a
@@ -104,11 +117,16 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     let auth: GitAuthContext | null = null;
 
     try {
+      // 磁盘预检 (03 §7.2★): refuse BEFORE writing anything, so a doomed clone leaves
+      // no half-written baseline dir to `rm -rf`. It runs FIRST — ahead of the
+      // credential materialisation — because it is the cheapest check and it must not
+      // decrypt a secret for a clone that cannot start.
+      await this.assertDiskSpace(dest);
       // Private-repo support (03 §7.3): pick a credential by URL protocol/host via
       // the cross-context facade. A hit whose host ∈ allowedHosts yields an opaque
       // handle we inject; otherwise (no credential / host not allowed) we clone as a
       // public repo. The workflow only ever holds the handle — never plaintext.
-      auth = await this.prepareAuth(project.repoUrl);
+      auth = await prepareGitAuth(this.credentials, project.repoUrl);
       await this.baseline.removeDir(dest); // fresh dest (retry re-clones from scratch)
       await this.cloner.clone({
         repoUrl: project.repoUrl,
@@ -126,8 +144,12 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
             event: 'project.clone_progress',
             projectId,
             phase: 'cloning',
+            stage: p.stage,
             percent: p.percent,
+            objectsDone: p.objectsDone,
+            objectsTotal: p.objectsTotal,
             receivedBytes: p.receivedBytes,
+            bytesPerSecond: p.bytesPerSecond,
           });
         },
       });
@@ -158,24 +180,25 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     }
   }
 
-  /** Resolve a git-auth handle for the repo, or null to clone as a public repo. */
-  private async prepareAuth(repoUrl: string): Promise<GitAuthContext | null> {
-    let repo: RepoUrl;
-    try {
-      repo = RepoUrl.create(repoUrl);
-    } catch {
-      return null; // already validated at create time; be defensive
-    }
-    try {
-      return await this.credentials.prepareGitAuth(
-        repo.credentialKind(),
-        repo.host(),
-        repo.scheme(),
-      );
-    } catch (e) {
-      if (e instanceof CredentialPreparationError) return null; // no cred / host not allowed
-      throw e;
-    }
+  /**
+   * 磁盘预检 (03 §7.2★): the pre-write half of `DISK_INSUFFICIENT`.
+   *
+   * ⚠️ IT DOES NOT REPLACE THE stderr CLASSIFIER, AND THE TWO ARE NOT ALTERNATIVES.
+   * This one catches 「一开始就不够」 — and only that. It cannot catch 「克隆途中别的进程把
+   *盘吃满」, which is a race no pre-check can win, so `classifyCloneError`'s
+   * `/enospc|no space left/` branch stays exactly where it is. Before the full clone
+   * that after-the-fact branch was an edge case; a full history makes it ordinary, and
+   * an ordinary failure deserves to be refused before it writes half a repository.
+   */
+  private async assertDiskSpace(destPath: string): Promise<void> {
+    const minFree = minFreeBytes();
+    const available = await this.baseline.availableBytes(destPath);
+    if (available >= minFree) return;
+    throw new CloneError(
+      'DISK_INSUFFICIENT',
+      `not enough free space to clone: ${String(available)} bytes available, ` +
+        `${String(minFree)} required (CLONE_MIN_FREE_BYTES)`,
+    );
   }
 
   private classifyFailure(e: unknown, timedOut: boolean, aborted: boolean): CloneErrorCode {
@@ -217,4 +240,12 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       this.logger.warn(`reaped interrupted clone: project ${project.id} → failed/INTERRUPTED`);
     }
   }
+}
+
+/** `CLONE_MIN_FREE_BYTES` when it parses as a positive integer, else the default. */
+function minFreeBytes(): number {
+  const raw = process.env.CLONE_MIN_FREE_BYTES;
+  if (raw === undefined) return DEFAULT_MIN_FREE_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_FREE_BYTES;
 }

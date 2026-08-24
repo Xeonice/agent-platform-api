@@ -321,6 +321,74 @@
         ]
       }
     },
+    "/api/projects/{id}/branches": {
+      "get": {
+        "operationId": "ProjectController_listBranches",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the branches in the project's baseline (local refs; no network)",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/projects/{id}/sync": {
+      "post": {
+        "operationId": "ProjectController_sync",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "the project is not ready (or has no remote)"
+          }
+        },
+        "summary": "Sync the baseline from its remote (git fetch --all)",
+        "tags": [
+          "project"
+        ]
+      }
+    },
     "/api/sandboxes": {
       "post": {
         "operationId": "SandboxController_create",
@@ -354,7 +422,16 @@
       },
       "get": {
         "operationId": "SandboxController_list",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "projectId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
@@ -1202,6 +1279,20 @@
           },
           "createdAt": {
             "type": "string"
+          },
+          "repoUrl": {
+            "type": "string"
+          },
+          "repoBranch": {
+            "type": "string"
+          },
+          "baselineSizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "updatedAt": {
+            "type": "string"
           }
         },
         "required": [
@@ -1211,7 +1302,8 @@
           "cloneStatus",
           "cloneErrorCode",
           "taskCount",
-          "createdAt"
+          "createdAt",
+          "updatedAt"
         ]
       },
       "DeleteProjectDto": {
@@ -1228,6 +1320,11 @@
           "projectId": {
             "type": "string",
             "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
           },
           "runtime": {
             "type": "string",

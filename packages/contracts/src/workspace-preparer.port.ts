@@ -18,6 +18,15 @@ export interface PreparedWorkspace {
 export interface WorkspaceSource {
   /** host baseline dir to import; must exist (platform guarantees it, 03 §4). */
   baselinePath: string;
+  /**
+   * Branch to check out in the FRESH COPY once the import is done (03 §7.2★). After a
+   * full baseline clone this is a purely LOCAL `git checkout` — no network, no git
+   * credential — which is exactly why the baseline is cloned in full. The value was
+   * already validated against the baseline's refs at the create door, so a failure
+   * here is a real fault, not a bad request. `undefined` ⇒ keep the baseline's own
+   * checked-out branch.
+   */
+  branch?: string;
 }
 
 export interface WorkspacePreparer {

@@ -159,6 +159,43 @@ export class Project extends AggregateRoot<ProjectId> {
     this._cloneErrorCode = code;
   }
 
+  /**
+   * Baseline synced from the remote (`POST /api/projects/:id/sync`, 03 §7.2★): refresh
+   * the recorded size and the timestamp. `ready → ready` is NOT a state-machine move,
+   * so it deliberately does not go through `transition` — nothing about the clone
+   * lifecycle changed, only how fresh the bytes on disk are.
+   *
+   * ⚠️ IT SAYS NOTHING ABOUT EXISTING TASKS, BECAUSE IT MUST NOT. A Task's workspace is
+   * a copy-on-write snapshot taken when that Task was created; rewriting it would
+   * change the code out from under a run in progress. The consequence — two Tasks on
+   * one project can sit on different commits — is a KNOWN, deliberately un-surfaced
+   * semantic this round (03 §7.2★).
+   */
+  syncBaseline(baselineSizeBytes: number, now: Date): void {
+    this.assertCanSync();
+    this._baselineSizeBytes = baselineSizeBytes;
+    this._updatedAt = now;
+  }
+
+  /**
+   * The sync precondition, callable BEFORE the fetch (I-PRJ / 27 §3 `INVALID_STATE`).
+   *
+   * ⚠️ IT IS SEPARATE FROM `syncBaseline` BECAUSE IT HAS TO RUN AT BOTH ENDS. Checked
+   * only at the end, an empty project's sync would first run `git fetch` inside a
+   * directory that is not a repository and answer with the GIT failure — a 502
+   * 「网络错误」 about a project that simply has no remote. Checked only at the start, a
+   * project that changed underneath a slow fetch could still be written. So: refuse
+   * early here, and re-assert inside `syncBaseline` for the race.
+   */
+  assertCanSync(): void {
+    if (this._cloneStatus !== 'ready') {
+      throw new ProjectStateError('sync is only allowed on a ready project');
+    }
+    if (this._sourceType !== 'git') {
+      throw new ProjectStateError('sync is only allowed on a git project (no remote to fetch)');
+    }
+  }
+
   /** retry a failed clone: failed → cloning. */
   retryClone(now: Date): void {
     if (this._cloneStatus !== 'failed') {

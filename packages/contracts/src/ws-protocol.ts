@@ -56,9 +56,15 @@ export type SandboxWsEvent =
       event: 'project.clone_progress';
       projectId: string;
       phase: 'cloning' | 'slow' | 'done' | 'failed';
-      receivedBytes?: number;
-      totalBytes?: number;
+      /** git 阶段名（03 §7.2★）。`cloning` 之外的 phase 不带它。 */
+      stage?: 'enumerating' | 'counting' | 'compressing' | 'receiving' | 'resolving' | 'checkout';
       percent?: number;
+      /** `(527/26348)` —— git 唯一诚实的分母（`totalBytes` 是幽灵字段，已删）。 */
+      objectsDone?: number;
+      objectsTotal?: number;
+      receivedBytes?: number;
+      /** 接收速率；卡住时它先归零，比百分比停住更早暴露。 */
+      bytesPerSecond?: number;
       errorCode?: string;
     }
   | { event: 'runtime-auth.status_changed'; runtime: string }
@@ -156,7 +162,8 @@ export const WS_PROTOCOL_CANONICAL =
   'terminal.server:data{data},exit{code},pong,session{socketSessionKey}|' +
   'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?,errorCode?},' +
   'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
-  'project.clone_progress{projectId,phase,receivedBytes?,totalBytes?,percent?,errorCode?},' +
+  'project.clone_progress{projectId,phase,stage?,percent?,objectsDone?,objectsTotal?,' +
+  'receivedBytes?,bytesPerSecond?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
   'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}|' +
   'tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|' +

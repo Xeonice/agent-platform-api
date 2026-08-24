@@ -23,6 +23,7 @@ import type {
   SandboxHandle,
   SandboxProvider,
   WorkspacePreparer,
+  WorkspaceSource,
 } from '@platform/contracts';
 import type { Sandbox } from '../../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../../domain/value-objects/sandbox-status.vo';
@@ -71,24 +72,27 @@ export class ProvisionSandboxWorkflow {
   async runSafely(
     sandbox: Sandbox,
     provider: SandboxProvider,
-    baselinePath: string,
+    source: WorkspaceSource,
   ): Promise<void> {
     try {
-      await this.run(sandbox, provider, baselinePath);
+      await this.run(sandbox, provider, source);
     } catch (e) {
       // run() already marked `failed`, recorded the reason and tore down any orphan.
       this.logger.error(`provision failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
     }
   }
 
-  async run(sandbox: Sandbox, provider: SandboxProvider, baselinePath: string): Promise<void> {
+  async run(sandbox: Sandbox, provider: SandboxProvider, source: WorkspaceSource): Promise<void> {
     // hoisted so the failure path can tear down a container that WAS created (e.g. a
     // later `start`/install failure) — otherwise it orphans (S1 audit P1-2).
     let handle: SandboxHandle | undefined;
     try {
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
-      const ws = await this.workspace.prepare(sandbox.id, { baselinePath });
+      // `source.branch` (if any) was already checked against the baseline's refs at the
+      // create door, so the checkout inside `prepare` is a local operation expected to
+      // succeed; a failure here is a real fault and lands as WORKSPACE_PREPARE_FAILED.
+      const ws = await this.workspace.prepare(sandbox.id, source);
 
       this.advance(sandbox, 'creating', 'scheduler');
       const image = this.imageSpecOf(sandbox);

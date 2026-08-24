@@ -30,6 +30,18 @@ export type RequiredCapabilities = z.infer<typeof RequiredCapabilitiesSchema>;
 
 export const CreateSandboxSchema = z.object({
   projectId: z.string().min(1),
+  /**
+   * Which branch the Task's workspace starts on (10 §7.3, 03 §7.2★). Values come from
+   * `GET /api/projects/:id/branches`; omitted ⇒ whatever the baseline has checked out.
+   *
+   * It is validated at the create DOOR against the baseline's LOCAL refs — a branch the
+   * project does not have is refused 零副作用 rather than failing half-way through
+   * `preparing-workspace`. Making it good is a single local `git checkout` in the fresh
+   * copy, which is only possible because the baseline is cloned in FULL (03 §7.2★): a
+   * `--depth=1 --single-branch` baseline has exactly one branch ref and every other
+   * name dies as `pathspec … did not match`.
+   */
+  branch: z.string().min(1).max(255).optional(),
   runtime: z.string().min(1),
   image: z.string().optional(),
   provider: z.string().optional(),

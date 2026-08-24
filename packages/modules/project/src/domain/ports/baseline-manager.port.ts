@@ -12,6 +12,12 @@ export interface BaselineManager {
   removeDir(path: string): Promise<void>;
   /** total bytes under a dir (for baseline_size_bytes). 0 if missing. */
   directorySizeBytes(path: string): Promise<number>;
+  /**
+   * Free bytes on the FILESYSTEM that would hold `path` (03 §7.2★ 磁盘预检). The path
+   * itself need not exist yet — the deepest existing ancestor is probed, which is the
+   * normal case since the check runs BEFORE the baseline dir is created.
+   */
+  availableBytes(path: string): Promise<number>;
 }
 
 export const BASELINE_MANAGER = Symbol('BaselineManager');
