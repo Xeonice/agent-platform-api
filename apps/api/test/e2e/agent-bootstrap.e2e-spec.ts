@@ -190,15 +190,21 @@ describe('E2E-1-bootstrap — the agent session starts in provision, with no ter
     //    the codex start command carrying the instruction.
     expect(provider.execs.some((c) => c.join(' ') === 'sh -c command -v tmux')).toBe(true);
     const start = provider.execs.find((c) => c.includes('new-session'))!;
-    expect(start.slice(0, 5)).toEqual([
-      'tmux',
-      'new-session',
-      '-d',
-      '-s',
-      PLATFORM_AGENT_TMUX_SESSION,
-    ]);
-    expect(start[5]).toContain(PROMPT);
-    expect(start[5]).toContain('danger-full-access'); // codex's inner sandbox is OFF
+    expect(start.slice(0, 3)).toEqual(['tmux', 'new-session', '-d']);
+    expect(start).toContain(PLATFORM_AGENT_TMUX_SESSION);
+    // ★ `-x/-y` 不能省：detached tmux 会话默认 **80x24**（容器内实测），agent 一启动就按
+    // 80 列画欢迎横幅，而终端协议没有"回流" ⇒ 之后 attach 撑宽也救不回第一屏。
+    // 断言测的是**性质**（明显大于那个坏掉的默认）而不是字面值——默认调整不该让这条假红。
+    const xi = start.indexOf('-x');
+    const yi = start.indexOf('-y');
+    expect(xi).toBeGreaterThan(-1);
+    expect(yi).toBeGreaterThan(-1);
+    expect(Number(start[xi + 1])).toBeGreaterThan(80);
+    expect(Number(start[yi + 1])).toBeGreaterThan(24);
+    // payload 是**最后一个** tmux 参数（tmux 会把多个尾参用空格拼起来）。
+    const payload = start[start.length - 1];
+    expect(payload).toContain(PROMPT);
+    expect(payload).toContain('danger-full-access'); // codex's inner sandbox is OFF
 
     // ② the instruction is persisted and now marked consumed — a restart must not replay it
     const row = sandboxRow(id);
@@ -254,7 +260,7 @@ describe('E2E-1-bootstrap — the agent session starts in provision, with no ter
     await waitFor(created.body.id as string, 'running');
 
     const start = provider.execs.find((c) => c.includes('new-session'))!;
-    expect(start[5]).toContain('codex');
+    expect(start[start.length - 1]).toContain('codex');
     expect(sandboxRow(created.body.id as string).initial_prompt_consumed_at).toBeNull();
   });
 });
