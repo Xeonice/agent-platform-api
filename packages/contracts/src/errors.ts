@@ -48,6 +48,16 @@ export const ErrorEnvelopeSchema = z.object({
    * checked. Fail-quiet was designed in on purpose; keep it that way.
    */
   sideEffectFree: z.boolean().optional(),
+  /**
+   * 服务端日志关联；用户报障时报这个。
+   *
+   * ⚠️ **REST 上一定有，类型上仍是 optional —— 这不是疏漏。**
+   * REST 侧由 `ErrorEnvelopeFilter` 在出线前统一注入（10A §3），一个都不会漏；
+   * 但本 schema 是 REST 与 MCP **共用**的（10 §6.8「REST 与 MCP 同构」），
+   * 而 MCP tool 走的是 `{content:[…]}`，不经那个 filter。
+   * 标成 required 会对 MCP 那条路撒谎 —— 宁可类型宽一格，也不要一个"契约说有、
+   * 实际没有"的字段（这个仓刚因为 `totalBytes` 那种幽灵字段吃过亏）。
+   */
   traceId: z.string().optional(),
   details: z.array(z.record(z.string(), z.unknown())).optional(),
 });

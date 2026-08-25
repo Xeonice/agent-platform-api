@@ -40,6 +40,11 @@ export default defineWorkspace([
         'packages/**/test/domain/**/*.spec.ts',
         'packages/**/test/unit/**/*.spec.ts',
         'packages/**/test/application/**/*.spec.ts',
+        // apps/api 的 bootstrap 层（全局 pipe/filter）也有纯单测:它们不属于任何
+        // module package,但同样是密封可测的。此前这条不在 include 里,
+        // `apps/api/test/**` 只被 e2e 那条(`*.e2e-spec.ts`)覆盖 ⇒ 写在这里的
+        // `*.spec.ts` 会被**静默跳过**,连"没有测试文件"都不报。
+        'apps/api/test/unit/**/*.spec.ts',
       ],
       environment: 'node',
     },
