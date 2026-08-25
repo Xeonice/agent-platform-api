@@ -1,6 +1,7 @@
-import { mkdir, rm, readdir, stat, statfs } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { mkdir, rm, readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Injectable } from '@nestjs/common';
+import { availableBytesFor } from '@platform/shared-kernel';
 import type { BaselineManager } from '../../domain/ports/baseline-manager.port';
 
 /**
@@ -32,22 +33,14 @@ export class FsBaselineDirManager implements BaselineManager {
    * two differ by the ~5% root reserve, and reporting space the platform cannot
    * actually use is precisely the mistake this check exists to stop.
    */
+  /**
+   * Delegates to shared-kernel: the SAME arithmetic backs the workspace-copy
+   * pre-check in the sandbox module (03 §7.6), and the two contexts cannot import
+   * each other. See `availableBytesFor` for why it is `bavail` and why the
+   * ancestor walk is the ordinary path rather than a fallback.
+   */
   async availableBytes(path: string): Promise<number> {
-    let probe = resolve(path);
-    for (;;) {
-      try {
-        const fs = await statfs(probe);
-        return Number(fs.bavail) * Number(fs.bsize);
-      } catch {
-        const parent = dirname(probe);
-        // `dirname('/') === '/'` — the loop's only exit when nothing is statable.
-        // `Infinity` = "unknown, do not block": a pre-check that cannot measure must
-        // not refuse a clone that would have succeeded. The post-hoc ENOSPC classifier
-        // (`error.classifier.ts`) is still there for the real out-of-space case.
-        if (parent === probe) return Number.POSITIVE_INFINITY;
-        probe = parent;
-      }
-    }
+    return availableBytesFor(path);
   }
 
   async directorySizeBytes(path: string): Promise<number> {

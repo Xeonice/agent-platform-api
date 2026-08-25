@@ -24,6 +24,7 @@ export * from './project-facade.port';
 export * from './credential-facade.port';
 export * from './terminal-auth.port';
 export * from './workspace-preparer.port';
+export * from './sandbox-failure-codes';
 export * from './ws-protocol';
 // NOTE: ./testkit is intentionally NOT re-exported here — it is a test-only
 // subpath (`@platform/contracts/testkit`) and must not pull vitest into the

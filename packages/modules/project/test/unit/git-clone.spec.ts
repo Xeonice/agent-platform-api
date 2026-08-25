@@ -92,6 +92,131 @@ describe('cleanGitEnv drops ambient repo-location overrides (03 §7.2★)', () =
   });
 });
 
+/**
+ * ★ THE `GIT_TRACE*` FAMILY — 03 §7.3 G，2026-08 从「四个字面量」改成前缀。
+ *
+ * The guard's own comment said it covered 「the GIT_TRACE* family」 while the list held
+ * four names. The ones it MISSED are the dangerous half: `GIT_TRACE2_ENV_VARS` prints
+ * the VALUES of the env vars you name — point it at `GIT_TOKEN` and the PAT is written
+ * into the trace verbatim — and `GIT_TRACE2_REDACT=0` switches off git's redaction of
+ * the `Authorization:` header, the one thing keeping a curl trace from spelling out the
+ * token. Both survived a guard that claimed to strip the family.
+ *
+ * MUTATION: delete the `GIT_TRACE_PREFIX.test(upper)` line and this goes red on the
+ * TRACE2 names while the four legacy literals stay green — which is precisely the shape
+ * of the hole, and precisely what a literal list cannot tell you.
+ */
+const TRACE_FAMILY = [
+  // the four the old literal list had…
+  'GIT_TRACE',
+  'GIT_TRACE_CURL',
+  'GIT_TRACE_PACKET',
+  // …and the generation it never heard of.
+  'GIT_TRACE2',
+  'GIT_TRACE2_EVENT',
+  'GIT_TRACE2_PERF',
+  'GIT_TRACE2_ENV_VARS', // dumps named env VALUES into the trace
+  'GIT_TRACE2_REDACT', // =0 disables Authorization redaction
+  'GIT_TRACE_REDACT', // =0 same, gen-1
+  'GIT_TRACE_SETUP',
+  'GIT_TRACE_PERFORMANCE',
+  'GIT_TRACE_PACK_ACCESS',
+  'GIT_TRACE_SHALLOW',
+  'GIT_TRACE_REFS',
+];
+
+function withTraceEnvSet(run: () => void): void {
+  const saved = new Map([...TRACE_FAMILY, 'GIT_CURL_VERBOSE'].map((k) => [k, process.env[k]]));
+  for (const k of TRACE_FAMILY) process.env[k] = '1';
+  process.env.GIT_TRACE2_ENV_VARS = 'GIT_TOKEN';
+  process.env.GIT_TRACE2_REDACT = '0';
+  process.env.GIT_CURL_VERBOSE = '1';
+  try {
+    run();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+describe('cleanGitEnv strips the whole GIT_TRACE* family, not a remembered list (03 §7.3 G)', () => {
+  it('no trace variable — including the TRACE2 generation — reaches the git child', () => {
+    withTraceEnvSet(() => {
+      const env = cleanGitEnv();
+      for (const k of TRACE_FAMILY) {
+        expect(env[k], `${k} would let the clone print its own credentials`).toBeUndefined();
+      }
+      // the one family member that is NOT `GIT_TRACE`-prefixed still needs its literal.
+      expect(env.GIT_CURL_VERBOSE).toBeUndefined();
+      // still a deny-list: ordinary inherited vars are untouched.
+      expect(env.PATH).toBe(process.env.PATH);
+    });
+  });
+
+  it('a name that merely CONTAINS the prefix elsewhere is not collateral damage', () => {
+    const saved = process.env.MY_GIT_TRACE_HELPER;
+    process.env.MY_GIT_TRACE_HELPER = 'keep-me';
+    try {
+      expect(cleanGitEnv().MY_GIT_TRACE_HELPER).toBe('keep-me');
+    } finally {
+      if (saved === undefined) delete process.env.MY_GIT_TRACE_HELPER;
+      else process.env.MY_GIT_TRACE_HELPER = saved;
+    }
+  });
+});
+
+/**
+ * ★ `objectsTotal` 是**本阶段的**分母 —— 这条把一句注释变成可执行的事实。
+ *
+ * 从 2026-08 起有三个文件（api 的 port、web 的 types、web 的 ws-protocol）加上两份文档
+ * 写着「`objectsTotal` 是 git 唯一在事前就知道的总量」。前半句对（`Enumerating objects`
+ * 确实开头就报），后半句不对，而且**没有任何东西在检验它**——注释不会红。
+ *
+ * 一句错话跟着一个正确的修复传播到五处，是 LIVE-RUN-FINDINGS 共性 2 的又一形态：
+ * 修 bug 时顺手写下的解释，本身从来没被验证过。
+ *
+ * 这条用**同一次 clone 的真实 stderr 片段**证明分母会变，因此下一个想做「整体进度」的人
+ * 会先在这里撞上事实，而不是在生产里撞上一个跳变的数字。
+ */
+describe('objectsTotal 是 per-stage 分母，不是全程分母', () => {
+  it('同一次 clone 里，各阶段报出的 total 是不同的量', () => {
+    // 真实 git 输出的形状：远端对象 26348 → delta 12000 → 工作树文件 3000。
+    const receiving = parseCloneProgress('Receiving objects:  50% (13174/26348), 1.20 MiB');
+    const resolving = parseCloneProgress('Resolving deltas:  50% (6000/12000)');
+    const checkout = parseCloneProgress('Updating files:  50% (1500/3000)');
+
+    expect(receiving?.objectsTotal).toBe(26348); // 对象数
+    expect(resolving?.objectsTotal).toBe(12000); // delta 数 —— 不是对象数
+    expect(checkout?.objectsTotal).toBe(3000); // 文件数 —— 连量纲都不是一个
+
+    // 把它当跨阶段稳定的分母，用户会看到 26348 → 12000 → 3000 一路跳。
+    const totals = [receiving, resolving, checkout].map((p) => p?.objectsTotal);
+    expect(new Set(totals).size).toBe(3);
+  });
+
+  it('压缩阶段的 total 也只算需压缩的对象，同样小于对象总数', () => {
+    const enumerating = parseCloneProgress('remote: Enumerating objects: 26348, done.');
+    const compressing = parseCloneProgress('remote: Compressing objects:  50% (4000/8000)');
+    expect(enumerating?.objectsTotal).toBe(26348);
+    expect(compressing?.objectsTotal).toBe(8000);
+    expect(compressing?.objectsTotal).toBeLessThan(enumerating?.objectsTotal ?? 0);
+  });
+
+  it('每一帧都自带 stage —— 这正是这对数唯一可被正确解读的原因', () => {
+    // `buildDetailLabel` 渲染成「接收对象 · 13,174/26,348」：阶段名限定了分母的含义。
+    // 少了 stage，同一对数字就无从解释 —— 所以 stage 不是装饰，是这对数的单位。
+    for (const line of [
+      'Receiving objects:  50% (13174/26348)',
+      'Resolving deltas:  50% (6000/12000)',
+      'Updating files:  50% (1500/3000)',
+    ]) {
+      expect(parseCloneProgress(line)?.stage, line).toBeDefined();
+    }
+  });
+});
+
 describe('classifyCloneError (03 §7.5)', () => {
   it('permission is matched before network', () => {
     expect(classifyCloneError('fatal: Authentication failed for https://h/x')).toBe(
