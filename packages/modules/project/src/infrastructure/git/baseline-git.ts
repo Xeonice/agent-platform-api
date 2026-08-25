@@ -79,7 +79,6 @@ export class SimpleGitBaseline implements BaselineGit {
   }
 }
 
-
 /**
  * ★ L-9 存量浅克隆基线的迁移 —— 2026-08 解决。
  *

@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Clock } from '@platform/shared-kernel';
 import { CloneProjectWorkflow } from '../../src/application/clone-project.workflow';
-import type { CloneProgress, CloneRequest, GitCloner } from '../../src/domain/ports/git-cloner.port';
+import type {
+  CloneProgress,
+  CloneRequest,
+  GitCloner,
+} from '../../src/domain/ports/git-cloner.port';
 import {
   FakeBaselineManager,
   InMemoryProjectRepo,

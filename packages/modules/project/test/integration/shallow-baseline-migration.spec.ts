@@ -155,9 +155,7 @@ describe.skipIf(!gitOk)('L-9 存量浅基线在 sync 时迁移成完整克隆', 
   it('重复 sync 幂等 —— 迁移过的基线再同步一次不会报错', async () => {
     const baseline = legacyShallowBaseline('twice');
     await new SimpleGitBaseline().fetchAll(fetchRequest(baseline));
-    await expect(
-      new SimpleGitBaseline().fetchAll(fetchRequest(baseline)),
-    ).resolves.toBeUndefined();
+    await expect(new SimpleGitBaseline().fetchAll(fetchRequest(baseline))).resolves.toBeUndefined();
     expect(remoteBranches(baseline)).toEqual(['origin/feature/x', 'origin/main']);
   }, 60_000);
 });

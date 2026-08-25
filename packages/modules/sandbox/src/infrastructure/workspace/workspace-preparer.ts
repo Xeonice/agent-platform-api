@@ -4,7 +4,11 @@ import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import { availableBytesFor } from '@platform/shared-kernel';
-import { WorkspacePrepareError, DISK_INSUFFICIENT, classifyWorkspacePrepareError } from '@platform/contracts';
+import {
+  WorkspacePrepareError,
+  DISK_INSUFFICIENT,
+  classifyWorkspacePrepareError,
+} from '@platform/contracts';
 import type { PreparedWorkspace, WorkspacePreparer, WorkspaceSource } from '@platform/contracts';
 
 const STATE_FILE = '.platform-workspace-state';

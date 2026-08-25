@@ -53,9 +53,7 @@ export const WORKSPACE_PREPARER = Symbol('WorkspacePreparer');
 export const WORKSPACE_PREPARE_FAILED = 'WORKSPACE_PREPARE_FAILED';
 export const DISK_INSUFFICIENT = 'DISK_INSUFFICIENT';
 
-export type WorkspacePrepareErrorCode =
-  | typeof WORKSPACE_PREPARE_FAILED
-  | typeof DISK_INSUFFICIENT;
+export type WorkspacePrepareErrorCode = typeof WORKSPACE_PREPARE_FAILED | typeof DISK_INSUFFICIENT;
 
 /**
  * 工作区准备失败。**由 adapter 抛**，不由 workflow 归类——只有实现知道自己刚才在做
@@ -85,6 +83,7 @@ export function classifyWorkspacePrepareError(e: unknown): WorkspacePrepareError
   if (e instanceof WorkspacePrepareError) return e;
   const errno = typeof e === 'object' && e !== null && 'code' in e ? String(e.code) : '';
   const message = e instanceof Error ? e.message : String(e);
-  const code = errno === 'ENOSPC' || errno === 'EDQUOT' ? DISK_INSUFFICIENT : WORKSPACE_PREPARE_FAILED;
+  const code =
+    errno === 'ENOSPC' || errno === 'EDQUOT' ? DISK_INSUFFICIENT : WORKSPACE_PREPARE_FAILED;
   return new WorkspacePrepareError(code, message, e);
 }
