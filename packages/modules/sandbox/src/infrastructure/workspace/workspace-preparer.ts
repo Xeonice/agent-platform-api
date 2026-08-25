@@ -3,6 +3,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { Injectable } from '@nestjs/common';
+import { availableBytesFor } from '@platform/shared-kernel';
+import {
+  WorkspacePrepareError,
+  DISK_INSUFFICIENT,
+  classifyWorkspacePrepareError,
+} from '@platform/contracts';
 import type { PreparedWorkspace, WorkspacePreparer, WorkspaceSource } from '@platform/contracts';
 
 const STATE_FILE = '.platform-workspace-state';
@@ -62,18 +68,72 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     return root;
   }
 
+  /**
+   * ⚠️ EVERY throw out of here is normalized to the closed set (`WorkspacePrepareError`).
+   * Un-wrapped, what escapes is a Node fs error whose `.code` is an **errno** —
+   * `ENOSPC`, `EACCES`, `ENOENT` — and `provisionSandbox`'s `failureOf` reads exactly
+   * that field, so the errno became the sandbox's `failureCode` and went out on the
+   * wire. The frontend keys its P22 §1 sentence off the code, has no entry for
+   * `ENOSPC`, and falls back to generic copy — for the one failure with the clearest
+   * possible user action ("free some disk").
+   *
+   * The wrap is at the METHOD boundary rather than per-call for the same reason the
+   * clone path's guard is: five awaits here can each throw an errno, and a per-call
+   * try/catch is five chances to forget — including in whatever line someone adds next.
+   */
   async prepare(sandboxId: string, source: WorkspaceSource): Promise<PreparedWorkspace> {
-    await this.ensureWorkspacesRoot();
-    const hostPath = this.dir(sandboxId);
-    await mkdir(hostPath, { recursive: true });
-    await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
-    await this.importBaseline(source.baselinePath, hostPath);
-    await this.checkoutBranch(hostPath, source.branch);
-    await writeFile(resolve(hostPath, STATE_FILE), 'ready');
-    // writable by the non-root in-sandbox agent user; unreachable to other host
-    // users thanks to the 0700 parent (see class doc).
-    await chmod(hostPath, 0o777);
-    return { hostPath };
+    try {
+      await this.ensureWorkspacesRoot();
+      const hostPath = this.dir(sandboxId);
+      await mkdir(hostPath, { recursive: true });
+      await this.assertDiskSpace(source.baselinePath, hostPath);
+      await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
+      await this.importBaseline(source.baselinePath, hostPath);
+      await this.checkoutBranch(hostPath, source.branch);
+      await writeFile(resolve(hostPath, STATE_FILE), 'ready');
+      // writable by the non-root in-sandbox agent user; unreachable to other host
+      // users thanks to the 0700 parent (see class doc).
+      await chmod(hostPath, 0o777);
+      return { hostPath };
+    } catch (e) {
+      throw classifyWorkspacePrepareError(e);
+    }
+  }
+
+  /**
+   * 磁盘预检 for the COPY side (03 §7.6). The clone path got one (03 §7.2★); this
+   * path — which moves the SAME number of bytes, once per Task instead of once per
+   * project — had none at all.
+   *
+   * ⚠️ WHY A FLOOR AND NOT 「基线体积」, WHEN THE BASELINE'S SIZE IS RIGHT THERE.
+   * On the clone side the requirement was unknowable because nothing had asked the
+   * remote how big the repo was. Here the opposite problem makes the same answer
+   * correct: `cp -a --reflink=auto` on btrfs/XFS clones the baseline for ~ZERO bytes,
+   * and there is no way to know in advance whether this filesystem will grant the
+   * reflink — `--reflink=auto` silently degrades to a full byte copy on ext4. So the
+   * requirement is either ≈0 or ≈baselineSize, and we cannot tell which. Demanding
+   * `baselineSize` free would refuse Tasks that a CoW filesystem completes for free;
+   * demanding nothing is what we had. A floor is the part that is true either way.
+   *
+   * What it catches is the case that actually happens on a single-machine deploy: a
+   * disk already at the brim, where a Task copy is the thing that finishes it off.
+   * Everything past the floor is still covered after the fact — `ENOSPC` now lands as
+   * `DISK_INSUFFICIENT` via `classifyWorkspacePrepareError`, which before this change
+   * reached the user as the literal string `ENOSPC`.
+   */
+  private async assertDiskSpace(baselinePath: string, hostPath: string): Promise<void> {
+    const minFree = minFreeBytes();
+    // measured on the WORKSPACE side: baseline and workspace can be different mounts
+    // (`DATA_ROOT` on one disk, a bind-mounted baselines volume on another), and the
+    // bytes are about to be written here.
+    const available = await availableBytesFor(hostPath);
+    if (available >= minFree) return;
+    throw new WorkspacePrepareError(
+      DISK_INSUFFICIENT,
+      `not enough free space to prepare the workspace: ${String(available)} bytes ` +
+        `available under ${hostPath}, ${String(minFree)} required ` +
+        `(WORKSPACE_MIN_FREE_BYTES); baseline is ${baselinePath}`,
+    );
   }
 
   /** Copy baseline contents into the workspace (CoW on Linux; portable fallback). */
@@ -170,4 +230,20 @@ function checkoutEnv(): NodeJS.ProcessEnv {
     delete env[key];
   }
   return env;
+}
+
+/**
+ * `WORKSPACE_MIN_FREE_BYTES` when it parses as a non-negative number, else the default.
+ *
+ * Deliberately a SEPARATE knob from the clone path's `CLONE_MIN_FREE_BYTES`: the two
+ * checks guard different directories, which on a real deploy are routinely different
+ * mounts, and an operator who tunes one has no reason to have meant the other.
+ */
+const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB, same floor as the clone side
+
+function minFreeBytes(): number {
+  const raw = process.env.WORKSPACE_MIN_FREE_BYTES;
+  if (raw === undefined) return DEFAULT_MIN_FREE_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_FREE_BYTES;
 }

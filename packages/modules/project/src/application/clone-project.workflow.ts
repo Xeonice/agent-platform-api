@@ -20,6 +20,16 @@ import { prepareGitAuth } from './git-auth';
 
 const MAX_CONCURRENT_CLONES = 2;
 const CLONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard cap (03 §7.2)
+/**
+ * 慢仓库提示 (03 §7.2 「慢仓库提示」表行, 10 §6 `project.clone_progress`): at 10 min the
+ * clone is still allowed to run — this only changes what the user is TOLD.
+ *
+ * ⚠️ 这个阶段此前是个幽灵态：`phase:'slow'` 在 ws-protocol 的联合里、在前端的 zod
+ * 枚举里、在 `useProjectClone.isSlow` 里、在 `CloneProgress.view` 的黄字分支里、
+ * 甚至在两个 Storybook story 里 —— 唯独**后端一次都没发过**。整条链路"完整"到
+ * 可以写故事截图，而它在生产中永远不会出现。
+ */
+const CLONE_SLOW_AFTER_MS = 10 * 60 * 1000;
 const PROGRESS_THROTTLE_MS = 1000;
 /**
  * Free-space floor the target filesystem must clear BEFORE a clone starts
@@ -115,6 +125,42 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     }, CLONE_TIMEOUT_MS);
     let lastEmit = 0;
     let auth: GitAuthContext | null = null;
+    /**
+     * ⚠️ STICKY. Once slow, every later progress frame stays `slow` until done/failed.
+     *
+     * Without it the warning is unreadable: the store REPLACES the whole clone state
+     * per event (`createProjectCloneSlice`), so the next throttled `cloning` frame —
+     * at most 1s later — erases it. The user would see a yellow line blink once,
+     * 10 minutes in, and never again.
+     */
+    let slow = false;
+    /**
+     * Last frame we sent, so the `slow` announcement can REPEAT it rather than send a
+     * bare `{phase:'slow'}`. Same reason: a bare frame would blank `stage`/`percent`/
+     * rate in the store and reset the bar to its indeterminate pulse — i.e. the moment
+     * we tell the user 「still going」 is the moment the UI stops showing how far.
+     */
+    let lastProgress: CloneProgress | null = null;
+    const slowTimer = setTimeout(() => {
+      if (slow) return;
+      slow = true;
+      // Emitted DIRECTLY, not via the throttle: a clone that is slow because it is
+      // WEDGED produces no further progress lines at all, and that is exactly the case
+      // where the user most needs to be told something. Waiting for the next frame
+      // would mean never.
+      this.broadcaster.broadcast({
+        event: 'project.clone_progress',
+        projectId,
+        phase: 'slow',
+        stage: lastProgress?.stage,
+        percent: lastProgress?.percent,
+        objectsDone: lastProgress?.objectsDone,
+        objectsTotal: lastProgress?.objectsTotal,
+        receivedBytes: lastProgress?.receivedBytes,
+        bytesPerSecond: lastProgress?.bytesPerSecond,
+      });
+      this.logger.warn(`clone for project ${projectId} still running after 10min → slow`);
+    }, CLONE_SLOW_AFTER_MS);
 
     try {
       // 磁盘预检 (03 §7.2★): refuse BEFORE writing anything, so a doomed clone leaves
@@ -137,13 +183,14 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         env: auth?.env,
         gitSshCommand: auth?.gitSshCommand,
         onProgress: (p: CloneProgress) => {
+          lastProgress = p;
           const now = this.clock.now().getTime();
           if (now - lastEmit < PROGRESS_THROTTLE_MS) return;
           lastEmit = now;
           this.broadcaster.broadcast({
             event: 'project.clone_progress',
             projectId,
-            phase: 'cloning',
+            phase: slow ? 'slow' : 'cloning',
             stage: p.stage,
             percent: p.percent,
             objectsDone: p.objectsDone,
@@ -175,6 +222,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     } finally {
       if (auth) await auth.dispose().catch(() => undefined); // delete temp keyfile dir (03 §7.3)
       clearTimeout(timer);
+      clearTimeout(slowTimer);
       this.controllers.delete(projectId);
       this.startNext();
     }

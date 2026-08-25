@@ -32,10 +32,9 @@ const GUARDED_ENV = new Set([
   'GIT_TEMPLATE_DIR',
   'SSH_ASKPASS',
   // log-redaction (G): a host-set trace would print Authorization: Basic <PAT> to stderr.
-  'GIT_TRACE',
-  'GIT_TRACE_CURL',
+  // ⚠️ The `GIT_TRACE*` family is stripped BY PREFIX (`GIT_TRACE_PREFIX` below), not by
+  // literals — only this non-prefixed member has to be named here.
   'GIT_CURL_VERBOSE',
-  'GIT_TRACE_PACKET',
   // TLS is the HTTPS rebinding/MITM hard closure (03 §7.3 C4): a server on a rebound
   // internal IP cannot present a valid cert for the SNI/Host. Drop any ambient
   // GIT_SSL_NO_VERIFY so it can't silently disable that. (CAINFO/CAPATH are kept so
@@ -43,11 +42,42 @@ const GUARDED_ENV = new Set([
   'GIT_SSL_NO_VERIFY',
 ]);
 
+/**
+ * ⚠️ THE TRACE FAMILY IS MATCHED BY PREFIX, AND THAT IS NOT A TIDY-UP.
+ *
+ * `GUARDED_ENV` used to list four literals — `GIT_TRACE`, `GIT_TRACE_CURL`,
+ * `GIT_TRACE_PACKET`, `GIT_CURL_VERBOSE` — under a comment claiming it covered
+ * 「the GIT_TRACE* family」. It did not. git ships a whole SECOND generation of trace
+ * variables the list never mentioned, and two of them are worse than the ones it had:
+ *
+ *   · `GIT_TRACE2` / `GIT_TRACE2_EVENT` / `GIT_TRACE2_PERF` — same dump, newer format;
+ *   · `GIT_TRACE2_ENV_VARS` — prints the VALUES of the env vars you name into the
+ *     trace, so a host that sets it to `GIT_TOKEN` gets the PAT written out verbatim;
+ *   · `GIT_TRACE_REDACT=0` / `GIT_TRACE2_REDACT=0` — turn OFF git's own redaction of
+ *     the `Authorization:` header. That redaction is the ONLY thing standing between
+ *     a curl trace and the token in plaintext, and it is defeated by an env var the
+ *     guard did not know existed.
+ *
+ * Plus `GIT_TRACE_SETUP` / `_PERFORMANCE` / `_PACK_ACCESS` / `_SHALLOW` / `_REFS`.
+ *
+ * Enumerating them is exactly how the hole got here: a literal list is a snapshot of
+ * what one person recalled on one day, and git keeps adding members — the guard silently
+ * ages out while the comment keeps promising a family. A prefix makes the code say what
+ * the comment already claimed, and it covers the members git has not shipped yet.
+ *
+ * Cost, stated plainly: you can no longer debug a platform git child by exporting
+ * `GIT_TRACE=1` on the host. That was already true of four of them; it is the price of
+ * a child process that cannot be made to print its own credentials.
+ */
+const GIT_TRACE_PREFIX = /^GIT_TRACE/;
+
 function cleanAmbientEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
-    if (GUARDED_ENV.has(k.toUpperCase())) continue;
+    const upper = k.toUpperCase();
+    if (GUARDED_ENV.has(upper)) continue;
+    if (GIT_TRACE_PREFIX.test(upper)) continue;
     if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/i.test(k)) continue;
     env[k] = v;
   }

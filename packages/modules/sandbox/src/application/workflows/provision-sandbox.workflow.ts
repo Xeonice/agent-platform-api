@@ -8,6 +8,7 @@ import {
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_INSTALL_ORCHESTRATOR,
   INTERNAL_ERROR_CODE,
+  isSandboxFailureCode,
   SANDBOX_WORKSPACE_MOUNT,
   WORKSPACE_PREPARER,
   toExecFn,
@@ -331,7 +332,18 @@ export class ProvisionSandboxWorkflow {
    */
   private compensate(sandbox: Sandbox, error: unknown): void {
     try {
-      sandbox.failWith(failureOf(error), 'scheduler', this.clock.now());
+      const failure = splitFailure(error);
+      if (failure.rejected !== undefined) {
+        this.logger.error(
+          `sandbox ${sandbox.id}: '${failure.rejected}' is not in SANDBOX_FAILURE_CODES — ` +
+            `recorded as ${INTERNAL_ERROR_CODE}. Register it, or wrap the throw site.`,
+        );
+      }
+      sandbox.failWith(
+        { code: failure.code, message: failure.message },
+        'scheduler',
+        this.clock.now(),
+      );
       this.persist(sandbox);
     } catch {
       // best-effort marking; a terminal state legitimately refuses the move
@@ -354,21 +366,36 @@ export class ProvisionSandboxWorkflow {
 /**
  * Split a thrown error into the two halves the failure record stores (13 §2.1.1).
  *
- * Every error the `starting` 段 can raise already carries a `code` from the 04 §4
- * closed set — `SandboxProviderError` (IMAGE_PULL_FAILED / TIMEOUT / …),
- * `RuntimeInstallFailedError` (INSTALL_FAILED), `ImageContractViolationError`
- * (IMAGE_CONTRACT_VIOLATION). Anything without one is `INTERNAL` rather than a bare
- * message: 02 §6.2 forbids a failure with no code, because the frontend would then
- * have nothing to key its P22 §1 sentence on and would fall back to generic copy.
- *
  * The message is kept as DETAIL only — deliberately not concatenated with the code.
  * Prose gets reworded; a UI that had to parse the code back out of it would break.
  */
-function failureOf(error: unknown): { code: string; message: string } {
+function splitFailure(error: unknown): { code: string; message: string; rejected?: string } {
   const message = error instanceof Error ? error.message : String(error);
   const raw =
     typeof error === 'object' && error !== null && 'code' in error
       ? (error as { code?: unknown }).code
       : undefined;
-  return { code: typeof raw === 'string' && raw !== '' ? raw : INTERNAL_ERROR_CODE, message };
+
+  // ⚠️ THE `.code` IS CHECKED AGAINST THE CLOSED SET, NOT MERELY TESTED FOR BEING A
+  // NON-EMPTY STRING. This function's own comment used to claim 「every error … already
+  // carries a code from the 04 §4 closed set」 and then trusted any string it found.
+  // Node's fs errors carry `.code` too, so `ENOSPC` / `ENOENT` / `EACCES` became the
+  // sandbox's `failureCode`, went into the DB and out over WS — and the frontend, which
+  // looks the code up in the P22 §1 copy table, found nothing and fell back to generic
+  // text FOR THE FAILURE WITH THE CLEAREST USER ACTION ("free some disk").
+  //
+  // The right place to name a failure is where it is RAISED (`WorkspacePrepareError`
+  // now does), because only there is it known what was being attempted. This is the
+  // backstop for everything that does not.
+  if (isSandboxFailureCode(raw)) return { code: raw, message };
+  return {
+    code: INTERNAL_ERROR_CODE,
+    message,
+    // Not silent: an UNREGISTERED platform code degrades user-facing copy invisibly.
+    // Anything that reaches here with a code the set does not know is either a new
+    // error class nobody registered in `SANDBOX_FAILURE_CODES` or a raw system error
+    // that should have been wrapped — both are bugs, and both are shaped exactly like
+    // "works fine" from the outside.
+    rejected: typeof raw === 'string' && raw !== '' ? raw : undefined,
+  };
 }

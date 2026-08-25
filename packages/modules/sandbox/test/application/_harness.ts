@@ -518,6 +518,13 @@ export interface HarnessOptions {
    * 零副作用 flag is earned by POSITION rather than by each throw site remembering it.
    */
   projectError?: Error;
+  /**
+   * Make `WorkspacePreparer.prepare` throw. The seam exists to prove that an error
+   * escaping the preparer is NAMED by the closed set before it becomes a
+   * `failureCode` — a raw Node fs error carries `.code = 'ENOSPC'`, and that used to
+   * be recorded and broadcast verbatim.
+   */
+  workspaceError?: Error;
   now?: Date;
 }
 
@@ -586,6 +593,7 @@ export function harness(opts: HarnessOptions = {}) {
     async prepare(id: string, source: WorkspaceSource): Promise<PreparedWorkspace> {
       wsCalls.push(`prepare:${id}`);
       wsSources.push(source);
+      if (opts.workspaceError) throw opts.workspaceError;
       return { hostPath: `/tmp/ws/${id}` };
     },
     async cleanup(id, o): Promise<void> {
