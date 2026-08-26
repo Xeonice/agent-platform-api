@@ -19,6 +19,10 @@ import {
  */
 export const PROVIDER_HTTP: Record<SandboxProviderErrorCode, number> = {
   [SandboxProviderErrorCode.IMAGE_PULL_FAILED]: HttpStatus.BAD_GATEWAY,
+  // 409, not 502: nothing is wrong with the registry or the network — the pinned
+  // coordinate simply no longer exists upstream. A gateway status would invite the
+  // 「retry / check your network」 reading, and neither helps here.
+  [SandboxProviderErrorCode.IMAGE_DIGEST_GONE]: HttpStatus.CONFLICT,
   [SandboxProviderErrorCode.PROVIDER_UNAVAILABLE]: HttpStatus.SERVICE_UNAVAILABLE,
   [SandboxProviderErrorCode.RESOURCE_EXHAUSTED]: HttpStatus.TOO_MANY_REQUESTS,
   [SandboxProviderErrorCode.NOT_FOUND]: HttpStatus.NOT_FOUND,

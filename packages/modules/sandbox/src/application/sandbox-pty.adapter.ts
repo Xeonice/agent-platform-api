@@ -39,11 +39,12 @@ export class SandboxPtyAdapter implements SandboxPtyPort {
       {
         provider: sandbox.provider,
         providerSandboxId: sandbox.providerSandboxId,
-        // rebuild the persisted runtime binding (boxlite agent port + the agent
-        // bearer token) from the DB so the terminal reconnects even after a backend
-        // restart (empty in-memory state).
-        agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-        agentAuthToken: sandbox.agentAuthToken ?? undefined,
+        // rebuild the provider's private runtime binding from the DB so the terminal
+        // reconnects even after a backend restart (empty in-memory state).
+        // ⚠️ 平台一个键都不认（04 §2.2）：`aio` 往里放的是 agent bearer token，
+        // `boxlite` 换成 native 数据面后放的是**空**（只凭 box id 就能接回微 VM）。
+        // 这里若开始解释它的内容，那个「实现私有」的边界就白划了。
+        providerState: sandbox.providerState ?? undefined,
       },
       {
         // Since S5 the caller ALWAYS supplies the command (the terminal context

@@ -1,0 +1,16 @@
+-- 04 §7 ★血统 / 13 §2.4.2：`image_manifests` 增加血统锚点 `diff_ids`。
+--
+-- ⚠️ 这里**刻意没有照 0010 的「建新表-搬数据-改名」12 步走**，而那不是偷懒。0010 之所以
+--    非重建不可，是因为它要**加一个外键**，而 SQLite 没有 `ALTER TABLE ... ADD CONSTRAINT`。
+--    加一个普通列没有这个限制：`ADD COLUMN` 是 SQLite 原生支持的操作。
+--    反过来说，重建 `image_manifests` 是**更危险**的做法 —— `sandboxes.image_ref` 有一条
+--    ON DELETE RESTRICT 的外键指着它，重建意味着在 FK 关闭的窗口里 DROP 掉被引用的表再改名，
+--    换来的收益为零。「照着先例做」不等于「照着先例的**动作**做」，先例真正的内容是它的**理由**。
+--
+-- ⚠️ 存量行按 DEFAULT '[]' 回填，语义是**「未知」而不是「没有层」**：切片前写下的行没有可复原的
+--    `rootfs.diff_ids`，凭空编一个就是 `'sha256:unresolved'` 换个马甲。`isDerivedFrom` 拒绝把空
+--    数组当锚点，于是这类行既不能给新镜像背书、也无法被证明是派生 —— fail-closed。
+--
+-- FK 纪律不变：`runMigrations` 在调用外把 `foreign_keys` 关掉、跑完再打开并 `PRAGMA
+-- foreign_key_check`（PRAGMA 在事务内是 no-op，所以它不能写在本文件里）。
+ALTER TABLE `image_manifests` ADD `diff_ids` text DEFAULT '[]' NOT NULL;

@@ -15,7 +15,12 @@ const SCAN_INTERVAL_MS = 15 * 60_000;
 const REFRESH_LEAD_MS = 30 * 60_000;
 /** TTL of the CLI-refreshed access token (codex-class hourly default, 05 §5.1). */
 const REFRESHED_ACCESS_TTL_MS = 60 * 60_000;
-const REFRESH_CMD_TIMEOUT_MS = 60_000;
+/**
+ * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 刷新要在 PTY 里跑一次
+ * CLI，而 CLI 在微 VM 里**光启动就实测 18.6 秒**。刷新失败的后果是凭证过期后沙箱静默
+ * 掉线，比多等一分钟贵得多。
+ */
+const REFRESH_CMD_TIMEOUT_MS = 120_000;
 
 /**
  * Credential refresh scanner (docs/backend/05 §5.1, method A: let the CLI refresh

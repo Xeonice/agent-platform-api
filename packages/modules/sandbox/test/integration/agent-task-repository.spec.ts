@@ -9,6 +9,7 @@ import { AgentTask } from '../../src/domain/entities/agent-task.entity';
 import { SqliteSandboxRepository } from '../../src/infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { SqliteAgentTaskRepository } from '../../src/infrastructure/persistence/sqlite/agent-task.repository.impl';
 import { SqliteUnitOfWork } from '../../../../../apps/api/src/platform/persistence/unit-of-work.impl';
+import { seedImageManifest } from './_seed-image';
 
 /**
  * Real better-sqlite3 + Drizzle + the committed migrations + the real UnitOfWork.
@@ -41,12 +42,14 @@ const JOB_ID = JSON.stringify({
 const CURSOR = JSON.stringify({ o: 4096, e: 128 });
 
 function seedSandbox(h: ReturnType<typeof makeHarness>, id = 'sbx-task-1'): string {
+  // `image_ref` is a REAL foreign key since 0010, so the manifest has to exist first.
+  const manifestId = seedImageManifest(h.sqlite);
   const sandbox = Sandbox.create({
     id: asSandboxId(id),
     projectId: asProjectId('prj-1'),
     runtime: 'claude-code',
     provider: 'aio',
-    imageRef: 'ghcr.io/agent-infra/sandbox:latest',
+    imageRef: manifestId,
     headless: true,
     timeoutMinutes: 30,
     idleTimeoutSec: 1800,

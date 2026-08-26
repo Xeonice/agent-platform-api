@@ -25,10 +25,16 @@ export interface SandboxProps {
   workspacePath: string | null;
   /** provider's opaque sandbox id (SandboxHandle.providerSandboxId); null until created. */
   providerSandboxId: string | null;
-  /** provider runtime binding persisted for restart reconnect (boxlite agent port); null otherwise. */
-  agentEndpointPort: number | null;
-  /** per-sandbox bearer token for the in-sandbox agent; null for agent-less runtimes. */
-  agentAuthToken: string | null;
+  /**
+   * Provider 的私有运行期状态，原样持久化、原样交还（`SandboxHandle.providerState`）。
+   *
+   * ⚠️ **领域层不解释它的内容，一个键都不认。** 这里曾经是 `agentEndpointPort` +
+   * `agentAuthToken` 两个具名字段——一种 provider 的一种数据面实现（AIO 镜像里的
+   * HTTP agent）的词汇，一路爬到了聚合根上。`Sandbox` 不该知道"端口"和"bearer token"
+   * 这种东西存不存在；它只需要知道**有一坨状态要跟着这个沙箱走**，好让后端重启后
+   * provider 能接回自己的实例。
+   */
+  providerState: Record<string, unknown> | null;
   /** "WHAT to run" — the create-time instruction + its one-shot consumed marker. */
   initialTask: InitialTask;
   /**
@@ -55,8 +61,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _idleTimeoutSec: number;
   private _workspacePath: string | null;
   private _providerSandboxId: string | null;
-  private _agentEndpointPort: number | null;
-  private _agentAuthToken: string | null;
+  private _providerState: Record<string, unknown> | null;
   private _initialTask: InitialTask;
   private _failureCode: string | null;
   private _failureReason: string | null;
@@ -88,8 +93,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._idleTimeoutSec = props.idleTimeoutSec;
     this._workspacePath = props.workspacePath;
     this._providerSandboxId = props.providerSandboxId;
-    this._agentEndpointPort = props.agentEndpointPort;
-    this._agentAuthToken = props.agentAuthToken;
+    this._providerState = props.providerState;
     this._version = props.version;
     this._transitions = props.transitions;
   }
@@ -146,8 +150,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       idleTimeoutSec: input.idleTimeoutSec,
       workspacePath: null,
       providerSandboxId: null,
-      agentEndpointPort: null,
-      agentAuthToken: null,
+      providerState: null,
       initialTask,
       failureCode: null,
       failureReason: null,
@@ -187,12 +190,13 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   get providerSandboxId(): string | null {
     return this._providerSandboxId;
   }
-  get agentEndpointPort(): number | null {
-    return this._agentEndpointPort;
-  }
-  /** SECRET — reachable only by the sandbox context; never mapped onto a wire DTO. */
-  get agentAuthToken(): string | null {
-    return this._agentAuthToken;
+  /**
+   * ⚠️ **可能含密**（如 aio 的 agent bearer token），只在 sandbox 上下文内可达，
+   * **永远不映射到任何 wire DTO**。这条纪律原本挂在 `agentAuthToken` 的 getter 上；
+   * 字段收成一坨之后它跟着收到这里——收拢字段不该把纪律弄丢。
+   */
+  get providerState(): Record<string, unknown> | null {
+    return this._providerState;
   }
   get version(): number {
     return this._version;
@@ -202,13 +206,11 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   bindRuntime(input: {
     providerSandboxId: string;
     workspacePath: string;
-    agentEndpointPort?: number | null;
-    agentAuthToken?: string | null;
+    providerState?: Record<string, unknown> | null;
   }): void {
     this._providerSandboxId = input.providerSandboxId;
     this._workspacePath = input.workspacePath;
-    this._agentEndpointPort = input.agentEndpointPort ?? null;
-    this._agentAuthToken = input.agentAuthToken ?? null;
+    this._providerState = input.providerState ?? null;
   }
   /**
    * Stamp the initial instruction as started (I-SBX-10). Called by the provision

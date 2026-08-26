@@ -37,8 +37,7 @@ export class SandboxExecAdapter implements SandboxExecPort {
     return toExecFn(provider, {
       provider: sandbox.provider,
       providerSandboxId: sandbox.providerSandboxId as string,
-      agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-      agentAuthToken: sandbox.agentAuthToken ?? undefined,
+      providerState: sandbox.providerState ?? undefined,
     });
   }
 

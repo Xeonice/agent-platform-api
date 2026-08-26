@@ -7,9 +7,11 @@ import type { INestApplication } from '@nestjs/common';
 import { io, type Socket } from 'socket.io-client';
 import { SANDBOX_PROVIDER_REGISTRY, WS_SCHEMA_HASH } from '@platform/contracts';
 import type { ProviderRegistry, TerminalServerFrame } from '@platform/contracts';
+import { IMAGE_SPEC_REGISTRY } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { makeFakeImageSpecRegistry, registerDefaultImage } from './_fakes';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import {
   createDockerClient,
   isDockerAvailable,
@@ -78,13 +80,19 @@ beforeAll(async () => {
   process.env.SANDBOX_DEFAULT_IMAGE = IMAGE;
 
   // REAL providers + registry + workspace preparer (no overrides).
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    // Only the registry round-trip is doubled — the rest of the image chain
+    // (register → freeze digest → door lookup → FK → pull `ref@digest`) is real.
+    .overrideProvider(IMAGE_SPEC_REGISTRY)
+    .useValue(makeFakeImageSpecRegistry())
+    .compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
+  // 04 §7 时刻③: the create door only accepts a REGISTERED image now.
+  await registerDefaultImage(app);
   const addr = app.getHttpServer().address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
 }, 60_000);

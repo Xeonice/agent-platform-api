@@ -5,6 +5,7 @@ import { SandboxModule } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
 import { CredentialModule } from '@platform/credential';
 import { RuntimeModule } from '@platform/runtime';
+import { ImageModule } from '@platform/image';
 import { PlatformModule } from './platform/persistence/platform.module';
 import { SystemModule } from './platform/system/system.module';
 import { AccessPasscodeModule } from './platform/access-passcode/access-passcode.module';
@@ -29,6 +30,7 @@ import { guardProviders } from './bootstrap/guards.setup';
     TerminalModule,
     CredentialModule,
     RuntimeModule,
+    ImageModule,
   ],
   providers: [...guardProviders],
 })

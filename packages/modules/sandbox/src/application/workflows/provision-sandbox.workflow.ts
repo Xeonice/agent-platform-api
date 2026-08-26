@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/shared-kernel';
+import { builtinImageRef, CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, EventBus, UnitOfWork } from '@platform/shared-kernel';
 import {
   AGENT_SESSION_BOOTSTRAP,
@@ -7,6 +7,7 @@ import {
   CredentialPreparationError,
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_INSTALL_ORCHESTRATOR,
+  IMAGE_FACADE,
   INTERNAL_ERROR_CODE,
   isSandboxFailureCode,
   SANDBOX_WORKSPACE_MOUNT,
@@ -16,6 +17,7 @@ import {
 import type {
   AgentSessionBootstrap,
   CredentialFacade,
+  ImageFacade,
   InjectableRuntimeCredential,
   ResolvedImageSpec,
   RuntimeAdapterRegistry,
@@ -67,6 +69,7 @@ export class ProvisionSandboxWorkflow {
     @Inject(RUNTIME_INSTALL_ORCHESTRATOR) private readonly installs: RuntimeInstallOrchestrator,
     @Inject(CREDENTIAL_FACADE) private readonly credentials: CredentialFacade,
     @Inject(AGENT_SESSION_BOOTSTRAP) private readonly agentSessions: AgentSessionBootstrap,
+    @Inject(IMAGE_FACADE) private readonly images: ImageFacade,
   ) {}
 
   /** Background runner — never rejects into an unhandled promise. */
@@ -96,7 +99,7 @@ export class ProvisionSandboxWorkflow {
       const ws = await this.workspace.prepare(sandbox.id, source);
 
       this.advance(sandbox, 'creating', 'scheduler');
-      const image = this.imageSpecOf(sandbox);
+      const image = await this.imageSpecOf(sandbox);
       // env-form credentials (claude's `CLAUDE_CODE_OAUTH_TOKEN`, an api-key) can ONLY
       // be delivered at instance creation: a per-call `env` would be visible in `ps`
       // inside the sandbox (04 §2.3★ 第 2 条), and an already-started process cannot
@@ -109,8 +112,13 @@ export class ProvisionSandboxWorkflow {
         handle = await provider.create({
           sandboxId: sandbox.id,
           quota: DEFAULT_QUOTA,
-          image,
-          env: { ...(credential?.env ?? {}) },
+          image: image.spec,
+          // ⚠️ ORDER IS THE GUARANTEE, NOT A BLACKLIST (05 §4.1「凭证永远赢，靠顺序而非
+          // 校验」). The image's own run parameters go in FIRST and the runtime
+          // credential LAST, so a user-defined variable can never shadow a credential
+          // — and `EnvVarSet` already refuses the credential NAMES at save time, which
+          // makes this belt and braces rather than either alone.
+          env: { ...image.env, ...(credential?.env ?? {}) },
           volumes: [
             {
               source: ws.hostPath,
@@ -127,13 +135,12 @@ export class ProvisionSandboxWorkflow {
           // persist any provider runtime binding (boxlite's forwarded agent port,
           // and the agent bearer token both providers mint) so a backend restart can
           // rebuild the handle and still reach the instance.
-          agentEndpointPort: handle.agentEndpointPort ?? null,
-          agentAuthToken: handle.agentAuthToken ?? null,
+          providerState: handle.providerState ?? null,
         });
         this.persist(sandbox); // save handle (no new transition/event)
 
         this.advance(sandbox, 'starting', 'scheduler');
-        await this.runStartingSteps(sandbox, provider, handle, image, credential);
+        await this.runStartingSteps(sandbox, provider, handle, image.spec, credential);
       } finally {
         credential?.zeroize();
       }
@@ -168,7 +175,7 @@ export class ProvisionSandboxWorkflow {
           sandbox,
           provider,
           handle,
-          this.imageSpecOf(sandbox),
+          (await this.imageSpecOf(sandbox)).spec,
           credential,
         );
       } finally {
@@ -226,18 +233,65 @@ export class ProvisionSandboxWorkflow {
     return {
       provider: sandbox.provider,
       providerSandboxId: sandbox.providerSandboxId,
-      agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-      agentAuthToken: sandbox.agentAuthToken ?? undefined,
+      providerState: sandbox.providerState ?? undefined,
     };
   }
 
   /**
-   * The image the sandbox actually runs. `digest` is a placeholder until the image
-   * context lands (04 §7 IS-01 wants a real digest, but there is no `ImageSpecProvider`
-   * yet — 04 §8 marks the registry ⏳).
+   * The image the sandbox actually runs — 04 §7 时刻④, and the step without which
+   * the other three are bookkeeping.
+   *
+   * ⚠️ THIS METHOD USED TO READ, IN FULL:
+   *     `return { ref: sandbox.imageRef, digest: 'sha256:unresolved' };`
+   * A hard-coded placeholder, while 04 §7's method table said 「必须解出 digest，
+   * 否则同一 tag 前后两次创建可能不是同一镜像」. Three consequences, none theoretical:
+   * `:latest` could drift with the platform completely unaware; two sandboxes 「on the
+   * same image」 could be running different bits with no column able to say so; and
+   * `imagePreinstalls()` matched a TAG rather than the bits behind it.
+   *
+   * Now it reads the FROZEN coordinate back from the manifest row that
+   * `sandboxes.image_ref` points at. The row is immutable (I-IMG-7), so the digest a
+   * historical Task ran is still exactly recoverable — which is what makes I-IMG-3's
+   * 「历史引用仍合法」 a structural guarantee instead of a promise.
+   *
+   * ⚠️ A NULL `image_ref` IS A PRE-SLICE ROW, AND IT DEGRADES RATHER THAN CRASHING.
+   * The migration NULLed those rows because inventing a digest for them would be the
+   * placeholder again (13 §2.1). Restarting such a sandbox falls back to the platform
+   * default image with an empty digest — `pinnedImageRef` then degrades to the tag,
+   * i.e. exactly the pre-slice behaviour, LOUDLY logged. Failing outright would strand
+   * every sandbox that existed before the upgrade.
    */
-  private imageSpecOf(sandbox: Sandbox): ResolvedImageSpec {
-    return { ref: sandbox.imageRef, digest: 'sha256:unresolved' };
+  private async imageSpecOf(
+    sandbox: Sandbox,
+  ): Promise<{ spec: ResolvedImageSpec; env: Record<string, string> }> {
+    const selected =
+      sandbox.imageRef === '' ? null : await this.images.findTaskImage(sandbox.imageRef);
+    if (selected) {
+      return {
+        spec: {
+          ref: selected.ref,
+          digest: selected.digest,
+          entrypoint: selected.entrypoint,
+          // ⚠️ THE INSTALL PLAN'S ONLY HONEST INPUT (04 §7 ★ 第 3 条, now closed).
+          // `getInstallPlan()` used to decide 「预装了没有」 by regex-matching this
+          // sandbox's REF STRING — a guess about a name that is wrong for a mirror
+          // (`localhost:5001/platform/sandbox:v1`) and blind to any user image. What
+          // the image itself declared is stored on the manifest row; carrying it here
+          // is what lets the plan answer 「0 秒」 vs 「约 12.5 分钟」 about the bits
+          // that will actually be pulled.
+          supportedRuntimes: selected.manifest.supportedRuntimes,
+        },
+        env: selected.env ?? {},
+      };
+    }
+    this.logger.warn(
+      `sandbox ${sandbox.id} has no image manifest ('${sandbox.imageRef}'): it predates the ` +
+        'image slice, so its digest is not recoverable — falling back to the tag (04 §7 时刻④)',
+    );
+    return {
+      spec: { ref: builtinImageRef(), digest: '' },
+      env: {},
+    };
   }
 
   /**

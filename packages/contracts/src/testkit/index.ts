@@ -8,6 +8,8 @@
  *     sandbox host and report as SKIPPED (with a reason) otherwise.
  *   - `runRuntimeAdapterContractTests` — `codex` / `claude-code` / yours. Covers
  *     only clauses that need no real CLI and no network, so it runs everywhere.
+ *   - `runImageSpecContractTests` — the built-in OCI provider / yours (04 §10.4
+ *     IS-01..IS-05). The caller supplies a fixture registry, so no network either.
  *
  * The RuntimeAdapter golden-output fixtures live under ./fixtures (04 §10.3 RA-04)
  * with a CLI-VERSION-MATRIX placeholder.
@@ -16,6 +18,7 @@ export {
   runSandboxProviderContractTests,
   type SandboxProviderTestOptions,
 } from './sandbox-provider.testkit';
+export { runImageSpecContractTests, type ImageSpecTestCase } from './image-spec.testkit';
 export {
   runRuntimeAdapterContractTests,
   type RuntimeAdapterInjectionCase,

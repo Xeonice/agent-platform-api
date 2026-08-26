@@ -95,7 +95,11 @@ export class SqliteSandboxRepository implements SandboxRepository {
         projectId: sandbox.projectId as string,
         name: sandbox.name,
         runtime: sandbox.runtime,
-        imageRef: sandbox.imageRef,
+        // `''` ⇒ NULL, not the empty string: `image_ref` is a foreign key since 0010
+        // and `''` is a VALUE, so it would fail the constraint rather than mean
+        // 「no manifest」. The domain models 「none」 as `''` because the aggregate's
+        // field is non-optional; the boundary is where that becomes SQL's NULL.
+        imageRef: sandbox.imageRef === '' ? null : sandbox.imageRef,
         provider: sandbox.provider,
         status: sandbox.status,
         headless: sandbox.headless,
@@ -103,8 +107,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         idleTimeoutSec: sandbox.idleTimeoutSec,
         providerHandle: sandbox.providerSandboxId,
         workspacePath: sandbox.workspacePath,
-        agentEndpointPort: sandbox.agentEndpointPort,
-        agentAuthToken: sandbox.agentAuthToken,
+        providerState: encodeProviderState(sandbox.providerState),
         initialPrompt: sandbox.initialTask.prompt ?? null,
         initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
         failureCode: sandbox.failureCode,
@@ -122,8 +125,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
           idleTimeoutSec: sandbox.idleTimeoutSec,
           providerHandle: sandbox.providerSandboxId,
           workspacePath: sandbox.workspacePath,
-          agentEndpointPort: sandbox.agentEndpointPort,
-          agentAuthToken: sandbox.agentAuthToken,
+          providerState: encodeProviderState(sandbox.providerState),
           // the instruction itself never changes after T1; only its consumed marker
           // moves (once, forward) — see I-SBX-10.
           initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
@@ -167,8 +169,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       idleTimeoutSec: row.idleTimeoutSec,
       workspacePath: row.workspacePath,
       providerSandboxId: row.providerHandle,
-      agentEndpointPort: row.agentEndpointPort,
-      agentAuthToken: row.agentAuthToken,
+      providerState: decodeProviderState(row.providerState),
       initialTask: InitialTask.create({
         prompt: row.initialPrompt,
         consumedAt: row.initialPromptConsumedAt,
@@ -184,4 +185,35 @@ export class SqliteSandboxRepository implements SandboxRepository {
       })),
     });
   }
+}
+
+/**
+ * `providerState` ↔ 一列 JSON 文本。
+ *
+ * ⚠️ 平台**不认识里面任何一个键**（见 `SandboxHandle.providerState`）：这里只负责
+ * 「对象 ⇄ 文本」，不校验形状、不填默认值——那样做等于替 provider 定义它的私有状态。
+ */
+function encodeProviderState(state: Record<string, unknown> | null): string | null {
+  return state === null ? null : JSON.stringify(state);
+}
+
+/**
+ * ⚠️ **坏 JSON 降级成 `null`，不抛。**
+ *
+ * `null` 在这里是**诚实**的：provider 会发现自己没有状态可用，于是报「接不回这个实例」
+ * ——那是一句准确的话。反过来，为一行坏数据抛异常会让**整个沙箱读不出来**，用户
+ * 连删除它都做不到；而拿半个解析结果去连，则是拿一个编造的状态去够真实实例
+ * （与 `decodeJobHandle` 返回空 handle 是同一条纪律）。
+ */
+function decodeProviderState(raw: string | null): Record<string, unknown> | null {
+  if (raw === null || raw === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* fall through — 见上面的注释：null 比半个状态诚实 */
+  }
+  return null;
 }

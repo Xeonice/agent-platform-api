@@ -115,12 +115,50 @@ if (!boxliteReady) {
   );
 }
 
+/**
+ * ── 数据面条款（DP-\*）的 fixture ──────────────────────────────────────────────
+ *
+ * 与 SP-01 的 `context` **分开**：SP-01 只 create+destroy，一张 `alpine` 就够；
+ * DP-\* 要 create → **start** → 真跑数据面 → destroy，裸镜像会直接卡在就绪门槛上
+ * （aio 的 `start()` 要等沙箱内 agent 应答，alpine 里根本没有那个东西）。
+ *
+ * 两个 provider 用**同一张**带数据面的镜像 `agent-infra/sandbox:latest`——同一套条款、
+ * 同一个 fixture，没有双重标准（04 §10）。aio 侧要求 docker 本地已有这张镜像；
+ * 它比 `alpine` 大得多，所以**不主动 pull**，缺了就响亮 skip。
+ */
+const AIO_DATAPLANE_IMAGE = process.env.SANDBOX_AIO_DATAPLANE_IMAGE ?? BOXLITE_IMAGE;
+
+async function dockerHasImage(ref: string): Promise<boolean> {
+  try {
+    await docker.getImage(ref).inspect();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const aioDataPlaneReady = aioReady && (await dockerHasImage(AIO_DATAPLANE_IMAGE));
+if (aioReady && !aioDataPlaneReady) {
+  console.warn(
+    '\n\x1b[33m========================================================================\n' +
+      `[builtin-provider-contract.e2e] aio DATA-PLANE clauses SKIPPED — docker has no\n` +
+      `local image ${AIO_DATAPLANE_IMAGE}. Stage it with:\n` +
+      `  docker pull ${AIO_DATAPLANE_IMAGE}\n` +
+      'The lifecycle clause (SP-01) still ran. NOT fake-passed.\n' +
+      '========================================================================\x1b[0m\n',
+  );
+}
+
 runSandboxProviderContractTests(
   'aio (built-in, live docker)',
   () => new AioSandboxProvider(docker),
   {
     context: aioReady ? contextFor(`ctr-aio-${Date.now()}`, DOCKER_IMAGE) : undefined,
     skipLiveReason: `docker daemon or ${DOCKER_IMAGE} unavailable`,
+    dataPlaneContext: aioDataPlaneReady
+      ? contextFor(`dp-aio-${Date.now()}`, AIO_DATAPLANE_IMAGE)
+      : undefined,
+    skipDataPlaneReason: `docker has no local ${AIO_DATAPLANE_IMAGE}`,
   },
 );
 
@@ -130,5 +168,7 @@ runSandboxProviderContractTests(
   {
     context: boxliteReady ? contextFor(`ctr-bl-${Date.now()}`, BOXLITE_IMAGE) : undefined,
     skipLiveReason: `BoxLite binary or ${BOXLITE_REGISTRY} image missing`,
+    dataPlaneContext: boxliteReady ? contextFor(`dp-bl-${Date.now()}`, BOXLITE_IMAGE) : undefined,
+    skipDataPlaneReason: `BoxLite binary or ${BOXLITE_REGISTRY} image missing`,
   },
 );

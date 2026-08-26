@@ -58,6 +58,27 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
         return { code: body.code, message: body.message, retryable: defaultRetryable(status) };
       }
 
+      // ②' **只有 `code`，没有 message**（口令门四处就是这个形状）。
+      //
+      // ⚠️ 这一条是补上去的，因为缺了它的时候**已经给出的 `code` 会被整条丢掉**：
+      // ① ② 都不匹配 ⇒ 落到 ③ ⇒ `codeForStatus(429)` 打回 `BAD_REQUEST`，
+      // 而抛出点写的明明是 `PASSCODE_LOCKED`。真实表现：解锁页上一句
+      // 「Http Exception」，HTTP 是 429、信封里却写着 `BAD_REQUEST` + `retryable: true`
+      // ——三处口径全错，且**唯一说得清"到底哪儿不对"的那一位被丢在了传输层**。
+      //
+      // 判据是「body 里有没有 code」，不是「信封完不完整」：给了名字就必须让它活着出线，
+      // 缺的两位补齐即可。`...body` 在前，保住随行字段（`retryAfterSec`、`sideEffectFree`
+      // 这些只有抛出点知道的东西）。
+      if (isPartialEnvelope(body) === false && hasCode(body)) {
+        return {
+          ...body,
+          code: body.code,
+          message: nestMessage(body) ?? exception.message,
+          retryable:
+            typeof body.retryable === 'boolean' ? body.retryable : defaultRetryable(status),
+        };
+      }
+
       // ③ 裸 Nest：`{message, error, statusCode}` 或纯字符串。
       //    message 一定要透传 —— 它往往是唯一说清"到底哪儿不对"的那句话。
       return {
@@ -88,6 +109,15 @@ function isEnvelope(v: unknown): v is ErrorEnvelope {
     'retryable' in v &&
     typeof v.retryable === 'boolean'
   );
+}
+
+/**
+ * 只判「有没有 `code`」——比 `isPartialEnvelope` 松一格，因为 `code` 才是承重的那一位：
+ * 它是前端选文案、用户报障、错误码表对账（docs:check A5）共同认的那个名字。
+ * message 缺了可以退回 Nest 的，`code` 丢了就没有第二个地方能补回来。
+ */
+function hasCode(v: unknown): v is { code: string } & Record<string, unknown> {
+  return typeof v === 'object' && v !== null && 'code' in v && typeof v.code === 'string';
 }
 
 function isPartialEnvelope(v: unknown): v is { code: string; message: string } {

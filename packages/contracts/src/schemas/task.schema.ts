@@ -95,6 +95,8 @@ export const TaskErrorCodeSchema = z.enum([
   'UNKNOWN_RUNTIME',
   // provider 契约错误(SandboxProviderErrorCode 全集)
   'IMAGE_PULL_FAILED',
+  /** 钉住的 digest 在上游已消失(04 §7 时刻④ 按 `ref@digest` 拉取才会出现的失败态)。 */
+  'IMAGE_DIGEST_GONE',
   'RESOURCE_EXHAUSTED',
   'NOT_FOUND',
   'ALREADY_EXISTS',

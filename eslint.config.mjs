@@ -17,6 +17,46 @@ const NO_AS_UNKNOWN_AS = {
   message: '禁止 as unknown as 双重断言 —— 用正当类型收窄替代（与前端仓库一致）。',
 };
 
+/**
+ * e2e 里禁止手抄 app 的全局装配 —— 必须走 `configurePlatformApp()`。
+ *
+ * ⚠️ 这条不是风格洁癖，它挡的是一个**已经发生过**的失效：`main.ts` 装三样
+ * （prefix / 管道 / `ErrorEnvelopeFilter`），而 20 个 e2e 里有 19 个各自手抄了前两样。
+ * 少的那一样正是把错误响应归一成信封的那层，于是**每个 e2e 断言的错误形状都不是
+ * 生产上会出现的形状**。`passcode.e2e-spec.ts` 里一直写着
+ * `expect(locked.body.code).toBe('PASSCODE_LOCKED')`，实测：不装 filter ⇒ 5 passed，
+ * 装上 ⇒ `expected 'BAD_REQUEST' to be 'PASSCODE_LOCKED'`。断言从头就在，
+ * 是 app 少装一层让它失效的——用户因此在解锁页看到「Http Exception」而门禁全绿。
+ *
+ * 手抄意味着 20 次可以漏的机会。共用函数让偏差没有落脚点，这条规则让**下一次手抄**
+ * 在 lint 阶段就停下，而不是等某个真实用户看见一句机器话。
+ */
+const NO_HANDROLLED_APP_SETUP = ['setGlobalPrefix', 'useGlobalPipes', 'useGlobalFilters'].map(
+  (m) => ({
+    selector: `CallExpression[callee.property.name='${m}']`,
+    message: `e2e 不要手抄 app 装配：用 configurePlatformApp(app)（bootstrap/configure-app.ts）。漏掉 ErrorEnvelopeFilter 会让错误信封断言测到一个生产上不存在的形状。`,
+  }),
+);
+
+/**
+ * `SANDBOX_DEFAULT_IMAGE` 只许在 `shared-kernel/domain/builtin-image.ts` 里读一次。
+ *
+ * ⚠️ 这条挡的是一个**已经发生过**的分裂：同一个 env 曾被三处各自读取，兜底值却是
+ * 两个不同的值（`ghcr.io/agent-infra/sandbox:latest` vs `alpine:3.20`）。于是没配这个
+ * env 时，开机日志说「把 SANDBOX_DEFAULT_IMAGE 指向平台预制镜像」，而向导对用户说
+ * 「镜像 `alpine:3.20` 尚未注册，请先注册它」——**两条提示指向两个不同的下一步**，
+ * 而用户看得见的那条是错的：他会去注册一张 alpine，那张镜像既没有 agent 也没有 tmux，
+ * 注册完照样用不了。全量测试 883 条**一条都没红**，因为没有任何断言在比对这三处。
+ *
+ * 用 `builtinImageRef()`（`@platform/shared-kernel`）。
+ */
+const NO_SCATTERED_DEFAULT_IMAGE = {
+  selector:
+    "MemberExpression[object.object.name='process'][object.property.name='env'][property.name='SANDBOX_DEFAULT_IMAGE']",
+  message:
+    '不要各自读 SANDBOX_DEFAULT_IMAGE —— 用 builtinImageRef()（@platform/shared-kernel）。三处各读一次曾经分裂出两个不同的兜底值，把用户指向了错误的下一步。',
+};
+
 // time / random bans — exempted only in port implementations and tests.
 const NO_DIRECT_TIME_RANDOM = [
   {
@@ -59,6 +99,7 @@ export default tseslint.config(
             'packages/modules/sandbox/tsconfig.json',
             'packages/modules/credential/tsconfig.json',
             'packages/modules/runtime/tsconfig.json',
+            'packages/modules/image/tsconfig.json',
             'apps/api/tsconfig.json',
           ],
         },
@@ -150,7 +191,12 @@ export default tseslint.config(
           ],
         },
       ],
-      'no-restricted-syntax': ['error', ...NO_DIRECT_TIME_RANDOM, NO_AS_UNKNOWN_AS],
+      'no-restricted-syntax': [
+        'error',
+        ...NO_DIRECT_TIME_RANDOM,
+        NO_AS_UNKNOWN_AS,
+        NO_SCATTERED_DEFAULT_IMAGE,
+      ],
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': [
         'error',
@@ -174,6 +220,13 @@ export default tseslint.config(
     ],
     rules: { 'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS] },
   },
+  // 唯一允许读 SANDBOX_DEFAULT_IMAGE 的地方 —— 它就是那个「一次」（见规则注释）。
+  {
+    files: ['packages/shared-kernel/src/domain/builtin-image.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...NO_DIRECT_TIME_RANDOM, NO_AS_UNKNOWN_AS],
+    },
+  },
   // Tests may use wall-clock time and cross layers freely — but NOT `as unknown as`.
   {
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/test/**/*.ts'],
@@ -181,6 +234,13 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS],
       'boundaries/element-types': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
+    },
+  },
+  // e2e 另加一条：app 装配必须走共用函数（见 NO_HANDROLLED_APP_SETUP 的注释）。
+  {
+    files: ['apps/api/test/e2e/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS, ...NO_HANDROLLED_APP_SETUP],
     },
   },
 );

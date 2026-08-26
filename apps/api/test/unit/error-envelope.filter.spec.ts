@@ -76,6 +76,37 @@ describe('ErrorEnvelopeFilter — 四种入参归一成同一形状', () => {
     expect(out['sideEffectFree']).toBeUndefined(); // 传输层不猜这一位
   });
 
+  it("⭐ ②' 只有 code、没有 message ⇒ **code 必须活着出线**（口令门就是这个形状）", () => {
+    // ⚠️ 这条抓的是一个真的把第一道门变成哑巴的缺陷。口令门四处抛的是
+    //    `{ code: 'PASSCODE_LOCKED', retryAfterSec }`——有 code、没有 message。
+    //    ① 要三位俱全、② 要 code+message，两边都不匹配 ⇒ 落到 ③「裸 Nest」⇒
+    //    `codeForStatus(429)` 打回 `BAD_REQUEST`，message 退回 Nest 的 `'Http Exception'`。
+    //    用户在解锁页上看到的就是那四个字，而 HTTP 明明是 429。
+    //
+    // MUTATION: 删掉 filter 里的 ②' 分支 ⇒ code 变 `BAD_REQUEST`，本条红。
+    const locked = new HttpException(
+      { code: 'PASSCODE_LOCKED', retryAfterSec: 287 },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+    const out = run(locked);
+    expect(out['code']).toBe('PASSCODE_LOCKED');
+    // ⚠️ 随行字段也要活着：没有 `retryAfterSec`，「可重试」就退化成让用户盲目重试，
+    //    而每次重试只是再撞一次同一把锁。
+    expect(out['retryAfterSec']).toBe(287);
+    expect(out['retryable']).toBe(true); // 429 说的正是「稍后再来」
+  });
+
+  it("②' body 自己给了 retryable ⇒ 用 body 的，不用状态码猜的", () => {
+    // 428 在 `defaultRetryable` 里会算成不可重试（4xx），但抛出点说 true 就是 true——
+    // 显式值一律优先，这是 filter 全篇的规矩（见 `defaultRetryable` 的注释）。
+    // MUTATION: ②' 里改成无条件 `defaultRetryable(status)` ⇒ 本条红。
+    const out = run(
+      new HttpException({ code: 'SOMETHING', retryable: true }, HttpStatus.PRECONDITION_REQUIRED),
+    );
+    expect(out['code']).toBe('SOMETHING');
+    expect(out['retryable']).toBe(true);
+  });
+
   it('③ 裸 Nest 异常 ⇒ 给码，且**message 必须透传**', () => {
     const out = run(new NotFoundException('sandbox nope not found'));
     expect(out['code']).toBe('NOT_FOUND');

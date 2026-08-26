@@ -60,7 +60,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
   async bootstrapAgentSession(
     input: BootstrapAgentSessionInput,
   ): Promise<BootstrapAgentSessionResult> {
-    await this.assertTmuxPresent(input.exec);
+    await this.assertImageContract(input.exec);
 
     if (await this.sessionExists(input.exec)) {
       // Re-entrant provision (a retry after a later step failed): the agent is already
@@ -133,16 +133,39 @@ export class TerminalSessionService implements AgentSessionBootstrap {
   }
 
   /**
-   * The image contract self-check (03 §4.3 ⑤.1). A registration-time `validate()` pass
-   * does not excuse it: images change tags and base images upstream, so the only truth
-   * about a RUNNING sandbox is a live probe (04 §2.1★ methodology).
+   * The image contract self-check (03 §4.3 ⑤.1) —— **两件事，一次探测**：
+   *   ① 沙箱内 agent 可达吗（`exec` 本身就走它，抛出即不可达）
+   *   ② tmux 在吗（探测的退出码）
+   *
+   * A registration-time `validate()` pass does not excuse either: images change tags and
+   * base images upstream, and 血统校验（04 §7 ★）只能证明**祖先**有这些东西，证明不了
+   * 派生镜像没把它们删掉。The only truth about a RUNNING sandbox is a live probe
+   * (04 §2.1★ methodology).
    *
    * Missing tmux fails LOUDLY — it is never degraded into "same product, different
    * behaviour". Silent degradation would disguise a non-conforming image, and the user
    * would only discover it when a platform restart killed their running agent.
    */
-  private async assertTmuxPresent(exec: SandboxExecFn): Promise<void> {
-    const r = await exec(TMUX_PROBE_CMD, { timeoutMs: TMUX_CMD_TIMEOUT_MS });
+  private async assertImageContract(exec: SandboxExecFn): Promise<void> {
+    let r: Awaited<ReturnType<SandboxExecFn>>;
+    try {
+      r = await exec(TMUX_PROBE_CMD, { timeoutMs: TMUX_CMD_TIMEOUT_MS });
+    } catch (e) {
+      // ⭐ **agent 可达性**（2026-08 新增）。`exec` 本身就要经过沙箱内 agent
+      //（`:8080` 的 `/v1/bash/exec`，04 §2.1），所以这一次探测**同时**是 agent 的探针 ——
+      // 不需要再发一个请求，需要的是把这次失败**叫对名字**。
+      //
+      // ⚠️ 在此之前，一张不带 agent 的镜像会让这里抛一个传输层错误
+      //（connection refused / 超时），沿着 `failureOf` 落成 `INTERNAL`,
+      // 用户看到「服务内部错误，请稍后重试」——而真相是**这张镜像根本不满足平台约定**，
+      // 重试一万次也不会变。这与 `ENOSPC` 那次是同一种病：**失败发生在正确的位置，
+      // 却被叫了一个让用户走错方向的名字**。
+      throw new ImageContractViolationError(
+        '沙箱内 agent 不可达，镜像不满足平台约定（04 §7）：平台的 exec / 终端 / 文件全部经过' +
+          `镜像自带的 agent HTTP API（:8080 的 /v1/bash/exec、ws /v1/shell/ws）。` +
+          `原始错误：${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     if (r.exitCode !== 0) {
       throw new ImageContractViolationError(
         '镜像缺少 tmux，不满足平台约定（04 §7）：agent 会话必须由沙箱内的 tmux server 持有',

@@ -1,19 +1,11 @@
-import {
-  Body,
-  Controller,
-  HttpCode,
-  HttpException,
-  HttpStatus,
-  Post,
-  Req,
-  Res,
-} from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
+import { passcodeInvalid, passcodeLocked } from './passcode-errors';
 import { setSessionCookie } from './session-cookie';
 
 const UnlockSchema = z.object({ passcode: z.string().min(1) });
@@ -51,10 +43,7 @@ export class AccessController {
     const ip = req.ip ?? 'unknown';
     const lockedFor = this.limiter.lockedForSec(ip, now);
     if (lockedFor > 0) {
-      throw new HttpException(
-        { code: 'PASSCODE_LOCKED', retryAfterSec: lockedFor },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
+      throw passcodeLocked(lockedFor);
     }
 
     if (this.passcodes.matches(body.passcode)) {
@@ -64,6 +53,6 @@ export class AccessController {
     }
 
     this.limiter.recordFailure(ip, now);
-    throw new HttpException({ code: 'PASSCODE_INVALID' }, HttpStatus.UNAUTHORIZED);
+    throw passcodeInvalid();
   }
 }

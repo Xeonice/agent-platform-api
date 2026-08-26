@@ -14,6 +14,7 @@ export default defineConfig({
     './packages/modules/credential/src/infrastructure/persistence/schema/credential.sqlite.ts',
     './packages/modules/credential/src/infrastructure/persistence/schema/credential-sandbox-binding.sqlite.ts',
     './packages/modules/runtime/src/infrastructure/persistence/schema/runtime.sqlite.ts',
+    './packages/modules/image/src/infrastructure/persistence/schema/image.sqlite.ts',
   ],
   out: './drizzle',
 });
