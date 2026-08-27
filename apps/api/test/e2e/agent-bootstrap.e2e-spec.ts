@@ -7,6 +7,7 @@ import { DATABASE } from '@platform/shared-kernel';
 import {
   PLATFORM_AGENT_TMUX_SESSION,
   PROJECT_FACADE,
+  IMAGE_SPEC_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
   WS_SCHEMA_HASH,
@@ -25,10 +26,12 @@ import type {
 import { AppModule } from '../../src/app.module';
 import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import {
   EchoProcessStream,
   FakeExecProcessStream,
+  makeFakeImageSpecRegistry,
+  registerDefaultImage,
   fakeProjectFacade,
   fakeWorkspace,
 } from './_fakes';
@@ -121,13 +124,19 @@ async function boot(hasTmux: boolean): Promise<void> {
     .useValue(fakeWorkspace)
     .overrideProvider(PROJECT_FACADE)
     .useValue(fakeProjectFacade)
+    // The create door demands a REGISTERED image since 04 §7 时刻③. The whole image
+    // chain stays real here — only the registry round-trip is faked, because an e2e
+    // must not need a reachable registry.
+    .overrideProvider(IMAGE_SPEC_REGISTRY)
+    .useValue(makeFakeImageSpecRegistry())
     .compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
+  // The create door needs a REGISTERED image now (04 §7 时刻③).
+  await registerDefaultImage(app);
   const addr = app.getHttpServer().address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
 }

@@ -14,7 +14,7 @@ function openConnection(): Connection {
   let conn = connections.get(url);
   if (!conn) {
     conn = createConnection(url);
-    runMigrations(conn.db);
+    runMigrations(conn.db, conn.sqlite);
     connections.set(url, conn);
   }
   return conn;

@@ -5,7 +5,7 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 
 /**
  * Project context REST e2e (docs/backend/03 §7, shared/10 §6). Empty projects are
@@ -63,8 +63,7 @@ beforeAll(async () => {
   process.env.DATA_ROOT = dataRoot;
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   await app.init();
   await app.listen(0);
 }, 30_000);

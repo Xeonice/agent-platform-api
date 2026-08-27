@@ -13,6 +13,8 @@ import {
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
   PROJECT_FACADE,
+  IMAGE_FACADE,
+  ImageAccessError,
   ProjectAccessError,
   SandboxProviderError,
   SandboxProviderErrorCode,
@@ -33,6 +35,7 @@ import type {
   ProjectAccessErrorCode,
   ProjectFacade,
   ProjectRuntimeContext,
+  ImageFacade,
   WorkspaceSource,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
@@ -91,13 +94,10 @@ export class SandboxApplicationService {
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly registry: ProviderRegistry,
     @Inject(WORKSPACE_PREPARER) private readonly workspace: WorkspacePreparer,
     @Inject(PROJECT_FACADE) private readonly projectFacade: ProjectFacade,
+    @Inject(IMAGE_FACADE) private readonly imageFacade: ImageFacade,
     @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
     private readonly provision: ProvisionSandboxWorkflow,
   ) {}
-
-  private defaultImage(): string {
-    return process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20';
-  }
 
   /**
    * `GET /api/providers` — read-only capability discovery (04 §5 「能力发现」). The list
@@ -146,8 +146,9 @@ export class SandboxApplicationService {
     this.persist(sandbox);
 
     // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
-    // MUST NOT block on provision→start→agent-readiness — boxlite cold-pull alone
-    // is ~220s, and a cold runtime-CLI install was measured at 753s. Snapshot the
+    // MUST NOT block on provision→start→readiness — boxlite cold-pull alone
+    // is ~220s, a cold runtime-CLI install was measured at 753s, and even a WARM
+    // micro-VM takes 3.2s to boot before its first exec (实测 2026-08-26). Snapshot the
     // `pending` DTO NOW (before provision runs — it advances the aggregate
     // synchronously up to its first await), return it immediately, and let provision
     // drive the state machine in the background (each transition persists + publishes
@@ -174,6 +175,13 @@ export class SandboxApplicationService {
    *   `INVALID_IMAGE_REFERENCE` 400 · `PROJECT_NOT_FOUND` 404 · `PROJECT_NOT_READY` 409 ·
    *   `BRANCH_NOT_FOUND` 400.
    *
+   * ⚠️ `INVALID_IMAGE_REFERENCE` NOW COVERS THREE FACTS, NOT ONE (04 §7 时刻③): a
+   * malformed reference, an image that was never registered, and a registered version
+   * that is either retired (I-IMG-3) or judged `invalid` (I-IMG-2). One code because
+   * the user does the same thing about all three — pick a different image, or make
+   * this one selectable — and because a NEW retryable-looking code in this method
+   * would have to justify itself against the paragraph above.
+   *
    * ⚠️ `BRANCH_NOT_FOUND` IS THE PROOF THAT THE POSITIONAL RULE WORKS. It was added by
    * extending the project lookup below with one more argument — nobody wrote
    * `sideEffectFree` anywhere — and it is stamped correctly because it is thrown from
@@ -195,7 +203,7 @@ export class SandboxApplicationService {
       // row is written, before anything is scheduled.
       this.assertCapabilities(provider, input.require, input.headless ?? false);
       this.assertRuntimeRegistered(input.runtime);
-      const imageRef = this.resolveImage(input.image);
+      const imageRef = await this.resolveImage(input.image);
 
       // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
       // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -213,37 +221,65 @@ export class SandboxApplicationService {
   }
 
   /**
-   * The image to run (TASK-LAUNCH-DECISIONS §3★1). Until S5 this input was ACCEPTED
-   * on the wire and then silently ignored — every sandbox ran the default image, which
-   * would have made `getInstallPlan(imageSpec)` a permanently constant answer and voided
-   * the entire "(image, runtime) pair" conclusion.
+   * The image to run — 04 §7 时刻③, the create door's image half.
    *
-   * ⚠️ SCOPE: only shape validation happens here. `I-IMG-2` (reject an `invalid`
-   * manifest) and `I-IMG-3` (only `is_active` images are selectable) are NOT
-   * implementable yet — there is no image context at all: no `images` /
-   * `image_manifests` tables, no `ImageSpecProvider`, and `IMAGE_SPEC_REGISTRY` is a
-   * bare placeholder token (04 §8). Those two invariants land with the image slice.
+   * TWO CHECKS, IN THIS ORDER, AND BOTH BELONG AT THE DOOR:
+   *
+   *   ① SHAPE. Whitespace / control characters in a reference would flow into a
+   *      container-runtime call. ⚠️ `\s` ALONE DOES NOT SAY 「control characters」 —
+   *      it covers tab/newline/space and friends, but NUL, BEL and ESC are none of
+   *      those. The reference is concatenated into a registry coordinate and echoed
+   *      into logs, so an embedded `\x1b[` is a terminal-escape injection into
+   *      anything that renders them, and a `\x00` truncates it for a C-string
+   *      consumer.
+   *
+   *   ② CATALOGUE. The image must be a REGISTERED manifest that is `is_active`
+   *      (I-IMG-3) and not `invalid` (I-IMG-2). What lands in `sandboxes.image_ref`
+   *      is that manifest's ID, and the digest frozen at registration travels with
+   *      it — which is the only reason step ④ can pull `ref@digest` at all.
+   *
+   * ⚠️ CHECK ② READS THE DATABASE AND NEVER THE REGISTRY. This is the single most
+   * inverted-if-you-are-not-careful step in the whole image design (04 §7). Calling
+   * `resolve()` here would look natural and would introduce `REGISTRY_UNREACHABLE`
+   * (502, retryable:true) into a door that answers 「this request, as written, is not
+   * accepted」 — turning 「门口拒绝一律 retryable:false」 from a structural property
+   * back into a per-case judgement. A tag that was re-pushed is therefore discovered
+   * only by an explicit re-validate, and that is the intended trade: a coordinate
+   * migration should be a visible action, not an unnoticed drift.
+   *
+   * ⚠️ REFUSING AN UNREGISTERED COORDINATE IS THE BREAKING HALF OF THIS SLICE. Before
+   * it, any string was accepted and `provision` pulled whatever the tag pointed at
+   * that second. Accepting one now would mean a sandbox row with no manifest to join,
+   * i.e. no digest — the placeholder, back again, through the one door that was
+   * supposed to have closed it.
    */
-  private resolveImage(requested?: string): string {
+  private async resolveImage(requested?: string): Promise<string> {
     const ref = (requested ?? '').trim();
-    if (ref === '') return this.defaultImage();
-    // whitespace / control characters in an image ref would flow into a container
-    // runtime call; refuse them up front rather than deep inside `provider.create`.
-    //
-    // ⚠️ `\s` ALONE DOES NOT SAY "control characters" — it covers tab/newline/space
-    // and friends, but NUL, BEL and ESC are none of those. An image ref is
-    // concatenated into a registry reference and echoed into logs, so an embedded
-    // `\x1b[` is a terminal-escape injection into anything that renders them, and a
-    // `\x00` truncates the ref for a C-string consumer. The comment promised this
-    // check; now it is one.
-    if (/[\s\p{Cc}]/u.test(ref)) {
+    if (ref !== '' && /[\s\p{Cc}]/u.test(ref)) {
       throw doorRejection(
         HttpStatus.BAD_REQUEST,
         INVALID_IMAGE_REFERENCE_CODE,
         `invalid image reference '${requested}'`,
       );
     }
-    return ref;
+    try {
+      const selected = await this.imageFacade.resolveForTask(ref === '' ? undefined : ref);
+      return selected.manifestId;
+    } catch (e) {
+      if (e instanceof ImageAccessError) {
+        // 400 alongside `UNKNOWN_PROVIDER` / `UNKNOWN_RUNTIME`: the request named
+        // something outside the set the platform offers. `retryable:false` and
+        // `sideEffectFree:true` are both earned by POSITION — this runs inside
+        // `admit`'s `atDoor` region, which holds no `uow` and calls nothing.
+        //
+        // ⚠️ **码要透传，不能在这里钉死一个。** 原本这里硬写 `INVALID_IMAGE_REFERENCE`,
+        // 于是「全新部署、一张镜像都没注册」也报「你的镜像地址里有空白或控制字符」——
+        // 而用户什么都没填。facade 分了两个码正是为了让这两种拿到不同的出路
+        // （改地址 vs 去镜像管理），在出口合并回一个等于把那次区分抹掉。
+        throw doorRejection(HttpStatus.BAD_REQUEST, e.code, e.message);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -442,8 +478,7 @@ export class SandboxApplicationService {
       ? {
           provider: sandbox.provider,
           providerSandboxId: sandbox.providerSandboxId,
-          agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-          agentAuthToken: sandbox.agentAuthToken ?? undefined,
+          providerState: sandbox.providerState ?? undefined,
         }
       : null;
   }

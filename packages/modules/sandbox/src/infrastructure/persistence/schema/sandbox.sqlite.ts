@@ -19,9 +19,27 @@ export const sandboxes = sqliteTable(
     // the platform always writes a derived default at create time (P21-1 §9).
     name: text('name'),
     runtime: text('runtime').notNull(),
-    // The image this sandbox actually runs. NOT an FK: the image context (and its
-    // `image_manifests` table) is a later slice (04 §8 IMAGE_SPEC_REGISTRY ⏳), so
-    // pointing at a table that does not exist yet would be a fiction.
+    /**
+     * `image_manifests.id` — the manifest this sandbox runs (13 §2.4.5).
+     *
+     * ⚠️ THE MEANING OF THIS COLUMN CHANGED WITH THE IMAGE SLICE. It used to hold a
+     * REPOSITORY COORDINATE (`alpine:3.20`) passed straight through from the request;
+     * it now holds a uuid pointing at a frozen manifest row, and the coordinate +
+     * digest are read back through the join. Same column name, same field name, two
+     * different things — which is why the migration NULLs every pre-slice row rather
+     * than leaving strings that would silently read as ids (04 §7 ⚠️, 13 §2.1).
+     *
+     * ⚠️ THE FK ITSELF IS DECLARED IN THE MIGRATION SQL, NOT HERE. Same reason as
+     * `credential_sandbox_bindings.sandbox_id`: a DB-level cross-context constraint is
+     * not worth a PACKAGE dependency from `sandbox` onto `image`.
+     *
+     * ⚠️ AND IT STAYS NULLABLE. 13 §2.1.1 draws it NOT NULL, and every row written
+     * from now on has a value — but a NOT NULL migration would have to invent a
+     * manifest, and therefore a DIGEST, for each legacy coordinate. A fabricated
+     * digest is `'sha256:unresolved'` wearing a different hat, i.e. precisely the lie
+     * this slice exists to delete. NULL here means 「pre-slice row; which bits it ran
+     * is not recoverable」 — the second of the two options 13 §2.4 offered.
+     */
     imageRef: text('image_ref'),
     provider: text('provider').notNull().default('aio'),
     status: text('status').notNull().default('pending'),
@@ -32,15 +50,18 @@ export const sandboxes = sqliteTable(
     quotaRamMb: integer('quota_ram_mb'),
     providerHandle: text('provider_handle'),
     workspacePath: text('workspace_path'),
-    // provider-specific runtime binding persisted so a backend restart can still
-    // reach the instance (13 §2.1). boxlite stores its forwarded agent host port
-    // here; aio leaves it NULL (it re-derives from docker inspect).
-    agentEndpointPort: integer('agent_endpoint_port'),
-    // per-sandbox bearer token for the in-sandbox agent's auth gateway. It CANNOT
-    // be re-derived from the runtime (the container only holds the public half), so
-    // losing it would mean losing the data plane across a restart. SECRET: never
-    // mapped onto a DTO, never logged.
-    agentAuthToken: text('agent_auth_token'),
+    /**
+     * Provider 的私有运行期状态（JSON 文本），原样存、原样还——见
+     * `SandboxHandle.providerState`。后端重启后 provider 靠它接回自己的实例。
+     *
+     * ⚠️ **本列的内容由 provider 定义，平台不解释、不校验、不迁移。** 这里曾经是
+     * `agent_endpoint_port` + `agent_auth_token` 两列：一种 provider 的一种数据面
+     * 实现（AIO 镜像内的 HTTP agent）的词汇，硬写进了 provider 无关的表。
+     *
+     * ⚠️ **可能含密**（aio 在里面放 agent bearer token，它无法从运行时反推——容器只
+     * 持有公钥那一半，丢了就等于跨重启丢掉数据面）。**永不映射到 DTO、永不进日志**。
+     */
+    providerState: text('provider_state'),
     // TASK-LAUNCH-DECISIONS T-1: the create input `initialPrompt` lands HERE. It MUST
     // be persisted — its consumer (bootstrapAgentSession) runs in the provision
     // workflow after the 202, and that workflow receives only a `sandboxId` (26 §1).
@@ -65,6 +86,8 @@ export const sandboxes = sqliteTable(
     projectStatusIdx: index('idx_sandboxes_project_status').on(t.projectId, t.status),
     statusIdx: index('idx_sandboxes_status').on(t.status),
     providerHandleIdx: index('idx_sandboxes_provider_handle').on(t.providerHandle),
+    // 13 §2.1.1: the FK's lookup index —「使用中的镜像不可硬删」 needs the reverse scan.
+    imageRefIdx: index('idx_sandboxes_image_ref').on(t.imageRef),
     // 13 §2.1: 12-value status enum (waiting-input intentionally NOT included)
     statusCk: check(
       'sandboxes_status_ck',

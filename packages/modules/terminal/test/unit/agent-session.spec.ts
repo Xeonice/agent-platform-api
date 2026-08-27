@@ -60,6 +60,8 @@ class FakeAdapter implements RuntimeAdapter {
 interface ExecRule {
   match: RegExp;
   exitCode: number;
+  /** 让这条 exec **抛出**（传输层失败），而不是返回一个退出码。 */
+  throws?: string;
 }
 
 function harness(rules: ExecRule[] = []) {
@@ -75,6 +77,9 @@ function harness(rules: ExecRule[] = []) {
     execCalls.push(cmd);
     const joined = cmd.join(' ');
     const rule = rules.find((r) => r.match.test(joined));
+    // `throws` 模拟**传输层**失败（沙箱内 agent 不可达），与「命令跑了但退出码非零」
+    // 是两件不同的事 —— 前者说镜像没有 agent，后者说镜像缺某个命令。
+    if (rule?.throws !== undefined) throw new Error(rule.throws);
     return { stdout: '', stderr: '', exitCode: rule?.exitCode ?? 0 };
   };
   const sandboxes: SandboxExecPort = {
@@ -119,6 +124,44 @@ describe('bootstrapAgentSession — the tmux self-check (03 §4.3 ⑤.1)', () =>
 
     // it stops BEFORE building or starting anything: silently falling back to a
     // gateway-held pty is exactly the B 档 that was cancelled (04 §7 ★).
+    expect(h.adapter.startCalls).toHaveLength(0);
+    expect(h.execCalls.some((c) => c.includes('new-session'))).toBe(false);
+  });
+
+  /**
+   * ⭐ **agent 可达性**（2026-08 新增）。平台的 exec / 终端 / 文件**全部**经过镜像自带的
+   * agent HTTP API（`:8080` 的 `/v1/bash/exec`、`ws /v1/shell/ws`，04 §7）。
+   * 一张不带 agent 的镜像 —— 也就是任何一张普通 docker 镜像 —— 在这里会让 `exec`
+   * 抛传输层错误。
+   *
+   * ⚠️ 在此之前那个错误沿着 `failureOf` 落成 `INTERNAL`，用户看到「服务内部错误，
+   * 请稍后重试」。**失败发生在正确的位置，却被叫了一个让用户走错方向的名字** ——
+   * 与 `ENOSPC` 曾经被当成平台错误码是同一种病。
+   *
+   * MUTATION: 去掉 `assertImageContract` 里的 try/catch ⇒ 抛出的是裸 `Error` 而不是
+   * `ImageContractViolationError`，本条红。
+   */
+  it('⭐ 沙箱内 agent 不可达 ⇒ IMAGE_CONTRACT_VIOLATION，不是 INTERNAL', async () => {
+    const h = harness([
+      { match: /command -v tmux/, throws: 'connect ECONNREFUSED 127.0.0.1:8080' },
+    ]);
+    const err = await h.service
+      .bootstrapAgentSession({
+        sandboxId: 's1',
+        runtimeId: 'codex',
+        initialPrompt: 'do the thing',
+        workdir: '/workspace',
+        exec: h.exec,
+      })
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ImageContractViolationError);
+    // 说清是 agent 而不是 tmux —— 两种失败的下一步不同（换镜像 vs 装 tmux）。
+    expect(String((err as Error).message)).toContain('agent');
+    // 原始错误不丢：它进 message 供排障。
+    expect(String((err as Error).message)).toContain('ECONNREFUSED');
+    // 与 tmux 那条一样，停在自检，不去建会话。
     expect(h.adapter.startCalls).toHaveLength(0);
     expect(h.execCalls.some((c) => c.includes('new-session'))).toBe(false);
   });

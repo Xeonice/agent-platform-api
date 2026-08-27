@@ -1182,6 +1182,268 @@
           "runtime"
         ]
       }
+    },
+    "/api/images": {
+      "get": {
+        "operationId": "ImageController_list",
+        "parameters": [
+          {
+            "name": "runtimeId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ImageManifestResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List image manifests. `runtimeId` filters to the wizard-selectable set (is_active ∧ not invalid ∧ supports that runtime); without it the management page gets history too.",
+        "tags": [
+          "image"
+        ]
+      },
+      "post": {
+        "operationId": "ImageController_register",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterImageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "this digest was already known",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterImageResponseDto"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "a new manifest row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterImageResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Register an image: resolve → validate → freeze the digest",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/validate": {
+      "post": {
+        "operationId": "ImageController_validate",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterImageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationOutcomeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Pre-flight validate a reference — never persists a manifest",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/{id}/validate": {
+      "post": {
+        "operationId": "ImageController_revalidate",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevalidateOutcomeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Re-validate a registered manifest (04 §7 时刻②). A digest change is reported old → new — it is a coordinate migration, not a 「refresh succeeded」.",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/{id}": {
+      "patch": {
+        "operationId": "ImageController_patch",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchImageDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageManifestResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Update the two mutable fields (isActive:false | imageConfig). `isActive:true` is refused with 400 pointing at /activate.",
+        "tags": [
+          "image"
+        ]
+      },
+      "delete": {
+        "operationId": "ImageController_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Hard-delete a manifest row; 409 when referenced or built-in",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/{id}/activate": {
+      "post": {
+        "operationId": "ImageController_activate",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageManifestResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Make this row the current version of its tag — the same action for 「更新到新版本」 and 「回滚到旧版本」, in one transaction.",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/{id}/check-update": {
+      "post": {
+        "operationId": "ImageController_checkUpdate",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckImageUpdateResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Re-resolve this row’s tag and compare digests. Stores nothing; 409 when the row is pinned by digest (no tag to re-resolve).",
+        "tags": [
+          "image"
+        ]
+      }
     }
   },
   "info": {
@@ -1640,6 +1902,7 @@
               "RESUME_FAILED",
               "UNKNOWN_RUNTIME",
               "IMAGE_PULL_FAILED",
+              "IMAGE_DIGEST_GONE",
               "RESOURCE_EXHAUSTED",
               "NOT_FOUND",
               "ALREADY_EXISTS",
@@ -2213,6 +2476,740 @@
         "required": [
           "runtimeId",
           "activeAuthMethod"
+        ]
+      },
+      "ImageManifestResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "imageId": {
+            "type": "string"
+          },
+          "imageName": {
+            "type": "string"
+          },
+          "isBuiltin": {
+            "type": "boolean"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "baseImage": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "entrypointContract": {
+            "type": "object",
+            "properties": {
+              "workdir": {
+                "type": "string"
+              },
+              "entrypoint": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "healthcheckCmd": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "workdir",
+              "entrypoint"
+            ]
+          },
+          "supportedRuntimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "resourceDefaults": {
+            "type": "object",
+            "properties": {
+              "cores": {
+                "type": "number"
+              },
+              "ramMb": {
+                "type": "number"
+              },
+              "diskMb": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "cores",
+              "ramMb",
+              "diskMb"
+            ]
+          },
+          "labelsRequired": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "derivedFromDigest": {
+            "type": "string",
+            "nullable": true
+          },
+          "validationStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "valid",
+              "warning",
+              "invalid"
+            ]
+          },
+          "validationErrors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ]
+            },
+            "nullable": true
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "imageConfig": {
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "secret": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "value",
+                    "secret"
+                  ]
+                }
+              },
+              "cmdOverride": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "env"
+            ],
+            "nullable": true
+          },
+          "registeredAt": {
+            "type": "string"
+          },
+          "resolvedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "imageId",
+          "imageName",
+          "isBuiltin",
+          "ref",
+          "version",
+          "baseImage",
+          "digest",
+          "entrypointContract",
+          "supportedRuntimes",
+          "resourceDefaults",
+          "labelsRequired",
+          "derivedFromDigest",
+          "validationStatus",
+          "validationErrors",
+          "isActive",
+          "imageConfig",
+          "registeredAt",
+          "resolvedAt"
+        ]
+      },
+      "RegisterImageDto": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "ref"
+        ]
+      },
+      "RegisterImageResponseDto": {
+        "type": "object",
+        "properties": {
+          "manifest": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "imageId": {
+                "type": "string"
+              },
+              "imageName": {
+                "type": "string"
+              },
+              "isBuiltin": {
+                "type": "boolean"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "baseImage": {
+                "type": "string"
+              },
+              "digest": {
+                "type": "string"
+              },
+              "entrypointContract": {
+                "type": "object",
+                "properties": {
+                  "workdir": {
+                    "type": "string"
+                  },
+                  "entrypoint": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "healthcheckCmd": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "workdir",
+                  "entrypoint"
+                ]
+              },
+              "supportedRuntimes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "resourceDefaults": {
+                "type": "object",
+                "properties": {
+                  "cores": {
+                    "type": "number"
+                  },
+                  "ramMb": {
+                    "type": "number"
+                  },
+                  "diskMb": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "cores",
+                  "ramMb",
+                  "diskMb"
+                ]
+              },
+              "labelsRequired": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "derivedFromDigest": {
+                "type": "string",
+                "nullable": true
+              },
+              "validationStatus": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "valid",
+                  "warning",
+                  "invalid"
+                ]
+              },
+              "validationErrors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                },
+                "nullable": true
+              },
+              "isActive": {
+                "type": "boolean"
+              },
+              "imageConfig": {
+                "type": "object",
+                "properties": {
+                  "env": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        },
+                        "secret": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "value",
+                        "secret"
+                      ]
+                    }
+                  },
+                  "cmdOverride": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "env"
+                ],
+                "nullable": true
+              },
+              "registeredAt": {
+                "type": "string"
+              },
+              "resolvedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "imageId",
+              "imageName",
+              "isBuiltin",
+              "ref",
+              "version",
+              "baseImage",
+              "digest",
+              "entrypointContract",
+              "supportedRuntimes",
+              "resourceDefaults",
+              "labelsRequired",
+              "derivedFromDigest",
+              "validationStatus",
+              "validationErrors",
+              "isActive",
+              "imageConfig",
+              "registeredAt",
+              "resolvedAt"
+            ]
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "valid",
+                  "warning",
+                  "invalid"
+                ]
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "status",
+              "errors",
+              "warnings"
+            ]
+          }
+        },
+        "required": [
+          "manifest",
+          "validation"
+        ]
+      },
+      "ValidationOutcomeResponseDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "valid",
+              "warning",
+              "invalid"
+            ]
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ]
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ]
+            }
+          }
+        },
+        "required": [
+          "status",
+          "errors",
+          "warnings"
+        ]
+      },
+      "RevalidateOutcomeResponseDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "valid",
+              "warning",
+              "invalid"
+            ]
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ]
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ]
+            }
+          },
+          "currentDigest": {
+            "type": "string"
+          },
+          "upstreamDigest": {
+            "type": "string"
+          },
+          "digestChanged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "errors",
+          "warnings",
+          "currentDigest",
+          "upstreamDigest",
+          "digestChanged"
+        ]
+      },
+      "PatchImageDto": {
+        "type": "object",
+        "properties": {
+          "isActive": {
+            "type": "boolean"
+          },
+          "imageConfig": {
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "secret": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "value"
+                  ]
+                }
+              },
+              "cmdOverride": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "env"
+            ]
+          }
+        }
+      },
+      "CheckImageUpdateResponseDto": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "type": "object",
+            "properties": {
+              "digest": {
+                "type": "string"
+              },
+              "resolvedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "digest",
+              "resolvedAt"
+            ]
+          },
+          "upstream": {
+            "type": "object",
+            "properties": {
+              "digest": {
+                "type": "string"
+              },
+              "validation": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "valid",
+                      "warning",
+                      "invalid"
+                    ]
+                  },
+                  "errors": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ]
+                    }
+                  },
+                  "warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "status",
+                  "errors",
+                  "warnings"
+                ]
+              }
+            },
+            "required": [
+              "digest",
+              "validation"
+            ],
+            "nullable": true
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "current",
+          "upstream",
+          "changed"
         ]
       },
       "ErrorEnvelope": {

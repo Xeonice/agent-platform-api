@@ -1,0 +1,41 @@
+-- 04 §7 ★血统 / 13 §2.4.2：`image_manifests` 记下**匹配到的那张锚点** `derived_from_digest`。
+--
+-- 血统校验从 0011 起就在逐个比对 builtin 锚点、并且**知道匹配上了哪一个**，然后只带走
+-- 「过 / 不过」。于是平台答不出「谁基于谁」：卡片显示不了「基于 X」，平台发新 base 之后
+-- 也说不出哪些客户自定义镜像已经过期。这一列就是把那个已经算出来的答案存下来。
+--
+-- ⚠️ **存锚点的 digest，不存它的 `image_manifests.id`，而且刻意不建外键。三条理由：**
+-- ① **血统是历史事实，不是活引用。** 删掉某张 base 行不该让派生镜像的血统记录悬空，也不该
+--    被 FK RESTRICT 挡住删除——那张 base 的 bits 早在构建时就被派生镜像吸收了，base 行没了
+--    它们也还在派生镜像里。
+-- ② **digest 是内容寻址的。** 锚点行被删掉、被重新播种成另一个 id、或者压根是在另一套部署上
+--    注册的，这个值都还准确指向同一份 bits；而 manifest id 是**行指针**，行没了就是悬空。
+-- ③ **不建 FK 是设计，不是漏建。** 13 §2.9 记着本仓有三条「两张表都在、FK 却没建」的欠账
+--    （`sandboxes.project_id`、`runtime_installations.sandbox_id`、`sandbox_state_transitions`），
+--    它们读起来像正在生效的约束、实际不是。**这一列不是第四条**：按理由 ① 它必须在目标行被
+--    删除后**继续有效**，那正好是 RESTRICT / CASCADE 的反面；按理由 ② 它也根本不是任何一张表
+--    主键的值（`digest` 只在 `image_id` 范围内唯一）。别有人来「补上」它。
+--
+-- ⚠️ **存量行填 NULL，而 NULL 有两种语义，读的时候必须分清**：
+--    ① 预制根镜像（`images.is_builtin`）—— 它就是锚点，没有平台祖先，所以本来就豁免血统校验；
+--    ② 切片前的存量行 —— 它的 `diff_ids` 同样是 `[]`，祖先不可复原，也不准编造（I-IMG-6）。
+--    把 NULL 一律读成「没有基于任何平台镜像」，会把 ② 冤成违规；一律读成 ①，又会把切片前的
+--    用户镜像说成平台根镜像。区分它们的事实在隔壁 `images.is_builtin`。
+--
+-- ⚠️ **这里跟 0011 一样用 `ADD COLUMN`，没照 0010 的「建新表-搬数据-改名」。** 0010 之所以
+--    非重建不可，是因为它要**加外键**，而 SQLite 没有 `ALTER TABLE ... ADD CONSTRAINT`；加一
+--    个普通可空列没有这个限制。反过来重建 `image_manifests` 是**更危险**的做法——
+--    `sandboxes.image_ref` 有一条 ON DELETE RESTRICT 的外键指着它，重建意味着在 FK 关闭的窗口
+--    里 DROP 掉一张被引用的表再改名，收益为零。
+--
+--    ⚠️ 拦这件事的闸，是两份 migration spec 里各自那条**断言迁移文本**的用例，
+--    **不是**「升级后 `sandboxes` 的 DDL 还写不写着 image_manifests」那种运行期断言。
+--    实测（SQLite 3.49，本轮亲手跑过一次合法重建）：重建之后 `sandboxes` 的 DDL 原封不动、
+--    不含 `__new_`、`foreign_key_check` 干净、RESTRICT 照样生效——运行期断言**全绿**。
+--    原因是 SQLite 只在 RENAME 时改写指向**旧名字**的引用，而 `sandboxes` 引用的名字
+--    自始至终是 `image_manifests`。真正要拦的那件事在升级完成后的库里不留痕，
+--    只在迁移文件本身里看得见。
+--
+-- FK 纪律不变：`runMigrations` 在调用外把 `foreign_keys` 关掉、跑完再打开并 `PRAGMA
+-- foreign_key_check`（PRAGMA 在事务内是 no-op，所以它不能写在本文件里）。
+ALTER TABLE `image_manifests` ADD `derived_from_digest` text;

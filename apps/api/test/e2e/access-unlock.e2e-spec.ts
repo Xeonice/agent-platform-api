@@ -3,7 +3,7 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import { expectPasscodeEnabled, useEnv } from './_env';
 
 /**
@@ -21,8 +21,7 @@ beforeAll(async () => {
   restoreEnv = useEnv({ DATABASE_URL: ':memory:', ACCESS_PASSCODE: PASSCODE });
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   await app.init();
   await app.listen(0);
   expectPasscodeEnabled(app, true);
@@ -37,8 +36,7 @@ beforeAll(async () => {
 async function buildIsolatedApp(): Promise<INestApplication> {
   const ref = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const isolated = ref.createNestApplication();
-  isolated.setGlobalPrefix('api');
-  isolated.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(isolated);
   await isolated.init();
   await isolated.listen(0);
   return isolated;

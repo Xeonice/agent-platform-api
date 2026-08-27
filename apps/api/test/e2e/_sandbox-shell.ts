@@ -26,11 +26,14 @@ export async function sandboxShell(
   const provider = app
     .get<ProviderRegistry>(SANDBOX_PROVIDER_REGISTRY, { strict: false })
     .get(sandbox.provider);
+  // ⚠️ **原样交还 `providerState`，一个键都不认。** 这里曾经手抄
+  // `agentEndpointPort` / `agentAuthToken` 两个具名字段——那是「一种 provider 的一种
+  // 数据面实现」的词汇，早已收进不透明的 `providerState`（04 §2.2），抄它的代价是
+  // 平台重启后 aio 连不上自己的沙箱，而 boxlite 走 native 之后压根没有这两样东西。
   const handle = {
     provider: sandbox.provider,
     providerSandboxId: sandbox.providerSandboxId,
-    agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-    agentAuthToken: sandbox.agentAuthToken ?? undefined,
+    providerState: sandbox.providerState ?? undefined,
   };
   return async (script: string) =>
     collect(await provider.spawn(handle, { cmd: ['sh', '-c', script], tty: false }));

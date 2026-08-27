@@ -5,7 +5,7 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 
 /**
  * S3 ACCEPTANCE (docs/backend/25 §4.4): a PRIVATE git repo is cloned using a REAL
@@ -74,8 +74,7 @@ describe.skipIf(!ready)('private git repo → clone with credential (S3)', () =>
     process.env.DATA_ROOT = dataRoot;
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(platformValidationPipe());
+    configurePlatformApp(app);
     await app.init();
     await app.listen(0);
   }, 60_000);

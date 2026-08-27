@@ -16,28 +16,74 @@ import { ClaudeCodeAdapter } from '../../src/infrastructure/adapters/claude-code
  *     own vocabulary. The two vocabularies have nothing in common, which is exactly why
  *     this cannot be a platform-generic rule.
  */
-const image = (ref: string): ResolvedImageSpec => ({ ref, digest: 'sha256:x' });
+/**
+ * ⚠️ THE SECOND ARGUMENT IS THE POINT OF THIS HELPER (04 §7 ★ 第 3 条, closed 2026-08).
+ * The verdict is keyed on what the IMAGE DECLARES (`platform.supportedRuntimes`,
+ * frozen on the manifest row at registration), never on its ref string.
+ */
+const image = (ref: string, supportedRuntimes?: string[]): ResolvedImageSpec => ({
+  ref,
+  digest: 'sha256:x',
+  ...(supportedRuntimes === undefined ? {} : { supportedRuntimes }),
+});
 
 describe('getInstallPlan is keyed on the (image, runtime) pair (04 §3 ★1)', () => {
-  it('codex is preinstalled on the AIO default image and installed elsewhere', () => {
+  it('codex is preinstalled where the image DECLARES it, installed where it does not', () => {
     const codex = new CodexAdapter();
-    expect(codex.getInstallPlan(image('ghcr.io/agent-infra/sandbox:latest')).strategy).toBe(
+    expect(codex.getInstallPlan(image('registry.example/base:v1', ['codex'])).strategy).toBe(
       'preinstalled',
     );
-    expect(codex.getInstallPlan(image('debian:bookworm-slim')).strategy).toBe('install-on-start');
+    expect(codex.getInstallPlan(image('registry.example/base:v1', [])).strategy).toBe(
+      'install-on-start',
+    );
   });
 
-  it('claude-code is NOT on the AIO image — the 753s case that proves the pair matters', () => {
+  it('claude-code missing from the declaration — the 753s case that proves the pair matters', () => {
     const claude = new ClaudeCodeAdapter();
-    const onAio = claude.getInstallPlan(image('ghcr.io/agent-infra/sandbox:latest'));
-    expect(onAio.strategy).toBe('install-on-start');
-    expect(onAio.estimatedInstallSec).toBe(753); // measured, not guessed
-    expect(onAio.packageManagerCmds).toEqual(['npm install -g @anthropic-ai/claude-code']);
+    const notDeclared = claude.getInstallPlan(image('registry.example/base:v1', ['codex']));
+    expect(notDeclared.strategy).toBe('install-on-start');
+    expect(notDeclared.estimatedInstallSec).toBe(753); // measured, not guessed
+    expect(notDeclared.packageManagerCmds).toEqual(['npm install -g @anthropic-ai/claude-code']);
 
-    const onBoxlite = claude.getInstallPlan(image('localhost:5001/cap-boxlite-sandbox:yolo'));
-    expect(onBoxlite.strategy).toBe('preinstalled');
-    expect(onBoxlite.packageManagerCmds).toEqual([]);
-    expect(onBoxlite.estimatedInstallSec).toBe(0);
+    const declared = claude.getInstallPlan(
+      image('registry.example/base:v1', ['codex', 'claude-code']),
+    );
+    expect(declared.strategy).toBe('preinstalled');
+    expect(declared.packageManagerCmds).toEqual([]);
+    expect(declared.estimatedInstallSec).toBe(0);
+  });
+
+  /**
+   * ⚠️ THIS CLAUSE IS THE RETIRED REGEX'S HEADSTONE, AND IT IS WHY THE CASE ABOVE USES
+   * A NEUTRAL REF. `imagePreinstalls` used to answer by matching the ref against
+   * `/agent-infra\/sandbox/i` and `/cap-boxlite-sandbox/i`. Under that implementation
+   * the SAME two refs used here would produce the same strategies for the wrong reason —
+   * so a test that kept the old refs would stay green on the very bug being fixed.
+   * These two cases hold the ref CONSTANT and vary only the declaration.
+   */
+  it('the ref string has NO influence — only the declaration decides', () => {
+    const codex = new CodexAdapter();
+    // The historically-hard-coded name, now declaring it does NOT ship codex.
+    expect(codex.getInstallPlan(image('ghcr.io/agent-infra/sandbox:latest', [])).strategy).toBe(
+      'install-on-start',
+    );
+    // A name no regex ever knew — e.g. the platform's own `:5001` mirror, or any image
+    // a user registered — declaring that it DOES.
+    expect(
+      codex.getInstallPlan(image('localhost:5001/platform/sandbox:v1', ['codex'])).strategy,
+    ).toBe('preinstalled');
+  });
+
+  it('an image that declares NOTHING degrades to 现装, never to a silent 「preinstalled」', () => {
+    // `ANY_IMAGE` (the adapters' own neutral spec) and every pre-slice sandbox row land
+    // here. 现装 is the safe direction: the live `isInstalled` probe runs either way, and
+    // a wrong 「preinstalled」 would turn into a LOUD failure instead of a slow start.
+    expect(new CodexAdapter().getInstallPlan(image('anything:1')).strategy).toBe(
+      'install-on-start',
+    );
+    expect(new ClaudeCodeAdapter().getInstallPlan(image('anything:1')).strategy).toBe(
+      'install-on-start',
+    );
   });
 
   it('names the binary the platform probes for a version (13 §2.3.2)', () => {

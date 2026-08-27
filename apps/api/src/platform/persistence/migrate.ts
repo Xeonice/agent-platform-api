@@ -3,8 +3,8 @@ import { env } from '../config/env';
 import { createConnection, runMigrations, migrationsDir } from './drizzle.connection';
 
 function main(): void {
-  const { db } = createConnection(env.databaseUrl);
-  runMigrations(db);
+  const { db, sqlite } = createConnection(env.databaseUrl);
+  runMigrations(db, sqlite);
   console.log(`migrations applied from ${migrationsDir()} to ${env.databaseUrl}`);
 }
 

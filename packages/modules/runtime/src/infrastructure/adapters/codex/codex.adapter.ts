@@ -40,7 +40,13 @@ import {
 import { assertSessionRef } from '../session-ref.util';
 import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
 
-const BEGIN_TIMEOUT_MS = 60_000;
+/**
+ * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 这一步要在 PTY 里
+ * 起一次 CLI 再等它吐出授权 URL，而 CLI 在微 VM 里**光启动就实测 18.6 秒**（docker
+ * 里 44ms）。60s 里有三分之一被启动吃掉，剩下的留给 CLI 自己联网换 URL——太紧，
+ * 且它超时的表现是「登录向导毫无征兆地失败」。放宽只影响失败路径的等待时长。
+ */
+const BEGIN_TIMEOUT_MS = 120_000;
 const COMPLETE_TIMEOUT_MS = 15 * 60_000;
 
 const CODEX_BINARY = 'codex';
@@ -361,7 +367,7 @@ export class CodexAdapter implements RuntimeAdapter {
     return npmInstallPlan({
       packageName: '@openai/codex',
       binary: CODEX_BINARY,
-      preinstalled: imagePreinstalls(imageSpec.ref, 'codex'),
+      preinstalled: imagePreinstalls(imageSpec, 'codex'),
       // measured on a cold AIO default image; codex is the SMALL one of the two.
       estimatedInstallSec: 120,
     });

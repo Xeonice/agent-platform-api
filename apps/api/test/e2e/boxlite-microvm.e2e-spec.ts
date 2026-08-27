@@ -9,10 +9,12 @@ import type { INestApplication } from '@nestjs/common';
 import { io, type Socket } from 'socket.io-client';
 import { WS_SCHEMA_HASH } from '@platform/contracts';
 import type { TerminalServerFrame } from '@platform/contracts';
+import { IMAGE_SPEC_REGISTRY } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
+import { makeFakeImageSpecRegistry, registerDefaultImage } from './_fakes';
 import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 
 /**
  * BOXLITE-REQUIRED e2e (SANDBOX-RUNTIME-DECISIONS 决策 B). Full chain for the REAL
@@ -94,13 +96,19 @@ beforeAll(async () => {
   process.env.DATA_ROOT = dataRoot;
   process.env.SANDBOX_DEFAULT_IMAGE = IMAGE;
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    // Only the registry round-trip is doubled — the rest of the image chain
+    // (register → freeze digest → door lookup → FK → pull `ref@digest`) is real.
+    .overrideProvider(IMAGE_SPEC_REGISTRY)
+    .useValue(makeFakeImageSpecRegistry())
+    .compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   setupWebsockets(app);
   await app.init();
   await app.listen(0);
+  // 04 §7 时刻③: the create door only accepts a REGISTERED image now.
+  await registerDefaultImage(app);
   const addr = app.getHttpServer().address();
   port = typeof addr === 'object' && addr ? addr.port : 0;
 }, 60_000);
@@ -128,8 +136,23 @@ function nextFrame(
   });
 }
 
+/**
+ * 去掉 ANSI 转义序列。
+ *
+ * ⚠️ **这里曾经漏了 ESC 前缀**（`/\[[0-9;?]*[A-Za-z]/g`），于是它把任何「`[` + 一个
+ * 字母」都当成转义序列吃掉 —— tmux 状态栏的 `[platform-0:bash*` 会被啃成
+ * `latform-0:bash*`，下面那条 `/\[platform/` 因此**永远匹配不上**。
+ *
+ * 之所以一直没红，是因为它当时匹配上的其实是**另一样东西**：aio 那条数据面的
+ * `openTerminal` 是把 `exec tmux attach -t platform-agent` **敲进 shell**，shell 回显
+ * 把 `tmux` / `platform-agent` 这两个词送回了终端。boxlite 换成 native `Box.exec`
+ * 之后 `spec.cmd` 直接就是进程的 argv（顺带补上了 04 §2.3★ 记的那笔「tty:true 一侧
+ * spec.cmd 传不进去」的账），没有 shell 去回显它 —— 断言这才露出它一直在测回显、
+ * 而不是在测「终端真的附着到了平台的 tmux 会话」。修好 ESC 之后状态栏能留下来，
+ * 断言测的就是它本来该测的那个东西了。
+ */
 function stripAnsi(s: string): string {
-  return s.replace(/\[[0-9;?]*[A-Za-z]/g, '');
+  return s.replace(/\[[0-9;?>]*[A-Za-z]|[()][A-Za-z0-9]|[=>]|\][^]*/g, '');
 }
 
 /**

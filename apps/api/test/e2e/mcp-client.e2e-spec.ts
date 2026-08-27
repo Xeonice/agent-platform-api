@@ -5,10 +5,21 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
+import {
+  SANDBOX_PROVIDER_REGISTRY,
+  WORKSPACE_PREPARER,
+  PROJECT_FACADE,
+  IMAGE_SPEC_REGISTRY,
+} from '@platform/contracts';
 import { SandboxApplicationService } from '@platform/sandbox';
 import { AppModule } from '../../src/app.module';
-import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
+import {
+  makeFakeImageSpecRegistry,
+  registerDefaultImage,
+  fakeProjectFacade,
+  fakeWorkspace,
+  makeFakeRegistry,
+} from './_fakes';
 
 /**
  * MCP client smoke (docs/backend/25 §6.1): a REAL MCP Client drives a tool over a
@@ -27,9 +38,17 @@ beforeAll(async () => {
     .useValue(fakeWorkspace)
     .overrideProvider(PROJECT_FACADE)
     .useValue(fakeProjectFacade)
+    // The create door demands a REGISTERED image since 04 §7 时刻③. The whole image
+    // chain stays real here — only the registry round-trip is faked, because an e2e
+    // must not need a reachable registry.
+    .overrideProvider(IMAGE_SPEC_REGISTRY)
+    .useValue(makeFakeImageSpecRegistry())
     .compile();
   app = moduleRef.createNestApplication();
   await app.init();
+  // The create door needs a REGISTERED image now (04 §7 时刻③); register the
+  // platform default once so the creates below can omit `image` as they always did.
+  await registerDefaultImage(app);
 });
 
 afterAll(async () => {

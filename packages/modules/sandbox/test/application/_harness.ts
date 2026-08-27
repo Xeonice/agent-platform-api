@@ -23,6 +23,7 @@ import type {
   PreparedWorkspace,
   ProcessSpec,
   ProcessStream,
+  ImageFacade,
   ProjectFacade,
   ProviderRegistry,
   RefreshableRuntimeCredential,
@@ -525,6 +526,12 @@ export interface HarnessOptions {
    * be recorded and broadcast verbatim.
    */
   workspaceError?: Error;
+  /**
+   * Make the image facade refuse (I-IMG-2 / I-IMG-3, 04 §7 时刻③). Without this seam
+   * a test cannot distinguish 「the door consulted the catalogue」 from 「the door
+   * accepted any string」, which is exactly the pre-slice behaviour.
+   */
+  imageError?: Error;
   now?: Date;
 }
 
@@ -696,6 +703,70 @@ export function harness(opts: HarnessOptions = {}) {
   const taskLogs = new InMemoryTaskLogStore();
   const taskBroadcaster = new RecordingTaskBroadcaster();
 
+  /**
+   * In-memory image catalogue (04 §7 时刻③④).
+   *
+   * ⚠️ IT DELIBERATELY MAKES `manifestId` DIFFERENT FROM `ref`. Before the image slice
+   * the two were the same string, and any double that keeps them equal would let a
+   * `sandboxes.image_ref` misread as a coordinate (or vice versa) pass every test —
+   * the very confusion 04 §7 ⚠️ warns about. Here the row stores `img-<coordinate>`
+   * and the provider receives the coordinate, so a step that mixed them up fails.
+   */
+  const imageDigests = new Map<string, string>();
+  const imageFacade: ImageFacade = {
+    async resolveForTask(selector?: string) {
+      if (opts.imageError) throw opts.imageError;
+      const ref =
+        selector === undefined || selector === ''
+          ? (process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20')
+          : selector;
+      const digest = imageDigests.get(ref) ?? `sha256:${ref.length.toString(16).padStart(64, 'b')}`;
+      imageDigests.set(ref, digest);
+      // NOT recorded in `calls`: that log is the 「starting 段 five-step order」
+      // assertion (T-SBX-31), and this happens at the DOOR, before any of it.
+      return {
+        manifestId: `img-${ref}`,
+        ref,
+        digest,
+        entrypoint: undefined,
+        manifest: {
+          name: ref,
+          version: 'latest',
+          baseImage: ref,
+          entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+          supportedRuntimes: [],
+          resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+          labelsRequired: ['platform.tmux'],
+          diffIds: ['sha256:base-layer'],
+        },
+        resolvedAt: clock.now().toISOString(),
+      };
+    },
+    async findTaskImage(manifestId: string) {
+      if (!manifestId.startsWith('img-')) return null;
+      const ref = manifestId.slice('img-'.length);
+      const digest = imageDigests.get(ref);
+      if (digest === undefined) return null;
+      return {
+        manifestId,
+        ref,
+        digest,
+        entrypoint: undefined,
+        manifest: {
+          name: ref,
+          version: 'latest',
+          baseImage: ref,
+          entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+          supportedRuntimes: [],
+          resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+          labelsRequired: ['platform.tmux'],
+          diffIds: ['sha256:base-layer'],
+        },
+        resolvedAt: clock.now().toISOString(),
+      };
+    },
+  };
+
   const provision = new ProvisionSandboxWorkflow(
     repo,
     uow,
@@ -706,6 +777,7 @@ export function harness(opts: HarnessOptions = {}) {
     installs,
     credentials,
     agentSessions,
+    imageFacade,
   );
   const service = new SandboxApplicationService(
     repo,
@@ -716,6 +788,7 @@ export function harness(opts: HarnessOptions = {}) {
     registry,
     workspace,
     projectFacade,
+    imageFacade,
     runtimes,
     provision,
   );
@@ -785,6 +858,9 @@ export function harness(opts: HarnessOptions = {}) {
     bootstrapInputs,
     injections,
     projectLookups: () => projectLookups,
+    imageFacade,
+    /** The digest the fake catalogue froze for a coordinate — 时刻④ assertions use it. */
+    frozenDigestOf: (ref: string): string | undefined => imageDigests.get(ref),
   };
 }
 

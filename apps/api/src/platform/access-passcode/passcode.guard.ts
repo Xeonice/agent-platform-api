@@ -1,13 +1,8 @@
-import {
-  Injectable,
-  type CanActivate,
-  type ExecutionContext,
-  HttpException,
-  HttpStatus,
-} from '@nestjs/common';
+import { Injectable, type CanActivate, type ExecutionContext } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
+import { passcodeLocked, passcodeRequired } from './passcode-errors';
 import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
 
 /**
@@ -38,17 +33,29 @@ export class PasscodeGuard implements CanActivate {
 
     const now = Date.now();
     const ip = req.ip ?? 'unknown';
-    const lockedFor = this.limiter.lockedForSec(ip, now);
-    if (lockedFor > 0) {
-      throw new HttpException(
-        { code: 'PASSCODE_LOCKED', retryAfterSec: lockedFor },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
 
-    // already-authenticated session cookie
+    /**
+     * ⚠️ **已认证的会话先放行，锁定检查排在它后面 —— 顺序是承重的。**
+     *
+     * 此前反过来：锁定先判。后果是**任何人从同一 IP 猜错 5 次口令，就能把所有已登录
+     * 会话一起锁死 5 分钟** —— 家用 NAT、公司出口、docker bridge 后面全是同一个 `req.ip`。
+     * 实测表现：用户早已解锁、cookie 完全有效，界面却在建任务时弹
+     * 「口令错误次数过多，已暂时锁定；请 277 秒后重试」，而他这一轮**一次口令都没输过**。
+     *
+     * 锁定的目的是**拦住正在猜口令的请求**（11 §3.1 的暴力破解防护）。一个带着有效签名
+     * cookie 的请求不是在猜口令 —— 拿限流去拦它，防不到攻击者，只是把合法用户踢下线：
+     * 攻击者反而得到一个**零成本的 DoS**（猜 5 次错口令 = 全员掉线 5 分钟）。
+     *
+     * ⚠️ `POST /api/access/unlock` 不走这里（`isExempt`），它在 controller 里自己查锁定
+     * ——那条路径**确实**在提交口令，该受锁定约束。两处的差别正是「有没有在猜口令」。
+     */
     if (this.passcodes.verifySessionToken(readCookie(req, SESSION_COOKIE), now)) {
       return true;
+    }
+
+    const lockedFor = this.limiter.lockedForSec(ip, now);
+    if (lockedFor > 0) {
+      throw passcodeLocked(lockedFor);
     }
 
     const presented = this.presentedPasscode(req);
@@ -59,7 +66,7 @@ export class PasscodeGuard implements CanActivate {
     }
 
     this.limiter.recordFailure(ip, now);
-    throw new HttpException({ code: 'PASSCODE_REQUIRED' }, HttpStatus.UNAUTHORIZED);
+    throw passcodeRequired();
   }
 
   private isExempt(req: Request): boolean {

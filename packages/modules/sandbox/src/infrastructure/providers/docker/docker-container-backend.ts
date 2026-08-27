@@ -1,5 +1,6 @@
 import type Docker from 'dockerode';
 import {
+  pinnedImageRef,
   SandboxProviderError,
   SandboxProviderErrorCode,
   type SandboxFiles,
@@ -15,6 +16,7 @@ import {
 } from '@platform/contracts';
 import { DockerExecAgentClient } from './docker-exec-agent.client';
 import { AioSandboxAgentClient } from '../aio/aio-sandbox-agent.client';
+import { agentProviderState, readAgentState } from '../aio/agent-state';
 import { AgentSandboxFiles, AgentSandboxJobs } from '../aio/agent-data-plane';
 import {
   assertAgentRejectsAnonymous,
@@ -88,7 +90,10 @@ export class DockerContainerBackend implements SandboxProvider {
         );
       }
       const clientFor = async (handle: SandboxHandle): Promise<AioSandboxAgentClient> =>
-        new AioSandboxAgentClient(await this.resolveAgentHttpBase(handle), handle.agentAuthToken);
+        new AioSandboxAgentClient(
+          await this.resolveAgentHttpBase(handle),
+          readAgentState(handle).agentAuthToken,
+        );
       this.jobs = new AgentSandboxJobs(this.name, clientFor);
       this.files = new AgentSandboxFiles(this.name, clientFor);
     }
@@ -115,7 +120,12 @@ export class DockerContainerBackend implements SandboxProvider {
       const env = this.capabilities.headlessTask ? withJobSurvivalEnv(authed) : authed;
       const container = await this.docker.createContainer({
         name: this.containerName(ctx.sandboxId),
-        Image: ctx.image.ref,
+        // 04 §7 时刻④: `ref@digest`, not a tag. Steps ①②③ freeze a coordinate into
+        // the database; if the string handed to the daemon here is still a tag, all
+        // three were bookkeeping — 「不可变坐标」只在最后交给 provider 的那个字符串
+        // 是 digest 时才成立. Degrades to the bare tag for a pre-slice sandbox row
+        // whose digest is not recoverable.
+        Image: pinnedImageRef(ctx.image),
         // agent images keep their own entrypoint (starts :8080); only bare images
         // need an explicit keep-alive command.
         Cmd: this.config.keepAliveCmd,
@@ -154,7 +164,7 @@ export class DockerContainerBackend implements SandboxProvider {
         // persisted by the platform: unlike the published port (re-derivable from
         // `docker inspect`) the token cannot be recovered from the daemon, so a
         // backend restart would otherwise lose the only way to talk to the agent.
-        agentAuthToken: auth?.token,
+        providerState: agentProviderState({ agentAuthToken: auth?.token }),
       };
     });
   }
@@ -174,7 +184,7 @@ export class DockerContainerBackend implements SandboxProvider {
       // before the in-sandbox agent HTTP server accepts connections.
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
-        await this.waitForAgent(base, handle.agentAuthToken);
+        await this.waitForAgent(base, readAgentState(handle).agentAuthToken);
       }
     });
   }
@@ -225,7 +235,7 @@ export class DockerContainerBackend implements SandboxProvider {
       // agent-first data plane (ADR 决策 A): in-sandbox AIO agent when available.
       if (this.config.agentPort !== undefined) {
         const base = await this.resolveAgentHttpBase(handle);
-        const client = new AioSandboxAgentClient(base, handle.agentAuthToken);
+        const client = new AioSandboxAgentClient(base, readAgentState(handle).agentAuthToken);
         return spec.tty
           ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24, spec.cmd)
           : client.exec(spec);
@@ -325,6 +335,15 @@ export class DockerContainerBackend implements SandboxProvider {
     if (e instanceof SandboxProviderError) return e;
     const code = this.statusCode(e);
     const msg = e instanceof Error ? e.message : String(e);
+    // ⚠️ A 404 ABOUT A DIGEST-PINNED IMAGE IS ITS OWN FAILURE, NOT `NOT_FOUND`.
+    // Pinning created this mode: the coordinate is exactly right and the bits behind
+    // it were deleted or GC'd upstream (the tag may still resolve fine). Neither a
+    // retry nor a corrected address helps — the way out is [检查更新] onto a new
+    // digest, so the user's action differs and therefore so must the code
+    // (04 §4 四类分类法). Tested BEFORE the generic 404 rule, which would swallow it.
+    if (code === 404 && /@sha256:/.test(msg)) {
+      return new SandboxProviderError(SandboxProviderErrorCode.IMAGE_DIGEST_GONE, msg, e);
+    }
     if (code === 404) {
       return new SandboxProviderError(SandboxProviderErrorCode.NOT_FOUND, msg, e);
     }

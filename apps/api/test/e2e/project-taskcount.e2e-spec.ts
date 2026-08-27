@@ -4,10 +4,21 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { SANDBOX_PROVIDER_REGISTRY, WORKSPACE_PREPARER, PROJECT_FACADE } from '@platform/contracts';
+import {
+  SANDBOX_PROVIDER_REGISTRY,
+  WORKSPACE_PREPARER,
+  PROJECT_FACADE,
+  IMAGE_SPEC_REGISTRY,
+} from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
-import { fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
+import {
+  makeFakeImageSpecRegistry,
+  registerDefaultImage,
+  fakeProjectFacade,
+  fakeWorkspace,
+  makeFakeRegistry,
+} from './_fakes';
 
 /**
  * ProjectDto.taskCount aggregation (shared/10 §7): GET /api/projects[/:id] reports
@@ -29,12 +40,19 @@ beforeAll(async () => {
     .useValue(fakeWorkspace)
     .overrideProvider(PROJECT_FACADE)
     .useValue(fakeProjectFacade)
+    // The create door demands a REGISTERED image since 04 §7 时刻③. The whole image
+    // chain stays real here — only the registry round-trip is faked, because an e2e
+    // must not need a reachable registry.
+    .overrideProvider(IMAGE_SPEC_REGISTRY)
+    .useValue(makeFakeImageSpecRegistry())
     .compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   await app.init();
   await app.listen(0);
+  // The create door needs a REGISTERED image now (04 §7 时刻③); register the
+  // platform default once so the creates below can omit `image` as they always did.
+  await registerDefaultImage(app);
 });
 
 afterAll(async () => {

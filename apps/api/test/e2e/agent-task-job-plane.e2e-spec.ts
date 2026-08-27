@@ -148,27 +148,68 @@ for (const target of targets) {
       expect(provider.files).toBeDefined();
     });
 
-    it('生存义务: the session TTL and cap were raised AT CREATE TIME', async () => {
-      // The clause a naive implementation breaks by DEFAULT: the agent reaps an idle
-      // session after an hour on a clock that READING does not refresh, and evicts the
-      // oldest session past a cap of 50. Both are read at agent boot, so `create()` is
-      // the only moment they can be set — which is why this is asserted on the ENV the
-      // sandbox actually booted with, not on a doc.
-      const stream = await provider.spawn(handle, {
-        cmd: ['sh', '-c', 'printf "%s|%s" "$BASH_SESSION_TIMEOUT" "$MAX_BASH_SESSIONS"'],
-        tty: false,
-      });
-      const out = await new Promise<string>((resolveOut) => {
+    /**
+     * 生存义务（04 §2.6 ★★★）—— **两个 provider 兑现它的方式不同，所以断言也不同。**
+     *
+     * ⚠️ 这条**曾经对两边写同一句**（「session TTL 与上限必须在 create 时拉高」），
+     * 那是因为当时 boxlite 复用 aio 的 data-plane 客户端，两边真的跑同一个 agent。
+     * 数据面拆开之后再照抄，就是在要求 native 那侧去满足一个它根本没有的机制——
+     * 决策 A 修订里那句「共享实现保证的是『两边一样』，一旦对某个 provider 不适用，
+     * 『一样』就变成一起错」，在测试里的形态就是这条。
+     *
+     * 义务本身没变，**验证它的证据**变了：
+     *   aio     → agent 的 session 有 IDLE TTL（默认 3600s，读输出不刷新它的时钟）
+     *              与 session 上限（默认 50，新建淘汰最老的），两者都在 agent **启动时**
+     *              读取 ⇒ 只能在 `create()` 设，所以断言沙箱**真的**用这套 env 起来了。
+     *   boxlite → 根本没有 session：作业由 `setsid` 放进**自己的会话**，输出落 box 内
+     *              文件。所以证据是「跑起来的进程确实是一个新 session 的 leader」
+     *              （`sid == pgid == pid`），以及**没有**注入那两个 env——注入了反而说明
+     *              有人把 agent 那套又搬回来了。
+     */
+    const shellOut = async (script: string): Promise<string> => {
+      const stream = await provider.spawn(handle, { cmd: ['sh', '-c', script], tty: false });
+      return new Promise<string>((resolveOut) => {
         let acc = '';
         stream.onData((c) => {
           acc += c.toString('utf8');
         });
         stream.onExit(() => resolveOut(acc));
       });
-      const [ttl, cap] = out.trim().split('|');
-      // comfortably beyond the longest tier a Task may ask for (240 minutes).
-      expect(Number(ttl)).toBeGreaterThanOrEqual(240 * 60);
-      expect(Number(cap)).toBeGreaterThan(50);
+    };
+
+    it('生存义务: 用这一档自己的机制兑现，并有对应的证据', async () => {
+      const env = (
+        await shellOut('printf "%s|%s" "$BASH_SESSION_TIMEOUT" "$MAX_BASH_SESSIONS"')
+      ).trim();
+      if (target.label === 'aio') {
+        const [ttl, cap] = env.split('|');
+        // comfortably beyond the longest tier a Task may ask for (240 minutes).
+        expect(Number(ttl)).toBeGreaterThanOrEqual(240 * 60);
+        expect(Number(cap)).toBeGreaterThan(50);
+        return;
+      }
+      // native 侧：不该有那两个 env（有 = agent 那套又爬回来了）。
+      expect(env).toBe('|');
+      // 起一个后台作业，然后从 box 内部看它的进程属性：sid == pgid == pid 才叫
+      // 「自己的会话」——那正是「读的人走了、平台重启了，进程也不受影响」的物理基础。
+      const job = await provider.jobs!.startJob(handle, {
+        cmd: ['sh', '-c', 'sleep 30'],
+      });
+      try {
+        const probe = (
+          await shellOut(
+            'p=$(cat /var/tmp/.platform-job-*/pgid 2>/dev/null | head -1); ' +
+              'ps -o pid= -o pgid= -o sid= -p "$p" 2>/dev/null | tr -s " "',
+          )
+        ).trim();
+        const [pid, pgid, sid] = probe.replace(/^\s+/, '').split(' ');
+        expect(pid).not.toBe('');
+        expect(pgid).toBe(pid);
+        expect(sid).toBe(pid);
+      } finally {
+        await provider.jobs!.killJob(handle, job);
+        await provider.jobs!.releaseJob(handle, job);
+      }
     }, 120_000);
 
     it('async 起 → 收流 → 断开 → 补洞 → 重新附着 → 杀 → 释放', async () => {

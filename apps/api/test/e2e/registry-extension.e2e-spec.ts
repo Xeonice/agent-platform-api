@@ -7,13 +7,19 @@ import { Test } from '@nestjs/testing';
 import { Inject, Module } from '@nestjs/common';
 import type { INestApplication, OnModuleInit } from '@nestjs/common';
 import {
+  IMAGE_SPEC_REGISTRY,
   PROJECT_FACADE,
   RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
   WORKSPACE_PREPARER,
+  formatImageRef,
+  parseImageRef,
 } from '@platform/contracts';
 import type {
   ApiKeyFormatVerdict,
+  ImageSpecManifest,
+  ImageSpecProvider,
+  ImageSpecRegistry,
   ProcessSpec,
   ProcessStream,
   ProviderDto,
@@ -28,9 +34,11 @@ import type {
   SandboxProviderCapabilities,
   SandboxProviderContext,
   SandboxRuntimeStatus,
+  ValidationResult,
 } from '@platform/contracts';
+import { ImageApplicationService } from '@platform/image';
 import { AppModule } from '../../src/app.module';
-import { platformValidationPipe } from '../../src/bootstrap/validation.pipe';
+import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import { useEnv } from './_env';
 import { FakeExecProcessStream, fakeProjectFacade, fakeWorkspace } from './_fakes';
 
@@ -50,6 +58,12 @@ import { FakeExecProcessStream, fakeProjectFacade, fakeWorkspace } from './_fake
  *   - `GET /api/runtimes` lists the adapter and `POST .../credentials/secret` stores a
  *     credential whose expiry comes from the ADAPTER's own `credentialTtlMs` (04 §3);
  *   - a second registration of the same name/id fails fast (04 §8).
+ *
+ * ⚠️ IT NOW COVERS THE **THIRD** REGISTRY TOO. `IMAGE_SPEC_REGISTRY` was a bare Symbol
+ * with no interface, no implementation and no binding until the image slice — so
+ * 「provider / runtime / 镜像三层可注册」 (product 19 §1 原则 5) was two thirds true and
+ * nothing said so. `AcmeImageSpec` below registers through the same public token, and
+ * `POST /api/images` then resolves through IT.
  *
  * Runs on in-memory doubles for workspace/project only — no docker, no daemon.
  */
@@ -137,6 +151,42 @@ const acmeAdapter: RuntimeAdapter = {
   injectCredential: async () => {},
 };
 
+/**
+ * A third-party `ImageSpecProvider` (04 §7). Resolves offline — the point of the
+ * clause is the REGISTRATION path, not the network — and declares tmux so its
+ * manifests are selectable.
+ */
+const acmeImageSpec: ImageSpecProvider = {
+  name: 'acme-spec',
+  async resolve(ref: string) {
+    const parsed = parseImageRef(ref);
+    const reference = parsed.digest ?? parsed.tag ?? 'latest';
+    return {
+      ref: formatImageRef(parsed.name, reference),
+      digest: `sha256:${'ac3'.repeat(21)}e`,
+      entrypoint: ['/bin/sh'],
+      resolvedAt: '2026-08-25T00:00:00.000Z',
+      manifest: {
+        name: parsed.name,
+        version: reference,
+        baseImage: parsed.name,
+        entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+        supportedRuntimes: ['acme-runtime'],
+        resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+        labelsRequired: ['platform.tmux'],
+        // One constant layer for every ref: this provider answers the same bits for
+        // everything, so the seeded root and any later image share a lineage by
+        // construction. That keeps THIS spec about the registry seam (04 §8) instead
+        // of quietly turning into a second lineage test.
+        diffIds: [`sha256:${'ac7'.repeat(21)}f`],
+      },
+    };
+  },
+  validate(_manifest: ImageSpecManifest): ValidationResult {
+    return { valid: true, errors: [], warnings: [] };
+  },
+};
+
 const acmeProvider = new AcmeSandboxProvider();
 const headlessProvider = new HeadlessOnlyProvider();
 
@@ -150,18 +200,23 @@ class AcmeExtensionModule implements OnModuleInit {
   constructor(
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
     @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
+    @Inject(IMAGE_SPEC_REGISTRY) private readonly imageSpecs: ImageSpecRegistry,
   ) {}
 
   onModuleInit(): void {
     this.providers.register(acmeProvider);
     this.providers.register(headlessProvider);
     this.runtimes.register(acmeAdapter);
+    // `default: true` moves the platform's resolver onto this one, mirroring
+    // `register(x, { default: true })` on the sandbox registry.
+    this.imageSpecs.register(acmeImageSpec, { default: true });
   }
 }
 
 let app: INestApplication;
 let dataRoot: string;
 let restoreEnv: () => void;
+let acmeManifest: { manifest: { id: string; digest: string } };
 
 beforeAll(async () => {
   dataRoot = mkdtempSync(resolve(tmpdir(), 'registry-ext-'));
@@ -183,10 +238,17 @@ beforeAll(async () => {
     .useValue(fakeProjectFacade)
     .compile();
   app = moduleRef.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(platformValidationPipe());
+  configurePlatformApp(app);
   await app.init();
   await app.listen(0);
+  // Resolved BY THE THIRD-PARTY SPEC PROVIDER — the create door needs a registered,
+  // active image now (04 §7 时刻③), and this proves the third registry is load-bearing
+  // rather than merely present.
+  const registered = await app
+    .get(ImageApplicationService)
+    .registerImage(process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20');
+  expect(registered.created).toBe(true);
+  acmeManifest = registered;
 });
 
 afterAll(async () => {
@@ -220,8 +282,13 @@ describe('an out-of-tree module registers a provider + a runtime adapter (04 §8
 
     const acme = rows.find((p) => p.name === 'acme')!;
     expect(acme.capabilities).toEqual(ACME_CAPS); // all 6 bits, verbatim
+    // ⚠️ 这里断的是「注册第三方**不会**抢走默认」，而不是「默认是 aio」——
+    //    默认档位现在跟随宿主平台（macOS ⇒ boxlite，Linux ⇒ aio，见 provider-registry），
+    //    写死 'aio' 等于把一台机器的巧合当成契约，换台机器就红。
     expect(acme.isDefault).toBe(false);
-    expect(rows.find((p) => p.name === 'aio')!.isDefault).toBe(true);
+    const defaults = rows.filter((p) => p.isDefault).map((p) => p.name);
+    expect(defaults).toHaveLength(1); // 恰好一个，不是零个也不是两个
+    expect(['aio', 'boxlite']).toContain(defaults[0]);
   });
 
   it('POST /api/sandboxes provisions THROUGH the third-party provider', async () => {
@@ -324,5 +391,23 @@ describe('an out-of-tree module registers a provider + a runtime adapter (04 §8
     expect(() => runtimes.register({ ...acmeAdapter })).toThrow(/duplicate/i);
     // and shadowing a built-in is refused just the same
     expect(() => runtimes.register({ ...acmeAdapter, id: 'codex' })).toThrow(/duplicate/i);
+  });
+});
+
+/**
+ * The third registry, proven the same way as the other two: nothing built-in was
+ * edited, and the platform now resolves images through the out-of-tree provider.
+ */
+describe('IMAGE_SPEC_REGISTRY is a real extension point (04 §8 / §7)', () => {
+  it('registers an image THROUGH the out-of-tree spec provider, digest and all', () => {
+    // The digest is the third-party provider's, so this fails if the platform
+    // silently fell back to its own built-in `oci` resolver.
+    expect(acmeManifest.manifest.digest).toBe(`sha256:${'ac3'.repeat(21)}e`);
+    expect(acmeManifest.manifest.id).toMatch(/\S/);
+  });
+
+  it('a duplicate spec-provider name fails fast, like the other two registries', () => {
+    const registry = app.get<ImageSpecRegistry>(IMAGE_SPEC_REGISTRY);
+    expect(() => registry.register(acmeImageSpec)).toThrow(/duplicate image-spec provider/i);
   });
 });

@@ -12,6 +12,22 @@ import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contra
 export type BoxliteSdk = typeof import('@boxlite-ai/boxlite');
 export type BoxliteRuntime = InstanceType<BoxliteSdk['JsBoxlite']>;
 export type BoxliteBox = Awaited<ReturnType<BoxliteRuntime['create']>>;
+/**
+ * 一次 native `Box.exec` 的句柄（`JsExecution`）—— boxlite 数据面的**唯一**原语
+ * （SANDBOX-RUNTIME-DECISIONS 决策 A 修订）。它自带 `stdin()/stdout()/stderr()/
+ * wait()/kill()/signal(n)/resizeTty(rows,cols)`，`ProcessStream` 需要的每一件事
+ * 在这一层都是原生的，不需要翻译损耗。
+ */
+export type BoxliteExecution = Awaited<ReturnType<BoxliteBox['exec']>>;
+/**
+ * 数据面（spawn / files / jobs）真正需要的**全部**能力面：一个 `exec`。
+ *
+ * 收窄到这一个方法不是洁癖：`JsBox` 上还挂着 snapshot / clone / export / copyIn /
+ * copyOut / metrics 十来样东西，而数据面一样都不碰。写成 `Pick` 之后 ① 读代码的人
+ * 一眼看到边界在哪，② 单测能用一个只实现 `exec` 的替身把整条数据面**离线**跑通
+ * （不需要 hypervisor），而不必为了满足类型去桩十几个用不到的成员。
+ */
+export type ExecCapableBox = Pick<BoxliteBox, 'exec'>;
 export type JsImageRegistry = import('@boxlite-ai/boxlite').JsImageRegistry;
 
 let cached: BoxliteSdk | null = null;

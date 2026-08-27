@@ -39,6 +39,26 @@ export interface ResolvedImageSpec {
   ref: string;
   digest: string;
   entrypoint?: string[];
+  /**
+   * What the image DECLARES it preinstalls (`platform.supportedRuntimes`), carried
+   * over from the registered manifest. The ONLY reader is `getInstallPlan(imageSpec)`
+   * (04 §3 ★1) — it decides `preinstalled` vs `install-on-start`, i.e. whether the
+   * plan says 「0 秒」 or 「约 12.5 分钟」.
+   *
+   * ⚠️ ADDED IN 2026-08 TO RETIRE A REGEX THAT MATCHED THE REF STRING. `imagePreinstalls`
+   * used to test `imageSpec.ref` against `/agent-infra\/sandbox/i` — which is a guess
+   * about a NAME, not a fact about the BITS: it mis-fires on a mirror
+   * (`localhost:5001/platform/sandbox:v1`) and knows nothing at all about a
+   * user-registered image (04 §7 ★ 第 3 条, registered as 「被别的机制兜住的错，不是
+   * 没错」). Reading the manifest's own declaration is the fix.
+   *
+   * ⚠️ OPTIONAL, AND THAT IS NOT LAZINESS — it is 04 §8 取舍① applied honestly. The
+   * adapters' documented `ANY_IMAGE` neutral spec and every hand-built provider e2e
+   * context legitimately have nothing to say here; `undefined` means 「未声明」 and
+   * degrades to 现装, which is the safe direction (a live `isInstalled` probe still
+   * runs either way, 04 §3).
+   */
+  supportedRuntimes?: string[];
 }
 
 export interface VolumeMount {
@@ -64,25 +84,27 @@ export interface SandboxHandle {
   readonly provider: string; // MUST equal provider.name (SP-01)
   readonly providerSandboxId: string;
   /**
-   * Optional provider-specific runtime binding the platform PERSISTS verbatim
-   * (with the sandbox) and hands back on every later call — so a backend restart
-   * can still reach the instance. The platform treats it opaquely; only the
-   * owning provider reads it. Used by `boxlite` to remember the forwarded host
-   * loopback port of the in-sandbox agent (its runtime does not surface port
-   * mappings, so the port cannot be re-resolved after a restart). `aio` leaves
-   * it unset — its container backend re-resolves the published port at spawn time.
+   * Provider 的**私有运行期状态**：平台原样持久化（随 sandbox 一起），并在之后每次调用时
+   * 原样交还，好让后端重启后仍能接回这个实例。**平台从不解释它的内容**——键、值、语义
+   * 全归拥有它的那个 provider。
+   *
+   * ── 为什么是一坨不透明的 JSON，而不是几个具名字段 ────────────────────────────
+   * ⚠️ 这里曾经是 `agentEndpointPort?: number` + `agentAuthToken?: string` 两个具名字段。
+   * 名字里的 `agent` 是 **AIO 镜像内那个 HTTP 服务**——也就是说，*一种* provider 的
+   * *一种* 数据面实现，爬进了 provider **无关**的契约，还一路穿透到领域实体
+   * （`Sandbox` 聚合上曾经有 `agentEndpointPort`）。注释写着「平台把它当不透明的」，
+   * 而字段名恰恰不透明。
+   *
+   * 代价不是抽象洁癖：它让「沙箱里必须跑着一个 agent HTTP 服务」变成了**平台级假设**。
+   * 一个用原生 exec 通道的 provider（boxlite 微 VM）根本没有"端口"和"bearer token"
+   * 这两样东西，却仍要在契约里带着它们。
+   *
+   * ⚠️ **放什么进来是有代价的**：这坨东西会**原样落库**。凭证类的值（如 aio 的 agent
+   * bearer token）放这里是当前的既定做法（SANDBOX-RUNTIME-DECISIONS 安全姿态：
+   * loopback 端口对本机任意进程可达，没有凭证就等于一个无鉴权 shell），
+   * 但它意味着 provider 自己要为「落库的是什么」负责——平台不会替它加密或脱敏。
    */
-  readonly agentEndpointPort?: number;
-  /**
-   * Bearer credential the platform presents to the in-sandbox agent, PERSISTED
-   * verbatim with the sandbox exactly like `agentEndpointPort` (the platform
-   * never parses it; only the owning provider reads it). It exists because the
-   * agent port is published on the host loopback, where 127.0.0.1 stops REMOTE
-   * hosts but not other LOCAL processes — without a credential the agent is an
-   * unauthenticated shell for anything running on the box. Both built-ins mint
-   * one per sandbox at `create()` (SANDBOX-RUNTIME-DECISIONS 安全姿态).
-   */
-  readonly agentAuthToken?: string;
+  readonly providerState?: Readonly<Record<string, unknown>>;
 }
 
 export type SandboxRuntimeLifecycleState =
@@ -466,6 +488,17 @@ export interface ProviderRegistry {
 // them to domain errors at the boundary (domain never imports this class). ──
 export enum SandboxProviderErrorCode {
   IMAGE_PULL_FAILED = 'IMAGE_PULL_FAILED',
+  /**
+   * The pinned digest is gone upstream (deleted / GC'd) although the tag still
+   * resolves — a failure mode that only EXISTS because the platform now pulls
+   * `ref@digest` (04 §7 时刻④). Following a tag always fetched 「某个东西」.
+   *
+   * ⚠️ DELIBERATELY NOT `IMAGE_PULL_FAILED`. That one sends the user to check the
+   * address and the network; here the address is exactly right, and neither editing
+   * it nor retrying helps — the way out is [检查更新] onto a new digest. Different
+   * thing to do ⇒ different code (04 §4 四类分类法).
+   */
+  IMAGE_DIGEST_GONE = 'IMAGE_DIGEST_GONE',
   RESOURCE_EXHAUSTED = 'RESOURCE_EXHAUSTED',
   NOT_FOUND = 'NOT_FOUND',
   ALREADY_EXISTS = 'ALREADY_EXISTS',

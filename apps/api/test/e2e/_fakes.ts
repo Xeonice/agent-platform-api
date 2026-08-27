@@ -1,5 +1,13 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import type { INestApplication } from '@nestjs/common';
+import { ImageApplicationService } from '@platform/image';
+import { formatImageRef, parseImageRef } from '@platform/contracts';
+import { OciRegistryClient } from '@platform/image';
 import type {
   FileEntry,
+  ImageSpecProvider,
+  ImageSpecRegistry,
   JobChunk,
   JobCursor,
   JobHandle,
@@ -224,6 +232,12 @@ export class FakeProvider implements SandboxProvider {
   readonly capabilities: SandboxProviderCapabilities;
   readonly jobs?: FakeJobPlane;
   readonly files?: FakeFilePlane;
+  /**
+   * The LAST context handed to `create` — i.e. exactly what 04 §7 时刻④ produced.
+   * It is the only place a test can see whether the frozen digest really travelled
+   * all the way to the provider, or merely sat in a column nobody read.
+   */
+  lastContext?: SandboxProviderContext;
   constructor(
     readonly name: string,
     capabilities: SandboxProviderCapabilities = CAPS,
@@ -235,6 +249,7 @@ export class FakeProvider implements SandboxProvider {
     }
   }
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
+    this.lastContext = ctx;
     return { provider: this.name, providerSandboxId: `fake-${ctx.sandboxId}` };
   }
   async start(): Promise<void> {}
@@ -299,3 +314,183 @@ export const fakePtyPort: SandboxPtyPort = {
     return new EchoProcessStream();
   },
 };
+
+/**
+ * A network-free `ImageSpecProvider` + registry for the e2e.
+ *
+ * ⚠️ THE SEAM IS THE REGISTRY, NOT THE FACADE, AND THE DIFFERENCE MATTERS. Faking
+ * `IMAGE_FACADE` would hand the create door a `manifestId` with no row behind it, and
+ * since 0010 `sandboxes.image_ref` is a REAL foreign key — the insert fails, loudly,
+ * which is the FK doing exactly its job. Faking the SPEC provider instead leaves the
+ * whole chain real (register → validate → freeze digest → door lookup → FK → provision
+ * pulls `ref@digest`) and replaces only the one thing an e2e must not depend on: a
+ * reachable registry.
+ *
+ * The digest is derived from the ref so two different refs cannot accidentally share
+ * one — a fixed constant would let a test that mixed up two images still pass.
+ */
+export function makeFakeImageSpecRegistry(): ImageSpecRegistry {
+  const provider: ImageSpecProvider = {
+    name: 'fake-oci',
+    async resolve(ref: string) {
+      const parsed = parseImageRef(ref);
+      const reference = parsed.digest ?? parsed.tag ?? 'latest';
+      const canonical = formatImageRef(parsed.name, reference);
+      return {
+        ref: canonical,
+        digest: (await realDigest(parsed.name, reference)) ?? localRepoDigest(ref) ?? digestOf(ref),
+        entrypoint: ['/bin/sh'],
+        resolvedAt: '2026-08-25T00:00:00.000Z',
+        manifest: {
+          name: parsed.name,
+          version: reference,
+          baseImage: parsed.name,
+          entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+          supportedRuntimes: ['codex', 'claude-code'],
+          resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+          // The ROOT must DECLARE tmux (04 §7 ★血统 ③) or `ImageSeeder` refuses to seed
+          // it and every spec in this suite loses its catalogue. Derived images inherit
+          // the label in reality, so declaring it everywhere IS the honest model.
+          labelsRequired: ['platform.tmux'],
+          diffIds: fakeDiffIds(canonical),
+        },
+      };
+    },
+    /**
+     * ⚠️ IT JUDGES NOTHING, AND THE `tmux` BRANCH THAT USED TO LIVE HERE WAS REMOVED
+     * ON PURPOSE (04 §7 ★血统). `validate()` stopped judging tmux — labels are
+     * inherited, so on a derived image `platform.tmux` describes an ancestor. A double
+     * that kept emitting `IMAGE_TMUX_MISSING` would keep a retired rule alive in ten
+     * e2e files, and the `{ tmux: false }` knob that drove it had no caller left.
+     * The spec judgement is exercised where it is the subject (`images.e2e-spec.ts`).
+     */
+    validate() {
+      return { valid: true, errors: [], warnings: [] };
+    },
+  };
+  return {
+    defaultProvider: provider.name,
+    register: () => undefined,
+    get: () => provider,
+    has: () => true,
+    list: () => [provider],
+  };
+}
+
+/** A stable, ref-derived sha256 so two refs never collide on one digest. */
+function digestOf(ref: string): string {
+  return `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+}
+
+/** The one layer every image in this double descends from — the seeded root's own. */
+const FAKE_ROOT_LAYER = `sha256:${'r'.repeat(64)}`;
+
+/**
+ * `rootfs.diff_ids` for the double, shaped like the real world: the ROOT image
+ * (`SANDBOX_DEFAULT_IMAGE`, which `ImageSeeder` registers as `builtin`) is one layer,
+ * and every other ref is that layer PLUS one of its own — i.e. a genuine prefix
+ * extension, which is exactly what registration verifies (04 §7 ★血统).
+ *
+ * ⚠️ THIS DOUBLE MAKES EVERY IMAGE LINEAGE-VALID, ON PURPOSE, AND THAT IS NOT WHERE
+ * LINEAGE IS VERIFIED. The ten specs that share this helper are about provisioning,
+ * terminals and credentials; they need a catalogue that works, not a lineage exam.
+ * Letting the rule bite here would only mean 「脚手架替产品做了一件事」 in reverse.
+ * The rule itself is exercised where it is the subject: `images.e2e-spec.ts` (the
+ * `IMAGE_BASE_REQUIRED` clause, through real HTTP) and the application-layer unit
+ * tests for `assertAdmissible`.
+ */
+function fakeDiffIds(canonicalRef: string): string[] {
+  const parsed = parseImageRef(seededRootRef());
+  const canonicalRoot = formatImageRef(parsed.name, parsed.digest ?? parsed.tag ?? 'latest');
+  if (canonicalRef === canonicalRoot) return [FAKE_ROOT_LAYER];
+  return [FAKE_ROOT_LAYER, `sha256:${createHash('sha256').update(canonicalRef).digest('hex')}`];
+}
+
+/**
+ * The ref `ImageSeeder` will actually seed — it MUST match `ImageSeeder#builtinImageRef`.
+ *
+ * ⚠️ THIS FALLBACK IS NOT THE SAME AS `registerDefaultImage`'s, AND THAT IS A REAL
+ * PRODUCT-SIDE DRIFT, NOT A TEST DETAIL. With `SANDBOX_DEFAULT_IMAGE` unset there are
+ * THREE different defaults in the codebase: `ImageSeeder` seeds
+ * `ghcr.io/agent-infra/sandbox:latest`, while `ImageFacadeAdapter#defaultImage` and
+ * `provision-sandbox.workflow#imageSpecOf` both fall back to `alpine:3.20` — so the
+ * image the platform seeds is not the image its create door defaults to. Left as-is
+ * here (it predates lineage and fixing it changes door behaviour), but the double has
+ * to follow the SEEDER, because the seeder is what决定s which row is `isBuiltin` and
+ * therefore which row is the lineage anchor.
+ */
+function seededRootRef(): string {
+  return process.env.SANDBOX_DEFAULT_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest';
+}
+
+/**
+ * Ask the REAL registry what this tag resolves to, or `null` if it cannot be reached.
+ *
+ * ⚠️ THE DIGEST HALF OF THIS DOUBLE HAS TO BE REAL WHEREVER A REAL RUNTIME WILL PULL.
+ * Since 04 §7 时刻④ the provider pulls `ref@digest`, so a digest the target registry
+ * does not serve lands as `IMAGE_DIGEST_GONE` — correct behaviour, useless as a
+ * fixture. And 「the digest docker has locally」 is NOT interchangeable with 「the
+ * digest THIS registry serves」: re-pushing an image into the `:5001` staging mirror
+ * mints a new manifest digest, which is exactly how the boxlite e2e failed. Only the
+ * registry named in the ref can answer this question, so we ask it.
+ *
+ * Only the digest is real; `validate()` stays a double, because the AIO image does not
+ * declare `platform.tmux` and this suite is not about that judgement.
+ */
+async function realDigest(name: string, reference: string): Promise<string | null> {
+  try {
+    return (await new OciRegistryClient(4000).fetchManifest(name, reference)).digest;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The REAL registry digest of a locally present image, or `null`.
+ *
+ * ⚠️ THE DOCKER-BACKED E2E CANNOT USE A SYNTHETIC DIGEST ANY MORE, AND THAT IS THE
+ * PINNING WORKING. Since 04 §7 时刻④ the provider pulls `ref@digest`, so a made-up
+ * digest lands as `IMAGE_DIGEST_GONE` — correct behaviour, useless as a fixture. The
+ * local `RepoDigests[0]` is the digest the daemon itself would resolve the tag to, so
+ * `ref@digest` addresses the image already on disk and nothing is fetched.
+ *
+ * Returns `null` when docker is absent or the image was built locally and never
+ * pushed (no repo digest at all) — the caller then falls back to the synthetic value,
+ * which is right for the specs that never touch a real daemon.
+ */
+function localRepoDigest(ref: string): string | null {
+  try {
+    const out = execFileSync(
+      'docker',
+      ['image', 'inspect', '--format', '{{index .RepoDigests 0}}', ref],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    ).trim();
+    const at = out.lastIndexOf('@');
+    return at > 0 ? out.slice(at + 1) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Register the platform default image so `POST /api/sandboxes` (which omits `image`)
+ * can find a selectable manifest. Returns its manifest id.
+ *
+ * Every spec that creates a sandbox needs this now: the create door demands a
+ * REGISTERED, active, non-invalid image (04 §7 时刻③) instead of accepting any string.
+ *
+ * ⚠️ IT GOES THROUGH THE APPLICATION SERVICE, NOT SUPERTEST, AND THAT IS NOT LAZINESS.
+ * This is per-file SETUP, and supertest binds an ephemeral port per request when the
+ * server is not already listening — in a single-process suite that freed port can be
+ * reassigned between `address().port` and the write, so the request is answered by a
+ * FOREIGN server (`suite-hygiene.e2e-spec.ts` guards exactly this). The image
+ * CONTROLLER is covered by its own e2e; here we only need a row in the catalogue.
+ */
+export async function registerDefaultImage(app: INestApplication): Promise<string> {
+  const ref = process.env.SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20';
+  const result = await app.get(ImageApplicationService).registerImage(ref);
+  return result.manifest.id;
+}

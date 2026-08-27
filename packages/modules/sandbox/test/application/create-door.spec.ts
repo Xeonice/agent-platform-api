@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ConflictException, HttpException } from '@nestjs/common';
 import {
+  ImageAccessError,
   ProjectAccessError,
   SandboxProviderError,
   SandboxProviderErrorCode,
@@ -65,6 +66,27 @@ const DOOR_REJECTIONS: {
     // built from an escape, never pasted raw — a literal 0x1b makes git treat the file
     // as binary (no diff, no review).
     input: { ...base, image: `alpine:3.20${String.fromCharCode(0x1b)}[2J` },
+  },
+  {
+    // ⭐ 全新部署的第一条错误。切片前 `imageRef` 是自由字符串直接进 provider；切片后门口
+    // 只接受注册过的镜像（04 §7 时刻③），而全新部署的 `images` 表是空的。
+    //
+    // ⚠️ 本条钉的是**码不能和上一条合并**。门口原本硬写 `INVALID_IMAGE_REFERENCE`，
+    // 于是「一张镜像都没注册」会被说成「你的镜像地址里有空白或控制字符」——而用户什么都没填。
+    // 两者出路完全不同：改地址 vs 去镜像管理。前端文案按顶层码查，一个码只能配一句话。
+    //
+    // MUTATION: 把 `resolveImage` 的 catch 改回硬写 `INVALID_IMAGE_REFERENCE_CODE`
+    // ⇒ 本条红，而上一条（控制字符）仍绿 —— 那正是「合并之后看不出区别」的样子。
+    what: 'an image reference that is well-formed but not registered (fresh deploy)',
+    status: 400,
+    code: 'IMAGE_NOT_REGISTERED',
+    opts: {
+      imageError: new ImageAccessError(
+        'IMAGE_NOT_REGISTERED',
+        "镜像 'ghcr.io/agent-infra/sandbox:latest' 尚未注册。",
+      ),
+    },
+    input: { ...base, image: 'ghcr.io/agent-infra/sandbox:latest' },
   },
   {
     what: 'a capability the chosen provider does not advertise',

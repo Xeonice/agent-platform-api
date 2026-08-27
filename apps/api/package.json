@@ -19,6 +19,7 @@
     "@platform/credential": "workspace:*",
     "@platform/project": "workspace:*",
     "@platform/runtime": "workspace:*",
+    "@platform/image": "workspace:*",
     "@platform/sandbox": "workspace:*",
     "@platform/shared-kernel": "workspace:*",
     "@platform/terminal": "workspace:*",

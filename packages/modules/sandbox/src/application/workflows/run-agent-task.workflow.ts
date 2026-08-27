@@ -762,8 +762,7 @@ export function handleOf(sandbox: Sandbox): SandboxHandle {
   return {
     provider: sandbox.provider,
     providerSandboxId: sandbox.providerSandboxId,
-    agentEndpointPort: sandbox.agentEndpointPort ?? undefined,
-    agentAuthToken: sandbox.agentAuthToken ?? undefined,
+    providerState: sandbox.providerState ?? undefined,
   };
 }
 
