@@ -15,6 +15,8 @@ export default defineConfig({
     './packages/modules/credential/src/infrastructure/persistence/schema/credential-sandbox-binding.sqlite.ts',
     './packages/modules/runtime/src/infrastructure/persistence/schema/runtime.sqlite.ts',
     './packages/modules/image/src/infrastructure/persistence/schema/image.sqlite.ts',
+    // 平台级表（13 §2.8）。落在 apps/api 而不是某个 module —— 理由写在 schema 文件顶部。
+    './apps/api/src/platform/audit/audit-events.sqlite.ts',
   ],
   out: './drizzle',
 });

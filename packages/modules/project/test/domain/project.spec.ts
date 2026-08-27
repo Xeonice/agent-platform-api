@@ -240,3 +240,74 @@ describe('Project aggregate', () => {
     expect(() => p.assertCanSync()).toThrow(ProjectStateError);
   });
 });
+
+/**
+ * 领域事件 —— 四个改动型操作与删除此前**一个都不发**，于是 `AuditProjector` 收不到
+ * 任何东西：实测删掉项目后 `audit_events.seq` 一点没动（13 §2.8.2）。
+ */
+describe('Project 的改动型操作各发一条事件', () => {
+  const failedGit = (): Project => {
+    const p = Project.create({
+      ...base,
+      sourceType: 'git',
+      repoUrl: 'https://git.company.com:8443/x/y.git',
+    });
+    p.pullEvents(); // 丢掉 ProjectCreated，只看本次操作发的
+    p.markCloneFailed('CLONE_FAILED_NETWORK', NOW);
+    return p;
+  };
+
+  it('retry-clone 发 ProjectCloneRetried，带上当时的项目名', () => {
+    const p = failedGit();
+    p.retryClone(NOW);
+    const events = p.pullEvents();
+    expect(events.map((e) => e.type)).toEqual(['ProjectCloneRetried']);
+    expect((events[0] as { name: string }).name).toBe('demo');
+  });
+
+  it('convert-to-empty 记下被丢弃的远端 host —— 只有 host，不是整条 URL', () => {
+    const p = failedGit();
+    p.convertToEmpty(NOW);
+    const [e] = p.pullEvents() as { type: string; discardedRepoHost: string | null }[];
+    expect(e.type).toBe('ProjectConvertedToEmpty');
+    // ⚠️ host 必须在归零**之前**取：转完之后平台里再没有任何一处记得它指向哪儿。
+    expect(e.discardedRepoHost).toBe('git.company.com:8443');
+    // ⛔ 整条 URL 不进事件：`RepoUrl` 保留原始串，`https://user:token@host/…` 会把
+    // token 一起带进来，而 log-redactor 认的是密钥的形状，userinfo 那一段不遮。
+    expect(JSON.stringify(e)).not.toContain('https://');
+  });
+
+  it('cancel-clone：只有真在克隆时才发事件，按晚了不发也不抛', () => {
+    const cloning = Project.create({ ...base, sourceType: 'git', repoUrl: 'https://h/x.git' });
+    cloning.pullEvents();
+    expect(cloning.cancelClone(NOW)).toBe(true);
+    expect(cloning.pullEvents().map((e) => e.type)).toEqual(['ProjectCloneCancelled']);
+
+    // 已经拉完的项目按取消，产品语义是「无事发生」而不是 409 —— 也就不该留下
+    // 一条说「有人取消了克隆」的审计行。
+    const ready = Project.create({ ...base, sourceType: 'empty' });
+    ready.pullEvents();
+    expect(ready.cancelClone(NOW)).toBe(false);
+    expect(ready.pullEvents()).toEqual([]);
+  });
+
+  it('sync 发 ProjectBaselineSynced，带上刷新后的体积', () => {
+    const p = Project.create({ ...base, sourceType: 'git', repoUrl: 'https://h/x.git' });
+    p.markCloneReady(1_000, NOW);
+    p.pullEvents();
+    p.syncBaseline(7_777, NOW);
+    const [e] = p.pullEvents() as { type: string; baselineSizeBytes: number }[];
+    expect(e.type).toBe('ProjectBaselineSynced');
+    expect(e.baselineSizeBytes).toBe(7_777);
+  });
+
+  it('删除发 ProjectDeleted，名字随事件走 —— 行没了之后没有任何库可以回查', () => {
+    const p = Project.create({ ...base, sourceType: 'empty' });
+    p.pullEvents();
+    p.markDeleted(true, NOW);
+    const [e] = p.pullEvents() as { type: string; name: string; keptBaseline: boolean }[];
+    expect(e.type).toBe('ProjectDeleted');
+    expect(e.name).toBe('demo');
+    expect(e.keptBaseline).toBe(true);
+  });
+});

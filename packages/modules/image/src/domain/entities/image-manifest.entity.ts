@@ -1,8 +1,9 @@
 import { AggregateRoot } from '@platform/shared-kernel';
-import type {
+import {
   ImageActivated,
   ImageConfigUpdated,
   ImageDeactivated,
+  ImageDeleted,
   ImageRegistered,
   ImageValidated,
 } from '../events/image-events';
@@ -168,7 +169,7 @@ export class ImageManifest extends AggregateRoot<string> {
    * placeholder the whole slice exists to delete (04 §7 ★). A shape check at the one
    * construction site is what makes 「不可变坐标」 mean something.
    */
-  static create(props: ImageManifestProps): ImageManifest {
+  static create(props: ImageManifestProps, ref: string): ImageManifest {
     if (!/^sha256:[0-9a-f]{64}$/.test(props.digest)) {
       throw new ImageStateError(
         `refusing to store manifest ${props.id} with a non-digest coordinate '${props.digest}' ` +
@@ -176,15 +177,7 @@ export class ImageManifest extends AggregateRoot<string> {
       );
     }
     const m = new ImageManifest(props);
-    const registered: ImageRegistered = {
-      type: 'image.registered',
-      occurredAt: props.registeredAt,
-      manifestId: props.id,
-      imageId: props.imageId,
-      ref: props.version,
-      digest: props.digest,
-    };
-    m.raise(registered);
+    m.raise(new ImageRegistered(props.id, props.imageId, ref, props.digest, props.registeredAt));
     return m;
   }
 
@@ -206,15 +199,9 @@ export class ImageManifest extends AggregateRoot<string> {
   }
 
   /** Write back a fresh verdict for THESE bits (04 §7 时刻②). */
-  recordValidation(outcome: ValidationOutcome, at: Date): void {
+  recordValidation(outcome: ValidationOutcome, ref: string, at: Date): void {
     this._validation = outcome;
-    const validated: ImageValidated = {
-      type: 'image.validated',
-      occurredAt: at,
-      manifestId: this.id,
-      status: outcome.status,
-    };
-    this.raise(validated);
+    this.raise(new ImageValidated(this.id, ref, outcome.status, at));
   }
 
   /**
@@ -225,7 +212,7 @@ export class ImageManifest extends AggregateRoot<string> {
    * settable as 「the current version」 either — otherwise the catalogue advertises a
    * default that every Task creation then rejects.
    */
-  activate(at: Date): void {
+  activate(ref: string, at: Date): void {
     if (this._validation.status === 'invalid') {
       throw new ImageStateError(
         `manifest ${this.id} is 'invalid' and cannot be activated (I-IMG-9); ` +
@@ -233,23 +220,13 @@ export class ImageManifest extends AggregateRoot<string> {
       );
     }
     this._isActive = true;
-    const activated: ImageActivated = {
-      type: 'image.activated',
-      occurredAt: at,
-      manifestId: this.id,
-    };
-    this.raise(activated);
+    this.raise(new ImageActivated(this.id, ref, at));
   }
 
   /** Retire this row: it leaves the选项 list, historical references stay valid. */
-  deactivate(at: Date): void {
+  deactivate(ref: string, at: Date): void {
     this._isActive = false;
-    const deactivated: ImageDeactivated = {
-      type: 'image.deactivated',
-      occurredAt: at,
-      manifestId: this.id,
-    };
-    this.raise(deactivated);
+    this.raise(new ImageDeactivated(this.id, ref, at));
   }
 
   /**
@@ -258,14 +235,19 @@ export class ImageManifest extends AggregateRoot<string> {
    * `env` arrives already validated (`EnvVarSet`, 构造即校验) and already sealed for
    * secrets — the aggregate never sees a plaintext secret (I-IMG-5).
    */
-  updateConfig(config: ImageConfigVO, at: Date): void {
+  updateConfig(config: ImageConfigVO, ref: string, at: Date): void {
     this._config = config;
-    const updated: ImageConfigUpdated = {
-      type: 'image.config_updated',
-      occurredAt: at,
-      manifestId: this.id,
-    };
-    this.raise(updated);
+    this.raise(new ImageConfigUpdated(this.id, ref, at));
+  }
+
+  /**
+   * `DELETE /api/images/:id` —— 行即将消失，事件是唯一的去处。
+   *
+   * ⚠️ 必须在 `deleteSync` 之前调用、并在**同一个事务**里 publish（与
+   * `Project.markDeleted` 同一条纪律：13 §2.8.2「审计必须在主体被删除之后继续存在」）。
+   */
+  markDeleted(ref: string, at: Date): void {
+    this.raise(new ImageDeleted(this.id, ref, at));
   }
 
   /**

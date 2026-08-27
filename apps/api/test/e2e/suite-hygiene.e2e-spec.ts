@@ -127,6 +127,30 @@ describe('e2e validation hygiene (tests must boot the pipe production boots)', (
   });
 });
 
+describe('e2e data-root isolation (LoggingModule writes on DI construction)', () => {
+  it('DATA_ROOT points at a throwaway dir, never the repo working tree', () => {
+    const dataRoot = process.env.DATA_ROOT;
+
+    // Unset is the failure that matters: `env.dataRoot` then falls back to
+    // `resolve(cwd, 'data')`, and `RuntimeLogWriter` — constructed by DI the moment
+    // any spec boots AppModule — creates `api/data/logs/runtime.log` in the repo.
+    // That is the SAME file the local dev server writes, and two processes rotating
+    // one log file is how `runtime.log` silently disappears (see _data-root.setup.ts).
+    expect(
+      dataRoot,
+      'DATA_ROOT is unset. The e2e project sets it in `_data-root.setup.ts` via ' +
+        '`setupFiles` — if that entry was removed from vitest.workspace.ts, every spec ' +
+        "that boots AppModule now writes into the repo's own api/data/.",
+    ).toBeDefined();
+
+    expect(
+      resolve(dataRoot as string),
+      `DATA_ROOT resolves to ${dataRoot}, inside the repo. e2e must never share a data ` +
+        'root with the dev server.',
+    ).not.toBe(resolve(E2E_DIR, '../../../..', 'data'));
+  });
+});
+
 /** Drop line/block comments so prose ABOUT the rule never trips the rule. */
 function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');

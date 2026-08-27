@@ -3,6 +3,7 @@ import { builtinImageRef, CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/share
 import type { Clock, EventBus, UnitOfWork } from '@platform/shared-kernel';
 import {
   AGENT_SESSION_BOOTSTRAP,
+  AUDIT_RECORDER,
   CREDENTIAL_FACADE,
   CredentialPreparationError,
   RUNTIME_ADAPTER_REGISTRY,
@@ -16,6 +17,7 @@ import {
 } from '@platform/contracts';
 import type {
   AgentSessionBootstrap,
+  AuditRecorder,
   CredentialFacade,
   ImageFacade,
   InjectableRuntimeCredential,
@@ -70,6 +72,11 @@ export class ProvisionSandboxWorkflow {
     @Inject(CREDENTIAL_FACADE) private readonly credentials: CredentialFacade,
     @Inject(AGENT_SESSION_BOOTSTRAP) private readonly agentSessions: AgentSessionBootstrap,
     @Inject(IMAGE_FACADE) private readonly images: ImageFacade,
+    /**
+     * 审计流的**写入口 ②**（13 §2.8.2）。provision 的阶段耗时与失败那一刻都只有这里
+     * 知道 —— 聚合在失败时压根不 publish 领域事件，projector 收不到任何东西。
+     */
+    @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
   ) {}
 
   /** Background runner — never rejects into an unhandled promise. */
@@ -90,15 +97,31 @@ export class ProvisionSandboxWorkflow {
     // hoisted so the failure path can tear down a container that WAS created (e.g. a
     // later `start`/install failure) — otherwise it orphans (S1 audit P1-2).
     let handle: SandboxHandle | undefined;
+    // ── 阶段计时（03 §7.8 `sandbox.provision.stage`）────────────────────────────
+    // 「启动 237s→4s 无历史可比」是这几行存在的全部理由：状态流转本身已经在
+    // `sandbox_state_transitions` 里，缺的是**每一段花了多久**。
+    const provisionStartedAt = this.clock.now().getTime();
+    // 当前跑到哪一段 —— 失败时用它给那条 outcome:'failed' 的审计定位。
+    let stage = 'scheduling';
+    let stageStartedAt = provisionStartedAt;
+    const enter = (name: string): void => {
+      stage = name;
+      stageStartedAt = this.clock.now().getTime();
+    };
+    const done = (): void => this.recordStage(sandbox, stage, stageStartedAt, 'ok');
     try {
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
+      enter('preparing-workspace');
       // `source.branch` (if any) was already checked against the baseline's refs at the
       // create door, so the checkout inside `prepare` is a local operation expected to
       // succeed; a failure here is a real fault and lands as WORKSPACE_PREPARE_FAILED.
       const ws = await this.workspace.prepare(sandbox.id, source);
+      done();
+      this.recordWorkspacePrepared(sandbox, ws);
 
       this.advance(sandbox, 'creating', 'scheduler');
+      enter('creating');
       const image = await this.imageSpecOf(sandbox);
       // env-form credentials (claude's `CLAUDE_CODE_OAUTH_TOKEN`, an api-key) can ONLY
       // be delivered at instance creation: a per-call `env` would be visible in `ps`
@@ -138,15 +161,24 @@ export class ProvisionSandboxWorkflow {
           providerState: handle.providerState ?? null,
         });
         this.persist(sandbox); // save handle (no new transition/event)
+        done();
 
         this.advance(sandbox, 'starting', 'scheduler');
+        enter('starting');
         await this.runStartingSteps(sandbox, provider, handle, image.spec, credential);
+        done();
       } finally {
         credential?.zeroize();
       }
 
       this.advance(sandbox, 'running', 'scheduler');
+      this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
     } catch (e) {
+      // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
+      // 多久才看见失败）回答的是两个不同的问题，而失败路径上聚合**不 publish 任何
+      // 领域事件** —— projector 一条都收不到，这里不记就永远没有记录（13 §2.8.2）。
+      this.recordStage(sandbox, stage, stageStartedAt, 'failed', e);
+      this.recordStage(sandbox, 'provision', provisionStartedAt, 'failed', e);
       this.compensate(sandbox, e);
       if (handle) await provider.destroy(handle).catch(() => undefined);
       await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
@@ -167,6 +199,7 @@ export class ProvisionSandboxWorkflow {
    */
   async restart(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
     const handle = this.handleOf(sandbox);
+    const startedAt = this.clock.now().getTime();
     try {
       this.advance(sandbox, 'starting', 'scheduler');
       const credential = await this.prepareCredential(sandbox);
@@ -182,7 +215,9 @@ export class ProvisionSandboxWorkflow {
         credential?.zeroize();
       }
       this.advance(sandbox, 'running', 'scheduler');
+      this.recordStage(sandbox, 'restart', startedAt, 'ok');
     } catch (e) {
+      this.recordStage(sandbox, 'restart', startedAt, 'failed', e);
       this.compensate(sandbox, e);
       throw e;
     }
@@ -310,6 +345,21 @@ export class ProvisionSandboxWorkflow {
           `sandbox ${sandbox.id}: no usable '${sandbox.runtime}' credential (${e.code}); ` +
             'the agent will start UNAUTHENTICATED',
         );
+        // ⚠️ 一条 WARN 日志不够。「agent 起来了但没登录」在用户眼里是「它什么都没干」，
+        // 而**没有任何领域事件**会记下这件事（缺席不是状态流转）。这正是 13 §2.8.2
+        // 说的「写入口 ② 覆盖失败路径」那一类。
+        this.audit.record({
+          category: 'sandbox',
+          type: 'sandbox.credential.absent',
+          severity: 'warn',
+          subjectType: 'sandbox',
+          subjectId: sandbox.id,
+          actor: 'scheduler',
+          summary: `没有可用的 ${sandbox.runtime} 凭证，agent 将以未登录状态启动`,
+          detail: { runtimeId: sandbox.runtime },
+          outcome: 'skipped',
+          errorCode: e.code,
+        });
         return null;
       }
       throw e;
@@ -366,12 +416,34 @@ export class ProvisionSandboxWorkflow {
   private async bootstrapAgentSession(sandbox: Sandbox, exec: SandboxExecFn): Promise<void> {
     if (sandbox.headless) return;
     const pending = sandbox.initialTask.isPending;
+    const startedAt = this.clock.now().getTime();
     const result = await this.agentSessions.bootstrapAgentSession({
       sandboxId: sandbox.id,
       runtimeId: sandbox.runtime,
       initialPrompt: pending ? sandbox.initialTask.prompt : undefined,
       workdir: SANDBOX_WORKSPACE_MOUNT,
       exec,
+    });
+    // 03 §7.8 `sandbox.agent_session`:「起没起 / 跑的是什么」——「要进 tmux 才知道
+    // CLI 没起」是这条记录补的那个查不出来。⚠️ **不记 prompt 正文**：最长 8000 字符
+    // 的用户内容，审计要的是身份不是正文（同 `AgentTaskStarted` 的纪律）。
+    this.audit.record({
+      category: 'sandbox',
+      type: 'sandbox.agent_session',
+      subjectType: 'sandbox',
+      subjectId: sandbox.id,
+      actor: 'scheduler',
+      summary: result.reusedExisting
+        ? `agent 会话已存在，沿用（${sandbox.runtime}）`
+        : `已启动 ${sandbox.runtime} agent 会话`,
+      detail: {
+        runtimeId: sandbox.runtime,
+        started: !result.reusedExisting,
+        reusedExisting: result.reusedExisting,
+        promptCarried: result.promptConsumed,
+      },
+      durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
+      outcome: 'ok',
     });
     if (result.promptConsumed) {
       sandbox.consumeInitialTask(this.clock.now());
@@ -402,6 +474,80 @@ export class ProvisionSandboxWorkflow {
     } catch {
       // best-effort marking; a terminal state legitimately refuses the move
     }
+  }
+
+  /**
+   * 一条 `sandbox.provision.stage`（03 §7.8：每阶段结束，含 `duration_ms` 与 outcome）。
+   *
+   * ⚠️ `errorCode` 走 `splitFailure` 的**同一条**闭集判定，而不是把 `error.code` 直接
+   * 抄进来 —— 否则 fs 的 `ENOSPC` 会以「平台错误码」的身份进审计流，与它当初进
+   * `failure_code` 时闯的祸一模一样（见本文件底部 `splitFailure` 的长注释）。
+   */
+  private recordStage(
+    sandbox: Sandbox,
+    stage: string,
+    startedAt: number,
+    outcome: 'ok' | 'failed',
+    error?: unknown,
+  ): void {
+    const failure = error === undefined ? undefined : splitFailure(error);
+    this.audit.record({
+      category: 'sandbox',
+      type: 'sandbox.provision.stage',
+      severity: outcome === 'failed' ? 'error' : 'info',
+      subjectType: 'sandbox',
+      subjectId: sandbox.id,
+      actor: 'scheduler',
+      summary:
+        outcome === 'failed' ? `provision 阶段「${stage}」失败` : `provision 阶段「${stage}」完成`,
+      detail: {
+        stage,
+        ...(failure === undefined ? {} : { message: failure.message }),
+      },
+      durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
+      outcome,
+      ...(failure === undefined ? {} : { errorCode: failure.code }),
+    });
+  }
+
+  /**
+   * 03 §7.8 `sandbox.workspace.prepared`:「源 baseline **是否存在** / 产出条目数」，
+   * 补的是「**workspace 空了无人报错**」。
+   *
+   * ⚠️ baseline 读不到时 `prepare()` 是**静默**降级成空工作区的，所以这条在
+   * `baselineExisted === false` 时是 `warn` —— 那是最需要有人看见的一种"成功"。
+   *
+   * ⚠️ `entryCount === 0`（**产出为空**）同样是 `warn`，而且它与上一条是**两件事**：
+   * baseline 读到了、只是里面什么都没有（空项目，或者一次导入把东西丢在了别处）。
+   * 这个分支曾经是**死代码** —— adapter 把自己写的 `.platform-workspace-state` 也数进
+   * `entryCount` 里，于是真实文件系统上它恒 ≥ 1（实测），空工作区反而被报成
+   * 「1 个顶层条目 / info」。计数口径已在 adapter 侧改掉（见 `PreparedWorkspace.
+   * entryCount`），这里因此真的会被走到。
+   */
+  private recordWorkspacePrepared(
+    sandbox: Sandbox,
+    ws: { hostPath: string; baselineExisted: boolean; entryCount: number },
+  ): void {
+    const empty = ws.entryCount === 0;
+    this.audit.record({
+      category: 'sandbox',
+      type: 'sandbox.workspace.prepared',
+      severity: ws.baselineExisted && !empty ? 'info' : 'warn',
+      subjectType: 'sandbox',
+      subjectId: sandbox.id,
+      actor: 'scheduler',
+      summary: !ws.baselineExisted
+        ? '工作区就绪，但源 baseline 读不到 —— 工作区是空的'
+        : empty
+          ? '工作区就绪，但里面一个文件都没有 —— 源 baseline 是空的'
+          : `工作区就绪，${String(ws.entryCount)} 个顶层条目`,
+      detail: {
+        baselineExisted: ws.baselineExisted,
+        entryCount: ws.entryCount,
+        hostPath: ws.hostPath,
+      },
+      outcome: 'ok',
+    });
   }
 
   private advance(sandbox: Sandbox, to: SandboxStatus, by: TriggeredBy): void {

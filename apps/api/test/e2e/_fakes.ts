@@ -288,7 +288,7 @@ export function makeFakeRegistry(extra: SandboxProvider[] = []): ProviderRegistr
 
 export const fakeWorkspace: WorkspacePreparer = {
   async prepare(sandboxId: string): Promise<PreparedWorkspace> {
-    return { hostPath: `/tmp/platform-test-ws/${sandboxId}` };
+    return { hostPath: `/tmp/platform-test-ws/${sandboxId}`, baselineExisted: true, entryCount: 1 };
   },
   async cleanup(): Promise<void> {},
 };

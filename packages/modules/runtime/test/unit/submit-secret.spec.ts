@@ -53,6 +53,7 @@ function makeService(
     undefined as never, // sessions
     credentials as never, // credentials
     undefined as never, // uow
+    undefined as never, // events
     clock,
     undefined as never, // ids
   );

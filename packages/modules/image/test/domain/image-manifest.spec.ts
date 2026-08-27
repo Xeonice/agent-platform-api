@@ -7,6 +7,8 @@ import { ImageNotDeletableError, ImageStateError } from '../../src/domain/errors
 
 const REAL_DIGEST = `sha256:${'a'.repeat(64)}`;
 const NOW = new Date('2026-08-25T00:00:00.000Z');
+/** 完整坐标 —— 事件带的是它，不是 `version` 那一段（13 §2.8.2：summary 不许出现 UUID）。 */
+const REF = 'registry.local/platform/sandbox:latest';
 
 function props(over: Partial<ImageManifestProps> = {}): ImageManifestProps {
   return {
@@ -35,18 +37,20 @@ describe('ImageManifest.create guards the coordinate (I-IMG-6)', () => {
     // accepts it happily — this is the one place that does not. Deleting the shape
     // check leaves the invariant enforced by a constraint that cannot see the problem
     // (04 §7 ★).
-    expect(() => ImageManifest.create(props({ digest: 'sha256:unresolved' }))).toThrow(
+    expect(() => ImageManifest.create(props({ digest: 'sha256:unresolved' }), REF)).toThrow(
       ImageStateError,
     );
-    expect(() => ImageManifest.create(props({ digest: '' }))).toThrow(ImageStateError);
-    expect(() => ImageManifest.create(props({ digest: 'sha256:abc' }))).toThrow(ImageStateError);
-    expect(() => ImageManifest.create(props())).not.toThrow();
+    expect(() => ImageManifest.create(props({ digest: '' }), REF)).toThrow(ImageStateError);
+    expect(() => ImageManifest.create(props({ digest: 'sha256:abc' }), REF)).toThrow(
+      ImageStateError,
+    );
+    expect(() => ImageManifest.create(props(), REF)).not.toThrow();
   });
 
   it('raises image.registered carrying the digest that was frozen', () => {
-    const events = ImageManifest.create(props()).pullEvents();
+    const events = ImageManifest.create(props(), REF).pullEvents();
     expect(events.map((e) => e.type)).toEqual(['image.registered']);
-    expect(events[0]).toMatchObject({ manifestId: 'imf-1', digest: REAL_DIGEST });
+    expect(events[0]).toMatchObject({ manifestId: 'imf-1', digest: REAL_DIGEST, ref: REF });
   });
 });
 
@@ -61,7 +65,7 @@ describe('activate refuses an invalid version (I-IMG-9)', () => {
         ),
       }),
     );
-    expect(() => invalid.activate(NOW)).toThrow(ImageStateError);
+    expect(() => invalid.activate(REF, NOW)).toThrow(ImageStateError);
     // …and the row is NOT half-activated on the way out.
     expect(invalid.isActive).toBe(false);
     expect(invalid.pullEvents()).toEqual([]);
@@ -81,7 +85,7 @@ describe('activate refuses an invalid version (I-IMG-9)', () => {
       }),
     );
     expect(warned.validation.status).toBe('warning');
-    expect(() => warned.activate(NOW)).not.toThrow();
+    expect(() => warned.activate(REF, NOW)).not.toThrow();
     expect(warned.isActive).toBe(true);
   });
 });
@@ -125,5 +129,44 @@ describe('a built-in image may be disabled, never deleted (I-IMG-4)', () => {
         createdAt: NOW,
       }).assertDeletable(),
     ).not.toThrow();
+  });
+});
+
+/**
+ * 每个改动型操作都发事件、且每条都带**完整坐标** —— 平台级 `AuditProjector` 靠它写出
+ * 「停用镜像 registry.local/platform/sandbox:latest」而不是一串 UUID（13 §2.8.2）。
+ */
+describe('镜像事件带的是用户认得的 ref，不是 manifestId', () => {
+  it('五个改动型操作 + 删除各发一条，全部带 ref', () => {
+    const m = ImageManifest.create(props(), REF);
+    m.pullEvents(); // 丢掉 image.registered
+
+    m.recordValidation(ValidationOutcome.from([], []), REF, NOW);
+    m.deactivate(REF, NOW);
+    m.activate(REF, NOW);
+    m.updateConfig({ env: [] }, REF, NOW);
+    m.markDeleted(REF, NOW);
+
+    const events = m.pullEvents();
+    expect(events.map((e) => e.type)).toEqual([
+      'image.validated',
+      'image.deactivated',
+      'image.activated',
+      'image.config_updated',
+      'image.deleted',
+    ]);
+    for (const e of events) {
+      expect((e as { ref: string }).ref).toBe(REF);
+      // ⚠️ 否定断言是重点：光断言「有 ref 字段」的话，把 `manifestId` 也拼进去的
+      // 写法照样绿，而那正是 summary 上重新长出 UUID 的路径。
+      expect((e as { ref: string }).ref).not.toContain('imf-1');
+    }
+  });
+
+  it('事件是**类**，projector 的 instanceof 才有东西可判', () => {
+    // 接口在运行期什么都不是，只能退回按 `e.type` 字符串比对 —— 而字符串比对在字段
+    // 改名、事件拆分时一条编译错误都不会有，正是审计这一侧最不该有的沉默。
+    const [registered] = ImageManifest.create(props(), REF).pullEvents();
+    expect(registered.constructor.name).toBe('ImageRegistered');
   });
 });

@@ -5,3 +5,12 @@ export { ProjectMcpTools } from './interface/mcp/project.mcp-tools';
 export { projects } from './infrastructure/persistence/schema/project.sqlite';
 export { CloneStatusVO } from './domain/value-objects/project-status.vo';
 export type { CloneStatus } from './domain/value-objects/project-status.vo';
+// 领域事件类 —— 供平台级 `AuditProjector` 判别（理由见 sandbox 包同一处注释）。
+export {
+  ProjectCreated,
+  ProjectCloneRetried,
+  ProjectConvertedToEmpty,
+  ProjectCloneCancelled,
+  ProjectBaselineSynced,
+  ProjectDeleted,
+} from './domain/events/project-events';

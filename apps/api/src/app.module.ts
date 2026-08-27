@@ -8,8 +8,10 @@ import { RuntimeModule } from '@platform/runtime';
 import { ImageModule } from '@platform/image';
 import { PlatformModule } from './platform/persistence/platform.module';
 import { SystemModule } from './platform/system/system.module';
+import { AuditModule } from './platform/audit/audit.module';
 import { AccessPasscodeModule } from './platform/access-passcode/access-passcode.module';
 import { RealtimeModule } from './platform/events/realtime.module';
+import { LoggingModule } from './platform/logging';
 import { mcpModuleOptions } from './bootstrap/mcp.setup';
 import { guardProviders } from './bootstrap/guards.setup';
 
@@ -21,6 +23,8 @@ import { guardProviders } from './bootstrap/guards.setup';
 @Module({
   imports: [
     PlatformModule,
+    LoggingModule.forRoot(),
+    AuditModule,
     AccessPasscodeModule,
     RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),

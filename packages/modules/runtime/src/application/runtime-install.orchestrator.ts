@@ -2,11 +2,13 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
 import {
+  AUDIT_RECORDER,
   RUNTIME_ADAPTER_REGISTRY,
   RuntimeInstallFailedError,
   UnknownRuntimeError,
 } from '@platform/contracts';
 import type {
+  AuditRecorder,
   EnsureRuntimeInstalledInput,
   RuntimeAdapter,
   RuntimeAdapterRegistry,
@@ -74,6 +76,8 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     @Inject(EVENT_BUS) private readonly events: EventBus,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
+    /** 03 §7.8 `sandbox.probe`：探测失败此前只有一行 message。 */
+    @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
   ) {}
 
   async ensureInstalled(input: EnsureRuntimeInstalledInput): Promise<void> {
@@ -81,9 +85,14 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     // PURE — no IO. The same call happens on the create path purely to warn the user
     // ("claude-code takes ~12.5 min on this image"); only this one drives behaviour.
     const plan = adapter.getInstallPlan(input.image);
-    const present = await this.probeInstalled(adapter, input.exec, input.runtimeId);
+    // 每一次探测都经审计 exec 包一层（03 §7.8）。⚠️ **只包探测，不包 `install()`**：
+    // 一次冷装是十几分钟、上万行 npm 输出，把它逐条记进审计流等于把运行日志灌进
+    // 审计面板 —— P21-5 §10.1 明令不要做的那件事。安装的结果本来就有
+    // `RuntimeInstallationStateChanged` 走 Outbox。
+    const probeExec = this.auditingExec(input.exec, input.sandboxId, input.runtimeId);
+    const present = await this.probeInstalled(adapter, probeExec, input.runtimeId);
 
-    const installation = await this.openRecord(input, present, plan, adapter);
+    const installation = await this.openRecord(input, probeExec, present, plan, adapter);
     if (present) return;
 
     if (plan.strategy !== 'install-on-start') {
@@ -108,12 +117,12 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     // Re-probe rather than trusting a zero exit code: `install()` succeeding and the
     // binary being resolvable on PATH are two different claims (04 §2.1★ — codex
     // resolves through an fnm shim, so "npm said ok" proves nothing about lookup).
-    if (!(await this.probeInstalled(adapter, input.exec, input.runtimeId))) {
+    if (!(await this.probeInstalled(adapter, probeExec, input.runtimeId))) {
       const reason = `'${input.runtimeId}' is still not on PATH after install`;
       await this.recordFailure(installation, reason);
       throw new RuntimeInstallFailedError(reason);
     }
-    const version = await this.detectVersion(plan, input.exec);
+    const version = await this.detectVersion(plan, probeExec);
     await this.transition(installation, (i, now) => i.markInstalled(version, now));
   }
 
@@ -164,11 +173,14 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
   /** Open (or re-open, on a re-provision) the record at its probed initial status. */
   private async openRecord(
     input: EnsureRuntimeInstalledInput,
+    // ⚠️ **审计过的那只 exec**，不是 `input.exec`。这里的 `--version` 也是一次探测
+    // （03 §7.8「每次探测」），漏掉它就等于「预装镜像的那条路一条 probe 都不记」。
+    probeExec: SandboxExecFn,
     present: boolean,
     plan: RuntimeInstallPlan,
     adapter: RuntimeAdapter,
   ): Promise<RuntimeInstallation> {
-    const version = present ? await this.detectVersion(plan, input.exec) : null;
+    const version = present ? await this.detectVersion(plan, probeExec) : null;
     const status: RuntimeInstallState = present ? 'installed' : 'not_installed';
     const existing = await this.repo.find(input.sandboxId, input.runtimeId);
     const now = this.clock.now();
@@ -211,8 +223,73 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     });
   }
 
+  /**
+   * 把一个 `SandboxExecFn` 包成「每跑一条命令就落一条 `sandbox.probe`」的版本
+   * （03 §7.8：argv（不含 env 值）/ exitCode / 输出尾部）。
+   *
+   * ⚠️ **argv 原样递给 recorder，脱敏在写入口做，不在这里做。** 13 §2.8.2 的纪律是
+   * 「脱敏在写入口」而不是「每个调用点自己脱一遍」—— N 个调用点各脱一遍就是 N 处会
+   * 分头漂移的规则，漏掉的那一处不会有任何东西变红。`detail.argv` 这个键名是与
+   * recorder 约定好的：它会把值换成 argv **形状**（可执行名 + 旗标名，实参一律
+   * `<arg>`），因为 agent 会把 env 物化成 `export K=V` 拼进命令串（04 §2.3★）。
+   *
+   * ⚠️ **探测抛异常时也记一条**，而且是 `error` 级。「探测炸了」与「探测说没装」是
+   * 两件事，`probeInstalled` 的 catch 把它们都归成 `false`。
+   */
+  private auditingExec(exec: SandboxExecFn, sandboxId: string, runtimeId: string): SandboxExecFn {
+    return async (cmd, opts) => {
+      const startedAt = this.clock.now().getTime();
+      try {
+        const result = await exec(cmd, opts);
+        this.audit.record({
+          category: 'sandbox',
+          type: 'sandbox.probe',
+          severity: result.exitCode === 0 ? 'info' : 'warn',
+          subjectType: 'sandbox',
+          subjectId: sandboxId,
+          actor: 'scheduler',
+          summary: `探测 ${runtimeId}：exit ${String(result.exitCode)}`,
+          detail: {
+            runtimeId,
+            argv: cmd,
+            exitCode: result.exitCode,
+            stdoutTail: outputTail(result.stdout),
+            stderrTail: outputTail(result.stderr),
+          },
+          durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
+          outcome: result.exitCode === 0 ? 'ok' : 'failed',
+        });
+        return result;
+      } catch (e) {
+        this.audit.record({
+          category: 'sandbox',
+          type: 'sandbox.probe',
+          severity: 'error',
+          subjectType: 'sandbox',
+          subjectId: sandboxId,
+          actor: 'scheduler',
+          summary: `探测 ${runtimeId} 抛错：${(e as Error).message}`,
+          detail: { runtimeId, argv: cmd, threw: true },
+          durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
+          outcome: 'failed',
+        });
+        throw e;
+      }
+    };
+  }
+
   /** Apply a default timeout unless the caller already set one (03 §8.3 backstop). */
   private withTimeout(exec: SandboxExecFn, timeoutMs: number): SandboxExecFn {
     return (cmd, opts) => exec(cmd, { timeoutMs, ...(opts ?? {}) });
   }
+}
+
+/**
+ * 输出尾部 —— 13 §2.8.2：`stdout/stderr` **只留尾部若干行**。整份输出进审计流会把
+ * 面板冲垮，而排障要看的恰恰是最后那几行。空输出回 `undefined`，不写这个键。
+ */
+function outputTail(text: string, maxLines = 10): string | undefined {
+  if (text === '') return undefined;
+  const lines = text.split('\n');
+  return (lines.length > maxLines ? lines.slice(-maxLines) : lines).join('\n');
 }

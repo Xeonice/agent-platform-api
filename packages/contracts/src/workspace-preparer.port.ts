@@ -8,6 +8,29 @@
 export interface PreparedWorkspace {
   /** host absolute path; becomes VolumeMount.source (kind='host-path'). */
   hostPath: string;
+  /**
+   * 源 baseline 目录**是否存在且可读**。
+   *
+   * ⚠️ 这两个字段是 03 §7.8 的 `sandbox.workspace.prepared` 审计事件要回答的那件事：
+   * 「**workspace 空了无人报错**」。`prepare()` 对一个读不到的 baseline 是**静默**
+   * 降级成空工作区的（`importBaseline` 的 `catch { return; }`），而空工作区里 agent
+   * 一个文件都看不到 —— 用户只会看到「它什么也没干」。让 adapter 如实报出来，是把
+   * 这条静默路径变成一行可查的记录的唯一办法；由 workflow 事后 stat 一次也能算，
+   * 但那是**猜**，而且要在 application 层引 node:fs。
+   */
+  baselineExisted: boolean;
+  /**
+   * 导入后工作区里的顶层条目数，**含 `.git`，但不含平台自己的状态文件**
+   * （`.platform-workspace-state`）。
+   *
+   * ⚠️ 排除那一个文件不是洁癖，是这个字段能否成立的前提：它是 `prepare()` 自己写进去
+   * 的，`readdir` 又会把点文件算上 ⇒ 含它的计数在真实文件系统上**恒 ≥ 1**，于是
+   * 「产出为空」这件事**一次也报不出来**（workflow 的 `entryCount === 0` 成了死代码），
+   * 而审计还会对着一个空工作区说「1 个顶层条目」。这个字段要回答的是
+   * 「**workspace 空了无人报错**」，那就只能数**导入进来的**东西。
+   * ⇒ `0` = 工作区里除了平台记号什么都没有（空 baseline，或 baseline 读不到）。
+   */
+  entryCount: number;
 }
 
 /**

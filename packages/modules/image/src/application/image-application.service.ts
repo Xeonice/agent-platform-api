@@ -191,23 +191,29 @@ export class ImageApplicationService {
       existingImage !== null &&
       (await this.manifests.findActiveByVersion(image.id, version)) !== null;
 
-    const manifest = ImageManifest.create({
-      id: this.ids.next(),
-      imageId: image.id,
-      version,
-      baseImage: resolved.manifest.baseImage,
-      digest: resolved.digest,
-      entrypointContract: resolved.manifest.entrypointContract,
-      supportedRuntimes: resolved.manifest.supportedRuntimes,
-      resourceDefaults: resolved.manifest.resourceDefaults,
-      labelsRequired: resolved.manifest.labelsRequired ?? [],
-      diffIds: resolved.manifest.diffIds,
-      derivedFromDigest,
-      validation: resolved.outcome,
-      config: null,
-      isActive: !tagHasLiveRow,
-      registeredAt: now,
-    });
+    // ⚠️ 事件带的是**完整坐标**（`platform/sandbox:v2`），不是 `version` 那一段。
+    // 审计的 summary 要写出用户认得的串（13 §2.8.2）—— 孤零零一个 `v2` 认不出是哪张。
+    const manifestRef = formatImageRef(image.name, version);
+    const manifest = ImageManifest.create(
+      {
+        id: this.ids.next(),
+        imageId: image.id,
+        version,
+        baseImage: resolved.manifest.baseImage,
+        digest: resolved.digest,
+        entrypointContract: resolved.manifest.entrypointContract,
+        supportedRuntimes: resolved.manifest.supportedRuntimes,
+        resourceDefaults: resolved.manifest.resourceDefaults,
+        labelsRequired: resolved.manifest.labelsRequired ?? [],
+        diffIds: resolved.manifest.diffIds,
+        derivedFromDigest,
+        validation: resolved.outcome,
+        config: null,
+        isActive: !tagHasLiveRow,
+        registeredAt: now,
+      },
+      manifestRef,
+    );
 
     this.uow.run((tx) => {
       this.images.saveSync(tx, image);
@@ -256,13 +262,14 @@ export class ImageApplicationService {
     const manifest = await this.mustFindManifest(id);
     const image = await this.mustFindImage(manifest.imageId);
     const spec = this.specs.get(this.specs.defaultProvider);
-    const resolved = await spec.resolve(formatImageRef(image.name, manifest.version));
+    const ref = formatImageRef(image.name, manifest.version);
+    const resolved = await spec.resolve(ref);
     const result = spec.validate(resolved.manifest);
     const outcome = ValidationOutcome.from(result.errors, result.warnings ?? []);
     const digestChanged = resolved.digest !== manifest.digest;
 
     if (!digestChanged) {
-      manifest.recordValidation(outcome, this.clock.now());
+      manifest.recordValidation(outcome, ref, this.clock.now());
       this.uow.run((tx) => {
         this.manifests.saveSync(tx, manifest);
         this.events.publishInTx(tx, manifest.pullEvents());
@@ -283,10 +290,12 @@ export class ImageApplicationService {
     const image = await this.mustFindImage(manifest.imageId);
     const now = this.clock.now();
 
+    const ref = formatImageRef(image.name, manifest.version);
+
     if (patch.isActive === true) throw new PatchCannotActivateError(id);
-    if (patch.isActive === false) manifest.deactivate(now);
+    if (patch.isActive === false) manifest.deactivate(ref, now);
     if (patch.imageConfig !== undefined) {
-      manifest.updateConfig(this.sealConfig(patch.imageConfig, manifest.config), now);
+      manifest.updateConfig(this.sealConfig(patch.imageConfig, manifest.config), ref, now);
     }
 
     this.uow.run((tx) => {
@@ -312,7 +321,7 @@ export class ImageApplicationService {
   async activateImage(id: string): Promise<ImageManifestDto> {
     const manifest = await this.mustFindManifest(id);
     const image = await this.mustFindImage(manifest.imageId);
-    manifest.activate(this.clock.now());
+    manifest.activate(formatImageRef(image.name, manifest.version), this.clock.now());
     this.uow.run((tx) => {
       this.manifests.deactivateOthersSync(tx, manifest.imageId, manifest.version, manifest.id);
       this.manifests.saveSync(tx, manifest);
@@ -382,11 +391,15 @@ export class ImageApplicationService {
       );
     }
     const siblings = await this.manifests.listByImage(image.id);
+    // ⚠️ 事件在删行**之前**攒好、与删行**同一个事务** publish：删掉之后 `ref` 没有任何
+    // 库可以回查（13 §2.8.2「审计必须在主体被删除之后继续存在」）。
+    manifest.markDeleted(formatImageRef(image.name, manifest.version), this.clock.now());
     this.uow.run((tx) => {
       this.manifests.deleteSync(tx, id);
       // A name with no versions left is not an image any more — leaving the row would
       // make `images` accumulate entries the UI can only render as empty cards.
       if (siblings.length <= 1) this.images.deleteSync(tx, image.id);
+      this.events.publishInTx(tx, manifest.pullEvents());
     });
   }
 

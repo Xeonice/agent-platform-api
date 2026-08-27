@@ -133,17 +133,20 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       triggeredBy: 'user',
     };
     const initialTask = InitialTask.create({ prompt: input.initialPrompt });
+    // 提出来是因为它有**两个**去处：聚合的字段，以及 `SandboxCreated` 事件——
+    // 审计要记的是「当时」的名字，所以名字随事件走，而不是让 projector 回查库。
+    const name = deriveDefaultTaskName({
+      prompt: initialTask.prompt,
+      runtimeLabel: input.runtimeLabel ?? input.runtime,
+      now: input.now,
+    });
     const sandbox = new Sandbox({
       id: input.id,
       projectId: input.projectId,
       runtime: input.runtime,
       provider: input.provider,
       imageRef: input.imageRef,
-      name: deriveDefaultTaskName({
-        prompt: initialTask.prompt,
-        runtimeLabel: input.runtimeLabel ?? input.runtime,
-        now: input.now,
-      }),
+      name,
       status: 'pending',
       headless: input.headless,
       timeoutMinutes: input.timeoutMinutes,
@@ -158,7 +161,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       transitions: [firstTransition],
     });
     sandbox._pendingTransitions.push(firstTransition);
-    sandbox.raise(new SandboxCreated(input.id, input.projectId, input.now));
+    sandbox.raise(new SandboxCreated(input.id, input.projectId, name, input.now));
     return sandbox;
   }
 
@@ -264,6 +267,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
         this.id,
         from,
         next,
+        triggeredBy,
         now,
         next === 'failed' ? (this._failureCode ?? undefined) : undefined,
       ),

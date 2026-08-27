@@ -1,6 +1,123 @@
 {
   "openapi": "3.0.0",
   "paths": {
+    "/api/system/audit": {
+      "get": {
+        "operationId": "AuditController_list",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 200
+            }
+          },
+          {
+            "name": "subjectId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "required": false,
+            "in": "query",
+            "description": "逗号分隔的多值，取值 info / warn / error，服务端按 IN 过滤；单值向后兼容（`severity=error`），「仅告警」= `severity=warn,error`；重复值去重，含非法值 → 400 VALIDATION_FAILED",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "enum": [
+                "sandbox",
+                "project",
+                "credential",
+                "image",
+                "system"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "ISO 时间上界（与游标正交）",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "ISO 时间下界（与游标正交）",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "required": false,
+            "in": "query",
+            "description": "向老翻页：返回 seq < before",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "since",
+            "required": false,
+            "in": "query",
+            "description": "向新翻页：返回 seq > since",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditListResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "平台级审计流。since/before 为按 seq 的双向游标（互斥，同传 400 VALIDATION_FAILED）；from/to 是与游标正交的时间过滤。响应恒按 seq 降序 + hasMore。",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/audit/export": {
+      "get": {
+        "operationId": "AuditController_export",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "tar.gz 归档字节流"
+          }
+        },
+        "summary": "导出 tar.gz：audit.jsonl + runtime.log + diagnose.json + export-range.json。取「最近 24h」与「50MB」先到者，实际截取范围写在 export-range.json 里。",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/access/unlock": {
       "post": {
         "operationId": "AccessController_unlock",
@@ -1456,6 +1573,97 @@
   "servers": [],
   "components": {
     "schemas": {
+      "AuditListResponseDto": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "seq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": true
+                },
+                "at": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "sandbox",
+                    "project",
+                    "credential",
+                    "image",
+                    "system"
+                  ]
+                },
+                "type": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "error"
+                  ]
+                },
+                "subjectType": {
+                  "type": "string"
+                },
+                "subjectId": {
+                  "type": "string"
+                },
+                "actor": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "failed",
+                    "skipped"
+                  ]
+                },
+                "errorCode": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "seq",
+                "at",
+                "category",
+                "type",
+                "severity",
+                "actor",
+                "summary"
+              ]
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
+        ]
+      },
       "UnlockRequestDto": {
         "type": "object",
         "properties": {

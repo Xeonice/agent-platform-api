@@ -12,3 +12,12 @@ export { images, imageManifests } from './infrastructure/persistence/schema/imag
 export { EnvVarSet } from './domain/value-objects/env-var-set.vo';
 export { mergeEnv } from './domain/services/env-merge.domain-service';
 export type { MergedEnv, EnvSource } from './domain/services/env-merge.domain-service';
+// 领域事件类 —— 供平台级 `AuditProjector` 判别（理由见 image-events.ts 顶部注释）。
+export {
+  ImageRegistered,
+  ImageValidated,
+  ImageActivated,
+  ImageDeactivated,
+  ImageConfigUpdated,
+  ImageDeleted,
+} from './domain/events/image-events';

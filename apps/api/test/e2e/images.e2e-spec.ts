@@ -29,6 +29,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { sql } from 'drizzle-orm';
 import { AppModule } from '../../src/app.module';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
+import { AuditRepository } from '../../src/platform/audit/audit.repository';
 import { useEnv } from './_env';
 import { FakeProvider, fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from './_fakes';
 
@@ -801,6 +802,75 @@ describe('DELETE is hard, and RESTRICT is what makes 「使用中不可删」 tr
     await api().delete(`/api/images/${id}`).expect(204);
     const res = await api().post(`/api/images/${id}/activate`).expect(404);
     expect(expectEnvelope(res.body).code).toBe('NOT_FOUND');
+  });
+});
+
+/**
+ * 审计（13 §2.8.2 的 `category: 'image'`）—— 这一档此前**一个生产者都没有**：
+ * `image-events.ts` 的五个事件真的在 raise，但 `AuditProjector` 一条分支都没有，
+ * 于是 7 个改动型端点全部无痕，「谁把生产镜像停用了」答不出来。
+ */
+describe('image 档进审计流，summary 写用户认得的 ref', () => {
+  const auditFor = (manifestId: string): ReturnType<AuditRepository['list']>['items'] =>
+    app
+      .get(AuditRepository)
+      .list({ limit: 500 })
+      .items.filter((i) => i.subjectId === manifestId);
+
+  it('注册 / 停用 / 启用 / 删除各留下一行，且 summary 里是 ref 不是 UUID', async () => {
+    const auditedRef = 'ghcr.io/example/audited:1';
+    const created = await api().post('/api/images').send({ ref: auditedRef }).expect(201);
+    const id = (created.body as { manifest: { id: string } }).manifest.id;
+
+    await api().patch(`/api/images/${id}`).send({ isActive: false }).expect(200);
+    await api().post(`/api/images/${id}/activate`).expect(200);
+    await api().delete(`/api/images/${id}`).expect(204);
+
+    const rows = auditFor(id);
+    expect(rows.map((i) => i.type).sort()).toEqual(
+      ['image.registered', 'image.deactivated', 'image.activated', 'image.deleted'].sort(),
+    );
+    for (const row of rows) {
+      expect(row.category).toBe('image');
+      // 13 §2.8.2：这一列不许出现 UUID —— 用户认得的是他自己粘进注册框的那一行。
+      expect(row.summary).toContain(auditedRef);
+      // ⚠️ 否定断言是重点：`停用镜像 ghcr.io/…:1 (8f3c…)` 在「包含 ref」下照样绿。
+      expect(row.summary).not.toContain(id);
+      // id 仍然查得到 —— 它属于 subjectId 那一列。
+      expect(row.subjectId).toBe(id);
+    }
+
+    // 「谁把生产镜像停用了」是这一档存在的理由，它必须在筛 severity 时扫得到。
+    expect(rows.find((i) => i.type === 'image.deactivated')?.severity).toBe('warn');
+    // ⚠️ 删除那一行在**镜像行已经不在**之后仍然查得到 —— 弱引用不设 FK 的全部意义。
+    await api().post(`/api/images/${id}/activate`).expect(404);
+    expect(auditFor(id).some((i) => i.type === 'image.deleted')).toBe(true);
+  });
+
+  it('改运行参数留下一行，但 env 的键值一个都不进审计', async () => {
+    const cfgRef = 'ghcr.io/example/audited-cfg:1';
+    const created = await api().post('/api/images').send({ ref: cfgRef }).expect(201);
+    const id = (created.body as { manifest: { id: string } }).manifest.id;
+
+    await api()
+      .patch(`/api/images/${id}`)
+      .send({
+        imageConfig: {
+          env: [
+            { key: 'MY_GATEWAY', value: 'https://gw.internal:8443', secret: false },
+            { key: 'MY_TOKEN', value: 'super-secret-value', secret: true },
+          ],
+        },
+      })
+      .expect(200);
+
+    const row = auditFor(id).find((i) => i.type === 'image.config_updated');
+    expect(row?.summary).toBe(`修改镜像 ${cfgRef} 的运行参数`);
+    // ⛔ 04 §2.3★：env 会被物化成 `export K=V` 拼进命令串、沙箱内 `ps` 全文可见。
+    // 这一行只说「改过」；改成什么是 `image_manifests.config` 那一列的事。
+    const blob = JSON.stringify(row);
+    expect(blob).not.toContain('super-secret-value');
+    expect(blob).not.toContain('MY_GATEWAY');
   });
 });
 
