@@ -14,6 +14,7 @@ import {
   type SandboxProviderContext,
   type SandboxRuntimeLifecycleState,
   type SandboxRuntimeStatus,
+  type ResolvedImageSpec,
 } from '@platform/contracts';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
 import { boxliteNamePrefix } from '../../reconcile/instance-id';
@@ -22,6 +23,7 @@ import { BoxliteSandboxFiles } from './boxlite-files';
 import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
 import { runGuestScript } from './boxlite-guest-shell';
+import { isImageStaged } from './boxlite-image-store';
 
 /**
  * `boxlite` —— 微 VM provider（04 §2.1、SANDBOX-RUNTIME-DECISIONS 决策 B）。
@@ -152,6 +154,25 @@ export class BoxliteSandboxProvider implements SandboxProvider {
       );
       // providerState 为空：native 通道要的全部信息就是 box id 本身。
       return { provider: this.name, providerSandboxId: box.id };
+    });
+  }
+
+  /**
+   * 04 §2「可选方法」实现（契约里的长注释解释了平台为什么问这个问题）。
+   *
+   * 它读的是 BoxLite 自己的 image store 索引 —— **不是**平台的任何一张表。一次
+   * `images.list()` 就是一条本地 SQLite 查询，与那 190 秒相比可以忽略；而平台侧的
+   * 「这个镜像以前有沙箱跑成功过」是个会说谎的代理量（store 可能被清、上次也可能
+   * 是拉了一半就失败的），拿它当答案就等于用记账代替事实。
+   *
+   * ⚠️ 出错时**抛**，不返回 `false`。调用方（provision workflow）把异常读作
+   * 「问不出来」并让字段缺席，而 `false` 会被读成「本机确实没有」—— 一次 store
+   * 读不出来于是告诉用户「首次使用，要等几分钟」，是拿故障冒充事实。
+   */
+  async imageStaged(image: ResolvedImageSpec): Promise<boolean> {
+    return this.guard(async () => {
+      const runtime = await this.getRuntime();
+      return isImageStaged(await runtime.images.list(), image);
     });
   }
 

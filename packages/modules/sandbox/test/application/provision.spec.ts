@@ -506,3 +506,113 @@ describe('启动文件落盘（③.5）—— 与凭证无关的那一步', () =
     expect(h.adapter.log).toContain('bootstrapAgentSession');
   });
 });
+
+/**
+ * `sandbox.instance_progress` (10 §7.4) — the 190-second hole in the `starting` 段.
+ *
+ * ⚠️ WHAT THESE ASSERT IS THE *BOUNDARY*, NOT A NUMBER. `provider.start()` reports no
+ * intermediate progress at all, so the only honest thing to push is 「这一步开始了」/
+ * 「这一步结束了」 plus the one fact the browser cannot derive: whether the image's bits
+ * were already on this machine.
+ */
+describe('sandbox.instance_progress — the boundaries of provider.start() (10 §7.4)', () => {
+  const instanceFrames = (h: ReturnType<typeof harness>) =>
+    h.wsEvents.filter((e) => e.event === 'sandbox.instance_progress');
+
+  it('brackets provider.start() with exactly one starting frame and one ready frame', async () => {
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(instanceFrames(h)).toEqual([
+      { event: 'sandbox.instance_progress', sandboxId: dto.id, phase: 'starting' },
+      { event: 'sandbox.instance_progress', sandboxId: dto.id, phase: 'ready' },
+    ]);
+  });
+
+  it('the starting frame really is emitted BEFORE provider.start(), not after it', async () => {
+    // 这条是整件事的全部意义所在：`start()` 是那 190 秒本身。等它返回再播报，等于在
+    // 用户已经等完之后才告诉他「开始了」——帧还在，顺序错了，价值是零。
+    const h = harness();
+    const provider = h.provider as FakeProvider;
+    const order: string[] = [];
+    const realStart = provider.start.bind(provider);
+    provider.start = async (): Promise<void> => {
+      order.push(`start(seen=${String(instanceFrames(h).length)})`);
+      return realStart();
+    };
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    // 1 = the `starting` frame had already gone out when start() was entered.
+    expect(order).toEqual(['start(seen=1)']);
+  });
+
+  it('carries imageStaged:false — the ONE fact the browser cannot derive', async () => {
+    const h = harness();
+    (h.provider as FakeProvider).declareImageStaged(false);
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(instanceFrames(h)[0]).toEqual({
+      event: 'sandbox.instance_progress',
+      sandboxId: dto.id,
+      phase: 'starting',
+      imageStaged: false,
+    });
+    // 只挂在 starting 那一帧上：ready 时这个问题已经没有意义了。
+    expect(instanceFrames(h)[1]).not.toHaveProperty('imageStaged');
+  });
+
+  it('carries imageStaged:true when the bits are already here', async () => {
+    const h = harness();
+    (h.provider as FakeProvider).declareImageStaged(true);
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(instanceFrames(h)[0]).toMatchObject({ phase: 'starting', imageStaged: true });
+  });
+
+  it('OMITS the field when the provider does not implement imageStaged — absent ≠ false', async () => {
+    // 「不知道」和「本机没有这份镜像」是两个不同的断言，只有后者可以拿去当「你要等
+    // 几分钟」的理由。默认的 FakeProvider 身上压根没有这个方法，正如任何第三方 provider。
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(instanceFrames(h)[0]).not.toHaveProperty('imageStaged');
+    expect(h.provider.calls).not.toContain('imageStaged');
+  });
+
+  it('a provider that THROWS while answering degrades to absent, and provision still succeeds', async () => {
+    // 一句文案的输入把整个 Task 判死，是拿装饰品当承重墙。
+    const h = harness();
+    (h.provider as FakeProvider).declareImageStaged(new Error('image store unreadable'));
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    expect(h.provider.calls).toContain('imageStaged');
+    expect(instanceFrames(h)[0]).not.toHaveProperty('imageStaged');
+    expect((await h.repo.findById(dto.id as SandboxId))!.status).toBe('running');
+  });
+
+  it('emits NO state transition of its own — the status stays `starting` throughout', async () => {
+    // 10 §7.4 的整条论证：`status_changed` 的语义是「每一次状态机转移」。把起实例的进度
+    // 折进那条事件会发出一串「状态没变的状态变更」。这条断言盯的正是**没有多出来**的
+    // 转移：把新帧改成走 `advance()` 实现，`starting` 会立刻出现第二次。
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const path = (await h.repo.findById(dto.id as SandboxId))!.transitions.map((t) => t.to);
+    expect(path.filter((p) => p === 'starting')).toHaveLength(1);
+    expect(path).toEqual([
+      'pending',
+      'scheduling',
+      'preparing-workspace',
+      'creating',
+      'starting',
+      'running',
+    ]);
+  });
+});

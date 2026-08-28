@@ -8,6 +8,7 @@ import {
   CredentialPreparationError,
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_INSTALL_ORCHESTRATOR,
+  SANDBOX_EVENT_BROADCASTER,
   IMAGE_FACADE,
   INTERNAL_ERROR_CODE,
   isSandboxFailureCode,
@@ -24,6 +25,7 @@ import type {
   ResolvedImageSpec,
   RuntimeAdapterRegistry,
   RuntimeInstallOrchestrator,
+  SandboxEventBroadcaster,
   SandboxExecFn,
   SandboxHandle,
   SandboxProvider,
@@ -77,6 +79,13 @@ export class ProvisionSandboxWorkflow {
      * 知道 —— 聚合在失败时压根不 publish 领域事件，projector 收不到任何东西。
      */
     @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
+    /**
+     * `sandbox.instance_progress` 的出口。**不经领域事件、不进 Outbox** —— 与
+     * `CloneProjectWorkflow` 推 `project.clone_progress` 同款：这两条都是「一段长 IO
+     * 正在进行」的进度播报，不是聚合状态的变化，硬造一个领域事件只会让状态机里多出
+     * 一次并不存在的转移（这正是 10 §7.4 不让它挤进 `status_changed` 的同一条理由）。
+     */
+    @Inject(SANDBOX_EVENT_BROADCASTER) private readonly broadcaster: SandboxEventBroadcaster,
   ) {}
 
   /** Background runner — never rejects into an unhandled promise. */
@@ -104,11 +113,16 @@ export class ProvisionSandboxWorkflow {
     // 当前跑到哪一段 —— 失败时用它给那条 outcome:'failed' 的审计定位。
     let stage = 'scheduling';
     let stageStartedAt = provisionStartedAt;
+    // 当前阶段除耗时之外**还能说清什么**。⚠️ 它必须在 `enter` 时清空：上一段的
+    // 解释挂到下一段上,比不解释更糟 —— 读的人会拿它当这一段的成因。
+    let stageDetail: Record<string, unknown> = {};
     const enter = (name: string): void => {
       stage = name;
       stageStartedAt = this.clock.now().getTime();
+      stageDetail = {};
     };
-    const done = (): void => this.recordStage(sandbox, stage, stageStartedAt, 'ok');
+    const done = (): void =>
+      this.recordStage(sandbox, stage, stageStartedAt, 'ok', undefined, stageDetail);
     try {
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
@@ -165,7 +179,13 @@ export class ProvisionSandboxWorkflow {
 
         this.advance(sandbox, 'starting', 'scheduler');
         enter('starting');
-        await this.runStartingSteps(sandbox, provider, handle, image.spec, credential);
+        // ⚠️ **在这里问、而不是在 `runStartingSteps` 里面问**,有两个理由:
+        // ① 阶段结束时再问永远得到 `true`（镜像那时已经铺好了）—— 那等于什么都没说,
+        //    而这条信息的全部价值就是解释**这一段为什么慢**;
+        // ② 失败路径同样拿得到它。`provider.start()` 炸在铺 13GB 镜像的中途,与炸在
+        //    一个早就 staged 的镜像上,是两个不同的故障,下一步动作也不同。
+        stageDetail = await this.imageStagedOf(provider, image.spec);
+        await this.runStartingSteps(sandbox, provider, handle, image.spec, credential, stageDetail);
         done();
       } finally {
         credential?.zeroize();
@@ -177,7 +197,9 @@ export class ProvisionSandboxWorkflow {
       // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
       // 多久才看见失败）回答的是两个不同的问题，而失败路径上聚合**不 publish 任何
       // 领域事件** —— projector 一条都收不到，这里不记就永远没有记录（13 §2.8.2）。
-      this.recordStage(sandbox, stage, stageStartedAt, 'failed', e);
+      this.recordStage(sandbox, stage, stageStartedAt, 'failed', e, stageDetail);
+      // ⚠️ 整段 `provision` **刻意不带** stageDetail:它横跨多个阶段,把某一段的解释
+      // 挂在总计上会让读者以为那是整段的成因。
       this.recordStage(sandbox, 'provision', provisionStartedAt, 'failed', e);
       this.compensate(sandbox, e);
       if (handle) await provider.destroy(handle).catch(() => undefined);
@@ -200,24 +222,23 @@ export class ProvisionSandboxWorkflow {
   async restart(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
     const handle = this.handleOf(sandbox);
     const startedAt = this.clock.now().getTime();
+    let stageDetail: Record<string, unknown> = {};
     try {
       this.advance(sandbox, 'starting', 'scheduler');
       const credential = await this.prepareCredential(sandbox);
       try {
-        await this.runStartingSteps(
-          sandbox,
-          provider,
-          handle,
-          (await this.imageSpecOf(sandbox)).spec,
-          credential,
-        );
+        const spec = (await this.imageSpecOf(sandbox)).spec;
+        // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
+        // 而用户对「重启」的时间预期比「新建」短得多。
+        stageDetail = await this.imageStagedOf(provider, spec);
+        await this.runStartingSteps(sandbox, provider, handle, spec, credential, stageDetail);
       } finally {
         credential?.zeroize();
       }
       this.advance(sandbox, 'running', 'scheduler');
-      this.recordStage(sandbox, 'restart', startedAt, 'ok');
+      this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
     } catch (e) {
-      this.recordStage(sandbox, 'restart', startedAt, 'failed', e);
+      this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
       this.compensate(sandbox, e);
       throw e;
     }
@@ -233,9 +254,28 @@ export class ProvisionSandboxWorkflow {
     handle: SandboxHandle,
     image: ResolvedImageSpec,
     credential: InjectableRuntimeCredential | null,
+    /** 调用方已经问过了 —— 这里再问一次会拿到不同的答案，见调用点的注释。 */
+    imageStaged: { imageStaged?: boolean },
   ): Promise<void> {
     // ① + ② — start, and gate on in-sandbox agent readiness (inside `start`).
+    //
+    // ⚠️ 这一个 `await` 是整段 provision 里**最长、且唯一没有任何事件覆盖**的一段：
+    // 实测冷 store 190529ms（13GB 的 `platform/sandbox:v2` 现拉 + 铺 rootfs），期间
+    // `sandbox.status` 恒为 `starting`、CPU 是 0%、到 registry 一条连接都没有 ——
+    // 用户判它卡死，排查的人第一眼也判它卡死。下面两帧就是为了把这一段的**边界**
+    // 说出来；进度百分比没有（provider 只给得出「开始」和「结束」，编一个就是幽灵字段）。
+    this.broadcaster.broadcast({
+      event: 'sandbox.instance_progress',
+      sandboxId: sandbox.id,
+      phase: 'starting',
+      ...imageStaged,
+    });
     await provider.start(handle);
+    this.broadcaster.broadcast({
+      event: 'sandbox.instance_progress',
+      sandboxId: sandbox.id,
+      phase: 'ready',
+    });
     const exec = toExecFn(provider, handle);
 
     // ③ install the runtime CLI. Deliberately BEFORE ④: there is no point injecting
@@ -259,6 +299,33 @@ export class ProvisionSandboxWorkflow {
     // moment the task starts" true for a user who closed the browser, and for MCP
     // `create_sandbox`, which has no terminal at all (裁决 D-15).
     await this.bootstrapAgentSession(sandbox, exec);
+  }
+
+  /**
+   * 「本机是不是已经有这份镜像了」—— provider 答得上就带上，答不上就**整个字段缺席**。
+   *
+   * ⚠️ 返回的是一个**待展开的片段**而不是 `boolean | undefined`，就是为了让「缺席」
+   * 在类型层面成立：`{ imageStaged: undefined }` 会被 `JSON.stringify` 抹掉，看起来
+   * 没差，但它让「没问过」和「问了说没有」在代码里长得一模一样。
+   *
+   * ⚠️ 三种「答不上」在这里合成同一种处置（不实现 / 抛异常 / provider 不可用），因为
+   * 对用户是同一件事：这次说不出为什么慢。**它绝不能让 provision 失败** —— 一句文案的
+   * 输入把整个 Task 判死，是拿装饰品当承重墙。
+   */
+  private async imageStagedOf(
+    provider: SandboxProvider,
+    image: ResolvedImageSpec,
+  ): Promise<{ imageStaged?: boolean }> {
+    if (!provider.imageStaged) return {};
+    try {
+      return { imageStaged: await provider.imageStaged(image) };
+    } catch (e) {
+      this.logger.warn(
+        `provider '${provider.name}' could not report image staging for '${image.ref}' ` +
+          `(${(e as Error).message}); the startup card falls back to generic copy`,
+      );
+      return {};
+    }
   }
 
   private handleOf(sandbox: Sandbox): SandboxHandle {
@@ -489,6 +556,7 @@ export class ProvisionSandboxWorkflow {
     startedAt: number,
     outcome: 'ok' | 'failed',
     error?: unknown,
+    extra?: Record<string, unknown>,
   ): void {
     const failure = error === undefined ? undefined : splitFailure(error);
     this.audit.record({
@@ -502,6 +570,7 @@ export class ProvisionSandboxWorkflow {
         outcome === 'failed' ? `provision 阶段「${stage}」失败` : `provision 阶段「${stage}」完成`,
       detail: {
         stage,
+        ...extra,
         ...(failure === undefined ? {} : { message: failure.message }),
       },
       durationMs: Math.max(0, this.clock.now().getTime() - startedAt),

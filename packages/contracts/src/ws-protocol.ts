@@ -28,7 +28,7 @@ export type TerminalServerFrame =
   | { type: 'session'; socketSessionKey: string };
 
 // ── /events channel (discriminator: event) ──
-// SYNC WITH shared/10 §7.4 (canonical union, 7 variants). `status` is the
+// SYNC WITH shared/10 §7.4 (canonical union, 8 variants). `status` is the
 // SandboxStatus enum (NOT a bare string). S1 PRODUCES only sandbox.created /
 // sandbox.status_changed / sandbox.removed; waiting_input (S4), clone_progress
 // (S2) and runtime-auth.status_changed (S3) are defined here but not yet emitted.
@@ -86,11 +86,60 @@ export type SandboxWsEvent =
       status: RuntimeInstallStatus;
       versionDetected?: string;
       errorCode?: string;
+    }
+  /**
+   * The two BOUNDARIES of step ① `provider.start()` (03 §4.3) — the one stretch of
+   * the `starting` 段 no other event covers.
+   *
+   * WHY AN EIGHTH EVENT RATHER THAN `sandbox.status_changed` (with its `phase?`): the
+   * same argument as `runtime.install_progress` above, and it bites harder here.
+   * `sandbox.status` is CONSTANT at `starting` for the whole call — measured at
+   * **190529ms** for a cold 13GB `platform/sandbox:v2`, because the micro-VM is LAZY:
+   * `runtime.create()` returns in ~4ms and the image is pulled and unpacked into a
+   * rootfs on the FIRST exec. Folding that into `status_changed` would emit a run of
+   * "state changes" where no state changed; the `phase?` field on that event is not an
+   * exemption from its documented "EVERY state-machine transition" semantics, it would
+   * just hide the violation from the type checker.
+   *
+   * ⚠️ WHAT IS DELIBERATELY **NOT** ON THIS FRAME — both omissions are the point.
+   * ① **No percentage and no ETA.** `provider.start()` is a single `await`: the platform
+   *    is handed 「开始」 and 「结束」 and nothing in between — there is no 40%/80%
+   *    callback to read, so any number here would be invented. This repo has already
+   *    deleted one invented denominator for exactly that reason (see
+   *    `project.clone_progress`: `totalBytes` was a 「幽灵字段，已删」).
+   * ② **No elapsed milliseconds.** The frontend knows the instant it received
+   *    `status_changed → starting`; counting up from there costs it one `setInterval`
+   *    and needs no field, no frame and no clock-skew handling. An `elapsedMs` here
+   *    would be a field whose only reader can already compute it alone.
+   *
+   * ⇒ what IS here is only what the platform knows and the browser CANNOT: whether
+   * this machine already holds the image's bits (`SandboxProvider.imageStaged`).
+   * `imageStaged:false` is the whole difference between 「几秒」 and 「几分钟」, and it is
+   * the one fact that turns 「卡住了」 into 「首次用这个镜像，正在准备」.
+   *
+   * ⚠️ IT IS **ABSENT**, NOT `false`, WHEN THE PROVIDER CANNOT SAY. 「不知道」 and
+   * 「本机没有这份镜像」 are different claims, and only one of them may be put in
+   * front of a waiting user as a reason for a multi-minute wait.
+   *
+   * NOT Outbox-backed, deliberately — the opposite call from `runtime.install_progress`
+   * one variant up, for a reason specific to this frame: a dropped `starting` only
+   * degrades the copy to the generic wording for the rest of THIS wait, and a dropped
+   * `ready` is overwritten by the `status_changed` that always follows. Install
+   * progress rides the Outbox because nothing follows it — a dropped frame there pins
+   * the card on stale copy forever.
+   */
+  | {
+      event: 'sandbox.instance_progress';
+      sandboxId: string;
+      /** `starting` = 即将调 `provider.start()`；`ready` = 它返回了（实例能跑命令了）。 */
+      phase: 'starting' | 'ready';
+      /** 只在 `phase:'starting'` 且 provider 答得上时出现；缺席 = 「不知道」。 */
+      imageStaged?: boolean;
     };
 
 // ── /tasks channel (S6 无头 Task 输出流;discriminator: type) ────────────────
 /**
- * WHY A THIRD NAMESPACE RATHER THAN AN EIGHTH `/events` EVENT: `/events` frames are
+ * WHY A THIRD NAMESPACE RATHER THAN ONE MORE `/events` EVENT: `/events` frames are
  * business projections and ride the Outbox for at-least-once delivery (13 §2.8). Task
  * output is a high-volume BYTE-DERIVED stream — a long task emits thousands of events.
  * Putting it through the Outbox would be pure write amplification for data that already
@@ -165,7 +214,8 @@ export const WS_PROTOCOL_CANONICAL =
   'project.clone_progress{projectId,phase,stage?,percent?,objectsDone?,objectsTotal?,' +
   'receivedBytes?,bytesPerSecond?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
-  'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}|' +
+  'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?},' +
+  'sandbox.instance_progress{sandboxId,phase,imageStaged?}|' +
   'tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|' +
   'tasks.server:event{taskId,seq,event},caught_up{taskId,firstSeq,seq},' +
   'exit{taskId,status,exitCode?},error{taskId,code},pong';

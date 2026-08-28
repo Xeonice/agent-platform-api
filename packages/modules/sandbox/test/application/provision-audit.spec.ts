@@ -94,6 +94,70 @@ describe('provision 失败路径的审计（13 §2.8.2 入口 ②）', () => {
     expect(ws?.severity).toBe('info');
   });
 
+  it('starting 那条阶段记录带上 imageStaged —— 回答的是「这一段为什么慢」', async () => {
+    const h = harness();
+    h.provider.declareImageStaged(false);
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const starting = h.auditRecords.find(
+      (r) => r.type === 'sandbox.provision.stage' && r.detail?.stage === 'starting',
+    );
+    expect(starting?.detail).toMatchObject({ stage: 'starting', imageStaged: false });
+
+    // ⚠️ 只有 starting 那一段带。整段 `provision` 横跨多个阶段，把某一段的解释挂在
+    // 总计上，会让读者以为那是整段的成因。
+    const total = h.auditRecords.find(
+      (r) => r.type === 'sandbox.provision.stage' && r.detail?.stage === 'provision',
+    );
+    expect(total?.detail && 'imageStaged' in total.detail).toBe(false);
+    // 前面的阶段更不该沾上它 —— 那说明 `enter()` 没清空上一段的解释。
+    const earlier = h.auditRecords.filter(
+      (r) =>
+        r.type === 'sandbox.provision.stage' &&
+        (r.detail?.stage === 'preparing-workspace' || r.detail?.stage === 'creating'),
+    );
+    expect(earlier.length).toBe(2);
+    expect(earlier.every((r) => r.detail && !('imageStaged' in r.detail))).toBe(true);
+  });
+
+  it('取的是「进入 starting 那一刻」的值 —— start() 之后再问永远是 true', async () => {
+    const h = harness();
+    h.provider.declareImageStaged(false);
+    // 真实语义：`provider.start()` 干的正是「把镜像铺开」，所以它返回之后再问，
+    // 答案必然翻成 true。⚠️ 没有这一句，「在 start() 之后才问」这个改动**测不出来**
+    // ——替身恒答同一个值，问的时机就成了不可观测的东西（本仓管这叫「变异无效」）。
+    const start = h.provider.start.bind(h.provider);
+    h.provider.start = async (...args: Parameters<typeof start>): Promise<void> => {
+      await start(...args);
+      h.provider.declareImageStaged(true);
+    };
+
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const starting = h.auditRecords.find(
+      (r) => r.type === 'sandbox.provision.stage' && r.detail?.stage === 'starting',
+    );
+    // 记 true 就等于说「本机早有这镜像」，而这一段恰恰慢在**现拉**上 —— 那是把成因
+    // 反着写进审计，比不写更坏。
+    expect(starting?.detail).toMatchObject({ imageStaged: false });
+  });
+
+  it('provider 答不上 ⇒ 整个字段缺席，不退化成 false', async () => {
+    // 没有 declareImageStaged：方法根本不存在，正是第三方 provider 的常态。
+    const h = harness();
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const starting = h.auditRecords.find(
+      (r) => r.type === 'sandbox.provision.stage' && r.detail?.stage === 'starting',
+    );
+    // ⛔ `false` 是「问了，本机没有」；缺席是「没问出来」。退化成 false 等于替 provider
+    //    编了一个它没说过的答案，而这条 detail 的读者会拿它解释耗时。
+    expect(starting?.detail && 'imageStaged' in starting.detail).toBe(false);
+  });
+
   it('baseline 读不到 ⇒ 那条 workspace.prepared 是 warn，不是一次静默的"成功"', async () => {
     const h = harness({ workspaceBaselineMissing: true });
     const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });

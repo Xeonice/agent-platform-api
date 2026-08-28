@@ -44,7 +44,9 @@ import type {
   SandboxProvider,
   SandboxProviderCapabilities,
   SandboxProviderContext,
+  SandboxEventBroadcaster,
   SandboxRuntimeStatus,
+  SandboxWsEvent,
   TaskEventBroadcaster,
   TaskLogStore,
   TaskServerFrame,
@@ -220,6 +222,12 @@ export class FakeProvider implements SandboxProvider {
   /** Present iff `capabilities.headlessTask` — CAP-02 in both directions. */
   readonly jobs?: FakeJobPlane;
   readonly files?: FakeFilePlane;
+  /**
+   * The OPTIONAL `imageStaged` — **absent until a test declares it**, which is exactly
+   * the state a third-party provider that never heard of the method is in. Declaring it
+   * is `declareImageStaged` below.
+   */
+  imageStaged?: () => Promise<boolean>;
 
   constructor(
     readonly name: string,
@@ -230,6 +238,22 @@ export class FakeProvider implements SandboxProvider {
       this.jobs = new FakeJobPlane(name);
       this.files = new FakeFilePlane();
     }
+  }
+
+  /**
+   * INSTALL the optional method (answering `answer`, or rejecting when it is an Error).
+   *
+   * ⚠️ 「没实现」在这个替身里就是**方法不存在**，不是「方法存在但返回 undefined」。
+   * 平台侧那条分支写的是 `if (!provider.imageStaged)`；一个恒存在、只是答 undefined 的
+   * 方法会**穿过**那个分支，于是「第三方 provider 根本没这个方法」这条路径就一次都没被
+   * 走到过 —— 而那恰恰是本仓唯一有真实实现的 provider（boxlite）之外所有 provider 的常态。
+   */
+  declareImageStaged(answer: boolean | Error): void {
+    this.imageStaged = async (): Promise<boolean> => {
+      this.calls.push('imageStaged');
+      if (answer instanceof Error) throw answer;
+      return answer;
+    };
   }
 
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
@@ -802,6 +826,9 @@ export function harness(opts: HarnessOptions = {}) {
   // 记录式审计 double —— provision 阶段计时/失败那一刻的断言直接读它（03 §7.8）。
   const auditRecords: AuditRecordInput[] = [];
   const audit: AuditRecorder = { record: (r) => void auditRecords.push(r) };
+  // `/events` 帧的记录式替身 —— `sandbox.instance_progress` 的断言直接读它（10 §7.4）。
+  const wsEvents: SandboxWsEvent[] = [];
+  const broadcaster: SandboxEventBroadcaster = { broadcast: (e) => void wsEvents.push(e) };
   const provision = new ProvisionSandboxWorkflow(
     repo,
     uow,
@@ -814,6 +841,7 @@ export function harness(opts: HarnessOptions = {}) {
     agentSessions,
     imageFacade,
     audit,
+    broadcaster,
   );
   const service = new SandboxApplicationService(
     repo,
@@ -871,6 +899,7 @@ export function harness(opts: HarnessOptions = {}) {
     service,
     provision,
     auditRecords,
+    wsEvents,
     publishedEvents,
     registry,
     runtimes,
