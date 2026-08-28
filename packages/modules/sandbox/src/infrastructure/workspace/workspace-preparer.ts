@@ -88,13 +88,29 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
       await mkdir(hostPath, { recursive: true });
       await this.assertDiskSpace(source.baselinePath, hostPath);
       await writeFile(resolve(hostPath, STATE_FILE), 'preparing');
-      await this.importBaseline(source.baselinePath, hostPath);
+      const baselineExisted = await this.importBaseline(source.baselinePath, hostPath);
       await this.checkoutBranch(hostPath, source.branch);
       await writeFile(resolve(hostPath, STATE_FILE), 'ready');
       // writable by the non-root in-sandbox agent user; unreachable to other host
       // users thanks to the 0700 parent (see class doc).
       await chmod(hostPath, 0o777);
-      return { hostPath };
+      // 03 §7.8 `sandbox.workspace.prepared` 的两个 detail 字段。数在这里数，因为
+      // 只有这里知道 baseline 到底读没读到（见 `PreparedWorkspace` 的注释）。
+      //
+      // ⚠️ **必须把平台自己的 `.platform-workspace-state` 排除掉。** 它在上面几行刚被
+      // 写进去（`prepare` 里两次 `writeFile`），而 `readdir` 会把点文件一并算进来 ——
+      // 所以「含状态文件的条目数」在真实文件系统上**恒 ≥ 1**，`entryCount === 0` 永远
+      // 不成立。实测（真 fs，三种 baseline）：空 baseline ⇒ 1、baseline 读不到 ⇒ 1、
+      // 一个文件的 baseline ⇒ 2。后果有两层：workflow 里 `const empty = entryCount === 0`
+      // 是**死代码**（「产出为空」这件事一次也报不出来），而那条审计还会对着一个空空
+      // 如也的工作区说「工作区就绪，**1** 个顶层条目」—— 那 1 个是平台自己的记号，
+      // 不是用户的任何东西。这个字段要回答的是「workspace 空了无人报错」，那就只能数
+      // **导入进来的**东西。
+      const entryCount = await readdir(hostPath).then(
+        (e) => e.filter((name) => name !== STATE_FILE).length,
+        () => 0,
+      );
+      return { hostPath, baselineExisted, entryCount };
     } catch (e) {
       throw classifyWorkspacePrepareError(e);
     }
@@ -137,24 +153,25 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
   }
 
   /** Copy baseline contents into the workspace (CoW on Linux; portable fallback). */
-  private async importBaseline(baselinePath: string, workspacePath: string): Promise<void> {
+  private async importBaseline(baselinePath: string, workspacePath: string): Promise<boolean> {
     let entries: string[];
     try {
       entries = await readdir(baselinePath);
     } catch {
-      return; // baseline missing/unreadable ⇒ empty workspace
+      return false; // baseline missing/unreadable ⇒ empty workspace
     }
-    if (entries.length === 0) return; // empty project ⇒ nothing to copy
+    if (entries.length === 0) return true; // empty project ⇒ nothing to copy
     if (process.platform === 'linux') {
       try {
         // reflink=auto ⇒ copy-on-write clone of a large repo baseline (03 §7.1).
         await execFileAsync('cp', ['-a', '--reflink=auto', `${baselinePath}/.`, workspacePath]);
-        return;
+        return true;
       } catch {
         /* fall through to the portable copy */
       }
     }
     await cp(baselinePath, workspacePath, { recursive: true, force: true });
+    return true;
   }
 
   /**

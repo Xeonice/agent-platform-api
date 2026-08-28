@@ -3,6 +3,7 @@ import { asProjectId, asSandboxId } from '@platform/shared-kernel';
 import { SandboxStatusVO } from '../../src/domain/value-objects/sandbox-status.vo';
 import { Sandbox } from '../../src/domain/entities/sandbox.entity';
 import { InvalidSandboxTransitionError } from '../../src/domain/errors/invalid-transition.error';
+import { SandboxCreated } from '../../src/domain/events/sandbox-events';
 
 /**
  * Zero-mock domain unit test (docs/backend/25 L0). The transition table is static
@@ -48,6 +49,34 @@ describe('Sandbox aggregate', () => {
       triggeredBy: 'user',
     });
     expect(sandbox.pullEvents().map((e) => e.type)).toContain('SandboxCreated');
+  });
+
+  /**
+   * 审计流的 `summary` 要「一行人话，直接上 UI」（13 §2.8.2），而审计是**历史快照**：
+   * 记的必须是**当时**的名字。所以名字随事件走，projector 不回查库——任务后来被改名、
+   * 甚至沙箱被销毁，那条审计行都该保持原样。
+   */
+  it('SandboxCreated 带的是任务显示名，且与聚合上的是同一个值', () => {
+    const sandbox = Sandbox.create({ ...baseInput, initialPrompt: '修复登录页的样式问题' });
+    const created = sandbox
+      .pullEvents()
+      .find((e): e is SandboxCreated => e instanceof SandboxCreated);
+
+    // 这一条是关键：事件里塞 `runtime` / `imageRef` / id 的那几版同样"有个 name 字段"，
+    // 只有与聚合自己那份对齐才能把它们分开。
+    expect(created?.name).toBe(sandbox.name);
+    expect(created?.name).toBe('修复登录页的样式问题');
+    // ⚠️ 否定断言：写 id 的那一版正是本轮要修掉的东西。
+    expect(created?.name).not.toBe(baseInput.id);
+    expect(created?.name).not.toContain('sbx-1');
+  });
+
+  it('没有指令时，名字退化成 runtime + 时刻（仍然认得出，不是 UUID）', () => {
+    const sandbox = Sandbox.create({ ...baseInput, runtimeLabel: 'Claude Code' });
+    const created = sandbox
+      .pullEvents()
+      .find((e): e is SandboxCreated => e instanceof SandboxCreated);
+    expect(created?.name).toBe('Claude Code · 2026-08-12 00:00');
   });
 
   it('permits the legal pending -> scheduling move and raises SandboxStateChanged', () => {

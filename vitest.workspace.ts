@@ -54,7 +54,14 @@ export default defineWorkspace([
     ...shared,
     test: {
       name: 'integration',
-      include: ['packages/**/test/integration/**/*.spec.ts'],
+      include: [
+        'packages/**/test/integration/**/*.spec.ts',
+        // 平台级设施（audit_events 这类不属于任何限界上下文的表）住在 apps/api,
+        // 它们的 drizzle 往返同样要在真 sqlite 上测。⚠️ 少了这一条,写在
+        // `apps/api/test/integration/` 里的 spec 会被**静默跳过** —— 与上面 unit
+        // 那条注释记的是同一个坑,只是换了一个目录。
+        'apps/api/test/integration/**/*.spec.ts',
+      ],
       environment: 'node',
     },
   },
@@ -72,6 +79,11 @@ export default defineWorkspace([
       name: 'e2e',
       include: ['apps/api/test/**/*.e2e-spec.ts'],
       environment: 'node',
+      // Every e2e file gets a throwaway DATA_ROOT before it can import AppModule.
+      // See the long note in the setup file: `LoggingModule` is global and its writer
+      // opens a real file in the DI constructor, so WITHOUT this any spec that boots
+      // AppModule writes into the repo's `api/data/` — the dev server's own data root.
+      setupFiles: [r('apps/api/test/e2e/_data-root.setup.ts')],
       hookTimeout: 30_000,
       testTimeout: 30_000,
       // e2e drive SHARED external resources (docker daemon, the :5001 registry,

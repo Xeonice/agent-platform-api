@@ -23,11 +23,12 @@ describe('WS protocol schema hash', () => {
     expect(WS_PROTOCOL_CANONICAL).toContain('session{socketSessionKey}');
   });
 
-  it('carries all SEVEN /events variants, including runtime.install_progress', () => {
-    // 10 §7.4 / §7.6: the event union is 7 wide since S5. `runtime.install_progress`
-    // is separate from `sandbox.status_changed` on purpose — during a CLI install the
-    // sandbox status is CONSTANT at `starting` (753s measured), so folding progress in
-    // would emit "state changes" where no state changed.
+  it('carries all EIGHT /events variants, including the two starting-段 progress ones', () => {
+    // 10 §7.4 / §7.6: the event union is 8 wide. BOTH progress events are separate from
+    // `sandbox.status_changed` for the same reason — the sandbox status is CONSTANT at
+    // `starting` while they fire (753s measured for a cold CLI install, 190529ms for a
+    // cold image pull), so folding either in would emit "state changes" where no state
+    // changed.
     const events = [
       'sandbox.created',
       'sandbox.status_changed',
@@ -36,10 +37,14 @@ describe('WS protocol schema hash', () => {
       'project.clone_progress',
       'runtime-auth.status_changed',
       'runtime.install_progress',
+      'sandbox.instance_progress',
     ];
     for (const e of events) expect(WS_PROTOCOL_CANONICAL).toContain(e);
     expect(WS_PROTOCOL_CANONICAL).toContain(
       'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?}',
+    );
+    expect(WS_PROTOCOL_CANONICAL).toContain(
+      'sandbox.instance_progress{sandboxId,phase,imageStaged?}',
     );
   });
 
@@ -50,6 +55,33 @@ describe('WS protocol schema hash', () => {
       'terminal.client:input{data},resize{cols,rows},ping|' +
         'terminal.server:data{data},exit{code},pong,session{socketSessionKey}',
     );
+  });
+});
+
+describe('sandbox.instance_progress frame (10 §7.4)', () => {
+  it('is assignable with the boundary phase and the one optional fact', () => {
+    const frames: SandboxWsEvent[] = [
+      { event: 'sandbox.instance_progress', sandboxId: 's1', phase: 'starting' },
+      {
+        event: 'sandbox.instance_progress',
+        sandboxId: 's1',
+        phase: 'starting',
+        imageStaged: false,
+      },
+      { event: 'sandbox.instance_progress', sandboxId: 's1', phase: 'ready' },
+    ];
+    expect(frames).toHaveLength(3);
+  });
+
+  it('carries NO percentage and NO elapsed field — both would have to be invented', () => {
+    // ① `provider.start()` is one await: 「开始」/「结束」 and nothing between, so a
+    //    percentage has no honest source (cf. the deleted `clone_progress.totalBytes`).
+    // ② elapsed ms is derivable by the only party that would read it — the frontend
+    //    times from the `starting` it received. A field whose reader can compute it
+    //    alone is a field that only adds a way to disagree.
+    const segment = WS_PROTOCOL_CANONICAL.split('sandbox.instance_progress')[1] ?? '';
+    const fields = segment.slice(1, segment.indexOf('}'));
+    expect(fields.split(',')).toEqual(['sandboxId', 'phase', 'imageStaged?']);
   });
 });
 

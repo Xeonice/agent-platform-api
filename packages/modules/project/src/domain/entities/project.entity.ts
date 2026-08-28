@@ -4,7 +4,14 @@ import { CloneStatusVO } from '../value-objects/project-status.vo';
 import type { CloneStatus } from '../value-objects/project-status.vo';
 import { RepoUrl } from '../value-objects/repo-url.vo';
 import { InvalidProjectTransitionError, ProjectStateError } from '../errors/project-errors';
-import { ProjectCreated } from '../events/project-events';
+import {
+  ProjectBaselineSynced,
+  ProjectCloneCancelled,
+  ProjectCloneRetried,
+  ProjectConvertedToEmpty,
+  ProjectCreated,
+  ProjectDeleted,
+} from '../events/project-events';
 
 export type ProjectSourceType = 'git' | 'empty';
 export type CloneErrorCode =
@@ -106,7 +113,7 @@ export class Project extends AggregateRoot<ProjectId> {
       createdAt: input.now,
       updatedAt: input.now,
     });
-    project.raise(new ProjectCreated(input.id, input.now));
+    project.raise(new ProjectCreated(input.id, input.name, input.now));
     return project;
   }
 
@@ -175,6 +182,7 @@ export class Project extends AggregateRoot<ProjectId> {
     this.assertCanSync();
     this._baselineSizeBytes = baselineSizeBytes;
     this._updatedAt = now;
+    this.raise(new ProjectBaselineSynced(this.id, this.name, baselineSizeBytes, now));
   }
 
   /**
@@ -206,6 +214,7 @@ export class Project extends AggregateRoot<ProjectId> {
     }
     this.transition('cloning', now);
     this._cloneErrorCode = null;
+    this.raise(new ProjectCloneRetried(this.id, this.name, now));
   }
 
   /** convert a failed git project into an empty one: failed → ready, drop source. */
@@ -213,12 +222,51 @@ export class Project extends AggregateRoot<ProjectId> {
     if (this._cloneStatus !== 'failed') {
       throw new ProjectStateError('convert-to-empty is only allowed on a failed project');
     }
+    // ⚠️ host 必须在归零**之前**取：下面四行一过，平台里再没有任何一处记得它原本
+    // 指向哪儿（23 §6.4「记录曾经的 repoUrl 已丢弃」）。
+    const discardedRepoHost = this.repoHost();
     this.transition('ready', now);
     this._sourceType = 'empty';
     this._repoUrl = null;
     this._repoBranch = null;
     this._cloneErrorCode = null;
     this._baselineSizeBytes = 0;
+    this.raise(new ProjectConvertedToEmpty(this.id, this.name, discardedRepoHost, now));
+  }
+
+  /**
+   * 用户在克隆进行中按了取消（`POST /api/projects/:id/cancel-clone`）。
+   *
+   * ⚠️ **不改状态、也不抛**：真正的落定由 `CloneProjectWorkflow` 的失败路径写成
+   * `failed` + `INTERRUPTED`；而对一个已经拉完的项目按取消，产品语义是「无事发生」
+   * 而不是 409（端点此前就是这么答的，本次不改）。返回值区分的正是「真取消了」与
+   * 「按晚了」—— 只有前者该在审计里留下一行。
+   */
+  cancelClone(now: Date): boolean {
+    if (this._cloneStatus !== 'cloning') return false;
+    this.raise(new ProjectCloneCancelled(this.id, this.name, now));
+    return true;
+  }
+
+  /**
+   * 项目被删除（`DELETE /api/projects/:id`）。**行即将消失，事件是唯一的去处。**
+   *
+   * ⚠️ 它必须在 `deleteSync` 之前调用、并在**同一个事务**里 publish —— 事件在
+   * `AggregateRoot` 的内存缓冲里，不依赖那一行还在不在库中（13 §2.8.2：审计必须在
+   * 主体被删除之后继续存在）。
+   */
+  markDeleted(keptBaseline: boolean, now: Date): void {
+    this.raise(new ProjectDeleted(this.id, this.name, keptBaseline, now));
+  }
+
+  /**
+   * 远端**主机**（`github.com` / `git.corp:8443`），空项目为 `null`。
+   *
+   * 走 `RepoUrl` 而不是自己切串：解析规则（含端口是否保留）只该有一处，
+   * 而那一处已经是 `RepoUrl.host()`。
+   */
+  private repoHost(): string | null {
+    return this._repoUrl === null ? null : RepoUrl.create(this._repoUrl).host();
   }
 
   /** I-PRJ: a task may only start on a ready project. */

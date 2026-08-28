@@ -129,6 +129,7 @@ async function completeAuthWith(adapter: RuntimeAdapter, method: RuntimeAuthMeth
     sessions,
     credentials as never,
     undefined as never, // uow
+    undefined as never, // events
     clock,
     undefined as never, // ids
   );
@@ -212,6 +213,7 @@ describe('credential expiry comes from RuntimeAdapter.credentialTtlMs (04 §3)',
       undefined as never,
       undefined as never,
       credentials as never,
+      undefined as never,
       undefined as never,
       clock,
       undefined as never,

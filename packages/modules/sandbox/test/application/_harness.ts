@@ -1,5 +1,6 @@
 import type {
   Clock,
+  DomainEvent,
   EventBus,
   IdGenerator,
   SandboxId,
@@ -37,11 +38,15 @@ import type {
   SandboxCommand,
   SandboxFiles,
   SandboxHandle,
+  AuditRecorder,
+  AuditRecordInput,
   SandboxJobs,
   SandboxProvider,
   SandboxProviderCapabilities,
   SandboxProviderContext,
+  SandboxEventBroadcaster,
   SandboxRuntimeStatus,
+  SandboxWsEvent,
   TaskEventBroadcaster,
   TaskLogStore,
   TaskServerFrame,
@@ -217,6 +222,12 @@ export class FakeProvider implements SandboxProvider {
   /** Present iff `capabilities.headlessTask` — CAP-02 in both directions. */
   readonly jobs?: FakeJobPlane;
   readonly files?: FakeFilePlane;
+  /**
+   * The OPTIONAL `imageStaged` — **absent until a test declares it**, which is exactly
+   * the state a third-party provider that never heard of the method is in. Declaring it
+   * is `declareImageStaged` below.
+   */
+  imageStaged?: () => Promise<boolean>;
 
   constructor(
     readonly name: string,
@@ -227,6 +238,22 @@ export class FakeProvider implements SandboxProvider {
       this.jobs = new FakeJobPlane(name);
       this.files = new FakeFilePlane();
     }
+  }
+
+  /**
+   * INSTALL the optional method (answering `answer`, or rejecting when it is an Error).
+   *
+   * ⚠️ 「没实现」在这个替身里就是**方法不存在**，不是「方法存在但返回 undefined」。
+   * 平台侧那条分支写的是 `if (!provider.imageStaged)`；一个恒存在、只是答 undefined 的
+   * 方法会**穿过**那个分支，于是「第三方 provider 根本没这个方法」这条路径就一次都没被
+   * 走到过 —— 而那恰恰是本仓唯一有真实实现的 provider（boxlite）之外所有 provider 的常态。
+   */
+  declareImageStaged(answer: boolean | Error): void {
+    this.imageStaged = async (): Promise<boolean> => {
+      this.calls.push('imageStaged');
+      if (answer instanceof Error) throw answer;
+      return answer;
+    };
   }
 
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
@@ -527,6 +554,20 @@ export interface HarnessOptions {
    */
   workspaceError?: Error;
   /**
+   * `prepare()` 成功但 baseline 读不到 —— **静默降级成空工作区**那条路
+   * （03 §7.8「workspace 空了无人报错」）。
+   */
+  workspaceBaselineMissing?: boolean;
+  /**
+   * `prepare()` 成功、baseline **也读到了**，但导入进来的东西是空的（空项目）——
+   * 与 `workspaceBaselineMissing` 是**两件事**，走的是 workflow 里另一条 warn 分支。
+   *
+   * ⚠️ 那条分支曾经是死代码：真实 adapter 把自己写的 `.platform-workspace-state`
+   * 也数进 `entryCount`，于是真实文件系统上它恒 ≥ 1（`test/integration/
+   * workspace-entry-count.spec.ts` 实测）。计数口径已改，这个 seam 才有意义。
+   */
+  workspaceEmpty?: boolean;
+  /**
    * Make the image facade refuse (I-IMG-2 / I-IMG-3, 04 §7 时刻③). Without this seam
    * a test cannot distinguish 「the door consulted the catalogue」 from 「the door
    * accepted any string」, which is exactly the pre-slice behaviour.
@@ -601,7 +642,13 @@ export function harness(opts: HarnessOptions = {}) {
       wsCalls.push(`prepare:${id}`);
       wsSources.push(source);
       if (opts.workspaceError) throw opts.workspaceError;
-      return { hostPath: `/tmp/ws/${id}` };
+      if (opts.workspaceBaselineMissing) {
+        return { hostPath: `/tmp/ws/${id}`, baselineExisted: false, entryCount: 0 };
+      }
+      if (opts.workspaceEmpty) {
+        return { hostPath: `/tmp/ws/${id}`, baselineExisted: true, entryCount: 0 };
+      }
+      return { hostPath: `/tmp/ws/${id}`, baselineExisted: true, entryCount: 1 };
     },
     async cleanup(id, o): Promise<void> {
       wsCalls.push(`cleanup:${id}:${o.keep}`);
@@ -685,7 +732,16 @@ export function harness(opts: HarnessOptions = {}) {
       return fn({} as Tx);
     },
   };
-  const events: EventBus = { publishInTx: () => {}, subscribe: () => {} };
+  /**
+   * 发出去的领域事件。⚠️ 记下来是为了能断言**「这条路上一个事件都没有」** ——
+   * 13 §2.8.2 说审计的第二个写入口不是可选项，理由正是失败/技术路径不发事件；
+   * 那句话只有对着一份真实的事件清单才能被机械验证。
+   */
+  const publishedEvents: DomainEvent[] = [];
+  const events: EventBus = {
+    publishInTx: (_tx, batch) => void publishedEvents.push(...batch),
+    subscribe: () => {},
+  };
   let n = 0;
   const ids: IdGenerator = { next: () => `sbx-${++n}` };
   /**
@@ -767,6 +823,12 @@ export function harness(opts: HarnessOptions = {}) {
     },
   };
 
+  // 记录式审计 double —— provision 阶段计时/失败那一刻的断言直接读它（03 §7.8）。
+  const auditRecords: AuditRecordInput[] = [];
+  const audit: AuditRecorder = { record: (r) => void auditRecords.push(r) };
+  // `/events` 帧的记录式替身 —— `sandbox.instance_progress` 的断言直接读它（10 §7.4）。
+  const wsEvents: SandboxWsEvent[] = [];
+  const broadcaster: SandboxEventBroadcaster = { broadcast: (e) => void wsEvents.push(e) };
   const provision = new ProvisionSandboxWorkflow(
     repo,
     uow,
@@ -778,6 +840,8 @@ export function harness(opts: HarnessOptions = {}) {
     credentials,
     agentSessions,
     imageFacade,
+    audit,
+    broadcaster,
   );
   const service = new SandboxApplicationService(
     repo,
@@ -834,6 +898,9 @@ export function harness(opts: HarnessOptions = {}) {
   return {
     service,
     provision,
+    auditRecords,
+    wsEvents,
+    publishedEvents,
     registry,
     runtimes,
     forgetRuntime,

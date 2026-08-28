@@ -6,6 +6,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../../src/app.module';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
+import { AuditRepository } from '../../src/platform/audit/audit.repository';
 
 /**
  * Project context REST e2e (docs/backend/03 §7, shared/10 §6). Empty projects are
@@ -245,6 +246,48 @@ describe('projects REST', () => {
     },
     120_000,
   );
+
+  /**
+   * 审计（13 §2.8.2）：四个改动型 POST 与 `DELETE` 此前**一个事件都不发**，
+   * 实测删掉项目后 `audit_events.seq` 一点没动。
+   */
+  it('改动型操作与删除都留下审计行，且删除那条在项目消失之后仍在', async () => {
+    const name = `audited-${Math.random().toString(36).slice(2, 8)}`;
+    const created = await request(app.getHttpServer())
+      .post('/api/projects')
+      .send({ name, sourceType: 'git', repoUrl: 'https://nonexistent.invalid/y.git' })
+      .expect(202);
+    const id = created.body.id as string;
+
+    await poll(id, 'failed');
+    await request(app.getHttpServer()).post(`/api/projects/${id}/retry-clone`).expect(202);
+    await poll(id, 'failed');
+    await request(app.getHttpServer()).post(`/api/projects/${id}/convert-to-empty`).expect(200);
+    await request(app.getHttpServer()).delete(`/api/projects/${id}`).send({}).expect(204);
+    // 主体真的没了 —— 下面那条审计行因此不可能是回查库拿到的名字。
+    await request(app.getHttpServer()).get(`/api/projects/${id}`).expect(404);
+
+    const rows = app
+      .get(AuditRepository)
+      .list({ limit: 500 })
+      .items.filter((i) => i.subjectId === id);
+    expect(rows.map((i) => i.type).sort()).toEqual(
+      [
+        'project.clone_retried',
+        'project.converted_to_empty',
+        'project.created',
+        'project.deleted',
+      ].sort(),
+    );
+
+    const deleted = rows.find((i) => i.type === 'project.deleted');
+    // ⚠️ 名字**随事件走**：项目行已经没了，没有任何库可以回查（13 §2.8.2）。
+    expect(deleted?.summary).toBe(`删除项目 ${name}`);
+    // ⚠️ 否定断言：把 id 也拼进 summary 的写法在「包含项目名」下照样绿。
+    expect(deleted?.summary).not.toContain(id);
+    // id 仍然查得到 —— 它属于 subjectId 那一列（弱引用，不设 FK，正是为了这一刻）。
+    expect(deleted?.subjectId).toBe(id);
+  }, 60_000);
 
   // LAST: fills up to the 50-project cap, so it must not precede the other cases.
   it('I-PRJ-4: at most 50 projects (over the cap → 400)', async () => {

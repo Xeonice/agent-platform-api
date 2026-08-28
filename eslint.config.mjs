@@ -83,6 +83,12 @@ export default tseslint.config(
       '**/*.cjs',
       'drizzle/**',
       'coverage/**',
+      // ⚠️ 运行期数据根（DATA_ROOT 默认 ./data）。CI 是干净检出、这个目录不存在，
+      // 所以少了这一条 CI 照样绿；但**本机跑过后端之后**，里面是沙箱工作区和 git
+      // 基线（别人的仓库源码），`pnpm lint` 会被几百个与本仓无关的错淹掉 —— 实测
+      // 339 个。而「本地检查必须对齐 CI」是本仓反复强调的纪律，一个本地必红、CI 必
+      // 绿的 lint 等于把这条纪律废掉：人会开始忽略 lint 的红。
+      'data/**',
     ],
   },
   ...tseslint.configs.recommended,

@@ -117,7 +117,7 @@ export class Credential extends AggregateRoot<CredentialId> {
       refreshFailures: 0,
       lastRefreshedAt: null,
     });
-    cred.raise(new CredentialStored(input.id, input.now));
+    cred.raise(new CredentialStored(input.id, null, input.obtainedVia, input.now));
     return cred;
   }
 
@@ -164,7 +164,7 @@ export class Credential extends AggregateRoot<CredentialId> {
       refreshFailures: 0,
       lastRefreshedAt: null,
     });
-    cred.raise(new CredentialStored(input.id, input.now));
+    cred.raise(new CredentialStored(input.id, input.runtimeId, input.obtainedVia, input.now));
     return cred;
   }
 
@@ -201,7 +201,7 @@ export class Credential extends AggregateRoot<CredentialId> {
     if (this.isRevoked()) return;
     this._revokedAt = now;
     this._secret = new Erased(now);
-    this.raise(new CredentialRevoked(this.id, now));
+    this.raise(new CredentialRevoked(this.id, this.runtimeId, this.obtainedVia, now));
   }
 
   touchLastUsed(now: Date): void {

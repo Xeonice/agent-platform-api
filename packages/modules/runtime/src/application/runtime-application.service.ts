@@ -9,8 +9,8 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { CLOCK, ID_GENERATOR, UNIT_OF_WORK, shiftMs } from '@platform/shared-kernel';
-import type { Clock, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
+import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK, shiftMs } from '@platform/shared-kernel';
+import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
 import { RUNTIME_ADAPTER_REGISTRY } from '@platform/contracts';
 import type {
   AuthChallengeDto,
@@ -60,6 +60,7 @@ export class RuntimeApplicationService {
     private readonly sessions: AuthSessionStore,
     private readonly credentials: RuntimeCredentialService,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
+    @Inject(EVENT_BUS) private readonly events: EventBus,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
   ) {}
@@ -274,9 +275,16 @@ export class RuntimeApplicationService {
     }
     const now = this.clock.now();
     const existing = await this.settings.findByRuntime(runtimeId);
-    const settings = existing ?? RuntimeSettings.create(runtimeId, mode, now);
+    // 首配与切换走两个工厂，因为「有没有来处」是审计行要写出来的差别 —— 见
+    // `RuntimeSettings.configureFirst()` 的注释。
+    const settings = existing ?? RuntimeSettings.configureFirst(runtimeId, mode, now);
     if (existing) existing.switchTo(mode, now);
-    this.uow.run((tx) => this.settings.saveSync(tx, settings));
+    this.uow.run((tx) => {
+      this.settings.saveSync(tx, settings);
+      // ⚠️ 这一行决定**此后每一个沙箱**注入哪份凭证（05 §4.1）。事件是它进审计流的
+      // 唯一通道 —— 23 §12 / 24 §214 一直写着它，实现里此前没有。
+      this.events.publishInTx(tx, settings.pullEvents());
+    });
     return { runtimeId, activeAuthMethod: settings.activeAuthMethod };
   }
 

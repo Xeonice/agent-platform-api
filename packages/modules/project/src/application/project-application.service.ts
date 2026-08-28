@@ -189,8 +189,11 @@ export class ProjectApplicationService {
 
   async cancelClone(id: string): Promise<ProjectDto> {
     const project = await this.require(id);
-    if (project.cloneStatus === 'cloning') {
+    // 聚合判「真取消了还是按晚了」，只有前者才发事件（见 `Project.cancelClone`）。
+    if (project.cancelClone(this.clock.now())) {
       this.cloneWorkflow.cancel(id);
+      // ⚠️ 只 publish，不 save：取消**不改聚合状态**，落定由 workflow 的失败路径写。
+      this.publish(project);
     }
     return this.toDto(project);
   }
@@ -198,10 +201,18 @@ export class ProjectApplicationService {
   async delete(id: string, input: DeleteProjectInput = {}): Promise<void> {
     const project = await this.require(id);
     if (project.cloneStatus === 'cloning') this.cloneWorkflow.cancel(id);
-    if (!(input.keepBaseline ?? false)) {
+    const keptBaseline = input.keepBaseline ?? false;
+    if (!keptBaseline) {
       await this.baseline.removeDir(project.baselinePath).catch(() => undefined);
     }
-    this.uow.run((tx) => this.repo.deleteSync(tx, asProjectId(id)));
+    // ⚠️ 事件在删行**之前**攒好、与删行**同一个事务** publish：审计必须在主体被删除
+    // 之后继续存在（13 §2.8.2「为什么 subject_id 不设 FK」），而这条记录本身此前
+    // 压根不存在 —— 删掉项目后 `seq` 一点没动。
+    project.markDeleted(keptBaseline, this.clock.now());
+    this.uow.run((tx) => {
+      this.repo.deleteSync(tx, asProjectId(id));
+      this.events.publishInTx(tx, project.pullEvents());
+    });
   }
 
   async get(id: string): Promise<ProjectDto> {
@@ -232,6 +243,11 @@ export class ProjectApplicationService {
       this.repo.saveSync(tx, project);
       this.events.publishInTx(tx, project.pullEvents());
     });
+  }
+
+  /** 只投递事件、不写行 —— 给「聚合状态没变但确实发生了一件事」的路径用（cancel-clone）。 */
+  private publish(project: Project): void {
+    this.uow.run((tx) => this.events.publishInTx(tx, project.pullEvents()));
   }
 
   private mapDomainError(e: unknown): unknown {

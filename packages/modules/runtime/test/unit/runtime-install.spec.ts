@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import type { Clock, EventBus, IdGenerator, Tx, UnitOfWork } from '@platform/shared-kernel';
 import { RuntimeInstallFailedError, UnknownRuntimeError } from '@platform/contracts';
 import type {
+  AuditRecorder,
+  AuditRecordInput,
   ResolvedImageSpec,
   RuntimeAdapter,
   RuntimeAdapterRegistry,
@@ -108,8 +110,19 @@ function harness(adapter: StubAdapter) {
     execCalls.push(cmd);
     return { stdout: 'stub 9.9.9\n', stderr: '', exitCode: 0 };
   };
-  const service = new RuntimeInstallOrchestratorService(registry, repo, uow, events, clock, ids);
-  return { service, repo, published, exec, execCalls, txCount };
+  // 记录式审计 double —— `sandbox.probe` 的断言直接读它（03 §7.8）。
+  const auditRecords: AuditRecordInput[] = [];
+  const audit: AuditRecorder = { record: (r) => void auditRecords.push(r) };
+  const service = new RuntimeInstallOrchestratorService(
+    registry,
+    repo,
+    uow,
+    events,
+    clock,
+    ids,
+    audit,
+  );
+  return { service, repo, published, exec, execCalls, txCount, auditRecords };
 }
 
 const plan = (over: Partial<RuntimeInstallPlan> = {}): RuntimeInstallPlan => ({
@@ -261,5 +274,62 @@ describe('ensureRuntimeInstalled — the three steps (03 §4.3 ③)', () => {
     // …and it is still not a crash: it carries a code, so `failureOf` can file it
     // (02 §6.2 forbids a code-less failure).
     await expect(call).rejects.not.toBeInstanceOf(RuntimeInstallFailedError);
+  });
+});
+
+/**
+ * `sandbox.probe`（03 §7.8）—— 补的是「探测失败只有一行 message」。
+ *
+ * MUTATION 记录（实际跑过）：把 `probeExec` 换回裸 `input.exec` ⇒ 第一条红。
+ */
+describe('探测审计（03 §7.8 sandbox.probe）', () => {
+  it('每次探测落一条 sandbox.probe，带 argv / exitCode / 耗时', async () => {
+    const adapter = new StubAdapter('stub', plan({ strategy: 'preinstalled' }));
+    adapter.probeResults = [true];
+    const h = harness(adapter);
+    await h.service.ensureInstalled({
+      sandboxId: 's1',
+      runtimeId: 'stub',
+      image: IMAGE,
+      exec: h.exec,
+    });
+    const probes = h.auditRecords.filter((r) => r.type === 'sandbox.probe');
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes[0]).toMatchObject({
+      category: 'sandbox',
+      subjectType: 'sandbox',
+      subjectId: 's1',
+      outcome: 'ok',
+    });
+    expect(Array.isArray(probes[0]!.detail?.argv)).toBe(true);
+    expect(typeof probes[0]!.durationMs).toBe('number');
+  });
+
+  /**
+   * ⚠️ **安装本身刻意不记。** 一次冷装是 753s、上万行 npm 输出（04 §3 ★1）；
+   * 把它逐条灌进审计流就是 P21-5 §10.1 明令禁止的「把运行日志灌进审计面板」。
+   */
+  it('install() 自己跑的命令不进审计流 —— 只有探测进', async () => {
+    // 一个会真的 exec 的 install（真 adapter 都会：`npm i -g …`）。
+    class InstallingAdapter extends StubAdapter {
+      override async install(exec: SandboxExecFn): Promise<void> {
+        await exec(['npm', 'install', '-g', '@anthropic-ai/claude-code']);
+      }
+    }
+    const adapter = new InstallingAdapter('stub', plan());
+    adapter.probeResults = [false, true];
+    const h = harness(adapter);
+    await h.service.ensureInstalled({
+      sandboxId: 's1',
+      runtimeId: 'stub',
+      image: IMAGE,
+      exec: h.exec,
+    });
+    const probes = h.auditRecords.filter((r) => r.type === 'sandbox.probe');
+    const probedArgv = probes.map((r) => (r.detail?.argv as string[])[0]);
+    expect(h.execCalls.map((c) => c[0])).toContain('npm');
+    // ⚠️ npm 那一条**不在**审计流里 —— 一次冷装 753s、上万行输出（04 §3 ★1）。
+    expect(probedArgv).not.toContain('npm');
+    expect(probes.length).toBeLessThan(h.execCalls.length);
   });
 });

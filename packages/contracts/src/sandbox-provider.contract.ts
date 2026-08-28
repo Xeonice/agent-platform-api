@@ -459,6 +459,41 @@ export interface SandboxProvider {
   updateResources?(handle: SandboxHandle, quota: ResourceQuota): Promise<void>;
   watchEvents?(): AsyncIterable<ProviderEvent>;
 
+  /**
+   * Are this image's bits ALREADY on this machine, so that `start()` will not have to
+   * fetch and unpack them first? OPTIONAL — 04 §11「minor = 新增可选方法」 is exactly
+   * this shape of addition, and a provider that does not implement it keeps behaving
+   * as it did before this method existed.
+   *
+   * ── WHY THE PLATFORM ASKS AT ALL ──────────────────────────────────────────────
+   * It is the ONE fact about a slow `start()` that the browser cannot derive for
+   * itself. Measured 2026-08 on boxlite: a warm store boots in **3.2–4.1s**, a cold
+   * one spent **190529ms** in the same call pulling a 13GB image and laying down a
+   * rootfs — with `sandbox.status` pinned at `starting` and the CPU idle the whole
+   * time. Both the user and the person debugging it read that as 「卡死了」. The answer
+   * to this one boolean is what lets the frontend say 「首次用这个镜像，正在准备」
+   * instead, and it goes out on `sandbox.instance_progress.imageStaged`.
+   *
+   * ⚠️ IT MUST NOT LIE, AND 「不知道」 IS NOT `false`. A provider that cannot inspect
+   * its own store simply does not implement the method; one that implements it and
+   * cannot answer THIS TIME (store unreadable, runtime unavailable) MUST reject rather
+   * than guess. A wrong `false` promises a multi-minute wait that then takes 4s
+   * (harmless-ish); a wrong `true` puts the user back in front of a silent 190-second
+   * spinner with the platform having told them it would be quick.
+   *
+   * ⚠️ NO CAPABILITY BIT ACCOMPANIES IT, ON PURPOSE. 04 §2.5 admits a bit only when a
+   * PLATFORM BRANCH hangs off it; here the branch is `typeof provider.imageStaged ===
+   * 'function'`, decided at the single call site, and `require.imageStaged` would be
+   * meaningless to an API caller (it changes copy, never what the sandbox can do).
+   * A bit with nothing behind it is what got `networkPolicy`/`gpuAllocation` deleted.
+   *
+   * ⚠️ IT IS A HINT, NEVER A GATE. Nothing may refuse, delay or reorder provisioning
+   * on this answer — `start()` behaves identically either way. A slow call is not an
+   * error, and turning an advisory boolean into control flow would make a cold store
+   * a failure mode.
+   */
+  imageStaged?(image: ResolvedImageSpec): Promise<boolean>;
+
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `jobs`. */

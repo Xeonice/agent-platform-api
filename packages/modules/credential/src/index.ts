@@ -20,3 +20,9 @@ export type {
   MaterializedRefreshCredential,
 } from './domain/ports/runtime-credential-materializer.port';
 export { MissingPlatformAuthFileError } from './domain/ports/runtime-credential-materializer.port';
+// 领域事件类 —— 供平台级 `AuditProjector` 判别（理由见 sandbox 包同一处注释）。
+export {
+  CredentialStored,
+  CredentialRevoked,
+  CredentialInjected,
+} from './domain/events/credential-events';

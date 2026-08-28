@@ -31,6 +31,7 @@ function service(store: AuthSessionStore, clock: Clock): RuntimeApplicationServi
     store,
     {} as never,
     {} as never,
+    {} as never, // events
     clock,
     {} as never,
   );

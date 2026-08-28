@@ -19,6 +19,7 @@ export * from './exec-fn';
 export * from './runtime-install.port';
 export * from './agent-session.port';
 export * from './sandbox-events.port';
+export * from './audit-recorder.port';
 export * from './task-events.port';
 export * from './task-log.port';
 export * from './sandbox-facade.port';
