@@ -10,6 +10,18 @@ services:
       - '127.0.0.1:3000:3000' # ★ loopback only — do NOT change to 0.0.0.0 without intent
     environment:
       HOST: 0.0.0.0 # inside the container; host-side exposure is gated by the ports bind above
+      # ⚠️ 上面那行 `HOST: 0.0.0.0` 是**必须**的(容器里绑 loopback,外面那行 `ports:` 就转
+      #   不进来),于是 compose 形态下每一次启动都会打一条「HTTP is bound to 0.0.0.0」
+      #   WARN —— 而它**每一次都不代表出错**。一条恒真的告警会训练用户忽略告警,
+      #   而这条告警存在的全部理由是有朝一日真的有人把实例挂到公网上时它能被看见。
+      # ⇒ 下面这一行是**一句声明,不是一个开关**(与 SANDBOX_DOCKER_NETWORK 同一形状):
+      #   填了它 ⇒ 那条 WARN 降为一条 INFO,并把这句话**原样**打进日志(可审计);
+      #   留空 ⇒ 行为一字不变,照旧 WARN。
+      # ⚠️ 平台**验证不了**这句声明 —— 进程内看不见外侧发布在哪。改动上面那行 `ports:`
+      #   的人有责任同时改这里,否则你亲手关掉的是一条安全告警。
+      # ⚠️ 整行加引号:默认值里那个 `: ` 不加引号会被 YAML 当成一个嵌套映射(实测
+      #   `docker compose config` 直接报 mapping values are not allowed in this context)。
+      HTTP_BIND_GATED_BY: '${HTTP_BIND_GATED_BY:-compose ports: 127.0.0.1:3000:3000 (loopback only)}'
       PORT: '3000'
       # ⚠️ 没有这一行,`createDockerClient()` 会回落到 `/var/run/docker.sock` ——
       # 而那个 socket **没有**挂进 api 容器,于是下面那个 docker-socket-proxy 白挂了:
@@ -47,6 +59,11 @@ services:
       #
       # ⚠️ 它是一句**声明**,不是一个开关:填了就等于说「沙箱放到这个网络里,而我自己
       # 也在这个网络里」。两件事必须同时为真,所以下面 `networks:` 那两处与这里是一体的。
+      #
+      # ✅ **后半句从 2026-08-30 起在开机时被真的验一次**(`self-network-check.ts`):
+      #   平台会问 daemon「这个网络上有哪些容器、地址是什么」,再与本进程自己持有的
+      #   地址取交集 —— 交集为空就**开机失败**,而不是让每个沙箱静静卡在 starting。
+      #   在此之前,填错这一行的症状是「无错误、无超时、无一行日志」,实测卡 6 分钟以上。
       SANDBOX_DOCKER_NETWORK: ${SANDBOX_DOCKER_NETWORK:-platform-sandbox-net}
       # 明文(http)registry 的允许名单,逗号分隔的 `host:port`(与 docker daemon 自己的
       # `insecure-registries` 同形状)。
@@ -61,6 +78,16 @@ services:
       # 此前这里写死 `/data` 而卷是 `${DATA_ROOT}:/data`,默认值下两边并不相等。
       DATA_ROOT: ${DATA_ROOT:-/srv/agent-platform/data}
       DATABASE_URL: ${DATA_ROOT:-/srv/agent-platform/data}/platform.db
+    # ⚠️ **这一行是 `api/images/README.md` 那份「本机明文 registry」配方的一部分,不是
+    #   可选项**(2026-08-30 从零复验的落差:配方要求 api 服务带 `extra_hosts`,而本文件
+    #   此前一个字都没有 —— 照配方做的人会发现容器里 `registry.local` 解析不出来,
+    #   而症状与「registry 根本没起」一模一样)。不用本机 registry 时它是一条无害的
+    #   /etc/hosts 记录,所以默认就带着,而不是留一段要人手动解注释的注释。
+    # ⚠️ 配套的另一半:registry **不能只发布在宿主 127.0.0.1 上**。`host-gateway` 解析到
+    #   的是宿主网关 IP(实测 WSL2 上是 192.168.65.254),从那个地址连不到只绑在 loopback
+    #   上的端口。起它要用 `-p 15001:5000`(不带 127.0.0.1: 前缀),见 images/README.md。
+    extra_hosts:
+      - 'registry.local:host-gateway'
     volumes:
       # 同名挂载（见上）：宿主的 $DATA_ROOT 落到容器内**同一个绝对路径**。
       - ${DATA_ROOT:-/srv/agent-platform/data}:${DATA_ROOT:-/srv/agent-platform/data}

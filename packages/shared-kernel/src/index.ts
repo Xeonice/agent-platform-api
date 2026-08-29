@@ -10,6 +10,7 @@ export * from './domain/aggregate-root';
 export * from './domain/runtime-secret';
 export * from './domain/reserved-env';
 export * from './domain/builtin-image';
+export * from './domain/sandbox-network';
 export * from './crypto/master-key';
 export * from './fs/free-space';
 export * from './net/git-remote';

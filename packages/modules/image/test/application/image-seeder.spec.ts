@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Logger } from '@nestjs/common';
-import { ImageSeeder } from '../../src/application/image-seeder';
+import { ImageSeeder, seedFailureNextStep } from '../../src/application/image-seeder';
 import { Image } from '../../src/domain/entities/image.entity';
 import type { ProviderRegistry } from '@platform/contracts';
 import type { ImageRepository } from '../../src/domain/repositories/image.repository';
@@ -237,5 +237,49 @@ describe('ImageSeeder：全新部署自带一张镜像', () => {
     // 按名查库时 tag 要去掉，而 `:5001` 那个冒号**不是** tag 分隔符。
     // MUTATION: `stripTag` 改用 `ref.indexOf(':')` ⇒ 查的名字变成 `localhost`，本条红。
     expect(repo.findByName).toHaveBeenCalledWith('localhost:5001/agent-infra/sandbox');
+  });
+});
+
+/**
+ * ⭐ 播种失败那句「下一步」**按形态分岔** —— 2026-08-30 compose 实测抓到的一条把人指回
+ * 原地的提示：`SANDBOX_DEFAULT_IMAGE` 明明已经指着预制镜像了，日志却让人去把它指向预制
+ * 镜像。真正的根因是那个坐标**在 api 容器里解析不开**。
+ *
+ * ⚠️ 判定被抽成纯函数 `seedFailureNextStep(ref, network)` 单独测：形态判断最容易写出
+ * 「在本机永远走同一支」的断言（本机永远是裸跑档），而那种断言红不了。
+ */
+describe('播种失败的下一步：两种形态下不是同一件事', () => {
+  it('⭐ 裸跑档（没配 SANDBOX_DOCKER_NETWORK）⇒ 指向预制镜像 + registry 起没起', () => {
+    const step = seedFailureNextStep('localhost:5001/platform/sandbox:v2', null);
+    expect(step).toContain('SANDBOX_DEFAULT_IMAGE');
+    // ⚠️ 「本机 build 过不算数」是 08-29 才被推翻的那句错话的正面版本，必须在场。
+    expect(step).toContain('push');
+  });
+
+  it('⭐ 容器网络档 ⇒ **先别改 SANDBOX_DEFAULT_IMAGE**，问的是坐标解析得开吗', () => {
+    // MUTATION: 把 `seedFailureNextStep` 改回无条件返回裸跑档那句 ⇒ 本条红。
+    // 这正是实测里看到的那条提示：它让人去做一件他刚做过的事。
+    const step = seedFailureNextStep('localhost:5001/platform/sandbox:v2', 'platform-sandbox-net');
+    expect(step).toContain('先别急着改');
+    expect(step).toContain('platform-sandbox-net');
+    // loopback 坐标要被点名 —— 那是这一档最常见、也最难自己看出来的根因。
+    expect(step).toContain('容器自己');
+    expect(step).toContain('IMAGE_REGISTRY_INSECURE_HOSTS');
+  });
+
+  it('⭐ 容器网络档 + 非 loopback 坐标 ⇒ 换成问 extra_hosts，而不是硬说「指的是容器自己」', () => {
+    // MUTATION: 去掉 loopback 判断、两支合一 ⇒ 本条红（`registry.local` 在容器里指的
+    // 并不是容器自己，那么说就是一句假话）。
+    const step = seedFailureNextStep('registry.local:15001/platform/sandbox:v2', 'net-x');
+    expect(step).toContain('extra_hosts');
+    expect(step).not.toContain('容器自己');
+  });
+
+  it('⭐ registry host 的判据照抄 docker：第一段有 `.`/`:` 或就是 localhost', () => {
+    // MUTATION: 把 `looksLikeHost` 改成「有斜杠就算 host」⇒ 本条红：`platform/sandbox`
+    // 的第一段是命名空间，把它当 host 会让提示里出现一个不存在的主机名。
+    const step = seedFailureNextStep('platform/sandbox:v2', 'net-x');
+    expect(step).toContain('platform/sandbox:v2');
+    expect(step).not.toContain('`platform`');
   });
 });

@@ -1,3 +1,5 @@
+import { configuredSandboxNetwork } from '@platform/shared-kernel';
+
 /**
  * **平台自己站在哪一侧** —— 沙箱内 agent 的可达地址该用哪一套坐标（shared/11 §1.4）。
  *
@@ -25,8 +27,16 @@
  * —— 那取决于部署者怎么接的网，不取决于我在不在容器里。反例现成：api 在容器里但用
  * `network_mode: host`，`/.dockerenv` 在、而 loopback 那套坐标恰恰是**对的**。
  *
- * 一个探测错了的部署，症状是「健康检查全绿、建 Task 必失败」——最难查的那一种。而显式
- * 配置错了，症状是一条指名道姓的错误（见 `DockerContainerRuntime.agentOrigin`）。
+ * 一个探测错了的部署，症状是「健康检查全绿、建 Task 必失败」——最难查的那一种。
+ *
+ * ⛔ **但「显式配置填错了会报一条指名道姓的错误」这句话，2026-08-30 之前是假的。**
+ * `DockerContainerRuntime.agentOrigin` 里那条 `not attached` 只覆盖「沙箱容器不在网络上」
+ * ——而沙箱容器是平台自己放进去的，那一半**填不错**。填得错的是另一半（「我自己也在
+ * 这个网络里」），它当时**一个字都没查**：api 裸跑在宿主却填了这一行 ⇒ 容器 healthy、
+ * `Ports={}`、`agentOrigin` = `http://platform-aio-<id>:8080`（名字本身是对的，只是宿主
+ * 解析不开）⇒ 沙箱卡在 `starting` **六分钟以上，无错误、无超时、无日志**，比它想修的
+ * 那个原始 bug 还难查（原始 bug 至少还给一句 `did not become ready`）。
+ * ⇒ 补在 `self-network-check.ts`：**开机**就验后半句，验不过开机就失败。
  *
  * ⇒ **一个配置项 `SANDBOX_DOCKER_NETWORK`，默认空 = 今天的行为，一字不差。**
  *
@@ -50,13 +60,14 @@ export type AgentAddressing =
 /**
  * 从 `SANDBOX_DOCKER_NETWORK` 读出形态。**空串 / 未设 = `published-port`**。
  *
- * ⚠️ 空串必须算「没配」：`SANDBOX_DOCKER_NETWORK=` 在 compose 里是「我没填」的常见写法，
- * 把它当成一个名叫空字符串的网络会让容器创建直接失败（与 `isBuiltinImageConfigured`
- * 的那条 ⚠️ 同源）。
+ * ⚠️ **env 的读取本身不在这里**，在 `@platform/shared-kernel` 的
+ * `configuredSandboxNetwork()`——那是全仓唯一的读取点（空串算「没配」等规矩都在那里）。
+ * 收成一个读取点的理由与 `builtinImageRef()` 同源：这个 env 有**第二个读者**
+ * （`ImageSeeder` 的失败提示要按形态分岔），两处各读各兜底 = 两条指向不同下一步的提示。
  */
 export function resolveAgentAddressing(env: NodeJS.ProcessEnv = process.env): AgentAddressing {
-  const network = (env.SANDBOX_DOCKER_NETWORK ?? '').trim();
-  return network === '' ? { mode: 'published-port' } : { mode: 'container-network', network };
+  const network = configuredSandboxNetwork(env);
+  return network === null ? { mode: 'published-port' } : { mode: 'container-network', network };
 }
 
 /**
