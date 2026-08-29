@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { builtinImageRef } from '@platform/shared-kernel';
+import { builtinImageRefFor } from '@platform/shared-kernel';
 import { ImageAccessError, formatImageRef, parseImageRef } from '@platform/contracts';
-import type { ImageFacade, TaskImageSelection } from '@platform/contracts';
+import type { ImageFacade, RegisteredImageSummary, TaskImageSelection } from '@platform/contracts';
 import { IMAGE_REPOSITORY } from '../domain/repositories/image.repository';
 import type { ImageRepository } from '../domain/repositories/image.repository';
 import { IMAGE_MANIFEST_REPOSITORY } from '../domain/repositories/image-manifest.repository';
@@ -35,16 +35,27 @@ export class ImageFacadeAdapter implements ImageFacade {
     @Inject(ENV_SECRET_CIPHER) private readonly cipher: EnvSecretCipher,
   ) {}
 
-  async resolveForTask(selector?: string): Promise<TaskImageSelection> {
+  async resolveForTask(
+    selector: string | undefined,
+    provider: string,
+  ): Promise<TaskImageSelection> {
     // ⚠️ 记下**是谁选的**：没给 selector 时用的是平台默认镜像，而那两种情况下
     //    「下一步该做什么」完全不同——见文件末尾 `notRegisteredMessage()`。
     const usingPlatformDefault = (selector ?? '').trim() === '';
-    const wanted = usingPlatformDefault ? builtinImageRef() : (selector ?? '').trim();
+    // ⚠️ **按档取兜底那一张**（ADR 决策 C）：两档的预制镜像不再是同一张，
+    // 「没给镜像」在 aio 档与 boxlite 档是两个不同的答案。单档部署下两者相同。
+    const wanted = usingPlatformDefault ? builtinImageRefFor(provider) : (selector ?? '').trim();
 
     // ① A manifest id is the canonical selector — it is what `ImageManifestDto.id`
     //    carries and therefore what the wizard sends back.
     const byId = await this.manifests.findById(wanted);
-    if (byId) return this.assertSelectable(byId, await this.imageOf(byId), wanted);
+    if (byId)
+      return this.assertRunnable(
+        await this.assertSelectable(byId, await this.imageOf(byId), wanted),
+        byId,
+        provider,
+        wanted,
+      );
 
     // ② A repository coordinate still resolves — the platform default is configured
     //    as one (`SANDBOX_DEFAULT_IMAGE`), and a human typing an image into an API
@@ -55,7 +66,14 @@ export class ImageFacadeAdapter implements ImageFacade {
     if (image) {
       const reference = parsed.digest ?? parsed.tag ?? 'latest';
       const active = await this.manifests.findActiveByVersion(image.id, reference);
-      if (active) return this.assertSelectable(active, image, wanted);
+      if (active) {
+        return this.assertRunnable(
+          this.assertSelectable(active, image, wanted),
+          active,
+          provider,
+          wanted,
+        );
+      }
       // The tag exists in history but has no live row: say so, rather than 「unknown
       // image」 — the user's fix is [启用] a version, not a different reference.
       const history = await this.manifests.listByImage(image.id);
@@ -71,6 +89,92 @@ export class ImageFacadeAdapter implements ImageFacade {
       'IMAGE_NOT_REGISTERED',
       notRegisteredMessage(wanted, usingPlatformDefault),
     );
+  }
+
+  /**
+   * ★ 「**这张镜像跑得在这一档上吗**」—— ADR 决策 C 长出来的那个新概念。
+   *
+   * ── 判据：从**血统**推，不从**声明**读 ────────────────────────────────────
+   * 一张用户镜像属于哪一档，由「它派生自哪一张锚点」决定；而锚点属于哪一档，是
+   * **平台自己的配置**（`SANDBOX_<PROVIDER>_IMAGE`），不是镜像上的任何一句话。
+   *
+   * ⚠️ **为什么不让镜像自己声明**（比如一个 `platform.providers` 标签）：那正是
+   * `platform.tmux` 那次搬家的教训——标签会被派生镜像**继承**、会**过期**、而且**防不住
+   * 谎报**。血统是注册期就验过的**可验证事实**（`diff_ids` 前缀），而且已经算出来落库了
+   * （`derivedFromDigest`）。多一份手抄，就多一处迟早会不一致的地方。
+   *
+   * ── 比的是「同一个**仓库**」，不是「同一个 digest」 ─────────────────────────
+   * ⚠️ 这一条是本方法唯一容易写错的地方。预制镜像会升级：`platform/sandbox:v2` 通常就是
+   * `:v1` 再叠一层，两张**都是** builtin 锚点。如果拿「当前配置那一张的 digest」去比，
+   * 那么运维方把 `SANDBOX_AIO_IMAGE` 从 v1 换到 v2 的那一刻，**所有基于 v1 的用户镜像会
+   * 集体变成「跑不了」** —— 而它们什么都没变，也确实还能跑。
+   * ⇒ 比的是锚点所属的那一**行 `images`**（同一个仓库名的所有版本），这正是
+   *   `images` 表本来就在建模的东西。
+   *
+   * ── 拿不准时**放行**，不拦 ──────────────────────────────────────────────
+   * ⚠️ 这一档的锚点还没播种成功（离线部署、registry 限流）时，本方法**无法证明**
+   * 不兼容，于是不拦。少报是降级（用户可能撞上一个启动超时），多报是撒谎（把一张本来
+   * 能跑的镜像拦下来，而用户没有任何办法自证）。真正的「一张预制镜像都没有」由
+   * `notRegisteredMessage` 那条路负责说。
+   *
+   * ⚠️ **单档部署下本方法恒为放行**：两档指向同一张锚点，任何合规镜像都同时属于两档。
+   */
+  private async assertRunnable(
+    selection: TaskImageSelection,
+    manifest: ImageManifest,
+    provider: string,
+    wanted: string,
+  ): Promise<TaskImageSelection> {
+    const anchorRef = builtinImageRefFor(provider);
+    const anchorImage = await this.images.findByName(parseImageRef(anchorRef).name);
+    if (anchorImage === null) return selection; // 证明不了不兼容 ⇒ 不拦（见注释）
+    if (manifest.imageId === anchorImage.id) return selection; // 就是这一档的锚点本身
+    const anchorDigests = new Set(
+      (await this.manifests.listByImage(anchorImage.id)).map((m) => m.digest),
+    );
+    if (manifest.derivedFromDigest !== null && anchorDigests.has(manifest.derivedFromDigest)) {
+      return selection;
+    }
+    throw new ImageAccessError(
+      'IMAGE_PROVIDER_MISMATCH',
+      `镜像 '${wanted}' 跑不在 '${provider}' 档上：它不是从这一档的预制镜像 ` +
+        `'${anchorRef}' 派生出来的。两档的预制镜像不是同一张（aio 档跑自带沙箱内 HTTP ` +
+        'API 的 AIO 镜像，boxlite 档跑精简镜像），拿错那张会在「启动实例」处超时。' +
+        `下一步：换成 '${provider}' 档的镜像，或者把任务建在这张镜像所属的那一档上。`,
+    );
+  }
+
+  /**
+   * 诊断第 ⑧ 项第 4 步（P21-5 §9A）。**交事实，不下判断。**
+   *
+   * ⚠️ 刻意**不复用 `resolveForTask`**：那条路把「没注册 / 全停用 / invalid」三种情况
+   * 都收敛成一个 `IMAGE_NOT_REGISTERED`（门口只需要知道「不能用」），而诊断存在的理由
+   * 正是把它们分开说 —— 三者的下一步分别是「重启平台等播种」「去启用一个版本」
+   * 「换一张镜像」。
+   *
+   * ⚠️ 按 tag 查的是**当前启用的那一版**（`findActiveByVersion`）；没有启用版本时退回
+   * 历史行，这样「有这张、但全停用了」不会被误报成「压根没有这张」。
+   */
+  async findRegisteredByRef(ref: string): Promise<RegisteredImageSummary | null> {
+    const parsed = parseImageRef(ref.trim());
+    const image = await this.images.findByName(parsed.name);
+    if (!image) return null;
+    const reference = parsed.digest ?? parsed.tag ?? 'latest';
+    const active = await this.manifests.findActiveByVersion(image.id, reference);
+    const manifest =
+      active ??
+      (await this.manifests.listByImage(image.id)).find((m) => m.version === reference) ??
+      null;
+    if (!manifest) return null;
+    return {
+      manifestId: manifest.id,
+      ref: formatImageRef(image.name, manifest.version),
+      digest: manifest.digest,
+      validationStatus: manifest.validation.status,
+      isActive: manifest.isActive,
+      isBuiltin: image.isBuiltin,
+      entrypoint: manifest.entrypointContract.entrypoint,
+    };
   }
 
   async findTaskImage(manifestId: string): Promise<TaskImageSelection | null> {

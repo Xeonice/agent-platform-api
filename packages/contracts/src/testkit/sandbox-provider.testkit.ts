@@ -24,6 +24,81 @@ const CAPABILITY_MANIFEST: Record<keyof SandboxProviderCapabilities, true> = {
 };
 const CAPABILITY_KEYS = Object.keys(CAPABILITY_MANIFEST) as (keyof SandboxProviderCapabilities)[];
 
+/**
+ * ★ CAP-03 的判据表：**每一位怎么被兑现**。
+ *
+ * ══ 为什么非有这张表不可（2026-08-29 事故记录）═══════════════════════════════════
+ *
+ * CAP-01 只查「七位齐全且都是 boolean」，CAP-02 只查 `headlessTask` 与两个面一致。
+ * 于是**其余五位声明了什么都没人验**。实测查出来的谎报：
+ *
+ * | provider | 位 | 真相 |
+ * |---|---|---|
+ * | `aio` | `updateResources: true` | 没有 `updateResources()` 方法 |
+ * | `aio` | `pauseResume: true` | 契约里**根本没有** pause/resume 方法 |
+ * | `aio` | `watchEvents: true` | 没有 `watchEvents()` 方法 |
+ * | `boxlite` | `watchEvents: true` | 同上 |
+ *
+ * ⚠️ **这些位不是装饰**：`sandbox-application.service.ts#assertCapabilities` 照着它们
+ * 放行 `create({ require: { updateResources: true } })`，`GET /api/providers` 照着它们
+ * 告诉前端该画哪些控件。一位谎报 = 平台替 provider 签了一张它兑付不了的支票。
+ *
+ * ⚠️ **根因不是「有人写错了一位」，是「没有任何东西要求任何一位兑现」**。所以修法不是
+ * 把那几位改成 false 就完事 —— 那只修了今天的四处，下一位照样漂。本表 + CAP-03 才是修根因：
+ * **新增一位就必须在这里回答「平台怎么兑现它」**，答不上来就只能声明 false。
+ */
+/**
+ * 契约上的**可选**方法名 —— 能力位唯一可能挂靠的东西。
+ *
+ * ⚠️ 写成联合类型而不是 `string`，是为了让 `provider[rule.method]` 本身就是合法索引：
+ * 用 `string` 就得靠 `as unknown as Record<string, unknown>` 双重断言把类型系统绕开，
+ * 而那正好会让「表里写了一个契约上不存在的方法名」变成一个**运行期永远为 false 的
+ * 断言**——一条永远绿的守卫。
+ */
+type OptionalProviderMethod = 'updateResources' | 'watchEvents' | 'imageStaged';
+
+interface CapabilityExercise {
+  /**
+   * 兑现这一位的契约方法名；`null` = **契约里还没有兑现它的办法**，于是这一位只能是
+   * `false`（"先加方法，再改这一位"）。
+   */
+  readonly method: OptionalProviderMethod | null;
+  /** `method: null` 时写清「为什么今天兑现不了」——它会原样出现在失败消息里。 */
+  readonly why: string;
+}
+
+/**
+ * 有兑现途径、但**不是可选方法**的那几位 —— 本条款不对它们下判断（各自的守卫写在
+ * 表里的 `why` 中）。⚠️ 它们仍然必须出现在 `CAPABILITY_EXERCISE` 里：豁免要显式，
+ * 不能靠「表里没有」来实现，否则新增一位漏填就被静默豁免。
+ */
+const CAPABILITY_NO_BIT_RULE = new Set<keyof SandboxProviderCapabilities>([
+  'spawnTty',
+  'volumeMount',
+  'headlessTask',
+]);
+
+const CAPABILITY_EXERCISE: Record<keyof SandboxProviderCapabilities, CapabilityExercise> = {
+  // 由**必需**方法兑现：`spawn(handle, { tty: true })`。它不是可选方法，所以无从用
+  // `typeof` 判在不在；真正的守卫在应用层——`assertCapabilities` 对 `spawnTty: false`
+  // 的 provider 一律拒绝建沙箱（每个 runtime 都要 TTY）。
+  spawnTty: { method: null, why: '由必需方法 `spawn({tty:true})` 兑现，没有可选方法可查' },
+  // 由 `SandboxProviderContext.volumes` 兑现——一个**入参**，不是方法。
+  volumeMount: { method: null, why: '由 `create()` 的 `ctx.volumes` 入参兑现，没有可选方法可查' },
+  updateResources: { method: 'updateResources', why: '' },
+  pauseResume: {
+    method: null,
+    why: '契约上没有 `pause()` / `resume()` —— 声明 true 等于承诺一件平台无法调用的事',
+  },
+  snapshot: {
+    method: null,
+    why: '契约上没有任何快照方法 —— boxlite 的 SDK 有完整快照 API 却仍声明 false，正是这个道理',
+  },
+  watchEvents: { method: 'watchEvents', why: '' },
+  // CAP-02 已经**双向**钉死它与 `jobs`/`files` 两个面的一致性，这里不重复。
+  headlessTask: { method: null, why: 'CAP-02 已按 `jobs`/`files` 两个面双向钉死' },
+};
+
 export interface SandboxProviderTestOptions {
   /** Pin the declared bits verbatim (regression guard for a built-in implementation). */
   expectedCapabilities?: Partial<SandboxProviderCapabilities>;
@@ -80,6 +155,49 @@ export function runSandboxProviderContractTests(
             value,
           );
         }
+      }
+    });
+
+    it('CAP-03 (MUST, behavioural half): a bit is `true` only when it is EXERCISABLE', () => {
+      const provider = factory();
+      const caps = provider.capabilities;
+
+      // ⚠️ 穷举，而且**穷举本身是断言的一部分**：`CAPABILITY_KEYS` 里出现一个表里没有的
+      // 位，本条立刻红。这正是本条款存在的理由 —— 上一次漂移不是因为有人写错了一位，
+      // 而是因为**没有任何东西要求任何一位兑现**（见下方 ⚠️ 事故记录）。
+      for (const key of CAPABILITY_KEYS) {
+        expect(
+          Object.prototype.hasOwnProperty.call(CAPABILITY_EXERCISE, key),
+          `capability bit '${key}' has no CAP-03 rule — 新增一位就必须同时回答「平台怎么兑现它」。` +
+            '要么它对应一个契约方法（写进 CAPABILITY_EXERCISE 的 `method`），要么契约里还没有' +
+            '兑现它的办法（`method: null` ⇒ 只能声明 false）。',
+        ).toBe(true);
+      }
+
+      for (const [key, rule] of Object.entries(CAPABILITY_EXERCISE)) {
+        const bit = caps[key as keyof SandboxProviderCapabilities];
+        if (CAPABILITY_NO_BIT_RULE.has(key as keyof SandboxProviderCapabilities)) continue;
+        if (rule.method === null) {
+          // 契约里**根本没有**兑现它的方法 ⇒ `true` 是一张无法兑付的支票。
+          // 平台的创建门 (`assertCapabilities`) 会照着它放行 `require: { <bit>: true }`
+          // 的请求 —— 用户说「我要能做 X 的沙箱」，平台答应了，然后没有任何 API 能做 X。
+          // 那比诚实地拒绝更糟。
+          expect(
+            bit,
+            `capability bit '${key}' must be false: ${rule.why}。` +
+              '⚠️ 顺序是「先加方法，再改这一位」—— 契约长出方法时，把本表的 `method` ' +
+              '从 null 改成方法名，两边一起走。',
+          ).toBe(false);
+          continue;
+        }
+        // 有方法可兑现 ⇒ 位与方法**双向**一致，理由与 CAP-02 同源：
+        // `true` 没方法 ⇒ 应用层调 `undefined`；`false` 有方法 ⇒ `GET /api/providers`
+        // 藏起一个真实存在的能力，而前端控件正是照着这一位画的。
+        const implemented = typeof provider[rule.method] === 'function';
+        expect(
+          implemented,
+          `capability bit '${key}' must equal the presence of \`${rule.method}()\``,
+        ).toBe(bit);
       }
     });
 

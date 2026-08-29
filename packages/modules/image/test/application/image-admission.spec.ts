@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach } from 'vitest';
 import {
   IMAGE_BASE_REQUIRED,
-  IMAGE_LABEL_TMUX,
   IMAGE_TMUX_MISSING,
   formatImageRef,
   parseImageRef,
@@ -49,8 +48,6 @@ const BASE_LAYERS = [layer('base-1'), layer('base-2'), layer('base-3')];
 
 interface ScriptedImage {
   diffIds: string[];
-  /** `false` ⇒ the image carries no `platform.tmux` label. */
-  tmux?: boolean;
 }
 
 class ScriptedSpec implements ImageSpecProvider {
@@ -74,7 +71,7 @@ class ScriptedSpec implements ImageSpecProvider {
         entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
         supportedRuntimes: ['codex'],
         resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
-        labelsRequired: scripted.tmux === false ? [] : [IMAGE_LABEL_TMUX],
+        labelsRequired: [],
         diffIds: scripted.diffIds,
       },
     });
@@ -201,12 +198,31 @@ function makeService(): {
   };
 }
 
-const ROOT = 'registry.example/platform/base:v1';
+/**
+ * ⚠️ 根镜像坐标落在**平台内置已知表**里（`platform/sandbox`），tmux 声明因此自动成立
+ * ——这正是默认配置下的样子。`UNKNOWN_ROOT` 是它的反面：一张平台不认识、运维方也没
+ * 声明过的镜像。
+ */
+const ROOT = 'registry.example/platform/sandbox:v1';
+const UNKNOWN_ROOT = 'registry.example/some/alpine:3.20';
 let h: ReturnType<typeof makeService>;
+
+const prevRef = process.env.SANDBOX_DEFAULT_IMAGE;
+const prevTmux = process.env.SANDBOX_DEFAULT_IMAGE_TMUX;
 
 beforeEach(() => {
   h = makeService();
   h.spec.images.set(ROOT, { diffIds: BASE_LAYERS });
+  h.spec.images.set(UNKNOWN_ROOT, { diffIds: BASE_LAYERS });
+  process.env.SANDBOX_DEFAULT_IMAGE = ROOT;
+  delete process.env.SANDBOX_DEFAULT_IMAGE_TMUX;
+});
+
+afterEach(() => {
+  if (prevRef === undefined) delete process.env.SANDBOX_DEFAULT_IMAGE;
+  else process.env.SANDBOX_DEFAULT_IMAGE = prevRef;
+  if (prevTmux === undefined) delete process.env.SANDBOX_DEFAULT_IMAGE_TMUX;
+  else process.env.SANDBOX_DEFAULT_IMAGE_TMUX = prevTmux;
 });
 
 /** Register the platform root exactly the way `ImageSeeder` does. */
@@ -214,7 +230,7 @@ async function seedRoot(): Promise<void> {
   await h.service.registerImage(ROOT, { builtin: true });
 }
 
-describe('根镜像（builtin）：豁免血统，但必须声明 tmux', () => {
+describe('根镜像（builtin）：豁免血统，但必须有一句 tmux 声明', () => {
   it('空库里也能注册 —— 它就是锚点，没有更早的祖先可比', async () => {
     // MUTATION: 把 `assertAdmissible` 里的 `if (builtin) { …; return; }` 去掉 ⇒ 本条
     // 撞上「平台还没有可用的预制镜像」那条 409，播种从此永远失败，平台起不来。
@@ -223,15 +239,15 @@ describe('根镜像（builtin）：豁免血统，但必须声明 tmux', () => {
     expect(h.rows()).toHaveLength(1);
   });
 
-  it('⭐ 根镜像没声明 platform.tmux ⇒ IMAGE_TMUX_MISSING，且不落库', async () => {
-    h.spec.images.set(ROOT, { diffIds: BASE_LAYERS, tmux: false });
-    // ⚠️ 这条防的是「运维方把 SANDBOX_DEFAULT_IMAGE 指错了」，**不是**防谎报——
-    // 标签会被派生镜像继承，防不住谎报；谎报由运行期 `command -v tmux` 抓
+  it('⭐ 根镜像既不是已知镜像、运维方也没声明 ⇒ IMAGE_TMUX_MISSING，且不落库', async () => {
+    // 「`SANDBOX_DEFAULT_IMAGE` 被填成一张随便的 alpine」——正是这条规则存在的理由。
+    // ⚠️ 它防的是「指错了镜像」，**不是**防谎报；谎报由运行期 `command -v tmux` 抓
     // （⇒ IMAGE_CONTRACT_VIOLATION）。两层各管一半，见 04 §7 ★血统。
-    await expect(h.service.registerImage(ROOT, { builtin: true })).rejects.toBeInstanceOf(
+    process.env.SANDBOX_DEFAULT_IMAGE = UNKNOWN_ROOT;
+    await expect(h.service.registerImage(UNKNOWN_ROOT, { builtin: true })).rejects.toBeInstanceOf(
       ManifestInvalidError,
     );
-    await h.service.registerImage(ROOT, { builtin: true }).catch((e: unknown) => {
+    await h.service.registerImage(UNKNOWN_ROOT, { builtin: true }).catch((e: unknown) => {
       expect((e as ManifestInvalidError).outcome.errors.map((f) => f.code)).toContain(
         IMAGE_TMUX_MISSING,
       );
@@ -239,14 +255,29 @@ describe('根镜像（builtin）：豁免血统，但必须声明 tmux', () => {
     expect(h.rows(), 'invalid 不落库（24 §7.2）').toHaveLength(0);
   });
 
-  it('派生镜像**不**做这条 tmux 声明检查 —— 标签是继承来的，问它等于问它祖宗', async () => {
+  it('⭐ 运维方显式声明 ⇒ 一张平台不认识的镜像也能当锚点', async () => {
+    // 这是自建/内网 mirror/改名镜像唯一的通路。⚠️ 没有它，规则就退化成「只有我们
+    // 发布的那两个名字能用」——那不是一条安全规则，那是一条锁死。
+    process.env.SANDBOX_DEFAULT_IMAGE = UNKNOWN_ROOT;
+    process.env.SANDBOX_DEFAULT_IMAGE_TMUX = 'true';
+    const result = await h.service.registerImage(UNKNOWN_ROOT, { builtin: true });
+    expect(result.created).toBe(true);
+  });
+
+  it('⭐ 显式的 `=false` 压得过内置已知表', async () => {
+    // 运维方说「我知道这张镜像没 tmux」时，平台不该反过来告诉他有。
+    process.env.SANDBOX_DEFAULT_IMAGE_TMUX = 'false';
+    await expect(h.service.registerImage(ROOT, { builtin: true })).rejects.toBeInstanceOf(
+      ManifestInvalidError,
+    );
+  });
+
+  it('派生镜像**不**做这条 tmux 声明检查 —— 那是关于根镜像的一句声明', async () => {
     await seedRoot();
-    // 一张老老实实 FROM base 的镜像，自己一个 platform.* 都没写。在旧口径下这会被判
-    // MANIFEST_INVALID；而实测表明它其实继承了 base 的全部三个标签，所以那个判定
-    // 既拦不住坏镜像，也拦得住好镜像。
+    // 一张老老实实 FROM 预制镜像的用户镜像。声明是**运维方对根镜像**说的一句话，
+    // 派生镜像既不该重复它，也无从重复——能证明的只有血统（diff_ids 前缀）。
     h.spec.images.set('registry.example/user/app:v1', {
       diffIds: [...BASE_LAYERS, layer('app')],
-      tmux: false,
     });
     const result = await h.service.registerImage('registry.example/user/app:v1');
     expect(result.created).toBe(true);
@@ -424,17 +455,22 @@ describe('⭐ 血统不止判「过不过」，还要记下「基于哪一张」
 
 describe('⭐ 多个锚点同时匹配：取**最长前缀**，也就是最近的那个祖先', () => {
   /**
-   * 这不是假想的边界。`platform/base` 与 `platform/sandbox` 是祖孙——后者 `FROM` 前者，两张
-   * 都是平台预制镜像、都在 `listBuiltinAnchors()` 里。于是一张 `FROM platform/sandbox` 的用户
-   * 镜像**同时**是两者的后代，两条前缀都成立，「匹配上了」这句话不足以定位到一张。
+   * 这不是假想的边界。`listBuiltinAnchors()` 返回**所有**注册过的 builtin，而预制镜像会
+   * 升级：`platform/sandbox:v2` 通常就是 `:v1` 再叠一层（换个 CLI 版本）。⚠️ 升级后
+   * **旧的那张仍然在库里、仍然是 builtin**，于是一张 `FROM :v2` 的用户镜像**同时**是
+   * 两者的后代，两条前缀都成立，「匹配上了」这句话不足以定位到一张。
+   *
+   * （这一组的原始动机是被删掉的 `platform/base` 与 `platform/sandbox` 那对祖孙。锚点
+   * 少了一层，**祖孙关系并没有消失**——它只是从「两个仓库」变成了「同一个仓库的两代」，
+   * 而且这一种会随每次升级自动发生，比原来更常见。）
    *
    * 取最长的那个前缀 = 取最近的祖先 = 取用户真的写在 Dockerfile 第一行的那张。取错了不会有
    * 任何东西报错：卡片上的「基于 X」会显示成一个用户从没写过的坐标，而将来据此做自动 rebase
    * 会把镜像 rebase 到**祖父**那一张上去。
    */
-  const PARENT = 'registry.example/platform/sandbox:v1';
+  const PARENT = 'registry.example/platform/sandbox:v2';
   const CHILD = 'registry.example/user/app:v1';
-  const PARENT_LAYERS = [...BASE_LAYERS, layer('sandbox')];
+  const PARENT_LAYERS = [...BASE_LAYERS, layer('sandbox-v2')];
 
   /**
    * 两张锚点都种下，`order` 决定注册顺序。
@@ -458,7 +494,7 @@ describe('⭐ 多个锚点同时匹配：取**最长前缀**，也就是最近�
   }
 
   it.each(['base-first', 'sandbox-first'] as const)(
-    'FROM sandbox 的镜像记成 sandbox（注册顺序 %s）—— 不是它的祖父 base',
+    'FROM v2 的镜像记成 v2（注册顺序 %s）—— 不是它的祖先 v1',
     async (order) => {
       const anchors = await seedAnchors(order);
       expect(anchors.base).not.toBe(anchors.sandbox);
@@ -474,9 +510,9 @@ describe('⭐ 多个锚点同时匹配：取**最长前缀**，也就是最近�
     },
   );
 
-  it('祖孙两张锚点都在时，直接 FROM base 的那张仍然记成 base', async () => {
+  it('两代锚点都在时，直接 FROM v1 的那张仍然记成 v1', async () => {
     // ⚠️ 反向守卫：一个「永远取最长的那张锚点」而**不看是否真的匹配**的实现，会把这张
-    // 只基于 base 的镜像也记成 sandbox —— 它从来没装过 sandbox 那一层。
+    // 只基于 v1 的镜像也记成 v2 —— 它从来没装过 v2 那一层。
     const anchors = await seedAnchors('base-first');
     h.spec.images.set('registry.example/user/plain:v1', {
       diffIds: [...BASE_LAYERS, layer('plain')],
@@ -488,7 +524,10 @@ describe('⭐ 多个锚点同时匹配：取**最长前缀**，也就是最近�
   it('两张锚点层列表一字不差时取先出现的那张（最新注册的），不报错也不挑第二张', async () => {
     // 长度相同 ⇒ 两张锚点指向同一份 bits，取哪张都对；这里钉住的是「不会因为并列而
     // 回退成 null」——那会让一张完全合规的镜像丢掉血统记录。
-    const twin = 'registry.example/platform/twin:v1';
+    //
+    // ⚠️ 这里的第二张锚点用 `platform/boxlite`，因为 ADR 决策 C 之后「同时有两张
+    // builtin 锚点」不再是假想：那就是**双档部署**的常态（aio 一张、boxlite 一张）。
+    const twin = 'registry.example/platform/boxlite:v1';
     h.spec.images.set(twin, { diffIds: [...BASE_LAYERS] });
     await h.service.registerImage(ROOT, { builtin: true });
     const later = await h.service.registerImage(twin, { builtin: true });

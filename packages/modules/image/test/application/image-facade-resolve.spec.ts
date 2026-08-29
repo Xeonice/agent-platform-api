@@ -64,7 +64,7 @@ afterEach(() => {
 
 async function messageOf(selector?: string): Promise<string> {
   try {
-    await facade().resolveForTask(selector);
+    await facade().resolveForTask(selector, 'aio');
   } catch (e) {
     return (e as Error).message;
   }
@@ -95,5 +95,155 @@ describe('ImageFacade.resolveForTask —— 「没注册」的两种说法', () 
 
   it('空白 selector 与不给 selector 同义（前端传空串是常态）', async () => {
     expect(await messageOf('   ')).toBe(await messageOf(undefined));
+  });
+});
+
+/**
+ * ★ ADR 决策 C：**两档的预制镜像不再是同一张**，于是门口多了一个此前不存在的问题
+ * ——「这张镜像跑得在这一档上吗」。
+ *
+ * ⚠️ 本组用例最重要的一条是**最后那条**：单档部署下这条检查必须**恒为放行**。
+ * 双档能力如果让今天绝大多数（单机单档）部署多出一种拒绝方式，那它带来的伤害
+ * 会远大于它解决的问题。
+ */
+describe('resolveForTask —— 「这张镜像跑得在这一档上吗」（ADR 决策 C）', () => {
+  const AIO_ANCHOR = 'registry.example/platform/sandbox:v1';
+  const BOX_ANCHOR = 'registry.example/platform/boxlite:v1';
+
+  interface Row {
+    id: string;
+    imageId: string;
+    digest: string;
+    derivedFromDigest: string | null;
+  }
+  const rows: Row[] = [
+    { id: 'm-aio', imageId: 'img-aio', digest: 'sha256:aio', derivedFromDigest: null },
+    { id: 'm-box', imageId: 'img-box', digest: 'sha256:box', derivedFromDigest: null },
+    // 用户镜像：一张 FROM aio 锚点，一张 FROM boxlite 锚点
+    { id: 'm-ua', imageId: 'img-ua', digest: 'sha256:ua', derivedFromDigest: 'sha256:aio' },
+    { id: 'm-ub', imageId: 'img-ub', digest: 'sha256:ub', derivedFromDigest: 'sha256:box' },
+    // aio 锚点的**下一个版本**（同一个 images 行）——升级场景
+    { id: 'm-aio2', imageId: 'img-aio', digest: 'sha256:aio2', derivedFromDigest: null },
+    { id: 'm-ua2', imageId: 'img-ua2', digest: 'sha256:ua2', derivedFromDigest: 'sha256:aio2' },
+  ];
+  const NAMES: Record<string, string> = {
+    'registry.example/platform/sandbox': 'img-aio',
+    'registry.example/platform/boxlite': 'img-box',
+  };
+
+  function twoTierFacade(): ImageFacadeAdapter {
+    const manifestOf = (id: string): Record<string, unknown> => {
+      const r = rows.find((x) => x.id === id)!;
+      // ⚠️ 照 `ImageManifest` 实体**真实读到的**那几个字段做替身，而不是照猜的做。
+      // 少一个（例如 `validation.status`）会让被测代码在断言前先抛 TypeError，
+      // 于是用例「红了」，红的却不是它要测的那件事。
+      return {
+        ...r,
+        version: 'v1',
+        baseImage: 'base',
+        isActive: true,
+        validation: { status: 'valid' },
+        entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+        supportedRuntimes: ['codex'],
+        resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+        labelsRequired: [],
+        diffIds: [],
+        registeredAt: new Date('2026-08-29T00:00:00.000Z'),
+        env: {},
+      };
+    };
+    const images: MinimalImages = {
+      findById: vi.fn(
+        async (id: string) => await Promise.resolve({ id, name: 'x', isBuiltin: true } as never),
+      ),
+      findByName: vi.fn(
+        async (name: string) =>
+          await Promise.resolve(
+            NAMES[name] ? ({ id: NAMES[name], name, isBuiltin: true } as never) : null,
+          ),
+      ),
+    };
+    const manifests: MinimalManifests = {
+      findById: vi.fn(
+        async (id: string) =>
+          await Promise.resolve(rows.some((r) => r.id === id) ? (manifestOf(id) as never) : null),
+      ),
+      findActiveByVersion: vi.fn(async () => await Promise.resolve(null)),
+      listByImage: vi.fn(
+        async (imageId: string) =>
+          await Promise.resolve(
+            rows.filter((r) => r.imageId === imageId).map((r) => manifestOf(r.id)) as never,
+          ),
+      ),
+    };
+    return new ImageFacadeAdapter(
+      images as ImageRepository,
+      manifests as ImageManifestRepository,
+      cipher,
+    );
+  }
+
+  const prevAio = process.env.SANDBOX_AIO_IMAGE;
+  const prevBox = process.env.SANDBOX_BOXLITE_IMAGE;
+  beforeEach(() => {
+    process.env.SANDBOX_AIO_IMAGE = AIO_ANCHOR;
+    process.env.SANDBOX_BOXLITE_IMAGE = BOX_ANCHOR;
+  });
+  afterEach(() => {
+    if (prevAio === undefined) delete process.env.SANDBOX_AIO_IMAGE;
+    else process.env.SANDBOX_AIO_IMAGE = prevAio;
+    if (prevBox === undefined) delete process.env.SANDBOX_BOXLITE_IMAGE;
+    else process.env.SANDBOX_BOXLITE_IMAGE = prevBox;
+  });
+
+  const codeOf = async (id: string, provider: string): Promise<string> => {
+    try {
+      await twoTierFacade().resolveForTask(id, provider);
+      return 'OK';
+    } catch (e) {
+      if ((e as { code?: string }).code) return (e as { code: string }).code;
+      throw e;
+    }
+  };
+
+  it('⭐ 一张 FROM boxlite 锚点的镜像跑不了 aio 档 ⇒ IMAGE_PROVIDER_MISMATCH', async () => {
+    // 没有这条，用户拿错镜像的后果是**在「启动实例」处静默超时**（boxlite 那张里
+    // 根本没有 `:8080` 的 agent），而错误信息说的是「实例启动超时」——指向一个
+    // 完全无关的方向。
+    expect(await codeOf('m-ub', 'aio')).toBe('IMAGE_PROVIDER_MISMATCH');
+    expect(await codeOf('m-ua', 'boxlite')).toBe('IMAGE_PROVIDER_MISMATCH');
+  });
+
+  it('各自档上的镜像正常放行，锚点自己也放行', async () => {
+    expect(await codeOf('m-ua', 'aio')).toBe('OK');
+    expect(await codeOf('m-ub', 'boxlite')).toBe('OK');
+    expect(await codeOf('m-aio', 'aio')).toBe('OK');
+    expect(await codeOf('m-box', 'boxlite')).toBe('OK');
+  });
+
+  it('⭐ 锚点升级（v1→v2，同一个仓库）不会让基于旧版的镜像集体失效', async () => {
+    // ⚠️ 拿「当前配置那一张的 digest」比对的实现会在这里红：`m-ua` 派生自 sha256:aio，
+    // 而运维方已经把这一档指向了 v2。它们什么都没变，也确实还能跑。
+    // ⇒ 比的必须是**锚点所属的那一行 `images`**（同一仓库的所有版本）。
+    process.env.SANDBOX_AIO_IMAGE = 'registry.example/platform/sandbox:v2';
+    expect(await codeOf('m-ua', 'aio')).toBe('OK');
+    expect(await codeOf('m-ua2', 'aio')).toBe('OK');
+    // 而 boxlite 那张仍然跑不了 aio —— 放宽的是版本，不是档。
+    expect(await codeOf('m-ub', 'aio')).toBe('IMAGE_PROVIDER_MISMATCH');
+  });
+
+  it('⭐⭐ 单档部署（两档指向同一张）⇒ 这条检查恒为放行', async () => {
+    // 绝大多数部署是单机单档，不该因为平台长出双档能力而多出一种拒绝方式。
+    process.env.SANDBOX_AIO_IMAGE = AIO_ANCHOR;
+    process.env.SANDBOX_BOXLITE_IMAGE = AIO_ANCHOR;
+    expect(await codeOf('m-ua', 'aio')).toBe('OK');
+    expect(await codeOf('m-ua', 'boxlite')).toBe('OK');
+  });
+
+  it('这一档的锚点还没播种成功 ⇒ **不拦**（证明不了不兼容）', async () => {
+    // 少报是降级（可能撞上一次启动超时），多报是撒谎（把一张能跑的镜像拦下来，
+    // 而用户没有任何办法自证）。「一张预制镜像都没有」由另一条路负责说。
+    process.env.SANDBOX_AIO_IMAGE = 'registry.example/platform/never-seeded:v1';
+    expect(await codeOf('m-ub', 'aio')).toBe('OK');
   });
 });

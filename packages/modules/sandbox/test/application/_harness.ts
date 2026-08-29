@@ -821,6 +821,21 @@ export function harness(opts: HarnessOptions = {}) {
         resolvedAt: clock.now().toISOString(),
       };
     },
+    // 诊断第 ⑧ 项第 4 步的读口。sandbox 上下文一处都不调它（它服务的是
+    // `platform/system/diagnostics`），这里存在只是为了让 double 与 port 同形 ——
+    // 少一个方法，`ImageFacade` 的类型注解就会当场报红。
+    async findRegisteredByRef(ref: string) {
+      const digest = imageDigests.get(ref);
+      if (digest === undefined) return null;
+      return {
+        manifestId: `img-${ref}`,
+        ref,
+        digest,
+        validationStatus: 'valid',
+        isActive: true,
+        isBuiltin: true,
+      };
+    },
   };
 
   // 记录式审计 double —— provision 阶段计时/失败那一刻的断言直接读它（03 §7.8）。

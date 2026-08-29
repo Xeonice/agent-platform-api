@@ -103,19 +103,55 @@ export function splitRegistry(name: string): { host: string; repository: string 
   return { host: head, repository: name.slice(slash + 1) };
 }
 
-/** Plain HTTP only for loopback (the boxlite `:5001` staging mirror); TLS elsewhere. */
-function schemeFor(host: string): string {
-  return /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host) ? 'http' : 'https';
+/**
+ * 明文 registry 的**允许名单**——`IMAGE_REGISTRY_INSECURE_HOSTS`，逗号分隔的 `host:port`。
+ *
+ * ⚠️ **为什么必须有这个配置，而不是继续只认 loopback 字面量**（shared/11 §1.4）：
+ * `localhost` / `127.0.0.1` 这几个字面量在**容器里指的是容器自己**。于是 compose 形态
+ * （api 在容器里）根本配不出一个可用的本机 registry：写 `127.0.0.1:5001` 连的是自己，
+ * 换成 `host.docker.internal:5001` 或 compose 服务名又会被这里强制走 https 而失败
+ * （实测：`http://host.docker.internal:15001/v2/` → 200，`https://…` → fetch failed）。
+ * 这与 `agent-addressing.ts` 记的是**同一个病根**：容器内外的坐标不是同一套。
+ *
+ * ⇒ 与 docker daemon 自己的 `insecure-registries` 同形状：**部署者显式列出**哪些 host
+ * 走明文。⛔ 不做「先试 https 再退回 http」那种自动降级——那等于给任何一次 TLS 故障
+ * 配了一条静默的降级路径，而它降级掉的正是传输安全。
+ *
+ * ⚠️ 默认空 ⇒ 行为与今天一字不差：**只有** loopback 字面量走 http，其余一律 https。
+ * ⚠️ 名单比对的是 `host[:port]` 整体：`registry.local:15001` 放行不代表
+ * `registry.local:443` 也放行——端口是坐标的一部分。
+ */
+export function insecureRegistryHosts(env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
+  return new Set(
+    (env.IMAGE_REGISTRY_INSECURE_HOSTS ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter((h) => h !== ''),
+  );
+}
+
+/** Plain HTTP for loopback (the boxlite `:5001` staging mirror) and for hosts the
+ * operator explicitly listed as insecure; TLS everywhere else. */
+export function schemeFor(host: string, insecure: ReadonlySet<string> = new Set()): string {
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host)) return 'http';
+  return insecure.has(host.toLowerCase()) ? 'http' : 'https';
 }
 
 export class OciRegistryClient {
   private readonly tokens = new Map<string, string>();
 
-  constructor(private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS) {}
+  constructor(
+    private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    /**
+     * 明文 registry 允许名单。**构造时定下来**——它是一条部署事实，不是每次请求
+     * 各自回答的问题（与 `AgentAddressing` 同理）。
+     */
+    private readonly insecureHosts: ReadonlySet<string> = insecureRegistryHosts(),
+  ) {}
 
   async fetchManifest(name: string, reference: string): Promise<FetchedManifest> {
     const { host, repository } = splitRegistry(name);
-    const base = `${schemeFor(host)}://${host}`;
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
     const res = await this.authed(
       host,
       repository,

@@ -87,7 +87,16 @@ export class BoxliteSandboxProvider implements SandboxProvider {
      * ⇒ 先加方法，再改这一位。顺序反过来就是给自己发一张空头支票。
      */
     snapshot: false,
-    watchEvents: true,
+    /**
+     * ⚠️ **2026-08-29 从 `true` 改成 `false`：它一直是谎报。** 契约上 `watchEvents?()`
+     * 是一个可选方法，返回 `AsyncIterable<ProviderEvent>`；这个 provider **从来没有
+     * 实现过它**（aio 也没有）。两边同时错了这么久，是因为在 CAP-03 之前**没有任何
+     * 东西要求任何一位兑现**。
+     *
+     * 与上面 `snapshot` 那段是同一条纪律：**先加方法，再改这一位**。翻成 `true` 的效果
+     * 是放行一个平台随后无法兑现的请求，那比诚实地拒绝更糟。
+     */
+    watchEvents: false,
     headlessTask: true,
   };
 

@@ -21,6 +21,40 @@ services:
       # `agent port 8080 is not published`(11 §1.3 坑二,本次 compose 验证当场复现)。
       # 不设这一行 ⇒ 照着本文件部署出来的平台**开箱即坏**。
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-ghcr.io/agent-infra/sandbox:latest}
+      # 运维方对上面那张镜像的一句声明:它装了 tmux 吗(04 §7 ★血统)。
+      # ⚠️ 留空 ⇒ 平台查内置的已知镜像表(`agent-infra/sandbox` / `platform/sandbox`,
+      #   含内网 mirror)。上面的兜底值正在表里,所以默认能起;换成一张平台不认识的
+      #   镜像时**必须**在这里显式声明,否则开机播种会响亮失败。
+      # ⚠️ 它防的是「指错了镜像」,不是「谎报」——谎报由运行期 `command -v tmux` 抓。
+      SANDBOX_DEFAULT_IMAGE_TMUX: ${SANDBOX_DEFAULT_IMAGE_TMUX:-}
+      # 按档覆盖预制镜像(ADR 决策 C)。**单档部署留空即可** —— 留空 = 两档共用上面那张,
+      # 与本次改动前的行为一字不差。两档的镜像不可互换,平台会在建任务门口拦下
+      # (IMAGE_PROVIDER_MISMATCH),判据是血统而不是任何一句声明。
+      SANDBOX_AIO_IMAGE: ${SANDBOX_AIO_IMAGE:-}
+      SANDBOX_BOXLITE_IMAGE: ${SANDBOX_BOXLITE_IMAGE:-}
+      # ⛔⛔ **这一行是 compose 形态能不能建出 Task 的开关**(11 §1.4)。
+      #
+      # 不设它 ⇒ 平台按「裸跑在宿主」那套坐标说话:沙箱 agent 端口发布到**宿主的**
+      # loopback,而 agentOrigin 拼成 `http://127.0.0.1:<port>`。api 自己在容器里,
+      # 它的 127.0.0.1 是**它自己的** loopback ⇒ 沙箱容器 `Up (healthy)`、镜像播种
+      # 成功、health 200,而**每一个 Task 都死在**
+      #   `PROVIDER_UNAVAILABLE: in-sandbox agent at http://127.0.0.1:<port> did not become ready`
+      # (2026-08-29 真 Linux 实测)。
+      #
+      # 设成下面那个网络名 ⇒ 沙箱容器加入**同一个**用户自定义网络,平台改用**容器名**
+      # 说话(`http://platform-aio-<id>:8080`,走 docker 内嵌 DNS),并且 agent 端口
+      # **一个都不发布** —— 暴露面比裸跑那档还小。
+      #
+      # ⚠️ 它是一句**声明**,不是一个开关:填了就等于说「沙箱放到这个网络里,而我自己
+      # 也在这个网络里」。两件事必须同时为真,所以下面 `networks:` 那两处与这里是一体的。
+      SANDBOX_DOCKER_NETWORK: ${SANDBOX_DOCKER_NETWORK:-platform-sandbox-net}
+      # 明文(http)registry 的允许名单,逗号分隔的 `host:port`(与 docker daemon 自己的
+      # `insecure-registries` 同形状)。
+      # ⚠️ 留空时**只有** `localhost` / `127.0.0.1` / `[::1]` 走 http —— 而那几个字面量
+      #   在容器里指的是**容器自己**,于是 compose 下配不出可用的本机 registry。
+      #   要用本机/内网明文 registry,这里显式列出它,并保证**宿主 daemon 与 api 容器
+      #   用同一个 host:port 解析得到同一个 registry**(见 api/images/README.md)。
+      IMAGE_REGISTRY_INSECURE_HOSTS: ${IMAGE_REGISTRY_INSECURE_HOSTS:-}
       # ⚠️ 宿主路径 = 容器路径,这是 bind mount 方案的**硬约束**(11 §1.2):
       # DooD 下 api 请求挂载 `${DATA_ROOT}/workspaces/<id>` 时,这个路径由**宿主的**
       # 容器运行时解析,而不是 api 容器的命名空间。两边不同名 ⇒ 挂载源找不到。
@@ -30,6 +64,12 @@ services:
     volumes:
       # 同名挂载（见上）：宿主的 $DATA_ROOT 落到容器内**同一个绝对路径**。
       - ${DATA_ROOT:-/srv/agent-platform/data}:${DATA_ROOT:-/srv/agent-platform/data}
+    networks:
+      # `default` 是 api ↔ docker-proxy 那条；`sandbox` 是 api ↔ 沙箱容器那条。
+      # ⚠️ 一旦给一个服务写了 `networks:`,compose 就**不再**自动把它接到 default 上,
+      #   少写 `default` 这一行的后果是 api 连不上 docker-proxy —— 一个 Task 都建不出来。
+      - default
+      - sandbox
     depends_on:
       - docker-proxy
 
@@ -45,3 +85,13 @@ services:
 
   # auth-helper: resident lightweight helper reusing the default AIO image
   # (11 §1.1). Reserved — the CLI login flow lands in the runtime slice.
+
+networks:
+  sandbox:
+    # ⛔⛔ **`name:` 这一行不能省。** compose 默认会给网络加项目名前缀
+    # （`<项目名>_sandbox`），而 `SANDBOX_DOCKER_NETWORK` 里写的是**docker 侧的真名**
+    # ——两者对不上时的症状极其难查：api 起得来、沙箱容器也起得来,只是它被塞进了一个
+    # 不存在/不同的网络,于是 `agentOrigin` 报
+    # `container … is not attached to the docker network '…'`。
+    # 显式 `name:` 关掉前缀,让「配置里写的」与「docker 里叫的」是同一个字符串。
+    name: ${SANDBOX_DOCKER_NETWORK:-platform-sandbox-net}

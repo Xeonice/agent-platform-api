@@ -209,21 +209,6 @@
         ]
       }
     },
-    "/api/health": {
-      "get": {
-        "operationId": "HealthController_health",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": ""
-          }
-        },
-        "summary": "Liveness probe (passcode-exempt)",
-        "tags": [
-          "system"
-        ]
-      }
-    },
     "/api/projects": {
       "post": {
         "operationId": "ProjectController_create",
@@ -1559,6 +1544,193 @@
         "summary": "Re-resolve this row’s tag and compare digests. Stores nothing; 409 when the row is pinned by digest (no tag to re-resolve).",
         "tags": [
           "image"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "HealthController_health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Liveness probe (passcode-exempt)",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/init-status": {
+      "get": {
+        "operationId": "SystemController_initStatus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitStatusResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "冷启动首屏据此决定是否进初始化向导；附上次出网检测结果（不重跑检测，进向导直接渲染历史结果）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/init": {
+      "post": {
+        "operationId": "SystemController_initialize",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitStatusResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "完成初始化：跑一轮出网检测（复用 /diagnose 的探测）+ 存代理 + 写 initialized=true。一次性操作，已初始化返 409",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/settings": {
+      "get": {
+        "operationId": "SystemController_getSettings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSettingsResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "运行期配置（代理 / 公开地址 / 版本）。⛔ 永不回显口令 hash",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "operationId": "SystemController_updateSettings",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSystemSettingsDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSettingsResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "改运行期配置（proxyConfig / publicBaseUrl；null=清空，缺席=不改）。⚠️ 不写 initialized",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/resources": {
+      "get": {
+        "operationId": "SystemController_getResources",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemResourcesResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "CPU / RAM / 磁盘水位 + 保留卷占用 + 活跃 Task 数",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/providers": {
+      "get": {
+        "operationId": "SystemController_getProviders",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemProvidersResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "运维看板：已注册 provider / runtime / imageSpec + capabilities + 健康与最近 1h 失败率。⚠️ 与 GET /api/providers 是两个端点",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/diagnose": {
+      "post": {
+        "operationId": "SystemController_diagnose",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "SSE 帧流：event: start / check / done。帧的 TypeScript 类型是手写的（两仓 sse-protocol.ts，B5 跨仓对账），openapi 只声明 content-type",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "summary": "八项诊断，SSE 逐项流式（帧类型手写于两仓 sse-protocol.ts）。八项并行、单项超时 5s，整轮 ≈ 最慢那项；断连即中止剩余检查",
+        "tags": [
+          "system"
         ]
       }
     }
@@ -3418,6 +3590,480 @@
           "current",
           "upstream",
           "changed"
+        ]
+      },
+      "InitStatusResponseDto": {
+        "type": "object",
+        "properties": {
+          "initialized": {
+            "type": "boolean"
+          },
+          "initializedAt": {
+            "type": "string"
+          },
+          "lastConnectivityCheck": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "latencyMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "modelApi": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "target",
+                "ok",
+                "modelApi"
+              ]
+            }
+          },
+          "lastConnectivityCheckAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "initialized"
+        ]
+      },
+      "InitRequestDto": {
+        "type": "object",
+        "properties": {
+          "proxyConfig": {
+            "type": "object",
+            "properties": {
+              "httpProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "httpsProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "noProxy": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            }
+          },
+          "acknowledgeOffline": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SystemSettingsResponseDto": {
+        "type": "object",
+        "properties": {
+          "initialized": {
+            "type": "boolean"
+          },
+          "proxyConfig": {
+            "type": "object",
+            "properties": {
+              "httpProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "httpsProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "noProxy": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            }
+          },
+          "publicBaseUrl": {
+            "type": "string"
+          },
+          "accessPasscodeEnabled": {
+            "type": "boolean"
+          },
+          "accessPasscodeUpdatedAt": {
+            "type": "string"
+          },
+          "version": {
+            "type": "object",
+            "properties": {
+              "platform": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "platform",
+              "node"
+            ]
+          }
+        },
+        "required": [
+          "initialized",
+          "accessPasscodeEnabled",
+          "version"
+        ]
+      },
+      "UpdateSystemSettingsDto": {
+        "type": "object",
+        "properties": {
+          "proxyConfig": {
+            "type": "object",
+            "properties": {
+              "httpProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "httpsProxy": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "noProxy": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            },
+            "nullable": true
+          },
+          "publicBaseUrl": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true
+          }
+        }
+      },
+      "SystemResourcesResponseDto": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "object",
+            "properties": {
+              "cores": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": true
+              },
+              "loadAvg1m": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "usedPercent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "warn",
+                  "critical"
+                ]
+              }
+            },
+            "required": [
+              "cores",
+              "loadAvg1m",
+              "usedPercent",
+              "level"
+            ]
+          },
+          "ram": {
+            "type": "object",
+            "properties": {
+              "totalBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "usedBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "usedPercent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "warn",
+                  "critical"
+                ]
+              }
+            },
+            "required": [
+              "totalBytes",
+              "usedBytes",
+              "usedPercent",
+              "level"
+            ]
+          },
+          "disk": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "totalBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "usedBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "availableBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "usedPercent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "warn",
+                  "critical"
+                ]
+              },
+              "reservedPercent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              }
+            },
+            "required": [
+              "path",
+              "totalBytes",
+              "usedBytes",
+              "availableBytes",
+              "usedPercent",
+              "level",
+              "reservedPercent"
+            ]
+          },
+          "retainedVolumes": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "totalBytes": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "percentOfDisk": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "warn",
+                  "critical"
+                ]
+              },
+              "oldestExpiresAt": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "count",
+              "totalBytes",
+              "percentOfDisk",
+              "level",
+              "truncated"
+            ]
+          },
+          "activeTasks": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "cpu",
+          "ram",
+          "disk",
+          "retainedVolumes",
+          "activeTasks"
+        ]
+      },
+      "SystemProvidersResponseDto": {
+        "type": "object",
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "capabilities": {
+                  "type": "object",
+                  "properties": {
+                    "spawnTty": {
+                      "type": "boolean"
+                    },
+                    "volumeMount": {
+                      "type": "boolean"
+                    },
+                    "updateResources": {
+                      "type": "boolean"
+                    },
+                    "pauseResume": {
+                      "type": "boolean"
+                    },
+                    "snapshot": {
+                      "type": "boolean"
+                    },
+                    "watchEvents": {
+                      "type": "boolean"
+                    },
+                    "headlessTask": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "spawnTty",
+                    "volumeMount",
+                    "updateResources",
+                    "pauseResume",
+                    "snapshot",
+                    "watchEvents",
+                    "headlessTask"
+                  ]
+                },
+                "isDefault": {
+                  "type": "boolean"
+                },
+                "healthy": {
+                  "type": "boolean"
+                },
+                "recentFailureRate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMinimum": false,
+                  "maximum": 1,
+                  "exclusiveMaximum": false
+                },
+                "sampleSize": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                },
+                "failureCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                }
+              },
+              "required": [
+                "id",
+                "capabilities",
+                "isDefault",
+                "healthy",
+                "sampleSize",
+                "failureCount"
+              ]
+            }
+          },
+          "runtimes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                },
+                "vendor": {
+                  "type": "string"
+                },
+                "authMethods": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "credentialConfigured": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "displayName",
+                "vendor",
+                "authMethods",
+                "credentialConfigured"
+              ]
+            }
+          },
+          "imageSpecs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "isDefault": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "isDefault"
+              ]
+            }
+          },
+          "healthWindowMs": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        },
+        "required": [
+          "providers",
+          "runtimes",
+          "imageSpecs",
+          "healthWindowMs"
         ]
       },
       "ErrorEnvelope": {

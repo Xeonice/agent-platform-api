@@ -10,6 +10,13 @@ import { AioSandboxProvider } from '../../../../packages/modules/sandbox/src/inf
  * DOCKER-REQUIRED e2e for 加固 1: the in-sandbox agent port is no longer an
  * unauthenticated shell (SANDBOX-RUNTIME-DECISIONS 安全姿态).
  *
+ * ⚠️ 2026-08：凭证从**平台自造的 RS256 JWT**（`JWT_PUBLIC_KEY` + 现场造密钥对 + 手工
+ * 签名）换成了**镜像原生的 `SANDBOX_API_KEY`**。镜像入口 `/opt/gem/gem.sh` 两个 env
+ * 都认、走同一扇 nginx `auth_request` 门，所以**鉴权强度不变**；换掉的是我们自己
+ * 维护的那套密码学代码。断言的语义因此变了两处：
+ *   · 「伪造的 JWT 被拒」→「猜错的 api key 被拒」（同一个洞，新的钥匙形状）
+ *   · 头从 `Authorization: Bearer` 换成镜像原生的 `X-AIO-API-Key`
+ *
  * The hole this closes is not theoretical and not remote: the agent is published
  * on the HOST loopback, so before this, ANY process on the machine — an npm
  * postinstall, any tool running as any local user — could scan 127.0.0.1 and
@@ -81,9 +88,19 @@ function collect(stream: ProcessStream): Promise<{ out: string; code: number | n
 }
 
 describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authenticated', () => {
-  it('publishes the agent on loopback only', () => {
-    expect(handle?.agentAuthToken).toBeTypeOf('string');
+  it('publishes the agent on loopback only, with a per-sandbox key on the handle', () => {
+    // ⚠️ 这里以前写的是 `handle?.agentAuthToken` —— 一个**契约上早就不存在**的字段
+    // （凭证 2026-08 收进了不透明的 `providerState`）。它从没红过，因为 tsc 不编译
+    // 测试、而这个文件在没有 docker 的机器上整体跳过：一条断言存在，且永远不生效。
+    expect(handle?.providerState?.agentAuthToken).toBeTypeOf('string');
     expect(agentOrigin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('leaves the image own auth-free ping open — readiness needs it', async () => {
+    // `GET /v1/ping` 是镜像 nginx map 里**唯一**走 `@proxy_without_auth` 的路由。
+    // 它开着是对的（就绪探测要用），但也正因为它开着，反向那条「匿名必须被拒」的
+    // 断言绝不能拿它来问 —— 拿它问会在一张完全正确的镜像上判失败。
+    expect((await fetch(`${agentOrigin}/v1/ping`)).status).toBe(200);
   });
 
   it('refuses an anonymous exec — the exact call that used to be a free shell', async () => {
@@ -96,10 +113,10 @@ describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authentica
     expect(await res.text()).not.toContain('uid=');
   });
 
-  it('refuses a forged / wrong-key bearer token', async () => {
+  it('refuses a guessed / wrong api key', async () => {
     const res = await fetch(`${agentOrigin}/v1/bash/exec`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-real-jwt' },
+      headers: { 'content-type': 'application/json', 'x-aio-api-key': 'not-the-key' },
       body: JSON.stringify({ session_id: 'attacker', command: 'id' }),
     });
     expect(res.status).toBe(401);
@@ -132,7 +149,7 @@ describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authentica
     expect(outcome).not.toBe('OPENED');
   });
 
-  it('still lets the PLATFORM exec through with the sandbox token', async () => {
+  it('still lets the PLATFORM exec through with the sandbox key', async () => {
     const stream = await provider.spawn(handle!, {
       tty: false,
       cmd: ['sh', '-c', 'echo AUTHED_EXEC_OK'],
@@ -145,6 +162,8 @@ describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authentica
   it('still opens the PLATFORM pty (token → ticket → ws upgrade)', async () => {
     // the pty cannot carry a header, so this is the only proof that the ticket
     // exchange works against the REAL agent and not just a fake.
+    // ⚠️ 实测 `?api_key=` 也能开 101，但我们不用它：query 会进沙箱自己的 nginx
+    // access log，而这把钥匙的寿命是整个沙箱（ticket 30 秒过期）。
     const pty = await provider.spawn(handle!, { tty: true, cols: 80, rows: 24 });
     const seen = await new Promise<string>((resolveP) => {
       let buf = '';
@@ -162,7 +181,7 @@ describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authentica
     expect(seen).toMatch(/AUTHED_PTY_OK/);
   }, 40_000);
 
-  it('fails a handle that lost the token — the credential is load-bearing', async () => {
+  it('fails a handle that lost the key — the credential is load-bearing', async () => {
     const stripped: SandboxHandle = {
       provider: 'aio',
       providerSandboxId: handle!.providerSandboxId,

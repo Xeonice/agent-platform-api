@@ -10,6 +10,7 @@ import type { INestApplication } from '@nestjs/common';
 import { IMAGE_SPEC_REGISTRY } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { makeFakeImageSpecRegistry, registerDefaultImage } from './_fakes';
+import { useEnv } from './_env';
 import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
@@ -44,10 +45,15 @@ const AIO_IMAGE = process.env.SANDBOX_TEST_IMAGE ?? 'ghcr.io/agent-infra/sandbox
  * 直接失败（`镜像缺少 tmux，不满足平台约定`）。而这条用例长期因为缺 docker/registry 被
  * `skipIf` 跳过，**夹具过时了一整轮都没人发现**——它一跑起来就是红的。
  *
- * 平台镜像（`api/images/platform-base`）带 `platform.tmux` 标签、装了 tmux，
+ * 平台镜像（`api/images/platform-sandbox`）装了 tmux（构建期 `command -v tmux` 自证），
  * 也正是 `SANDBOX_DEFAULT_IMAGE` 该指的那张。
  */
-const BOXLITE_IMAGE = process.env.SANDBOX_BOXLITE_TEST_IMAGE ?? `${REGISTRY}/platform/base:v1`;
+/**
+ * ⚠️ 2026-08：坐标从 `platform/base:v1` 换成 `platform/sandbox:v1`。只为盖
+ * `platform.tmux` 章而存在的那一层 base 被删了（见 `api/images/README.md`）——
+ * 现在只有一张预制镜像。
+ */
+const BOXLITE_IMAGE = process.env.SANDBOX_BOXLITE_TEST_IMAGE ?? `${REGISTRY}/platform/sandbox:v1`;
 
 const docker = createDockerClient();
 const dockerUp = await isDockerAvailable(docker).catch(() => false);
@@ -128,7 +134,7 @@ const PROVIDERS = [
      * 我据此写下「冷缓存下拉 12GB 超时，本机首次必须预热」。**那是错的**——
      * 后来跑全量 e2e 时它 96 秒就失败了，`failureCode` 是：
      *
-     *   INSTALL_FAILED: image localhost:5001/platform/base:v1 declares 'codex' as
+     *   INSTALL_FAILED: image localhost:5001/platform/base:v1 declares 'codex' as  ← 当时的坐标
      *                   preinstalled, but it is not present in the running sandbox
      *
      * 真正的原因是**沙箱内 rootfs 不完整**：boxlite 在 macOS 上构建 rootfs 时
@@ -212,6 +218,7 @@ for (const p of PROVIDERS) {
     () => {
       let app: INestApplication;
       let dataRoot: string;
+      let restoreEnv: (() => void) | undefined;
       const createdContainers = new Set<string>();
       const createdBoxNames = new Set<string>();
 
@@ -219,7 +226,14 @@ for (const p of PROVIDERS) {
         process.env.DATABASE_URL = ':memory:';
         dataRoot = mkdtempSync(resolve(process.cwd(), `tmp-wsclone-${p.provider}-`));
         process.env.DATA_ROOT = dataRoot;
-        process.env.SANDBOX_DEFAULT_IMAGE = p.image;
+        // ⚠️ **`SANDBOX_DEFAULT_IMAGE` 必须走 `useEnv`,不能裸赋值。** 每个 e2e 文件共享
+        // 同一个进程(singleFork),而这个变量决定 `ImageSeeder` 在**后面每一个文件**的
+        // `app.init()` 里去播种哪张镜像 —— 泄漏出去之后,`registry-extension.e2e` 的
+        // `registerImage(SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20')` 会撞上「播种时已经
+        // 注册过了」而 `created:false`。实测踩到过一次(2026-08-29);**CI 里因为没有
+        // AIO 镜像、这几个文件全被跳过,所以泄漏从来没发生过** —— 一个只在「测试真的
+        // 跑起来时」才出现的串扰。
+        restoreEnv = useEnv({ SANDBOX_DEFAULT_IMAGE: p.image });
         const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
           // Only the registry round-trip is doubled — the rest of the image chain
           // (register → freeze digest → door lookup → FK → pull `ref@digest`) is real.
@@ -256,6 +270,7 @@ for (const p of PROVIDERS) {
           }
         }
         await app?.close();
+        restoreEnv?.();
         if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
       });
 

@@ -30,6 +30,8 @@ export * from './terminal-auth.port';
 export * from './workspace-preparer.port';
 export * from './sandbox-failure-codes';
 export * from './ws-protocol';
+// SSE 帧契约 —— 与 ws-protocol 同放（10 §6「流帧类型必须手写并与 WS 协议文件同放」）。
+export * from './sse-protocol';
 // NOTE: ./testkit is intentionally NOT re-exported here — it is a test-only
 // subpath (`@platform/contracts/testkit`) and must not pull vitest into the
 // production bundle.

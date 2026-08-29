@@ -42,6 +42,13 @@ class FakeJobState {
 
 class FakeAgent {
   readonly calls: Recorded[] = [];
+  /**
+   * ⚠️ **升级请求不会走 `request` 处理器。** 带 `Upgrade:` 头的请求在 Node 里走
+   * `'upgrade'` 事件；没有监听者时 socket 直接被销毁，`request` 根本不触发。
+   * 于是「startJob 期间连了没连 socket」这件事，在加这个监听器之前**无从断言**——
+   * 那正是 04 §2.6 ★★ 那条 ordering 规则一直只活在注释里的原因。
+   */
+  readonly upgrades: string[] = [];
   readonly job = new FakeJobState();
   readonly files = new Map<string, Buffer>();
   /** Files that answer with the agent's OTHER not-found convention (200 + envelope). */
@@ -57,6 +64,11 @@ class FakeAgent {
 
   async start(): Promise<void> {
     this.server = createServer((req, res) => this.handle(req, res));
+    this.server.on('upgrade', (req, socket) => {
+      this.upgrades.push(req.url ?? '');
+      // 不完成握手：本文件只关心「有没有连、连的是哪个 session」，帧的语义由 e2e 覆盖。
+      socket.destroy();
+    });
     await new Promise<void>((r) => this.server.listen(0, '127.0.0.1', r));
     const addr = this.server.address();
     this.port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -93,7 +105,9 @@ class FakeAgent {
       };
       const path = url.split('?')[0];
 
-      if (path === '/v1/bash/sessions/create') return json({ success: true, data: {} });
+      if (path === '/v1/bash/sessions/create') {
+        return json({ success: true, data: { session_id: body.session_id } });
+      }
       if (path.startsWith('/v1/bash/sessions/') && path.endsWith('/close')) {
         return json({ success: true, data: {} });
       }
@@ -193,6 +207,33 @@ describe('startJob — the ordering that only breaks after a restart (04 §2.6 �
     const started = paths.lastIndexOf('/v1/bash/exec');
     expect(created).toBeGreaterThanOrEqual(0);
     expect(created).toBeLessThan(started);
+  });
+
+  it('⭐ startJob NEVER touches the socket — the ws would OWN the session it creates', async () => {
+    // ⚠️ 这是本组注释里写了、却**从来没有断言过**的那半条（「socket 最后才 attach」）。
+    // agent 那侧：`if created_by_ws: await manager.close_session(...)` —— 由 ws 创建的
+    // session 会随 ws 断开被关掉，而关 session 会**销毁已记录的输出并杀掉正在跑的命令**。
+    // 把「连 socket」挪到 exec 之前（甚至只是挪到 sessions/create 之前），今天不会有
+    // 任何东西失败；**第一次平台重启时，所有在跑的 job 静默死亡**。
+    await client.startJob({ cmd: ['codex', 'exec', '--json', 'go'] });
+    expect(agent.upgrades, 'startJob must not open the job socket at all').toEqual([]);
+  });
+
+  it('⭐ the socket ATTACHES to the session that step ① created — it never makes its own', async () => {
+    const jobId = await client.startJob({ cmd: ['sleep', '9'] });
+    const created = String(agent.bodyFor('/v1/bash/sessions/create')?.session_id ?? '');
+    expect(created).toMatch(/^platform-job-[0-9a-f]{16}$/);
+
+    // 只有需要等的时候才连（有整行可读就不连）——所以喂一个半行 + 给预算。
+    agent.job.stdout = 'half';
+    await client.readJob(jobId, undefined, 60);
+
+    expect(agent.upgrades).toHaveLength(1);
+    const url = new URL(agent.upgrades[0], 'ws://x');
+    expect(url.pathname).toBe('/v1/bash/ws');
+    // ⚠️ 决定性的一条：`session_id` 必须是**已存在**的那个。少带它、或带一个新的，
+    // agent 就会为这个 socket 新建 session ⇒ `created_by_ws = true` ⇒ 断开即杀命令。
+    expect(url.searchParams.get('session_id')).toBe(created);
   });
 
   it('starts ASYNC and passes the hard timeout in seconds', async () => {

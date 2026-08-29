@@ -10,17 +10,22 @@ import { AioSandboxAgentClient } from '../../src/infrastructure/providers/aio/ai
  * authenticated. Driven against a recording fake agent so both transports are
  * pinned without a container:
  *
- *   HTTP (exec/kill/close/file-write) → `Authorization: Bearer <token>`
+ *   HTTP (exec/kill/close/file-write) → `X-AIO-API-Key: <key>`  (镜像原生头)
  *   WS   (interactive pty)            → a `?ticket=` minted over authenticated HTTP
  *
  * The websocket case is the interesting one: the runtime's WHATWG `WebSocket`
- * cannot send headers, so the token CANNOT ride the upgrade. The agent's own
- * ticket endpoint is the sanctioned way across that gap, and a failure to mint one
- * must NOT fall back to an anonymous connect. The live-image proof is
- * aio-agent-auth.e2e-spec.ts.
+ * cannot send headers, so the key CANNOT ride the upgrade. The agent's own ticket
+ * endpoint is the sanctioned way across that gap, and a failure to mint one must
+ * NOT fall back to an anonymous connect.
+ *
+ * ⚠️ **实测（v1.11.0）`?api_key=<key>` 也能把 WS 开到 101——我们仍然不用它。**
+ * query 会进沙箱自己的 nginx access log，而这把钥匙的寿命是整个沙箱；ticket 30 秒
+ * 过期。用 query 等于把长期凭证写进沙箱内进程读得到的日志里。
+ * The live-image proof is aio-agent-auth.e2e-spec.ts.
  */
 interface Seen {
   url: string;
+  apiKey?: string;
   authorization?: string;
 }
 
@@ -33,7 +38,11 @@ class RecordingAgent {
 
   async start(): Promise<void> {
     this.server = createServer((req: IncomingMessage, res) => {
-      this.seen.push({ url: req.url ?? '', authorization: req.headers.authorization });
+      this.seen.push({
+        url: req.url ?? '',
+        apiKey: req.headers['x-aio-api-key'] as string | undefined,
+        authorization: req.headers.authorization,
+      });
       req.on('data', () => undefined); // drain; the fake does not need the body
       req.on('end', () => {
         if (req.url === '/tickets') {
@@ -84,7 +93,7 @@ afterEach(async () => {
 });
 
 describe('AioSandboxAgentClient — credential on the wire', () => {
-  it('sends the bearer token on every HTTP call', async () => {
+  it('sends the api key on every HTTP call', async () => {
     const client = new AioSandboxAgentClient(agent.base(), 'TOK');
     const stream = await client.exec({ tty: false, cmd: ['echo', 'hi'] });
     await new Promise<void>((r) => stream.onExit(() => r()));
@@ -92,17 +101,30 @@ describe('AioSandboxAgentClient — credential on the wire', () => {
     expect(agent.seen.length).toBeGreaterThan(0);
     // exec + session close both go out; not one of them may be anonymous.
     for (const call of agent.seen) {
-      expect(call.authorization).toBe('Bearer TOK');
+      expect(call.apiKey).toBe('TOK');
     }
     expect(agent.seen.map((c) => c.url)).toContain('/v1/bash/exec');
   });
 
-  it('sends no Authorization header when the sandbox has no token', async () => {
+  it('sends no credential header at all when the sandbox has no key', async () => {
     const client = new AioSandboxAgentClient(agent.base());
     const stream = await client.exec({ tty: false, cmd: ['echo', 'hi'] });
     await new Promise<void>((r) => stream.onExit(() => r()));
     for (const call of agent.seen) {
+      expect(call.apiKey).toBeUndefined();
       expect(call.authorization).toBeUndefined();
+    }
+  });
+
+  it("never puts the long-lived key in a URL — it would land in the sandbox's access log", async () => {
+    const client = new AioSandboxAgentClient(agent.base(), 'TOK');
+    const stream = await client.exec({ tty: false, cmd: ['echo', 'hi'] });
+    await new Promise<void>((r) => stream.onExit(() => r()));
+    await expect(client.openTerminal(80, 24)).rejects.toBeDefined();
+    // ⚠️ `?api_key=` DOES work against the real image (measured 101 on the upgrade),
+    // which is exactly why this needs an assertion rather than a comment.
+    for (const call of agent.seen) {
+      expect(call.url).not.toContain('TOK');
     }
   });
 
@@ -113,13 +135,13 @@ describe('AioSandboxAgentClient — credential on the wire', () => {
     await expect(client.openTerminal(80, 24)).rejects.toBeDefined();
 
     const tickets = agent.seen.find((c) => c.url === '/tickets');
-    expect(tickets?.authorization).toBe('Bearer TOK');
+    expect(tickets?.apiKey).toBe('TOK');
 
     const upgrade = agent.seen.find((c) => c.url.startsWith('/v1/shell/ws'));
     expect(upgrade?.url).toBe('/v1/shell/ws?ticket=TICKET-123');
   });
 
-  it('opens the websocket bare when there is no token to trade', async () => {
+  it('opens the websocket bare when there is no key to trade', async () => {
     const client = new AioSandboxAgentClient(agent.base());
     await expect(client.openTerminal(80, 24)).rejects.toBeDefined();
     expect(agent.seen.some((c) => c.url === '/tickets')).toBe(false);

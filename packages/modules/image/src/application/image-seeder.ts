@@ -1,8 +1,9 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { IMAGE_REPOSITORY } from '../domain/repositories/image.repository';
 import type { ImageRepository } from '../domain/repositories/image.repository';
-import { builtinImageRef } from '@platform/shared-kernel';
-import { ImageApplicationService } from './image-application.service';
+import { builtinImageRefs } from '@platform/shared-kernel';
+import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
+import { ImageApplicationService, ManifestInvalidError } from './image-application.service';
 
 /**
  * 平台自带镜像的**开机播种**。
@@ -65,10 +66,24 @@ export class ImageSeeder implements OnApplicationBootstrap {
   constructor(
     @Inject(IMAGE_REPOSITORY) private readonly images: ImageRepository,
     private readonly service: ImageApplicationService,
+    /**
+     * ⚠️ 播种要种的是**每一档的**预制镜像（ADR 决策 C），而「有哪些档」只有 provider
+     * 注册表知道。硬写 `['aio','boxlite']` 会让第三方注册进来的 provider 永远没有种子，
+     * 而那正是 §8 扩展点承诺过可以做的事。
+     */
+    @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    const ref = builtinImageRef();
+    // ⚠️ **去重后逐张种**：单档部署（两档指向同一张）这里恒为 1 张，与搬家前一字不差。
+    // 逐张各自 try/catch，因为一张种不上不该让另一张也不种——两档是独立的部署形态，
+    // 一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉。
+    for (const ref of builtinImageRefs(this.providers.list().map((p) => p.name))) {
+      await this.seedOne(ref);
+    }
+  }
+
+  private async seedOne(ref: string): Promise<void> {
     try {
       await withBudget(this.seed(ref), ref);
     } catch (e) {
@@ -80,7 +95,7 @@ export class ImageSeeder implements OnApplicationBootstrap {
       // `INVALID_STATE`「平台还没有可用的预制镜像作为基准」。真正的下一步是**把这一张
       // 修好**。日志说错下一步，比不打日志更贵。
       this.logger.warn(
-        `built-in image ${ref} could not be seeded (${(e as Error).message}). ` +
+        `built-in image ${ref} could not be seeded (${describeSeedFailure(e)}). ` +
           '平台已正常启动，但**建不了 Task，也注册不了自定义镜像**——' +
           '自定义镜像必须基于平台预制镜像，而平台现在一张预制镜像都没有。' +
           `下一步是修好这一张：把 SANDBOX_DEFAULT_IMAGE 指向平台预制镜像` +
@@ -134,6 +149,23 @@ function withBudget<T>(work: Promise<T>, ref: string): Promise<T> {
   return Promise.race([work, budget]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
+}
+
+/**
+ * 播种失败的**可读原因**。
+ *
+ * ⚠️ **`ManifestInvalidError.message` 是一句不说明任何事情的话**（「镜像不满足平台约定，
+ * 未注册」）——真正的原因住在 `outcome.errors[]` 里，而 HTTP 出口把它们放进 `details[]`
+ * 所以在界面上看得见。**只有日志这一条出口把它们丢了**，而这恰恰是运维方看 compose
+ * 启动输出时唯一的信息源（实测 2026-08-29：看到的就是那句空话，于是根因是「镜像名用了
+ * 连字符」这件事完全无从得知）。
+ */
+function describeSeedFailure(e: unknown): string {
+  if (e instanceof ManifestInvalidError) {
+    const findings = e.outcome.errors.map((f) => `${f.code}: ${f.message}`).join(' | ');
+    return findings === '' ? e.message : findings;
+  }
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** 仓库坐标里去掉 tag —— 冒号可能是端口（`localhost:5001/x`），只认最后一段里的。 */

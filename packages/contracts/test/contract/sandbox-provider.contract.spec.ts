@@ -21,7 +21,10 @@ const capabilities: SandboxProviderCapabilities = {
   updateResources: false,
   pauseResume: false,
   snapshot: false,
-  watchEvents: true,
+  // ⚠️ `false`：这个 fake 没有 `watchEvents()` 方法。⚠️ **它以前写的是 `true`**，
+  // 而 CAP-03 一落地就把它抓了出来——连契约包自己的样板 provider 都在谎报，
+  // 说明问题从来不是「某个实现写错了」，而是**没有条款要求兑现**。
+  watchEvents: false,
   headlessTask: false,
 };
 

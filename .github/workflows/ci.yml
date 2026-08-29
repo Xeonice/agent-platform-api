@@ -35,6 +35,17 @@ jobs:
       - name: integration
         run: pnpm test:integration
 
+      # ── 镜像播种 e2e 的前置（ADR 决策 C「两关」）───────────────────────────
+      # `image-seeding-registry.e2e-spec.ts` 真的起一个 registry、真的 push、真的播种
+      # —— 它是平台里**唯一一条不走替身**的镜像播种路径。ubuntu runner 自带 docker，
+      # 但不带这两张镜像 ⇒ 不拉的话那条 e2e 会**跳过**，而跳过等于「镜像从哪来」这个
+      # 问题在 CI 里根本没人问 —— 那正是「本地 build 的镜像可直接用」这句错话能活这么久
+      # 的原因。
+      # ⚠️ 两张加起来 ~50MB。**13GB 的 AIO 镜像仍然永不自动拉**（那几个 e2e 照旧跳过并
+      # 大声说明缺什么）——这里放行的判据是体积，不是「反正拉一下」。
+      - name: pull the tiny images the image-seeding e2e needs (never the 13GB AIO one)
+        run: docker pull registry:2 && docker pull alpine:3.20
+
       # ── interface e2e — REQUIRED (REST supertest + MCP client; 09 §2.3 / 25 §6.1) ──
       - name: e2e
         run: pnpm test:e2e

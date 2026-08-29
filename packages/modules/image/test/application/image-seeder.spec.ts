@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Logger } from '@nestjs/common';
 import { ImageSeeder } from '../../src/application/image-seeder';
 import { Image } from '../../src/domain/entities/image.entity';
+import type { ProviderRegistry } from '@platform/contracts';
 import type { ImageRepository } from '../../src/domain/repositories/image.repository';
+import { ManifestInvalidError } from '../../src/application/image-application.service';
 import type { ImageApplicationService } from '../../src/application/image-application.service';
+import { ValidationOutcome } from '../../src/domain/value-objects/validation-outcome.vo';
 
 /**
  * ★ 开机播种 —— 它修的是一个**把全新部署变成不可用**的缺口。
@@ -44,10 +47,26 @@ function fakeRepo(existing: string | null): MinimalRepo {
   };
 }
 
-function fakeService(behaviour: 'ok' | 'throws' | 'hangs'): MinimalService {
+function fakeService(behaviour: 'ok' | 'throws' | 'hangs' | 'invalid'): MinimalService {
   return {
     registerImage: vi.fn(async () => {
       if (behaviour === 'throws') throw new Error('registry unreachable: getaddrinfo ENOTFOUND');
+      // ⚠️ 第三种失败:镜像**够得着但不合规**(例如仓库名写成了 `platform-sandbox`)。
+      //    它与前两种的区别在于**原因藏在 `outcome.errors[]` 里而不在 `message` 上**。
+      if (behaviour === 'invalid') {
+        throw new ManifestInvalidError(
+          ValidationOutcome.from(
+            [
+              {
+                code: 'IMAGE_TMUX_MISSING',
+                path: 'env.X',
+                message: '只差一个分隔符：platform/sandbox',
+              },
+            ],
+            [],
+          ),
+        );
+      }
       // ⚠️ `'hangs'` 与 `'throws'` 是**两件事**：registry 抛错 vs registry 不响应。
       //    前者被 `catch` 接住，后者不会——DNS 黑洞 / 防火墙静默丢包 / 限流后挂起时，
       //    请求一直挂着，`onApplicationBootstrap` 被 Nest await 着，平台起不来。
@@ -65,9 +84,31 @@ function fakeService(behaviour: 'ok' | 'throws' | 'hangs'): MinimalService {
   };
 }
 
+/**
+ * 一个只有 `aio` 一档的 provider 注册表替身。
+ *
+ * ⚠️ **单档就是这里的默认形态**，而且这正是本文件要守住的：ADR 决策 C 让播种改成
+ * 「按档逐张种」，单档部署下那必须**恰好等于原来那一张**——不多种、不少种、也不多打
+ * 一行日志。多档形态另有用例（见文件末尾）。
+ */
+const providersWith = (names: readonly string[]): Pick<ProviderRegistry, 'list'> => ({
+  // ⚠️ 只实现播种真正调用的那一个成员，并用 `Pick<>` 把「只实现了一部分」写在类型里
+  // ——而不是用双重断言把类型系统绕开。绕开的那一刻，`ImageSeeder` 将来多用一个
+  // registry 方法，这份替身也不会红。
+  list: () => names.map((name) => ({ name })) as ReturnType<ProviderRegistry['list']>,
+});
+
 /** 单次断言收在这里：构造器要的是完整接口，而替身只实现了用到的两个成员。 */
-const seederWith = (repo: MinimalRepo, service: MinimalService): ImageSeeder =>
-  new ImageSeeder(repo as ImageRepository, service as ImageApplicationService);
+const seederWith = (
+  repo: MinimalRepo,
+  service: MinimalService,
+  providers: readonly string[] = ['aio'],
+): ImageSeeder =>
+  new ImageSeeder(
+    repo as ImageRepository,
+    service as ImageApplicationService,
+    providersWith(providers) as ProviderRegistry,
+  );
 
 const prevRef = process.env.SANDBOX_DEFAULT_IMAGE;
 beforeEach(() => {
@@ -121,6 +162,22 @@ describe('ImageSeeder：全新部署自带一张镜像', () => {
     // MUTATION: 把 message 换回「在镜像管理里注册一张镜像之前建不了 Task」⇒ 本条红。
     expect(line).toContain('SANDBOX_DEFAULT_IMAGE');
     expect(line).toContain('预制镜像');
+  });
+
+  it('⭐ 播种失败的**原因**必须进日志，而不是一句「镜像不满足平台约定」', async () => {
+    // ⚠️ `ManifestInvalidError.message` 是一句**不说明任何事情**的话；真正的 finding 住在
+    //    `outcome.errors[]` 里。HTTP 出口把它们放进 `details[]`,所以界面上看得见 ——
+    //    **只有日志这条出口把它们丢了**,而这恰恰是运维方看 `docker compose up` 输出时
+    //    唯一的信息源(2026-08-29 真机:看到的就是那句空话,于是根因「镜像名用了连字符」
+    //    完全无从得知)。
+    //
+    // MUTATION: 把 `describeSeedFailure` 换回 `(e as Error).message` ⇒ 本条红。
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    await seederWith(fakeRepo(null), fakeService('invalid')).onApplicationBootstrap();
+
+    const line = String(warn.mock.calls[0]?.[0] ?? '');
+    expect(line).toContain('IMAGE_TMUX_MISSING');
+    expect(line).toContain('只差一个分隔符：platform/sandbox');
   });
 
   it('⭐ registry **不响应** ⇒ 也不阻断启动 —— `catch` 接不住"一直慢"', async () => {
