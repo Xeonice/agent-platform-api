@@ -224,13 +224,18 @@ describe('GET /api/system/resources（P1-9：磁盘是真实瓶颈）', () => {
     //    所以**期望值必须跟着当前平台走**。本行此前只按 darwin 那份算 ⇒ macOS 上绿、
     //    Linux CI 上必红（实测 `expected 20468166656 to be 20150304768`）——一条
     //    「本地绿、CI 红」的断言，而它防的恰恰是跨平台读数错误本身。
+    const TOTAL_MEM_BYTES = 34_359_738_368; // 32 GB —— 两份样本的 MemTotal/hw.memsize 一致
     const expectedAvailable =
       process.platform === 'linux'
         ? 13_565_988 * 1024 // readProcMeminfo 样本里的 MemAvailable
         : (43280 + 803419 + 20576) * 16384; // vm_stat 样本：free + inactive + speculative
-    expect(res.body.ram.totalBytes).toBe(34359738368);
-    expect(res.body.ram.usedBytes).toBe(34359738368 - expectedAvailable);
-    expect(res.body.ram.usedPercent).toBeCloseTo(58.6, 1);
+    expect(res.body.ram.totalBytes).toBe(TOTAL_MEM_BYTES);
+    expect(res.body.ram.usedBytes).toBe(TOTAL_MEM_BYTES - expectedAvailable);
+    // ⚠️ 百分比也**从同一个 expectedAvailable 推**，不要再手抄一个字面量：
+    //    上一轮只改了 expectedAvailable、把这行的 58.6 留着，于是 CI 又红一次
+    //    （linux 样本算出来是 59.6）。两处手抄同一个事实，就会漏改其中一处。
+    const expectedUsedPercent = ((TOTAL_MEM_BYTES - expectedAvailable) / TOTAL_MEM_BYTES) * 100;
+    expect(res.body.ram.usedPercent).toBeCloseTo(expectedUsedPercent, 1);
     expect(res.body.ram.level).toBe('ok');
     expect(res.body.disk.totalBytes).toBeGreaterThan(0);
     expect(res.body.disk.reservedPercent).toBe(15);
