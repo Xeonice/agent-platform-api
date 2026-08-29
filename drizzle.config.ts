@@ -17,6 +17,7 @@ export default defineConfig({
     './packages/modules/image/src/infrastructure/persistence/schema/image.sqlite.ts',
     // 平台级表（13 §2.8）。落在 apps/api 而不是某个 module —— 理由写在 schema 文件顶部。
     './apps/api/src/platform/audit/audit-events.sqlite.ts',
+    './apps/api/src/platform/system/system-settings.sqlite.ts',
   ],
   out: './drizzle',
 });

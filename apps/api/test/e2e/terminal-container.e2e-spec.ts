@@ -283,12 +283,16 @@ describe.skipIf(!runnable)(
                   {
                     provider,
                     providerSandboxId: (await docker.getContainer(containerName).inspect()).Id,
-                    agentAuthToken:
+                    // ⚠️ 凭证住在**不透明的 `providerState`** 里，不是 handle 上的具名
+                    // 字段（那两个字段 2026-08 就收回去了）。这里以前写的是
+                    // `?.agentAuthToken` —— 一个早就不存在的属性，永远是 undefined，
+                    // 而这条用例在没有 docker 的机器上整体跳过，所以从没红过。
+                    providerState:
                       (
                         await app
                           .get<SandboxRepository>(SANDBOX_REPOSITORY)
                           .findById(asSandboxId(sandboxId))
-                      )?.agentAuthToken ?? undefined,
+                      )?.providerState ?? undefined,
                   },
                   { tty: false, cmd: ['sh', '-c', script] },
                 ),
@@ -317,16 +321,17 @@ describe.skipIf(!runnable)(
         // re-derives the agent port from `docker inspect` (no persisted state) and
         // reconnects — so exec/terminal survive a backend restart.
         const cid = (await docker.getContainer(containerName).inspect()).Id;
-        // …but the agent BEARER TOKEN is the one thing docker cannot give back (the
-        // container only carries the public half), so the restart path reads it out
-        // of the DB, exactly like SandboxPtyAdapter does on a real reconnect.
+        // …but the agent API KEY is the one thing docker cannot give back, so the
+        // restart path reads it out of the DB, exactly like SandboxPtyAdapter does on
+        // a real reconnect. (2026-08: 凭证从自造的 RS256 JWT 换成了镜像原生的
+        // `SANDBOX_API_KEY`；形状变了，「端口能重推、凭证不能」这条理由没变。)
         const repo = app.get<SandboxRepository>(SANDBOX_REPOSITORY);
         const persistedSandbox = await repo.findById(asSandboxId(sandboxId));
-        const agentAuthToken = persistedSandbox?.agentAuthToken ?? undefined;
-        expect(agentAuthToken).toBeTypeOf('string');
+        const providerState = persistedSandbox?.providerState ?? undefined;
+        expect(providerState?.agentAuthToken).toBeTypeOf('string');
         const freshAio = new AioSandboxProvider(createDockerClient());
         const exec = await freshAio.spawn(
-          { provider: 'aio', providerSandboxId: cid, agentAuthToken },
+          { provider: 'aio', providerSandboxId: cid, providerState },
           { tty: false, cmd: ['echo', 'AIO_RESTART_OK'] },
         );
         expect(await collectStream(exec)).toContain('AIO_RESTART_OK');

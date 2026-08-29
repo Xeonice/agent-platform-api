@@ -203,7 +203,9 @@ export class SandboxApplicationService {
       // row is written, before anything is scheduled.
       this.assertCapabilities(provider, input.require, input.headless ?? false);
       this.assertRuntimeRegistered(input.runtime);
-      const imageRef = await this.resolveImage(input.image);
+      // ⚠️ **provider 必须先定下来**：两档的预制镜像不再是同一张（ADR 决策 C），
+      // 所以「不给镜像时用哪一张」与「这张镜像跑不跑得了」都取决于它。
+      const imageRef = await this.resolveImage(input.image, provider.name);
 
       // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
       // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -253,7 +255,7 @@ export class SandboxApplicationService {
    * i.e. no digest — the placeholder, back again, through the one door that was
    * supposed to have closed it.
    */
-  private async resolveImage(requested?: string): Promise<string> {
+  private async resolveImage(requested: string | undefined, provider: string): Promise<string> {
     const ref = (requested ?? '').trim();
     if (ref !== '' && /[\s\p{Cc}]/u.test(ref)) {
       throw doorRejection(
@@ -263,7 +265,10 @@ export class SandboxApplicationService {
       );
     }
     try {
-      const selected = await this.imageFacade.resolveForTask(ref === '' ? undefined : ref);
+      const selected = await this.imageFacade.resolveForTask(
+        ref === '' ? undefined : ref,
+        provider,
+      );
       return selected.manifestId;
     } catch (e) {
       if (e instanceof ImageAccessError) {
@@ -274,8 +279,10 @@ export class SandboxApplicationService {
         //
         // ⚠️ **码要透传，不能在这里钉死一个。** 原本这里硬写 `INVALID_IMAGE_REFERENCE`,
         // 于是「全新部署、一张镜像都没注册」也报「你的镜像地址里有空白或控制字符」——
-        // 而用户什么都没填。facade 分了两个码正是为了让这两种拿到不同的出路
-        // （改地址 vs 去镜像管理），在出口合并回一个等于把那次区分抹掉。
+        // 而用户什么都没填。facade 分了三个码正是为了让它们拿到不同的出路
+        // （改地址 / 去镜像管理 / 换一档），在出口合并回一个等于把那次区分抹掉。
+        // ⚠️ 第三个码 `IMAGE_PROVIDER_MISMATCH` 尤其不能并进前两个：它的出路
+        // （换 provider 或换一张这一档的镜像）在另外两条建议下做**都没有用**。
         throw doorRejection(HttpStatus.BAD_REQUEST, e.code, e.message);
       }
       throw e;

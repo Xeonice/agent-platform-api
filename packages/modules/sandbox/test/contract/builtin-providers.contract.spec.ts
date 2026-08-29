@@ -26,10 +26,13 @@ runSandboxProviderContractTests(
     expectedCapabilities: {
       spawnTty: true,
       volumeMount: true,
-      updateResources: true,
-      pauseResume: true,
+      // ⚠️ 三位 2026-08-29 从 `true` 改成 `false`：它们是谎报，而**这份 pin 一直在
+      // 帮着钉住谎报**——`expectedCapabilities` 只保证「值没变过」，不保证「值是真的」。
+      // 真话由 CAP-03 保证（位 ⟺ 方法在不在），本 pin 退回它本来的角色：回归守卫。
+      updateResources: false,
+      pauseResume: false,
       snapshot: false,
-      watchEvents: true,
+      watchEvents: false,
       headlessTask: true,
     },
     skipLiveReason: 'live clauses run in apps/api/test/e2e/builtin-provider-contract.e2e-spec.ts',
@@ -46,7 +49,9 @@ runSandboxProviderContractTests(
       updateResources: false,
       pauseResume: false,
       snapshot: false,
-      watchEvents: true,
+      // ⚠️ 同 aio：从来没有 `watchEvents()` 方法。两个 provider 同时错了这么久，
+      // 是因为 CAP-03 之前没有任何东西要求任何一位兑现。
+      watchEvents: false,
       headlessTask: true,
     },
     skipLiveReason: 'live clauses run in apps/api/test/e2e/builtin-provider-contract.e2e-spec.ts',

@@ -28,13 +28,16 @@ import { guardProviders } from './bootstrap/guards.setup';
     AccessPasscodeModule,
     RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),
-    SystemModule,
     ProjectModule,
     SandboxModule,
     TerminalModule,
     CredentialModule,
     RuntimeModule,
     ImageModule,
+    // ⚠️ 放在各限界上下文之后：`SystemModule` 注入三个扩展点 registry
+    //    （provider / runtime adapter / image spec）与 `IMAGE_FACADE`，它们由那几个
+    //    @Global 模块提供 —— 装配顺序与图上的可读性一致，省得下一个人去猜。
+    SystemModule,
   ],
   providers: [...guardProviders],
 })

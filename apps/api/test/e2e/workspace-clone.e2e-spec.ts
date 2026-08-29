@@ -44,10 +44,15 @@ const AIO_IMAGE = process.env.SANDBOX_TEST_IMAGE ?? 'ghcr.io/agent-infra/sandbox
  * 直接失败（`镜像缺少 tmux，不满足平台约定`）。而这条用例长期因为缺 docker/registry 被
  * `skipIf` 跳过，**夹具过时了一整轮都没人发现**——它一跑起来就是红的。
  *
- * 平台镜像（`api/images/platform-base`）带 `platform.tmux` 标签、装了 tmux，
+ * 平台镜像（`api/images/platform-sandbox`）装了 tmux（构建期 `command -v tmux` 自证），
  * 也正是 `SANDBOX_DEFAULT_IMAGE` 该指的那张。
  */
-const BOXLITE_IMAGE = process.env.SANDBOX_BOXLITE_TEST_IMAGE ?? `${REGISTRY}/platform/base:v1`;
+/**
+ * ⚠️ 2026-08：坐标从 `platform/base:v1` 换成 `platform/sandbox:v1`。只为盖
+ * `platform.tmux` 章而存在的那一层 base 被删了（见 `api/images/README.md`）——
+ * 现在只有一张预制镜像。
+ */
+const BOXLITE_IMAGE = process.env.SANDBOX_BOXLITE_TEST_IMAGE ?? `${REGISTRY}/platform/sandbox:v1`;
 
 const docker = createDockerClient();
 const dockerUp = await isDockerAvailable(docker).catch(() => false);
@@ -128,7 +133,7 @@ const PROVIDERS = [
      * 我据此写下「冷缓存下拉 12GB 超时，本机首次必须预热」。**那是错的**——
      * 后来跑全量 e2e 时它 96 秒就失败了，`failureCode` 是：
      *
-     *   INSTALL_FAILED: image localhost:5001/platform/base:v1 declares 'codex' as
+     *   INSTALL_FAILED: image localhost:5001/platform/base:v1 declares 'codex' as  ← 当时的坐标
      *                   preinstalled, but it is not present in the running sandbox
      *
      * 真正的原因是**沙箱内 rootfs 不完整**：boxlite 在 macOS 上构建 rootfs 时

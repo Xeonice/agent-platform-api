@@ -38,3 +38,44 @@ export async function availableBytesFor(path: string): Promise<number> {
     }
   }
 }
+
+/** 一个路径所在文件系统的容量事实。`total === null` ⇒ **量不到**，不是 0。 */
+export interface FilesystemStats {
+  /** 真正被 `statfs` 量到的那个已存在的祖先路径 —— 报给用户时要说清量的是哪儿。 */
+  probedPath: string;
+  totalBytes: number;
+  /** 非特权可用（`bavail`），与 {@link availableBytesFor} 同一位。 */
+  availableBytes: number;
+  /** Linux 的 `statfs.type` 魔数；其它平台可能是 0/undefined。 */
+  fsTypeMagic?: number;
+}
+
+/**
+ * 与 {@link availableBytesFor} 同一次祖先回溯，但把**总容量**也带出来 —— 水位需要分母。
+ *
+ * ⚠️ **量不到时返回 `null`，不返回 `{total: 0}`。** 0 会让水位算成 `used/0`，UI 上是
+ * `NaN%` 或 `Infinity%`；而「这台机器我量不出来」是一个诚实且可渲染的状态。
+ * 少报是降级，多报是撒谎 —— 这里连报都不报。
+ *
+ * ⚠️ 祖先回溯与 {@link availableBytesFor} 共享同一段逻辑不是巧合：两份各写一遍的
+ * `statfs` 就是两份会分头漂移的算术，而那段算术有两个不显眼的讲究（`bavail` 而非
+ * `bfree`、目标目录可能还不存在），任何一份写错都不会有测试发现。
+ */
+export async function filesystemStatsFor(path: string): Promise<FilesystemStats | null> {
+  let probe = resolve(path);
+  for (;;) {
+    try {
+      const fs = await statfs(probe);
+      return {
+        probedPath: probe,
+        totalBytes: Number(fs.blocks) * Number(fs.bsize),
+        availableBytes: Number(fs.bavail) * Number(fs.bsize),
+        fsTypeMagic: typeof fs.type === 'number' ? fs.type : undefined,
+      };
+    } catch {
+      const parent = dirname(probe);
+      if (parent === probe) return null;
+      probe = parent;
+    }
+  }
+}

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Logger } from '@nestjs/common';
 import { ImageSeeder } from '../../src/application/image-seeder';
 import { Image } from '../../src/domain/entities/image.entity';
+import type { ProviderRegistry } from '@platform/contracts';
 import type { ImageRepository } from '../../src/domain/repositories/image.repository';
 import type { ImageApplicationService } from '../../src/application/image-application.service';
 
@@ -65,9 +66,31 @@ function fakeService(behaviour: 'ok' | 'throws' | 'hangs'): MinimalService {
   };
 }
 
+/**
+ * 一个只有 `aio` 一档的 provider 注册表替身。
+ *
+ * ⚠️ **单档就是这里的默认形态**，而且这正是本文件要守住的：ADR 决策 C 让播种改成
+ * 「按档逐张种」，单档部署下那必须**恰好等于原来那一张**——不多种、不少种、也不多打
+ * 一行日志。多档形态另有用例（见文件末尾）。
+ */
+const providersWith = (names: readonly string[]): Pick<ProviderRegistry, 'list'> => ({
+  // ⚠️ 只实现播种真正调用的那一个成员，并用 `Pick<>` 把「只实现了一部分」写在类型里
+  // ——而不是用双重断言把类型系统绕开。绕开的那一刻，`ImageSeeder` 将来多用一个
+  // registry 方法，这份替身也不会红。
+  list: () => names.map((name) => ({ name })) as ReturnType<ProviderRegistry['list']>,
+});
+
 /** 单次断言收在这里：构造器要的是完整接口，而替身只实现了用到的两个成员。 */
-const seederWith = (repo: MinimalRepo, service: MinimalService): ImageSeeder =>
-  new ImageSeeder(repo as ImageRepository, service as ImageApplicationService);
+const seederWith = (
+  repo: MinimalRepo,
+  service: MinimalService,
+  providers: readonly string[] = ['aio'],
+): ImageSeeder =>
+  new ImageSeeder(
+    repo as ImageRepository,
+    service as ImageApplicationService,
+    providersWith(providers) as ProviderRegistry,
+  );
 
 const prevRef = process.env.SANDBOX_DEFAULT_IMAGE;
 beforeEach(() => {

@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { IMAGE_REPOSITORY } from '../domain/repositories/image.repository';
 import type { ImageRepository } from '../domain/repositories/image.repository';
-import { builtinImageRef } from '@platform/shared-kernel';
+import { builtinImageRefs } from '@platform/shared-kernel';
+import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
 import { ImageApplicationService } from './image-application.service';
 
 /**
@@ -65,10 +66,24 @@ export class ImageSeeder implements OnApplicationBootstrap {
   constructor(
     @Inject(IMAGE_REPOSITORY) private readonly images: ImageRepository,
     private readonly service: ImageApplicationService,
+    /**
+     * ⚠️ 播种要种的是**每一档的**预制镜像（ADR 决策 C），而「有哪些档」只有 provider
+     * 注册表知道。硬写 `['aio','boxlite']` 会让第三方注册进来的 provider 永远没有种子，
+     * 而那正是 §8 扩展点承诺过可以做的事。
+     */
+    @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    const ref = builtinImageRef();
+    // ⚠️ **去重后逐张种**：单档部署（两档指向同一张）这里恒为 1 张，与搬家前一字不差。
+    // 逐张各自 try/catch，因为一张种不上不该让另一张也不种——两档是独立的部署形态，
+    // 一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉。
+    for (const ref of builtinImageRefs(this.providers.list().map((p) => p.name))) {
+      await this.seedOne(ref);
+    }
+  }
+
+  private async seedOne(ref: string): Promise<void> {
     try {
       await withBudget(this.seed(ref), ref);
     } catch (e) {

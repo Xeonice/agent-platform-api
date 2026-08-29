@@ -21,6 +21,17 @@ services:
       # `agent port 8080 is not published`(11 §1.3 坑二,本次 compose 验证当场复现)。
       # 不设这一行 ⇒ 照着本文件部署出来的平台**开箱即坏**。
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-ghcr.io/agent-infra/sandbox:latest}
+      # 运维方对上面那张镜像的一句声明:它装了 tmux 吗(04 §7 ★血统)。
+      # ⚠️ 留空 ⇒ 平台查内置的已知镜像表(`agent-infra/sandbox` / `platform/sandbox`,
+      #   含内网 mirror)。上面的兜底值正在表里,所以默认能起;换成一张平台不认识的
+      #   镜像时**必须**在这里显式声明,否则开机播种会响亮失败。
+      # ⚠️ 它防的是「指错了镜像」,不是「谎报」——谎报由运行期 `command -v tmux` 抓。
+      SANDBOX_DEFAULT_IMAGE_TMUX: ${SANDBOX_DEFAULT_IMAGE_TMUX:-}
+      # 按档覆盖预制镜像(ADR 决策 C)。**单档部署留空即可** —— 留空 = 两档共用上面那张,
+      # 与本次改动前的行为一字不差。两档的镜像不可互换,平台会在建任务门口拦下
+      # (IMAGE_PROVIDER_MISMATCH),判据是血统而不是任何一句声明。
+      SANDBOX_AIO_IMAGE: ${SANDBOX_AIO_IMAGE:-}
+      SANDBOX_BOXLITE_IMAGE: ${SANDBOX_BOXLITE_IMAGE:-}
       # ⚠️ 宿主路径 = 容器路径,这是 bind mount 方案的**硬约束**(11 §1.2):
       # DooD 下 api 请求挂载 `${DATA_ROOT}/workspaces/<id>` 时,这个路径由**宿主的**
       # 容器运行时解析,而不是 api 容器的命名空间。两边不同名 ⇒ 挂载源找不到。

@@ -57,7 +57,14 @@ import { FakeProvider, fakeProjectFacade, fakeWorkspace, makeFakeRegistry } from
  *   · REF/…      — ordinary user images, built FROM the root (diff_ids prefix).
  *   · ALIEN_REF  — an image built from something else entirely ⇒ IMAGE_BASE_REQUIRED.
  */
-const BASE_REF = 'ghcr.io/platform/base:v1';
+/**
+ * ⚠️ 2026-08：坐标从 `ghcr.io/platform/base` 换成了 `platform/sandbox`。只为盖
+ * `platform.tmux` 章而存在的那一层 base 被删了，根镜像的 tmux 声明改由平台配置回答
+ * （`SANDBOX_DEFAULT_IMAGE_TMUX` + 内置已知镜像表）。`platform/sandbox` 在那张表里，
+ * 所以播种照旧成功——**换成一个表外的名字，本文件全线 fail on seeding**，那正是这条
+ * 规则该有的样子。
+ */
+const BASE_REF = 'ghcr.io/platform/sandbox:v1';
 const IMAGE = 'ghcr.io/example/derived';
 const REF = `${IMAGE}:v1`;
 const OTHER_REF = 'ghcr.io/example/other:v1';
@@ -81,6 +88,7 @@ class ScriptedSpecProvider implements ImageSpecProvider {
    * `platform.tmux` describes an ancestor. Driving this fixture with a tmux verdict
    * would keep asserting, over real HTTP, a rule the platform no longer has. The
    * entry-point contract is what `validate()` genuinely still owns (IS-03).
+   * （2026-08 后续：那个标签连根镜像的判据都不再是了——见 `BASE_REF` 上方。）
    */
   readonly broken = new Set<string>();
   /** refs whose image is NOT built on the platform root ⇒ lineage refusal. */
@@ -113,7 +121,7 @@ class ScriptedSpecProvider implements ImageSpecProvider {
         // clause unfalsifiable.
         supportedRuntimes: ['codex'],
         resourceDefaults: { cores: 2, ramMb: 1024, diskMb: 4096 },
-        labelsRequired: ['platform.tmux'],
+        labelsRequired: [],
         diffIds: this.diffIdsFor(canonical),
       },
     };

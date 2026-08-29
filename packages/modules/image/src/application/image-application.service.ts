@@ -8,10 +8,10 @@ import {
   type EventBus,
   type IdGenerator,
   type UnitOfWork,
+  builtinImageDeclaresTmux,
 } from '@platform/shared-kernel';
 import {
   IMAGE_BASE_REQUIRED,
-  IMAGE_LABEL_TMUX,
   IMAGE_SPEC_REGISTRY,
   IMAGE_TMUX_MISSING,
   ImageSpecError,
@@ -444,27 +444,39 @@ export class ImageApplicationService {
    * 根镜像（`SANDBOX_DEFAULT_IMAGE`，由 `ImageSeeder` 以 `builtin: true` 注册）的规则。
    *
    * ⚠️ **它豁免血统校验，因为它就是锚点** —— 没有更早的祖先可比。取而代之的是一条
-   * 弱得多、但目标不同的检查：这张镜像**声明**了 `platform.tmux` 吗？
+   * 弱得多、但目标不同的检查：**运维方声明过这张镜像有 tmux 吗？**
    *
    * ⚠️ **这条防的是「指错了镜像」，不是「谎报」** —— 两者的区别必须写在明处，否则下一个
    * 人会以为根镜像的合规性已经有人担保了。它是**运维方对自己指定的那张镜像做的一次
    * 声明**：`SANDBOX_DEFAULT_IMAGE` 被填成一张随便的 `alpine:3.20` 时，开机就响亮地
    * 拒绝，而不是等到第一个 Task 起 tmux 会话时才炸。防谎报永远是运行期那次
    * `command -v tmux`（⇒ `IMAGE_CONTRACT_VIOLATION`），本条替代不了它。
+   *
+   * ══ 2026-08：声明的**来源**从镜像标签换成了平台配置 ═════════════════════════════
+   * 以前问的是 `manifest.labelsRequired` 里有没有 `platform.tmux`。那要求上游镜像打
+   * 一个我们发明的标签 ⇒ 平台被迫维护一层 `FROM 上游 + 3 个 LABEL`、零字节新层的
+   * `platform/base`，只为盖这个章，代价是 13GB 的 pull/push 和一个**必须自建的
+   * registry**（Docker 一停整条链断）。声明的作者从来就是运维方，不是镜像作者。
+   *
+   * ⇒ 改问 `builtinImageDeclaresTmux()`（`SANDBOX_DEFAULT_IMAGE_TMUX` + 平台内置的
+   * 已知镜像表）。**问的是同一件事、拦的是同一个错、留给运行期的还是同一件事**，
+   * 只是不再要求运维方先成为镜像作者。
    */
   private assertRootDeclaresTmux(resolved: ResolvedImage): void {
-    if ((resolved.manifest.labelsRequired ?? []).includes(IMAGE_LABEL_TMUX)) return;
+    if (builtinImageDeclaresTmux(resolved.ref)) return;
     throw new ManifestInvalidError(
       ValidationOutcome.from(
         [
           {
             code: IMAGE_TMUX_MISSING,
-            path: `labels.${IMAGE_LABEL_TMUX}`,
+            // ⚠️ `path` 指向**现在要改的那个东西**。继续指 `labels.platform.tmux` 会把
+            // 用户送去改一张他可能根本没有构建权的镜像——而正确的下一步是改一行配置。
+            path: 'env.SANDBOX_DEFAULT_IMAGE_TMUX',
             message:
-              `平台根镜像 '${resolved.ref}' 未声明 ${IMAGE_LABEL_TMUX}=true。` +
+              `平台根镜像 '${resolved.ref}' 没有 tmux 声明。` +
               'agent 会话由沙箱内的 tmux 持有，根镜像是所有自定义镜像的血统起点；' +
               '请把 SANDBOX_DEFAULT_IMAGE 指向平台预制镜像（构建脚本在 api/images/platform-sandbox），' +
-              '或给这张镜像补上该标签后重启。',
+              '或在确认该镜像装有 tmux 后设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 并重启。',
           },
         ],
         [],
