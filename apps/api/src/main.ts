@@ -5,7 +5,7 @@ import { AppModule } from './app.module';
 import { setupSwagger } from './bootstrap/swagger.setup';
 import { configurePlatformApp } from './bootstrap/configure-app';
 import { setupWebsockets } from './bootstrap/websocket.setup';
-import { env, isExposedBind } from './platform/config/env';
+import { describeBindExposure, env } from './platform/config/env';
 import { PlatformLoggerService } from './platform/logging';
 
 async function bootstrap(): Promise<void> {
@@ -24,13 +24,12 @@ async function bootstrap(): Promise<void> {
   setupWebsockets(app);
   setupSwagger(app);
 
-  if (isExposedBind(env.host)) {
-    Logger.warn(
-      `HTTP is bound to ${env.host} — this instance may be reachable from the LAN/public. ` +
-        `It holds user runtime credentials; prefer 127.0.0.1 + reverse proxy (shared/11 §3).`,
-      'Bootstrap',
-    );
-  }
+  // 绑在通配地址时的那条提示 —— 判定在 `describeBindExposure`（纯函数，单测在
+  // `apps/api/test/unit/config/bind-exposure.spec.ts`）。compose 形态下它必然为真而
+  // 又不代表出错，所以那里要的是一句**显式声明**，不是一次探测。
+  const exposure = describeBindExposure(env.host, process.env.HTTP_BIND_GATED_BY);
+  if (exposure.level === 'warn') Logger.warn(exposure.message, 'Bootstrap');
+  else if (exposure.level === 'declared') Logger.log(exposure.message, 'Bootstrap');
 
   // SIGTERM 时走 onApplicationShutdown 放干缓冲,否则退出会丢最后几行(11 §1.2.1)。
   app.enableShutdownHooks();

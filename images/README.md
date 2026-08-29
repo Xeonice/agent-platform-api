@@ -210,22 +210,51 @@ daemon 自己的 `insecure-registries` 同形状）。留空 = 行为一字不�
 ⚠️⚠️ **配它的时候要守住一条纪律：宿主 daemon 与 api 容器必须用同一个 `host:port` 解析到
 同一个 registry。** 镜像坐标只有一份，它同时要被两个人解析：
 
-| 谁                     | 什么时候        | 解析什么             |
-| ---------------------- | --------------- | -------------------- |
-| **api 进程**（容器里） | 注册 / 开机播种 | registry 的 HTTP API |
-| **宿主 docker daemon** | 起容器时拉镜像  | 同一个坐标           |
+| 谁                     | 什么时候        | 解析什么             | 非它不可？                             |
+| ---------------------- | --------------- | -------------------- | -------------------------------------- |
+| **api 进程**（容器里） | 注册 / 开机播种 | registry 的 HTTP API | ✅ **是**，这一步永远要够得着 registry |
+| **宿主 docker daemon** | 起容器时拉镜像  | 同一个坐标           | ⚠️ **aio 档不是**，见下                |
+
+⚠️ **第二行对 aio 档不成立（2026-08-30 复验更正）**：`docker-container-runtime.ts` 全文
+**没有 pull**——起容器只查 daemon 的本机镜像库。所以只要那个坐标在本机镜像库里存在
+（`docker tag` 就够），宿主 daemon **从不需要**解析它，`daemon.json` 的
+`insecure-registries` 那一行对 aio 档也就不是必需的。boxlite 档不同：它走 BoxLite 自己的
+OCI store，**必须**从 registry 拉，那一行才是硬要求。
 
 两边解析成不同的东西，就会回到本文档记的同一个病根（容器内外坐标不是同一套）。可用的形态：
 
-```
-# 宿主 /etc/hosts:            127.0.0.1 registry.local
-# 宿主 daemon.json:           {"insecure-registries": ["registry.local:15001"]}
-# registry 发布在:            registry.local:15001（宿主）
-# compose 的 api 服务:
+```sh
+# ★ registry **不能只发布在 127.0.0.1 上**：容器侧的 host-gateway 解析到的是宿主网关 IP
+#   （实测 WSL2 上是 192.168.65.254），从那个地址连不到只绑在 loopback 上的端口。
+docker run -d --name platform-registry -p 15001:5000 registry:2
+
+docker build -t localhost:15001/platform/sandbox:v2 images/platform-sandbox
+docker push  localhost:15001/platform/sandbox:v2   # loopback ⇒ daemon 默认按明文处理，免动 daemon.json
+docker tag   localhost:15001/platform/sandbox:v2 registry.local:15001/platform/sandbox:v2
+
+# compose 侧（`docker-compose.yml` 里 `extra_hosts` 已经默认带着了，见那里的注释）：
 #   extra_hosts: ["registry.local:host-gateway"]
 #   IMAGE_REGISTRY_INSECURE_HOSTS: registry.local:15001
 #   SANDBOX_DEFAULT_IMAGE: registry.local:15001/platform/sandbox:v2
 ```
+
+实测结果：`ImageSeeder ... seeded built-in image registry.local:15001/platform/sandbox:v2
+→ sha256:e053d0a4… (valid)`，digest 与裸跑档解析出来的**一字不差**。
+
+⚠️ 这份配方**免 root**：它既不改宿主 `/etc/hosts`，也不改 `daemon.json`。
+`registry.local` 这个名字只有 **api 容器**需要解析得开（由 `extra_hosts` 给），而
+`docker push` 走的是 `localhost:15001` 这个 loopback 坐标（daemon 对 loopback 默认按明文
+处理）。最后那句 `docker tag` 只是让**本机镜像库**也有 `registry.local:15001/...` 这个名字，
+好让起容器那一步查得到 —— 那一步不 pull（见上表第二行的 ⚠️）。
+
+⚠️⚠️ **上面这份配方是 2026-08-30 改过的。改之前那一份照抄跑不通，三处**（留档，
+因为每一处的症状都与「registry 根本没起」一模一样，不写下来会被重新踩）：
+
+| #   | 问题                                             | 后果 / 实测怎么绕过去的                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **`docker-compose.yml` 里没有 `extra_hosts`**    | 配方要求 api 服务带这一行，而仓里那份**一个字都没有**。不加 ⇒ 容器里 `registry.local` 根本解析不出来，播种照样失败。✅ **已修**：`docker-compose.yml` 现在**默认带着**这一行（不用本机 registry 时它只是一条无害的 /etc/hosts 记录，所以不做成要人手动解注释的注释）                                                                                                                                                                                                                                                                        |
+| 2   | **registry 发布在 `127.0.0.1` 上，容器侧够不着** | `/etc/hosts` 那行把 `registry.local` 指到宿主的 **127.0.0.1**，而容器侧 `extra_hosts: host-gateway` 指向的是**宿主网关 IP**（实测 WSL2 上是 `192.168.65.254`）。一个只发布在 loopback 上的 registry，从网关地址**连不到**。⇒ 配方必须写明 registry 要发布在网关可达的地址上（实测 `-p 15001:5000`），否则两行配置各自成立、合起来不通                                                                                                                                                                                                       |
+| 3   | **整个配方需要 root，而配方没说**                | 改 `/etc/hosts` 与 `daemon.json` 都要 root。测试机上 `sudo` 需要密码 ⇒ 这条路直接走不下去。**实测的免 root 走法**：仍用 `docker push localhost:15001/...`（loopback，daemon 默认按明文处理，不必动 `daemon.json`），再 `docker tag` 成 `registry.local:15001/...` 让**本机镜像库**有这个名字 —— 起容器那一步只查本机库、**不会 pull**（`docker-container-runtime.ts` 全文没有 pull），所以宿主 daemon 其实**从不需要**解析这个坐标。⇒ 上表「宿主 daemon 在起容器时拉同一个坐标」这句对 aio 档**不成立**，`daemon.json` 那一行也就不是必需的 |
 
 ⚠️ 别用 `localhost:5001` 那种「两边各自成立、指的却是两台机器」的坐标 —— 那是这条纪律
 唯一想拦的东西。

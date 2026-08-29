@@ -29,6 +29,7 @@ import { AioSandboxProvider } from '../infrastructure/providers/aio/aio-sandbox.
 import { BoxliteSandboxProvider } from '../infrastructure/providers/boxlite/boxlite-sandbox.provider';
 import { DOCKER_CLIENT } from '../infrastructure/providers/docker/docker.token';
 import { createDockerClient } from '../infrastructure/providers/docker/docker-client';
+import { DockerSelfNetworkCheck } from '../infrastructure/providers/docker/self-network-check.service';
 import { RuntimeReconciler } from '../infrastructure/reconcile/runtime-reconciler';
 import { SandboxController } from './http/sandbox.controller';
 import { AgentTaskController } from './http/agent-task.controller';
@@ -76,6 +77,9 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: SANDBOX_EXEC_PORT, useClass: SandboxExecAdapter },
     { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
     RuntimeReconciler,
+    // 开机自检：填了 SANDBOX_DOCKER_NETWORK 就证实「我自己也在那个网络里」——
+    // 那句声明里唯一填得错的一半（shared/11 §1.4）。没填 = 直接返回。
+    DockerSelfNetworkCheck,
     SandboxEventProjector,
     CredentialRevokedHandler,
   ],
