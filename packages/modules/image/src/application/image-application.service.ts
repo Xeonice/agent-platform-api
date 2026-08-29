@@ -9,6 +9,7 @@ import {
   type IdGenerator,
   type UnitOfWork,
   builtinImageDeclaresTmux,
+  explainKnownTmuxRepositories,
 } from '@platform/shared-kernel';
 import {
   IMAGE_BASE_REQUIRED,
@@ -476,7 +477,12 @@ export class ImageApplicationService {
               `平台根镜像 '${resolved.ref}' 没有 tmux 声明。` +
               'agent 会话由沙箱内的 tmux 持有，根镜像是所有自定义镜像的血统起点；' +
               '请把 SANDBOX_DEFAULT_IMAGE 指向平台预制镜像（构建脚本在 api/images/platform-sandbox），' +
-              '或在确认该镜像装有 tmux 后设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 并重启。',
+              '或在确认该镜像装有 tmux 后设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 并重启。' +
+              // ⚠️ **把「正确的名字长什么样」直接说出来**，而不是让人回去读一张表。
+              // 实测踩过：按构建目录名 build 成 `…/platform-sandbox:v1`（连字符）被拒，
+              // 而当时的消息一个字都没提到名字，排查方向必然跑偏（去查 registry、
+              // 去查镜像里到底有没有 tmux）——两者都没坏。
+              explainKnownTmuxRepositories(resolved.ref),
           },
         ],
         [],

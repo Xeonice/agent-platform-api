@@ -10,6 +10,7 @@ import type { ProviderRegistry, TerminalServerFrame } from '@platform/contracts'
 import { IMAGE_SPEC_REGISTRY } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { makeFakeImageSpecRegistry, registerDefaultImage } from './_fakes';
+import { useEnv } from './_env';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import {
@@ -61,7 +62,7 @@ if (!runnable) {
 // aio only here — boxlite runs on the BoxLite micro-VM SDK (no docker container),
 // exercised by boxlite-microvm.e2e.
 const PROVIDERS = [
-  { provider: 'aio', isolation: 'container', updateResources: true, pauseResume: true },
+  { provider: 'aio', isolation: 'container', updateResources: false, pauseResume: false },
 ] as const;
 
 let app: INestApplication;
@@ -70,6 +71,7 @@ let dataRoot: string;
 const docker = createDockerClient();
 /** container names created during the run, force-removed in afterAll. */
 const createdContainers = new Set<string>();
+let restoreEnv: (() => void) | undefined;
 
 beforeAll(async () => {
   if (!runnable) return;
@@ -77,7 +79,14 @@ beforeAll(async () => {
   // project-local temp dir so the host path is docker-shareable (macOS Docker Desktop)
   dataRoot = mkdtempSync(resolve(process.cwd(), 'tmp-e2e-data-'));
   process.env.DATA_ROOT = dataRoot;
-  process.env.SANDBOX_DEFAULT_IMAGE = IMAGE;
+  // ⚠️ **`SANDBOX_DEFAULT_IMAGE` 必须走 `useEnv`,不能裸赋值。** 每个 e2e 文件共享同一个
+  // 进程(singleFork),而这个变量决定 `ImageSeeder` 在**后面每一个文件**的 `app.init()`
+  // 里去播种哪张镜像 —— 泄漏出去之后,`registry-extension.e2e` 的
+  // `registerImage(SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20')` 会撞上「播种时已经注册过了」
+  // 而 `created:false`。实测踩到过一次(2026-08-29,本机装了 AIO 镜像因此这几个文件真的
+  // 跑了起来);**CI 里因为没有那张镜像、这三个文件全被跳过,所以泄漏从来没发生过** ——
+  // 一个只在「测试真的跑起来时」才出现的串扰。
+  restoreEnv = useEnv({ SANDBOX_DEFAULT_IMAGE: IMAGE });
 
   // REAL providers + registry + workspace preparer (no overrides).
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -105,6 +114,7 @@ afterAll(async () => {
       .catch(() => undefined);
   }
   await app?.close();
+  restoreEnv?.();
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
 });
 
@@ -193,15 +203,29 @@ describe.skipIf(!runnable)(
   () => {
     it('the registry exposes two DISTINCT providers with different capabilities', () => {
       const registry = app.get<ProviderRegistry>(SANDBOX_PROVIDER_REGISTRY);
-      expect(registry.defaultProvider).toBe('aio');
+      // ⚠️ **默认档跟宿主平台走,不是常量**（`provider-registry.ts#hostPreferredProvider`：
+      // darwin ⇒ boxlite，其余 ⇒ aio）。此前这里硬写 `'aio'`，于是本文件在 macOS 上一旦
+      // 真的跑起来（= 本机有 AIO 镜像时）必红 —— 而它平时被跳过，所以没人看见。
+      // ⚠️ 断言照着实现抄一遍等于什么都没断言，所以这里钉的是**那条规则**：默认档必须是
+      // 本平台上真的能用的那一档（macOS 上 aio 要 Docker，boxlite 才是原生的那个）。
+      expect(registry.defaultProvider).toBe(process.platform === 'darwin' ? 'boxlite' : 'aio');
       const aio = registry.get('aio');
       const boxlite = registry.get('boxlite');
       expect(aio).not.toBe(boxlite);
       expect(aio.name).toBe('aio');
       expect(boxlite.name).toBe('boxlite');
-      // capability divergence proves these are two different classes, not aio twice
-      expect(aio.capabilities.updateResources).toBe(true);
-      expect(aio.capabilities.pauseResume).toBe(true);
+      // ⚠️ 2026-08-29 (CAP-03) 之后，「能力位有分歧」这个判据**已经不成立了**。
+      // 那次修复把两档的谎报位全部改回 `false`（aio 的 `updateResources` /
+      // `pauseResume` / `watchEvents`，boxlite 的 `watchEvents`），结果是
+      // **两档的七位现在一字不差地相同**。所以「两个不同的类」今天只由上面的
+      // `not.toBe` 与 `name` 证明，下面四条退化成**回归钉**：钉住 CAP-03 的结论，
+      // 防止哪一位又被翻回 `true`。
+      //
+      // 本文件当时没跟着 CAP-03 改，而它**只在 Linux + docker + AIO 镜像**下才跑得
+      // 起来 —— 于是这两条断言在 macOS 上永远 skip，从没红过（2026-08-29 在真
+      // Linux 上首次跑通时当场变红）。
+      expect(aio.capabilities.updateResources).toBe(false);
+      expect(aio.capabilities.pauseResume).toBe(false);
       expect(boxlite.capabilities.updateResources).toBe(false);
       expect(boxlite.capabilities.pauseResume).toBe(false);
     });

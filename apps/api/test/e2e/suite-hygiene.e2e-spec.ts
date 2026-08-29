@@ -65,6 +65,28 @@ describe('e2e process.env hygiene (singleFork ⇒ one shared environment)', () =
         'through `useEnv` from ./_env so the value is restored for later specs.',
     ).toEqual([]);
   });
+
+  it('every spec that configures SANDBOX_DEFAULT_IMAGE does it through useEnv', () => {
+    // ⚠️ 这一条是 2026-08-29 真踩出来的,而它踩出来的方式本身值得记:
+    // `SANDBOX_DEFAULT_IMAGE` 决定 `ImageSeeder` 在**后面每一个文件**的 `app.init()` 里
+    // 去播种哪张镜像。三个 docker-gated 的文件裸赋值它、从不还原,于是泄漏之后
+    // `registry-extension.e2e` 的 `registerImage(SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20')`
+    // 撞上「播种时已经注册过了」而 `created:false`。
+    //
+    // ⛔ **而 CI 从来没红过,因为 CI 上没有 AIO 镜像 ⇒ 那三个文件全被跳过 ⇒ 泄漏根本
+    // 不发生。** 也就是说:这是一条**只在测试真的跑起来时才存在**的串扰 —— 跳过不是通过,
+    // 它连「有没有这个 bug」都答不了。
+    const offenders = e2eSources()
+      .filter(({ text }) => /process\.env\.SANDBOX_DEFAULT_IMAGE\s*=[^=]/.test(stripComments(text)))
+      .map(({ file }) => file);
+
+    expect(
+      offenders,
+      `${offenders.join(', ')} assign process.env.SANDBOX_DEFAULT_IMAGE directly; route ` +
+        'it through `useEnv` from ./_env. It decides what `ImageSeeder` seeds in every ' +
+        'LATER spec, so a leaked value silently changes their catalogue.',
+    ).toEqual([]);
+  });
 });
 
 describe('e2e HTTP hygiene (an ephemeral port must not be shared by accident)', () => {

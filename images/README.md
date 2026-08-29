@@ -108,6 +108,20 @@ docker build -t <registry>/platform/sandbox:<tag> images/platform-sandbox
 docker build -t <registry>/platform/boxlite:<tag> images/platform-boxlite
 ```
 
+⛔⛔ **`-t` 里的名字是 `platform/sandbox`（斜杠），不是目录名 `platform-sandbox`（连字符）。**
+
+这一条 2026-08-29 在真机上踩过：照着目录名 build 成 `…/platform-sandbox:v1`，开机播种被拒，
+随后任何自定义镜像注册都撞上「平台还没有可用的预制镜像作为血统基准」——而那句话**一个字都
+没提到名字**，排查方向必然跑偏（去查 registry、去查镜像里到底有没有 tmux，两者都没坏）。
+
+原因是平台内置的已知镜像表（`shared-kernel/domain/builtin-image.ts`）匹配的是**仓库名**
+`platform/sandbox` / `platform/boxlite` / `agent-infra/sandbox`（`<registry>/` 之后那一段），
+而目录名与仓库名只差一个分隔符。⇒ 现在错误信息会自己点出这件事，但那已经是十分钟以后了。
+
+绕过的办法只有一个、而且它拦的是别的东西：确认镜像真的装了 tmux 后设
+`SANDBOX_DEFAULT_IMAGE_TMUX=true`（那是给**自建 / 改名 / 内网 mirror** 用的口子，不是给
+打错名字用的）。
+
 覆盖版本：
 
 ```sh
@@ -129,12 +143,105 @@ docker build \
 
 ## 要不要 push？—— 取决于跑哪个 provider
 
-| provider             | 镜像从哪来                     | 需要 registry 吗                                                                                                     |
-| -------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| **aio**（docker）    | docker daemon 的**本机镜像库** | ❌ **不需要**。`docker build -t platform/sandbox:dev` 之后把 `SANDBOX_DEFAULT_IMAGE` 指过去就能用                    |
-| **boxlite**（微 VM） | 必须从 registry 拉             | ✅ 需要（`SANDBOX_BOXLITE_REGISTRY`；BoxLite 自己的 image store 不支持断点续传，大镜像还要经 `localhost:5001` 中转） |
+> ⛔ **本节此前写的是「aio 不需要 registry」——那是错的**（2026-08-29 在真 Linux 上实测推翻）。
+> 下表已订正。
 
-⚠️ **这条差别就是「自建 registry 是不是必需」的答案**：只跑 aio 的单机部署不需要自建 registry —— 而删掉 `platform/base` 之前它是必需的，因为那张只为盖章的中间镜像必须有地方存。
+| provider             | 运行期镜像从哪来               | **注册/播种**期镜像从哪来 | 需要 registry 吗                      |
+| -------------------- | ------------------------------ | ------------------------- | ------------------------------------- |
+| **aio**（docker）    | docker daemon 的**本机镜像库** | **OCI registry HTTP API** | ✅ **需要**                           |
+| **boxlite**（微 VM） | 必须从 registry 拉             | **OCI registry HTTP API** | ✅ 需要（`SANDBOX_BOXLITE_REGISTRY`） |
+
+⚠️ **两档都需要 registry，只是需要它的「时刻」不同。**
+
+镜像在平台里要过**两道**关，它们查的是两个不同的地方：
+
+1. **注册 / 开机播种**（`ImageSeeder` → `ImageApplicationService.registerImage` →
+   `OciImageSpecProvider.resolve`）—— 把 tag 解析成 digest、并读出 `rootfs.diff_ids`
+   给血统比对用。**这条路只有一个实现，就是 `oci`**（`DefaultImageSpecRegistry` 的
+   构造函数里只注册了 `OciImageSpecProvider`），它走的是 **registry 的 HTTP API**，
+   **从不问 docker daemon**。
+2. **起容器**（`DockerContainerRuntime`）—— 这一步才用 docker 的本机镜像库。
+
+⇒ 一张只存在于本机 docker 镜像库、没有 push 过的镜像，**过不了第 1 关**，于是平台
+「一张预制镜像都没有」，`POST /api/sandboxes` 与自定义镜像注册全都不可用。实测：
+
+```
+$ docker build -t platform/sandbox:dev images/platform-sandbox   # 镜像确实在本机
+$ SANDBOX_DEFAULT_IMAGE=platform/sandbox:dev  …启动
+WARN [ImageSeeder] built-in image platform/sandbox:dev could not be seeded
+     (registry registry-1.docker.io answered 401 for 'platform/sandbox:dev')
+```
+
+⚠️ **为什么这条错了这么久没被发现**：唯一会走 `registerImage` 的那批 e2e
+（`terminal-container.e2e-spec.ts` 等）都用
+`.overrideProvider(IMAGE_SPEC_REGISTRY).useValue(makeFakeImageSpecRegistry())`
+把这一关换成了**不联网的替身**。真实的播种路径**曾经没有任何自动化测试覆盖**。
+
+⇒ 2026-08-29 补上：`apps/api/test/e2e/image-seeding-registry.e2e-spec.ts` —— **不走替身**，
+真的起一个 registry、真的 `docker build` + `docker push`、真的让 `ImageSeeder` 在
+`app.init()` 里播种，正反两向各一条断言：
+
+| 方向 | 断言                                                                                            |
+| ---- | ----------------------------------------------------------------------------------------------- |
+| 正   | push 过 ⇒ 播成 `valid`，且 digest **等于 registry 自己回答的那一个**                            |
+| 反   | 同一份 bits、同一个 registry、**只是没 push** ⇒ `REF_NOT_FOUND`（前置先断言 daemon 里确实有它） |
+
+⚠️ 它依赖 docker + 本机有 `registry:2` / `alpine:3.20`，缺前置就**大声跳过并说明缺什么**——
+一条 skip 掉的 e2e 从来没有验证过任何东西。
+
+⚠️ **删掉 `platform/base` 省下的是 13GB 的「pull→打标签→push」**（那张零字节中间层
+不必再存一份），**不是「自建 registry」这件事本身** —— 后者仍然是单机部署的必需品。
+
+### 本机 registry 的坑（实测）与 compose 下的配方
+
+- **scheme 默认按 host 名硬判**：`oci-registry.client.ts` 只对
+  `localhost` / `127.0.0.1` / `[::1]` 用 `http`，其余一律 `https`。
+- ⛔ **于是 compose（api 跑在容器里）曾经配不出一个能用的本机 registry**：
+  容器里的 `127.0.0.1` 是它自己的 loopback（连不到宿主的 registry），
+  而换成 `host.docker.internal` / 网关 IP 又会被强制走 `https` 而失败。
+  实测两边都试过：`http://host.docker.internal:15001/v2/` → 200，
+  `https://…` → fetch failed，平台走的正是后者。
+
+⇒ **2026-08-29 起：`IMAGE_REGISTRY_INSECURE_HOSTS`**（逗号分隔的 `host:port`，与 docker
+daemon 自己的 `insecure-registries` 同形状）。留空 = 行为一字不变；列出的 host 走明文。
+⛔ 平台**不做**「先试 https 再退回 http」的自动降级 —— 那等于给任何一次 TLS 故障配一条
+静默的降级路径，而它降级掉的正是传输安全。
+
+⚠️⚠️ **配它的时候要守住一条纪律：宿主 daemon 与 api 容器必须用同一个 `host:port` 解析到
+同一个 registry。** 镜像坐标只有一份，它同时要被两个人解析：
+
+| 谁                     | 什么时候        | 解析什么             |
+| ---------------------- | --------------- | -------------------- |
+| **api 进程**（容器里） | 注册 / 开机播种 | registry 的 HTTP API |
+| **宿主 docker daemon** | 起容器时拉镜像  | 同一个坐标           |
+
+两边解析成不同的东西，就会回到本文档记的同一个病根（容器内外坐标不是同一套）。可用的形态：
+
+```
+# 宿主 /etc/hosts:            127.0.0.1 registry.local
+# 宿主 daemon.json:           {"insecure-registries": ["registry.local:15001"]}
+# registry 发布在:            registry.local:15001（宿主）
+# compose 的 api 服务:
+#   extra_hosts: ["registry.local:host-gateway"]
+#   IMAGE_REGISTRY_INSECURE_HOSTS: registry.local:15001
+#   SANDBOX_DEFAULT_IMAGE: registry.local:15001/platform/sandbox:v2
+```
+
+⚠️ 别用 `localhost:5001` 那种「两边各自成立、指的却是两台机器」的坐标 —— 那是这条纪律
+唯一想拦的东西。
+
+### ⚠️ 「宿主够得着」不蕴含「daemon 够得着」（写测试时又踩了一次）
+
+`docker push` 是 **daemon** 发起的。daemon 不一定与你的进程共享 netns —— Docker Desktop
+把它放在一个 VM 里。实测同一台机器：
+
+| registry 发布方式                        | 宿主 `curl http://127.0.0.1:<port>/v2/` | `docker push 127.0.0.1:<port>/…` |
+| ---------------------------------------- | --------------------------------------- | -------------------------------- |
+| `-p 5199:5000`（固定端口）               | 200                                     | ✅ Pushed                        |
+| `-p 0.0.0.0::5000`（内核分配的临时端口） | 200                                     | ⛔ `connect: connection refused` |
+
+⇒ 这与 §「api 在容器里连不上沙箱」是同一句话的两种说法。
+`apps/api/test/e2e/image-seeding-registry.e2e-spec.ts` 因此用固定端口起它的测试 registry。
 
 ## 血统（04 §7 ★血统）
 

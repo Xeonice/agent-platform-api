@@ -7,6 +7,11 @@ import {
   type SandboxRuntimeStatus,
 } from '@platform/contracts';
 import type { ContainerCreateSpec, ContainerRuntime } from '../container-runtime.port';
+import {
+  isDnsResolvableContainerName,
+  resolveAgentAddressing,
+  type AgentAddressing,
+} from './agent-addressing';
 
 /**
  * `ContainerRuntime` 的 **docker 实现** —— 控制面，仅此而已。
@@ -32,12 +37,34 @@ import type { ContainerCreateSpec, ContainerRuntime } from '../container-runtime
 export class DockerContainerRuntime implements ContainerRuntime {
   readonly kind = 'docker';
 
-  constructor(private readonly docker: Docker) {}
+  constructor(
+    private readonly docker: Docker,
+    /**
+     * **平台自己站在哪一侧**（`agent-addressing.ts`）。默认从 `SANDBOX_DOCKER_NETWORK`
+     * 读，且默认值就是今天的行为——裸跑在宿主、端口发布到 loopback。
+     *
+     * ⚠️ 显式参数不是为了测试方便，而是因为**这是一条部署事实，不是一个运行期判断**：
+     * 构造时定下来，之后每一次 `create`/`agentOrigin` 都照着同一份答案走。
+     */
+    private readonly addressing: AgentAddressing = resolveAgentAddressing(),
+  ) {}
 
   async create(spec: ContainerCreateSpec): Promise<string> {
     return this.guard(async () => {
       const binds = spec.volumes.map((v) => `${v.source}:${v.target}:${v.mode}`);
       const portKey = `${spec.agentPort}/tcp`;
+      const network = this.network();
+      if (network !== null && !isDnsResolvableContainerName(spec.instanceName)) {
+        // 名字不是一个 DNS label ⇒ 容器**照样起得来**，只是 `http://<名字>:8080`
+        // 永远解析不了，报出来会是一条指向沙箱的 `did not become ready`。在门口拦下，
+        // 把它变成一条说得出原因的错误（`agent-addressing.ts` 那段 ⚠️）。
+        throw new SandboxProviderError(
+          SandboxProviderErrorCode.INVALID_STATE,
+          `instance name '${spec.instanceName}' is not a DNS label, so it cannot be resolved ` +
+            `on the docker network '${network}' (SANDBOX_DOCKER_NETWORK). ` +
+            'Names must be 1–63 chars of [a-z0-9-], starting and ending alphanumeric.',
+        );
+      }
       const container = await this.docker.createContainer({
         name: spec.instanceName,
         // 04 §7 时刻④: `ref@digest`, not a tag. Steps ①②③ freeze a coordinate into
@@ -73,12 +100,19 @@ export class DockerContainerRuntime implements ContainerRuntime {
           // 主路径照常工作**。也就是说这一条买的是 browser 那一档的可用性，不是主路径的。
           // 记在这里是为了将来有人想去掉它时，知道该验的是哪一块，而不是「试试看没炸」。
           SecurityOpt: ['seccomp=unconfined'],
-          // publish the agent port to LOOPBACK ONLY (HostIp 127.0.0.1), never an
-          // external interface. Loopback alone is NOT the access control — every
-          // local process shares it — so the agent also runs behind its own auth
-          // gateway keyed by SANDBOX_API_KEY (ADR 安全姿态).
-          // Empty HostPort = kernel-assigned ephemeral port, resolved at spawn time.
-          PortBindings: { [portKey]: [{ HostIp: '127.0.0.1', HostPort: '' }] },
+          // ── 两种坐标，二选一（`agent-addressing.ts`，shared/11 §1.4）──────────
+          //
+          // `container-network`：api 与沙箱同在一个用户自定义网络 ⇒ 走 docker 内嵌
+          // DNS，**一个端口都不发布**。这是本形态相对默认档**收窄**暴露面的那一半：
+          // 宿主上没有任何进程能碰到这个 `:8080`。
+          //
+          // `published-port`（默认）：发布到 LOOPBACK ONLY（HostIp 127.0.0.1），
+          // 永不发布到对外网卡。loopback 本身**不是**访问控制——本机每个进程都共享它
+          // ——所以 agent 另有一道 `SANDBOX_API_KEY` 的门（ADR 安全姿态）。
+          // 空 HostPort = 内核分配的临时端口，起容器时才定。
+          ...(network !== null
+            ? { NetworkMode: network }
+            : { PortBindings: { [portKey]: [{ HostIp: '127.0.0.1', HostPort: '' }] } }),
         },
       });
       return container.id;
@@ -136,14 +170,35 @@ export class DockerContainerRuntime implements ContainerRuntime {
   }
 
   /**
-   * Resolve the loopback-published host origin of the in-sandbox agent. On a
-   * shared docker network (production, 11 §1) this would instead be
-   * `http://<container-ip>:<agentPort>`; for single-host (incl. macOS Docker
-   * Desktop, where container IPs are unreachable) we use the published loopback
-   * port. Runtime-resolved, never persisted (13 §: agent endpoint not in the DB).
+   * 沙箱内 agent 的 HTTP origin —— **按部署形态给出两套坐标之一**（`agent-addressing.ts`）。
+   *
+   * | 形态 | 返回 | 谁解得开 |
+   * |---|---|---|
+   * | `container-network` | `http://<容器名>:<agentPort>` | 同一个用户自定义网络里的容器（docker 内嵌 DNS） |
+   * | `published-port`（默认） | `http://127.0.0.1:<发布端口>` | **宿主上的进程** |
+   *
+   * ⚠️ **每次现算，从不持久化**（13 §）：端口是运行时分配的，名字则由运行时自己复述
+   * （用 `info.Name` 而不是在这里重新拼一遍 `platform-<provider>-<id>` —— 拼的那一份
+   * 早晚会与 provider 里的那一份漂移，而漂移的症状是「连不上」，不是「不一致」）。
    */
   async agentOrigin(id: string, agentPort: number): Promise<string> {
     const info = await this.guard(() => this.docker.getContainer(id).inspect());
+    const network = this.network();
+    if (network !== null) {
+      // 不在这个网络上 ⇒ 名字解析不出来。这**必须**是一条指名道姓的错误：否则症状是
+      // 一次 `did not become ready` 超时，而那条消息会把人送去查沙箱镜像（§1.4 实测：
+      // 容器 healthy、平台连不上，两天才找到根因在地址上）。
+      const attached = info.NetworkSettings?.Networks?.[network];
+      if (attached === undefined) {
+        throw new SandboxProviderError(
+          SandboxProviderErrorCode.INVALID_STATE,
+          `container ${id} is not attached to the docker network '${network}' ` +
+            `(SANDBOX_DOCKER_NETWORK), so its name cannot be resolved from this process. ` +
+            `Attached networks: ${Object.keys(info.NetworkSettings?.Networks ?? {}).join(', ') || '(none)'}.`,
+        );
+      }
+      return `http://${(info.Name ?? '').replace(/^\//, '')}:${String(agentPort)}`;
+    }
     const mapping = info.NetworkSettings?.Ports?.[`${agentPort}/tcp`]?.[0];
     if (!mapping?.HostPort) {
       throw new SandboxProviderError(
@@ -153,6 +208,11 @@ export class DockerContainerRuntime implements ContainerRuntime {
     }
     const host = mapping.HostIp && mapping.HostIp !== '0.0.0.0' ? mapping.HostIp : '127.0.0.1';
     return `http://${host}:${mapping.HostPort}`;
+  }
+
+  /** 配了网络名就返回它，否则 `null`（= 默认的发布端口坐标）。 */
+  private network(): string | null {
+    return this.addressing.mode === 'container-network' ? this.addressing.network : null;
   }
 
   private statusCode(e: unknown): number | undefined {

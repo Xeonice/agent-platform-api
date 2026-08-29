@@ -48,7 +48,14 @@ export interface ContainerRuntime {
   inspect(id: string): Promise<SandboxRuntimeStatus>;
 
   /**
-   * 沙箱内 agent 端口在**宿主侧**可达的 HTTP origin（`http://127.0.0.1:<port>`）。
+   * 沙箱内 agent 的 HTTP origin —— **从调用它的这个进程看过去**可达的那一个。
+   *
+   * ⚠️ **「可达」是相对于平台自己站在哪一侧说的，而这是一条部署事实**（shared/11 §1.4）：
+   * api 裸跑在宿主时是宿主 loopback 上的发布端口（`http://127.0.0.1:<port>`）；
+   * api 在容器里、与沙箱同在一个用户自定义网络时是容器名（`http://<name>:<port>`）。
+   * 端口那一套坐标**只有宿主上的进程解得开** —— 照搬到容器里的 api 上，得到的是一个
+   * 语法完全正确、永远连不上的地址（实测：容器 healthy，建 Task 必 `PROVIDER_UNAVAILABLE`）。
+   * ⇒ 实现按 `SANDBOX_DOCKER_NETWORK` 分岔，见 `docker/agent-addressing.ts`。
    *
    * ⚠️ **每次现算，从不持久化**（13 §）：端口是运行时分配的，重启后由运行时自己
    * 重新回答。这是它与凭证的关键区别——凭证反推不出来，所以那个才落库。
@@ -72,12 +79,17 @@ export interface ContainerCreateSpec {
   readonly quota: ResourceQuota;
   readonly volumes: readonly VolumeMount[];
   /**
-   * 沙箱内 agent 监听的 TCP 端口。运行时必须把它发布到**宿主 loopback**
+   * 沙箱内 agent 监听的 TCP 端口。**默认形态**下运行时把它发布到**宿主 loopback**
    * （`127.0.0.1`，端口由内核分配），永远不发布到对外网卡。
    *
    * ⚠️ loopback 本身**不是**访问控制——本机任意进程都够得着；那把锁是
    * `SANDBOX_API_KEY`（`agent-auth.ts`）。两者缺一不可：只有 key 没有 loopback，
    * 端口就暴露在网上；只有 loopback 没有 key，就是给本机所有进程开的一个 shell。
+   *
+   * ⚠️ 配了 `SANDBOX_DOCKER_NETWORK` 时这个端口**一个都不发布**（`agent-addressing.ts`）：
+   * 平台经 docker 内嵌 DNS 用容器名直连，宿主上没有任何进程碰得到它。那一档的暴露面
+   * 比本条描述的默认档**更小**，而 `SANDBOX_API_KEY` 那道门照旧——同网络的其他容器
+   * 仍然够得着。
    */
   readonly agentPort: number;
 }

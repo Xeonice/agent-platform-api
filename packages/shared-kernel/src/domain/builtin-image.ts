@@ -145,8 +145,7 @@ export function builtinImageDeclaresTmux(ref: string = builtinImageRef()): boole
  * `evil.io/notplatform/sandbox` 也认成自己人。
  */
 function isKnownTmuxImage(ref: string): boolean {
-  // 去掉 tag / digest，只留 `<host>/<path>`
-  const path = ref.replace(/@sha256:[0-9a-f]+$/i, '').replace(/:[^:/]+$/, '');
+  const path = repositoryPathOf(ref);
   return KNOWN_TMUX_REPOSITORIES.some((repo) => path === repo || path.endsWith(`/${repo}`));
 }
 
@@ -163,3 +162,47 @@ const KNOWN_TMUX_REPOSITORIES = [
   'platform/sandbox',
   'platform/boxlite',
 ] as const;
+
+/**
+ * 平台内置已知镜像仓库的**只读视图**，给错误消息用。
+ *
+ * ⚠️ 它存在的理由是「这条约束今天只存在于一张表里，没有任何地方提示」：实测踩过一次
+ * （2026-08-29，真 Linux）—— 按 README 的构建目录名 build 成 `…/platform-sandbox:v1`
+ * （**连字符**），而表里是 `platform/sandbox`（**斜杠**），于是开机播种被拒，用户看到的
+ * 是「平台还没有可用的预制镜像作为血统基准」——一句**完全没提到名字**的话。
+ */
+export function knownTmuxRepositories(): readonly string[] {
+  return KNOWN_TMUX_REPOSITORIES;
+}
+
+/**
+ * 一句**把正确形态说出来**的提示，附在「这张镜像平台不认识」的错误后面。
+ *
+ * ⚠️ 特判「只差一个分隔符」：`platform-sandbox` ↔ `platform/sandbox` 不是一个假想的
+ * 笔误，它是**照着仓库目录名做的必然动作**（`api/images/platform-sandbox` 是目录名，
+ * 而 `docker build -t <name>` 里的 `<name>` 是仓库名）。两者相差一个字符、语义完全不同，
+ * 而失败信息此前一个字都没提到名字 ⇒ 排查方向必然跑偏（去查 registry、去查 tmux）。
+ *
+ * ⚠️ 提示**不放宽任何规则**：连字符那张照样被拒。它只是让被拒这件事说得出下一步。
+ */
+export function explainKnownTmuxRepositories(ref: string): string {
+  const path = repositoryPathOf(ref);
+  const nearMiss = KNOWN_TMUX_REPOSITORIES.find((repo) => {
+    const hyphenated = repo.replace(/\//g, '-');
+    return path === hyphenated || path.endsWith(`/${hyphenated}`);
+  });
+  const list = `平台内置已知镜像仓库：${KNOWN_TMUX_REPOSITORIES.join('、')}（匹配 \`<registry>/\` 之后那一段）。`;
+  if (nearMiss === undefined) return list;
+  return (
+    `⚠️ '${path}' 与已知的 '${nearMiss}' 只差一个分隔符：镜像仓库名用**斜杠**（${nearMiss}），` +
+    `而 ${nearMiss.replace(/\//g, '-')} 是**构建目录名**（api/images/${nearMiss.replace(/\//g, '-')}）。` +
+    `\`docker build -t <registry>/${nearMiss.replace(/\//g, '-')}:<tag>\` 建出来的坐标平台认不出，` +
+    `改成 \`-t <registry>/${nearMiss}:<tag>\` 重新构建并 push。` +
+    list
+  );
+}
+
+/** 去掉 tag / digest，只留 `<host>/<path>` —— 与 `isKnownTmuxImage` 同一套切法。 */
+function repositoryPathOf(ref: string): string {
+  return ref.replace(/@sha256:[0-9a-f]+$/i, '').replace(/:[^:/]+$/, '');
+}

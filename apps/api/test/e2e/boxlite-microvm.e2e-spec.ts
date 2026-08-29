@@ -12,6 +12,7 @@ import type { TerminalServerFrame } from '@platform/contracts';
 import { IMAGE_SPEC_REGISTRY } from '@platform/contracts';
 import { AppModule } from '../../src/app.module';
 import { makeFakeImageSpecRegistry, registerDefaultImage } from './_fakes';
+import { useEnv } from './_env';
 import { sandboxShell } from './_sandbox-shell';
 import { setupWebsockets } from '../../src/bootstrap/websocket.setup';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
@@ -88,13 +89,21 @@ if (!ready) {
 let app: INestApplication;
 let port: number;
 let dataRoot: string;
+let restoreEnv: (() => void) | undefined;
 
 beforeAll(async () => {
   if (!ready) return;
   process.env.DATABASE_URL = ':memory:';
   dataRoot = mkdtempSync(resolve(process.cwd(), 'tmp-boxlite-e2e-'));
   process.env.DATA_ROOT = dataRoot;
-  process.env.SANDBOX_DEFAULT_IMAGE = IMAGE;
+  // ⚠️ **`SANDBOX_DEFAULT_IMAGE` 必须走 `useEnv`,不能裸赋值。** 每个 e2e 文件共享同一个
+  // 进程(singleFork),而这个变量决定 `ImageSeeder` 在**后面每一个文件**的 `app.init()`
+  // 里去播种哪张镜像 —— 泄漏出去之后,`registry-extension.e2e` 的
+  // `registerImage(SANDBOX_DEFAULT_IMAGE ?? 'alpine:3.20')` 会撞上「播种时已经注册过了」
+  // 而 `created:false`。实测踩到过一次(2026-08-29,本机装了 AIO 镜像因此这几个文件真的
+  // 跑了起来);**CI 里因为没有那张镜像、这三个文件全被跳过,所以泄漏从来没发生过** ——
+  // 一个只在「测试真的跑起来时」才出现的串扰。
+  restoreEnv = useEnv({ SANDBOX_DEFAULT_IMAGE: IMAGE });
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     // Only the registry round-trip is doubled — the rest of the image chain
@@ -115,6 +124,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  restoreEnv?.();
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
 });
 

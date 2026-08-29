@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { ImageSpecError } from '@platform/contracts';
 import {
   OciRegistryClient,
+  insecureRegistryHosts,
   parseChallenge,
+  schemeFor,
   splitRegistry,
 } from '../../src/infrastructure/spec/oci-registry.client';
 
@@ -198,3 +200,68 @@ describe('splitRegistry', () => {
     expect(splitRegistry(name)).toEqual({ host, repository });
   });
 });
+
+/**
+ * shared/11 §1.4 的另一半：**容器内外的坐标不是同一套**。
+ *
+ * `localhost` / `127.0.0.1` 这几个字面量在容器里指的是**容器自己**，于是 compose 形态
+ * （api 在容器里）根本配不出可用的本机 registry —— 写 loopback 连的是自己，换成
+ * `host.docker.internal` 或 compose 服务名又被这里强制走 https（实测：
+ * `http://host.docker.internal:15001/v2/` 200，`https://…` fetch failed）。
+ * ⇒ `IMAGE_REGISTRY_INSECURE_HOSTS`，与 docker daemon 自己的 `insecure-registries` 同形状。
+ */
+describe('明文 registry 的允许名单（IMAGE_REGISTRY_INSECURE_HOSTS）', () => {
+  it.each(['localhost:5001', '127.0.0.1:5001', '[::1]:5001', 'localhost'])(
+    '%s 不配也走 http —— 默认行为一字未变',
+    (host) => {
+      expect(schemeFor(host)).toBe('http');
+    },
+  );
+
+  it('名单外的 host 一律 https', () => {
+    expect(schemeFor('registry.local:15001')).toBe('https');
+    expect(schemeFor('ghcr.io')).toBe('https');
+  });
+
+  it('⭐ 名单里的 host 走 http', () => {
+    // MUTATION: 让 `schemeFor` 忽略第二个参数 ⇒ 本条红。没有它，compose 形态下
+    // 「配一个本机 registry」这件事根本做不到（§1.4）。
+    expect(schemeFor('registry.local:15001', insecureHosts('registry.local:15001'))).toBe('http');
+    expect(schemeFor('REGISTRY.local:15001', insecureHosts('registry.local:15001'))).toBe('http');
+  });
+
+  it('⭐ 端口是坐标的一部分：放行 :15001 不等于放行 :443', () => {
+    // MUTATION: 把比对改成只看 hostname ⇒ 本条红。一条「顺手也放过 443」的规则，
+    // 放过的正是它唯一该守住的那个端口。
+    expect(schemeFor('registry.local:443', insecureHosts('registry.local:15001'))).toBe('https');
+  });
+
+  it('⭐ 空 / 未配 ⇒ 空名单，https 照旧', () => {
+    // MUTATION: 去掉 `.filter(h => h !== '')` ⇒ 名单里混进一个空串。空串永远匹配不上
+    // 一个真实 host，所以那个变异不会被这一条抓到 —— 抓它的是下一条。
+    expect(insecureRegistryHosts({}).size).toBe(0);
+    expect(insecureRegistryHosts({ IMAGE_REGISTRY_INSECURE_HOSTS: '  ' }).size).toBe(0);
+    expect(insecureRegistryHosts({ IMAGE_REGISTRY_INSECURE_HOSTS: 'a.io:1, ,b.io:2' })).toEqual(
+      new Set(['a.io:1', 'b.io:2']),
+    );
+  });
+
+  it('⭐ 名单真的换掉了请求的 scheme，而不只是换了那个函数的返回值', async () => {
+    // MUTATION: 把 `fetchManifest` 里的 `schemeFor(host, this.insecureHosts)` 改回
+    // `schemeFor(host)` ⇒ 本条红。上面那些用例只钉了纯函数；这一条钉的是**它被接上了**。
+    stubFetch((url) =>
+      url.includes('/manifests/')
+        ? res(MANIFEST_BODY, { headers: { 'docker-content-digest': MANIFEST_DIGEST } })
+        : res(CONFIG_BODY),
+    );
+    await new OciRegistryClient(1000, insecureHosts('registry.local:15001')).fetchManifest(
+      'registry.local:15001/platform/sandbox',
+      'v1',
+    );
+    expect(calls[0].url).toBe('http://registry.local:15001/v2/platform/sandbox/manifests/v1');
+  });
+});
+
+function insecureHosts(csv: string): ReadonlySet<string> {
+  return insecureRegistryHosts({ IMAGE_REGISTRY_INSECURE_HOSTS: csv });
+}

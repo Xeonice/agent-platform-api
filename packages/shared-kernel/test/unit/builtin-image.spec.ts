@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   builtinImageDeclaresTmux,
   builtinImageRef,
+  explainKnownTmuxRepositories,
   isBuiltinImageConfigured,
+  knownTmuxRepositories,
 } from '../../src/domain/builtin-image';
 
 /**
@@ -108,5 +110,51 @@ describe('兜底坐标与「配了没有」（既有行为，别在搬家时弄�
   it('空串算没配', () => {
     process.env[REF] = '   ';
     expect(isBuiltinImageConfigured()).toBe(false);
+  });
+});
+
+/**
+ * 「这条约束今天只存在于一张表里，没有任何地方提示」—— 2026-08-29 真机踩到：按仓库里的
+ * **构建目录名** build 成 `…/platform-sandbox:v1`（连字符），而表里是 `platform/sandbox`
+ * （斜杠），于是开机播种被拒、自定义镜像注册报「平台还没有可用的预制镜像作为血统基准」
+ * —— 一句**完全没提到名字**的话，排查方向必然跑偏。
+ */
+describe('错误信息自己说得出正确的镜像名形态', () => {
+  it('⭐ 连字符写法被点名，并给出斜杠那一份', () => {
+    // MUTATION: 删掉 nearMiss 那段、只留仓库清单 ⇒ 本条红。清单本身**说不出**
+    // 「你现在写的这个名字差在哪」——而差的就是一个字符。
+    const hint = explainKnownTmuxRepositories('localhost:5001/platform-sandbox:v1');
+    expect(hint).toContain('platform/sandbox');
+    expect(hint).toContain('platform-sandbox');
+    expect(hint).toContain('api/images/platform-sandbox');
+  });
+
+  it.each([
+    ['localhost:5001/platform-boxlite:v1', 'platform/boxlite'],
+    ['platform-sandbox', 'platform/sandbox'],
+    ['registry.corp/agent-infra-sandbox:v3', 'agent-infra/sandbox'],
+  ])('%s ⇒ 点名 %s', (ref, want) => {
+    const hint = explainKnownTmuxRepositories(ref);
+    // ⚠️ 光断言「消息里出现了 platform/boxlite」是**假绿**：仓库清单本来就把三张都列了。
+    // 必须钉住「它认出这是一次近似写法」，那才是 nearMiss 分支干的活。
+    expect(hint).toContain('只差一个分隔符');
+    expect(hint).toContain(`与已知的 '${want}' 只差一个分隔符`);
+  });
+
+  it('不是近似写法时只给清单，不硬凑一个「你大概是想写 X」', () => {
+    // ⚠️ 乱猜比不猜贵：把 `alpine:3.20` 说成「你大概是想写 platform/sandbox」会让人
+    // 去改一个他根本没打算用的名字。
+    const hint = explainKnownTmuxRepositories('alpine:3.20');
+    expect(hint).not.toContain('只差一个分隔符');
+    for (const repo of knownTmuxRepositories()) expect(hint).toContain(repo);
+  });
+
+  it('清单与判定表是同一份 —— 不允许两处各写一遍', () => {
+    // MUTATION: 在 `explainKnownTmuxRepositories` 里手写一份仓库清单 ⇒ 加一张新的
+    // 已知镜像时两处会漂移，而漂移的症状是「提示里没有它」。
+    for (const repo of knownTmuxRepositories()) {
+      process.env[REF] = `registry.example/${repo}:v1`;
+      expect(builtinImageDeclaresTmux()).toBe(true);
+    }
   });
 });
