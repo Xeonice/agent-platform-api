@@ -220,7 +220,14 @@ describe('GET /api/system/resources（P1-9：磁盘是真实瓶颈）', () => {
     // ⛔ RAM 走**可用内存**，不是 os.freemem()。喂进去的样本真实占用约 59%：
     //    可用 = (43280 + 803419 + 20576) × 16384 = 13.23 GB / 32 GB ⇒ 已用 58.6%。
     //    出事那版会把同一台机器报成 96.3% / critical ⇒ 前端整页「资源耗尽，无法创建新 Task」。
-    const expectedAvailable = (43280 + 803419 + 20576) * 16384;
+    // ⚠️ 两个平台各喂了一份样本（darwin 的 vm_stat / linux 的 /proc/meminfo），
+    //    所以**期望值必须跟着当前平台走**。本行此前只按 darwin 那份算 ⇒ macOS 上绿、
+    //    Linux CI 上必红（实测 `expected 20468166656 to be 20150304768`）——一条
+    //    「本地绿、CI 红」的断言，而它防的恰恰是跨平台读数错误本身。
+    const expectedAvailable =
+      process.platform === 'linux'
+        ? 13_565_988 * 1024 // readProcMeminfo 样本里的 MemAvailable
+        : (43280 + 803419 + 20576) * 16384; // vm_stat 样本：free + inactive + speculative
     expect(res.body.ram.totalBytes).toBe(34359738368);
     expect(res.body.ram.usedBytes).toBe(34359738368 - expectedAvailable);
     expect(res.body.ram.usedPercent).toBeCloseTo(58.6, 1);
