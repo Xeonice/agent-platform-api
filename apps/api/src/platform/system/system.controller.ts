@@ -9,6 +9,8 @@ import {
 } from '@nestjs/swagger';
 import { createZodDto } from 'nestjs-zod';
 import {
+  AccessPasscodeActionSchema,
+  AccessPasscodeResultSchema,
   InitRequestSchema,
   InitStatusDtoSchema,
   SystemProvidersDtoSchema,
@@ -17,11 +19,13 @@ import {
   UpdateSystemSettingsRequestSchema,
 } from '@platform/contracts';
 import type {
+  AccessPasscodeResult,
   InitStatusDto,
   SystemProvidersDto,
   SystemResourcesDto,
   SystemSettingsDto,
 } from '@platform/contracts';
+import { AccessPasscodeService } from '../access-passcode/access-passcode.service';
 import { InitializationService } from './initialization.service';
 import { SystemSettingsService } from './system-settings.service';
 import { SystemResourcesService } from './system-resources.service';
@@ -35,6 +39,8 @@ export class SystemSettingsResponseDto extends createZodDto(SystemSettingsDtoSch
 export class UpdateSystemSettingsDto extends createZodDto(UpdateSystemSettingsRequestSchema) {}
 export class SystemResourcesResponseDto extends createZodDto(SystemResourcesDtoSchema) {}
 export class SystemProvidersResponseDto extends createZodDto(SystemProvidersDtoSchema) {}
+export class AccessPasscodeRequestDto extends createZodDto(AccessPasscodeActionSchema) {}
+export class AccessPasscodeResponseDto extends createZodDto(AccessPasscodeResultSchema) {}
 
 /**
  * 系统状态与初始化的 REST 外壳（10 §6.6；23 D-11/D-12：系统端点不属任何限界上下文）。
@@ -53,6 +59,7 @@ export class SystemController {
     private readonly resources: SystemResourcesService,
     private readonly providers: SystemProvidersService,
     private readonly diagnostics: DiagnosticsService,
+    private readonly passcodes: AccessPasscodeService,
   ) {}
 
   @Get('init-status')
@@ -101,6 +108,25 @@ export class SystemController {
   @ApiOkResponse({ type: SystemSettingsResponseDto })
   updateSettings(@Body() body: UpdateSystemSettingsDto): SystemSettingsDto {
     return this.settings.update(body);
+  }
+
+  /**
+   * ⚠️ **PUT 而不是 PATCH `settings`，且响应里有一个平台此后再也不会说的字符串。**
+   * 口令是**动作**（换一把钥匙），不是 `system_settings` 上的一个字段更新 ——
+   * 判据同 02 §5.1 末段，也同 `PATCH /api/images/:id {isActive:true}` 被打回
+   * `POST /activate`：副作用大于字面的那一类，不走部分更新。
+   *
+   * ⛔ **明文只在这一个响应体里出现一次**（11 §3.1）。它不进日志、不进审计
+   * （`access-audit.ts` 的构造函数根本不接受口令参数）、不进 `GET /settings`。
+   */
+  @Put('access-passcode')
+  @ApiOperation({
+    summary:
+      '启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成不影响已通过的 session',
+  })
+  @ApiOkResponse({ type: AccessPasscodeResponseDto })
+  setAccessPasscode(@Body() body: AccessPasscodeRequestDto): AccessPasscodeResult {
+    return this.passcodes.apply(body);
   }
 
   @Get('resources')

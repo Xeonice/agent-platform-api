@@ -7,11 +7,13 @@ import {
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
-import type { SandboxDto } from '@platform/contracts';
+import type { ExecResult, SandboxDto } from '@platform/contracts';
 import { SandboxApplicationService } from '../../application/sandbox-application.service';
 import {
   CreateSandboxDto,
   DestroySandboxDto,
+  ExecInSandboxDto,
+  ExecResultResponseDto,
   ListSandboxesQueryDto,
   SandboxResponseDto,
 } from './dto/sandbox.dto';
@@ -54,6 +56,43 @@ export class SandboxController {
   @ApiOkResponse({ type: SandboxResponseDto })
   get(@Param('id') id: string): Promise<SandboxDto> {
     return this.app.get(id);
+  }
+
+  /**
+   * ⚠️ POST ACTION SUB-PATHS, NOT `PATCH { status }` (02 §5.1 末段, 审计 P2-7). The
+   * judgement is 「会不会产生资源之外的副作用」: these two start and stop a real
+   * instance — a container/micro-VM boots, a CLI is re-verified, a credential is
+   * re-injected. `PATCH /api/images/:id` stays a PATCH by the same rule, because it
+   * only writes record fields.
+   */
+  @Post(':id/start')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Start a stopped sandbox. Returns as soon as the start is accepted; progress on WS.',
+  })
+  @ApiOkResponse({ type: SandboxResponseDto })
+  start(@Param('id') id: string): Promise<SandboxDto> {
+    return this.app.start(id);
+  }
+
+  @Post(':id/stop')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Stop a running sandbox, keeping its instance and workspace' })
+  @ApiOkResponse({ type: SandboxResponseDto })
+  stop(@Param('id') id: string): Promise<SandboxDto> {
+    return this.app.stop(id);
+  }
+
+  /**
+   * ⚠️ NON-INTERACTIVE ONLY (27 §2). An interactive TTY is WS `/terminal` and a long
+   * agent run is `POST :id/runtimes/:rt/tasks`; this is the one-shot in between.
+   */
+  @Post(':id/exec')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Run one non-interactive command in a sandbox (TTY goes over WS)' })
+  @ApiOkResponse({ type: ExecResultResponseDto })
+  exec(@Param('id') id: string, @Body() dto: ExecInSandboxDto): Promise<ExecResult> {
+    return this.app.exec(id, dto);
   }
 
   @Delete(':id')

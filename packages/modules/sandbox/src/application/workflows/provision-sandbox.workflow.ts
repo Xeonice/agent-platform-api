@@ -219,6 +219,26 @@ export class ProvisionSandboxWorkflow {
    * not preserved" — which is also why the initial instruction is not replayed here
    * (its `consumedAt` is already set).
    */
+  /**
+   * Background runner for `restart` — the sibling of `runSafely`, and it exists for
+   * exactly the same reason: `POST /api/sandboxes/:id/start` returns as soon as the
+   * platform has accepted the start (the 段 behind it is minutes long, 03 §4.3), so
+   * nothing is left to `await` this promise. Without the catch, a restart that fails
+   * becomes an unhandled rejection — which under Node's default kills the process, i.e.
+   * one sandbox failing to come back up would take the whole platform down.
+   *
+   * `restart` has already marked the aggregate `failed` and recorded the reason by the
+   * time this catch runs (`compensate`); the log line is for the operator reading
+   * stderr, not the record.
+   */
+  async restartSafely(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    try {
+      await this.restart(sandbox, provider);
+    } catch (e) {
+      this.logger.error(`restart failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
+    }
+  }
+
   async restart(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
     const handle = this.handleOf(sandbox);
     const startedAt = this.clock.now().getTime();

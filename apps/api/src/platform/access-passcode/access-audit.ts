@@ -117,3 +117,36 @@ export function lockedAttemptRecord(lockedForSec: number): AuditRecordInput {
     errorCode: 'PASSCODE_LOCKED',
   };
 }
+
+/**
+ * 口令本身被启用 / 重新生成 / 关闭（`PUT /api/system/access-passcode`）。
+ *
+ * ⚠️ **这一条比上面四条更该有，而它此前不存在。** 上面四条记的是「有人在门上试」；
+ * 这一条记的是「门锁本身被换掉了」——包括 `disable` 那次，也就是**平台从此对任何人
+ * 敞开**的那一刻。没有它，事后唯一能看出的只有 `system_settings` 的一个时间戳，
+ * 而那一列会被下一次操作原地覆盖，`disable` 更是把它清成 NULL：**关掉口令这件事
+ * 不留任何痕迹**。
+ *
+ * `disable` 落 `error` 级、另外两个落 `info`：运维筛「仅告警」时，要扫得到的是
+ * 「防护被关了」，而不是「防护被开了」。
+ *
+ * ⛔ 与上面四条同一条纪律：**签名里没有口令参数**，所以这里不可能记进明文/前缀/长度。
+ */
+export function passcodeChangedRecord(
+  action: 'enable' | 'regenerate' | 'disable',
+): AuditRecordInput {
+  const summary = {
+    enable: '已启用访问口令（新口令仅在本次响应中回显一次）',
+    regenerate: '已重新生成访问口令，旧口令即刻失效（已通过的会话不受影响）',
+    disable: '已关闭访问口令，此后任何人可访问本实例',
+  }[action];
+  return {
+    category: 'system',
+    type: 'system.access.passcode_changed',
+    severity: action === 'disable' ? 'error' : 'info',
+    actor: 'user',
+    summary,
+    detail: { action },
+    outcome: 'ok',
+  };
+}

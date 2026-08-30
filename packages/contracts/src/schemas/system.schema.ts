@@ -303,6 +303,44 @@ export const UpdateSystemSettingsRequestSchema = z.object({
 export type UpdateSystemSettingsRequest = z.infer<typeof UpdateSystemSettingsRequestSchema>;
 
 /**
+ * `PUT /api/system/access-passcode` 的 body（10 §6.6 / 11 §3.1）。
+ *
+ * ⚠️ **动作，不是字段更新**（02 §5.1 末段的判据）：它不是把 `accessPasscodeEnabled`
+ * 从 false 改成 true，而是**生成一个平台自己都留不下明文的新密钥**并立即销毁旧的。
+ * 写成 `PATCH { accessPasscodeEnabled: true }` 会让「读起来像改一个布尔、实际换掉了
+ * 一把钥匙」——与 `PATCH {isActive:true}` 被打回 `POST /activate` 是同一条纪律。
+ *
+ * ⚠️ **`enable` 与 `regenerate` 刻意是两个动作，不合并成一个「幂等的 enable」。**
+ * 两者做的事一样（生成 + 覆写），但调用方的意图完全不同：一个是「这台机器还没设口令」，
+ * 一个是「我知道有旧口令，我要作废它」。合并之后，一次误发的 `enable` 会**静默轮换掉
+ * 正在用的口令**，而调用方以为自己什么都没改。所以 `enable` 撞上已启用 → 409，
+ * `regenerate` 撞上未启用 → 409。
+ * `disable` 则是幂等的：它的目标态是「关」，到达两次不构成冲突。
+ */
+export const AccessPasscodeActionSchema = z.object({
+  action: z.enum(['enable', 'regenerate', 'disable']),
+});
+export type AccessPasscodeAction = z.infer<typeof AccessPasscodeActionSchema>;
+
+/**
+ * `PUT /api/system/access-passcode` 的响应。
+ *
+ * ⚠️ **`passcode` 是平台这辈子唯一一次说出它**（11 §3.1「明文只在生成后回显一次」）。
+ * 库里只有 scrypt hash，`GET /api/system/settings` 只出一个布尔。所以前端必须当场把它
+ * 交给用户（[复制] + 明确提示「关掉就再也看不到了」），⛔ 不要落任何持久化。
+ *
+ * ⚠️ 它是 `optional` 而不是 `nullable`：`disable` 的响应里这个键**整个缺席**。
+ * 一个 `passcode: null` 会让「这次没有明文」和「明文是空的」在类型上长得一样。
+ */
+export const AccessPasscodeResultSchema = z.object({
+  /** 动作执行后的状态；`disable` 之后为 false。 */
+  enabled: z.boolean(),
+  /** 仅 `enable` / `regenerate` 出现：16 位明文，此后任何接口都不再回显。 */
+  passcode: z.string().optional(),
+});
+export type AccessPasscodeResult = z.infer<typeof AccessPasscodeResultSchema>;
+
+/**
  * 一条水位的三态判定（P21-5 §5 状态矩阵）。CPU/RAM 与磁盘的阈值不同，故各自算好再下发
  * —— 让前端按数字重算一遍阈值，就是把产品规则抄到第二个地方。
  */

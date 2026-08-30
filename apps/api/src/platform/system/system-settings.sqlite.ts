@@ -55,13 +55,29 @@ export const systemSettings = sqliteTable(
      * ⛔ **只存 hash，且永不出现在任何响应里**（10 §6.6：「永不回显口令 hash」）。
      * 本轮的 `GET /api/system/settings` 只出一个布尔 `accessPasscodeEnabled`。
      *
-     * ⏳ 今天口令仍从 `ACCESS_PASSCODE` env 读（`PasscodeService` 构造期快照），本列
-     * 是 `PUT /api/system/access-passcode` 落地时的落点；现在它恒为 NULL，而
-     * `accessPasscodeEnabled` 由 `PasscodeService.enabled` 交出 —— **不拿一个空列去回答
-     * 一个 env 决定的问题**，那会在口令明明开着的时候说「未启用」。
+     * ✅ `PUT /api/system/access-passcode` 落地后本列**就是口令的所在地**（11 §3.1「存储」
+     * 那一行）。形态是 `scrypt$N$r$p$<salt-b64>$<dk-b64>`，自描述参数，见 `passcode-hash.ts`。
+     *
+     * ⚠️ **`ACCESS_PASSCODE` env 仍然优先，而且它一旦非空就把写入口整个关掉**（409
+     * `INVALID_STATE`）。理由是平台**改不动别人的部署配置**：让 UI 写库、env 继续生效，
+     * 会造出一个「点了禁用、口令还在要」的分裂态；反过来让库盖过 env，则是平台悄悄推翻
+     * 运维方显式写下的一行配置。两种都比「如实说这台实例的口令由部署配置固定」更糟。
      */
     accessPasscodeHash: text('access_passcode_hash'),
     accessPasscodeUpdatedAt: integer('access_passcode_updated_at', { mode: 'timestamp' }),
+
+    /**
+     * `ap_session` cookie 的 HMAC 签名密钥 —— **与口令无关，这正是它存在的全部理由**。
+     *
+     * ⚠️ 密钥此前退化到「口令本身」（`PASSCODE_COOKIE_SECRET ?? passcode`）。在口令只能
+     * 来自 env 的年代那没有后果；有了 `regenerate` 之后它直接违背 11 §3.1 白纸黑字的
+     * 「**已通过的会话不受口令重新生成影响**」—— 换一次口令 = 所有人当场掉线。
+     *
+     * ⚠️ **必须落库、不能每进程现生成**：cookie 承诺 7 天，而进程内随机数会让每一次重启
+     * 都把所有会话作废。首次签发时惰性生成一次，此后原样复用。
+     * `PASSCODE_COOKIE_SECRET` 非空时以 env 为准（多实例部署共享密钥的出口），本列不参与。
+     */
+    accessPasscodeSessionSecret: text('access_passcode_session_secret'),
 
     /** 拼 webhook 载荷里的 Task 深链（03 §8.5）；未配置时省略该字段。 */
     publicBaseUrl: text('public_base_url'),

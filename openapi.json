@@ -618,6 +618,109 @@
         ]
       }
     },
+    "/api/sandboxes/{id}/start": {
+      "post": {
+        "operationId": "SandboxController_start",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Start a stopped sandbox. Returns as soon as the start is accepted; progress on WS.",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/stop": {
+      "post": {
+        "operationId": "SandboxController_stop",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Stop a running sandbox, keeping its instance and workspace",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/api/sandboxes/{id}/exec": {
+      "post": {
+        "operationId": "SandboxController_exec",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecInSandboxDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecResultResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Run one non-interactive command in a sandbox (TTY goes over WS)",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
     "/api/sandboxes/{id}/runtimes/{rt}/tasks": {
       "post": {
         "operationId": "AgentTaskController_run",
@@ -1668,6 +1771,38 @@
         ]
       }
     },
+    "/api/system/access-passcode": {
+      "put": {
+        "operationId": "SystemController_setAccessPasscode",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessPasscodeRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessPasscodeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成不影响已通过的 session",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/system/resources": {
       "get": {
         "operationId": "SystemController_getResources",
@@ -2130,6 +2265,38 @@
           "idleTimeoutSec",
           "waitingInput",
           "version"
+        ]
+      },
+      "ExecInSandboxDto": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "ExecResultResponseDto": {
+        "type": "object",
+        "properties": {
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stdout",
+          "stderr",
+          "exitCode"
         ]
       },
       "DestroySandboxDto": {
@@ -3745,6 +3912,36 @@
             "nullable": true
           }
         }
+      },
+      "AccessPasscodeRequestDto": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "enable",
+              "regenerate",
+              "disable"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "AccessPasscodeResponseDto": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "passcode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled"
+        ]
       },
       "SystemResourcesResponseDto": {
         "type": "object",

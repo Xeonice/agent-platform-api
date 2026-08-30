@@ -4,6 +4,7 @@ import { Tool } from '@rekog/mcp-nest';
 import {
   CreateSandboxSchema,
   DestroySandboxSchema,
+  ExecInSandboxSchema,
   ListSandboxesQuerySchema,
   RunAgentTaskSchema,
 } from '@platform/contracts';
@@ -12,6 +13,27 @@ import { SandboxApplicationService } from '../../application/sandbox-application
 import { AgentTaskApplicationService } from '../../application/agent-task.service';
 
 const DestroySandboxToolSchema = DestroySandboxSchema.extend({ id: z.string().min(1) });
+
+/**
+ * The three lifecycle/read tools take nothing but the id, so they get one shared shape
+ * rather than three identical inline objects — a divergence between them (one accepting
+ * an empty string, say) would be a difference with no meaning behind it.
+ */
+const SandboxIdToolSchema = z.object({ id: z.string().min(1) });
+
+/**
+ * `exec_in_sandbox` input = the REST body plus the path parameter, so the two shells
+ * validate the SAME `ExecInSandboxSchema` (02 §5 zod 单源).
+ *
+ * ⚠️ THIS IS THE SECOND TOOL THAT LETS AN OUTSIDE CALLER RUN SOMETHING, and unlike
+ * `run_agent_task` it has no whitelist to hide behind — the command is free text by
+ * design (10 §7.3 `ExecRequest { command }`). What bounds it is the SANDBOX: the
+ * command runs inside the isolated instance, never on the host, which is the same
+ * boundary the terminal has relied on since day one. The alternative — omitting the
+ * tool — would only push callers to `run_agent_task` with a prompt that says "run this
+ * command", i.e. the same capability with worse observability.
+ */
+const ExecInSandboxToolSchema = ExecInSandboxSchema.extend({ id: z.string().min(1) });
 
 /**
  * `run_agent_task` input = the REST body plus the two path parameters, so the MCP and
@@ -100,6 +122,62 @@ export class SandboxMcpTools {
   async cancelAgentTask(params: z.infer<typeof CancelAgentTaskToolSchema>) {
     const dto = await this.tasks.cancel(params.sandboxId, params.taskId);
     return { content: [{ type: 'text' as const, text: JSON.stringify(dto) }] };
+  }
+
+  @Tool({
+    name: 'get_sandbox',
+    description: 'Get one sandbox (Task) by id, including why it failed if it did',
+    parameters: SandboxIdToolSchema,
+  })
+  async getSandbox(params: z.infer<typeof SandboxIdToolSchema>) {
+    const dto = await this.app.get(params.id);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(dto) }] };
+  }
+
+  /**
+   * ⚠️ `start_sandbox` RETURNS BEFORE THE SANDBOX IS USABLE, and the description says so
+   * because an LLM caller has no other way to find out. A restart re-runs the whole
+   * `starting` 段 (03 §4.3) — measured at minutes on a cold image store — so the tool
+   * answers with the accepted `starting` state and the caller polls `get_sandbox`,
+   * exactly like `create_project` / `list_projects` handle an async clone.
+   */
+  @Tool({
+    name: 'start_sandbox',
+    description:
+      'Start a stopped sandbox. Returns immediately with status `starting`; poll ' +
+      'get_sandbox until it reads `running`. A restart is a NEW agent session — the ' +
+      'previous conversation context is gone, the workspace files are not.',
+    parameters: SandboxIdToolSchema,
+  })
+  async startSandbox(params: z.infer<typeof SandboxIdToolSchema>) {
+    const dto = await this.app.start(params.id);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(dto) }] };
+  }
+
+  @Tool({
+    name: 'stop_sandbox',
+    description:
+      'Stop a running sandbox, keeping its instance and workspace so start_sandbox can ' +
+      'bring it back. Use destroy_sandbox to remove it entirely.',
+    parameters: SandboxIdToolSchema,
+  })
+  async stopSandbox(params: z.infer<typeof SandboxIdToolSchema>) {
+    const dto = await this.app.stop(params.id);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(dto) }] };
+  }
+
+  @Tool({
+    name: 'exec_in_sandbox',
+    description:
+      'Run ONE non-interactive shell command inside a running sandbox and return its ' +
+      'stdout/stderr/exitCode. Not for interactive programs and not for long jobs — ' +
+      'it is cut off after 60s; use run_agent_task for anything longer.',
+    parameters: ExecInSandboxToolSchema,
+  })
+  async execInSandbox(params: z.infer<typeof ExecInSandboxToolSchema>) {
+    const { id, ...input } = params;
+    const result = await this.app.exec(id, input);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   }
 
   @Tool({
