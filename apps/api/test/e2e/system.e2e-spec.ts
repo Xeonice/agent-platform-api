@@ -160,14 +160,25 @@ describe('PUT /api/system/settings —— ⚠️ 只存配置、不放行', () =
 });
 
 describe('POST /api/system/init —— 一次性、不幂等（P2-4）', () => {
-  it('模型 API 全挂而未确认 ⇒ 409，且**什么都没写**（sideEffectFree）', async () => {
+  /**
+   * ⭐ **两种 409 各自的码，是本组最容易全绿着出错的一对断言。**
+   *
+   * 这两条用例（本条与下面「已初始化再调」）此前都只断言 `code: 'INVALID_STATE'` ——
+   * 于是**把两处 throw 的码互换，两条用例照样全绿**：它们各自都"完整"，合起来什么都没守住。
+   * 而调用方要做的事恰好相反（放行进工作台 / 留在向导里），认错一次的样子就是
+   * 一台没初始化的机器被放进了工作台。⇒ 两条各自钉死自己的码，且**互相点名对方**。
+   */
+  it('模型 API 全挂而未确认 ⇒ 409 `OFFLINE_NOT_ACKNOWLEDGED`，且**什么都没写**（sideEffectFree）', async () => {
     connectivity = OFFLINE;
     const res = await request(app.getHttpServer()).post('/api/system/init').send({}).expect(409);
     expect(res.body).toMatchObject({
-      code: 'INVALID_STATE',
+      code: 'OFFLINE_NOT_ACKNOWLEDGED',
       retryable: false,
       sideEffectFree: true,
     });
+    // ⛔ 这一条不许退化成「是个 409 就行」：`ALREADY_INITIALIZED` 也是 409，
+    //    而它的含义（已经初始化过了 ⇒ 放行）在这里是句彻底的假话。
+    expect(res.body.code).not.toBe('ALREADY_INITIALIZED');
     expect(res.body.message).toContain('离线');
     // ⚠️ 「零副作用」不能只写在信封里 —— 要真的没写。
     const status = await request(app.getHttpServer()).get('/api/system/init-status').expect(200);
@@ -187,11 +198,27 @@ describe('POST /api/system/init —— 一次性、不幂等（P2-4）', () => {
     expect(res.body.lastConnectivityCheckAt).toBeTypeOf('string');
   });
 
-  it('已初始化再调 ⇒ 409，不是幂等 200', async () => {
+  it('已初始化再调 ⇒ 409 `ALREADY_INITIALIZED`，不是幂等 200', async () => {
     connectivity = ONLINE;
     const res = await request(app.getHttpServer()).post('/api/system/init').send({}).expect(409);
-    expect(res.body.code).toBe('INVALID_STATE');
+    expect(res.body.code).toBe('ALREADY_INITIALIZED');
+    // ⛔ 与上面那条对偶：别退回「是个 409 就行」——两种 409 的处置相反。
+    expect(res.body.code).not.toBe('OFFLINE_NOT_ACKNOWLEDGED');
     expect(res.body.message).toContain('PUT /api/system/settings');
+    expect(res.body).toMatchObject({ retryable: false, sideEffectFree: true });
+  });
+
+  /**
+   * ⭐ **同一台已初始化的机器 + 模型 API 全挂 ⇒ 仍然是 `ALREADY_INITIALIZED`。**
+   *
+   * 两个判定的**先后**也是契约的一部分：离线那道门排在「已初始化」之后的话，一台已经开好
+   * 的离线平台重复调用会拿到 `OFFLINE_NOT_ACKNOWLEDGED`，前端于是把它留在向导里 ——
+   * 而它明明早就初始化完了。这条用例把顺序钉住：单看上面两条，把 if 换个位置照样全绿。
+   */
+  it('已初始化 + 模型 API 全挂 ⇒ 仍是 `ALREADY_INITIALIZED`（已初始化的判定在前）', async () => {
+    connectivity = OFFLINE;
+    const res = await request(app.getHttpServer()).post('/api/system/init').send({}).expect(409);
+    expect(res.body.code).toBe('ALREADY_INITIALIZED');
   });
 
   it('审计里有 system.initialized，且**代理凭证已脱敏**', async () => {

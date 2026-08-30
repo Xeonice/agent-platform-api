@@ -20,6 +20,20 @@ import { redactProxyConfig } from './proxy-redaction';
  * 会被每一次误调重写，而那正是日后排查里问得到、现在答不出的那个问题
  * （13 §2.8.2 对 `system.initialized` 的原话）。
  *
+ * ── ★ 两种 409 是**两个码**，不是一个 ─────────────────────────────────────
+ * 这条路上有两种 409：**已经初始化过了**（`ALREADY_INITIALIZED`）与**模型 API 全挂且没带
+ * `acknowledgeOffline`**（`OFFLINE_NOT_ACKNOWLEDGED`）。
+ *
+ * ⛔ 它们**曾经共用 `INVALID_STATE`**，而调用方要做的事恰好相反：前者「目标状态已达成 ⇒
+ * 放行进工作台」，后者「平台一个字都没写 ⇒ 必须留在向导里让用户看见那句话」。同一个码
+ * 表达两件需要不同处理的事，等于逼每个调用方**再打一次 `GET /init-status` 去二次探测**
+ * 才知道自己拿到的是哪一种 —— 而照着「409 = 已初始化」直接放行的那一版（F21-8 §8 约束 3
+ * 的原文）会把一台**根本没初始化**的机器放进工作台：用户看到工作台、下次刷新又被弹回
+ * 向导，**中间一句错误都没有**。
+ *
+ * ⚠️ 加码的代价（10 §6.8 那张表 + A5 门禁）是**一次性**的；二次探测的代价是**每个调用方
+ * 每一次**。这与四个 `PRESET_IMAGE_*` 不许合成一条「镜像不可用」是同一条纪律。
+ *
  * ── 它与 `PUT /api/system/settings` 的分工 ──────────────────────────────────
  * `/init` 是**放行**（写 `initialized=true`，此后不再出现向导）；`PUT /settings` 只
  * **存配置**。两条路都能写代理，但只有这一条会放行 —— 见
@@ -38,7 +52,7 @@ export class InitializationService {
       // ⚠️ `sideEffectFree: true` 是**由构造断言**的：这一步在任何写之前，库一个字都没动。
       //    前端据此把它渲染成「就地改请求」而不是「重试」（10 §6.8）。
       throw new ConflictException({
-        code: 'INVALID_STATE',
+        code: 'ALREADY_INITIALIZED',
         message:
           '平台已经初始化过了。初始化是一次性操作 —— 要改代理等运行期配置请用 PUT /api/system/settings（系统状态页），它不会重放初始化。',
         retryable: false,
@@ -80,7 +94,7 @@ export class InitializationService {
     const offline = modelApis.length > 0 && modelApis.every((r) => !r.ok);
     if (!offline || acknowledged) return;
     throw new ConflictException({
-      code: 'INVALID_STATE',
+      code: 'OFFLINE_NOT_ACKNOWLEDGED',
       message:
         `模型 API 全部不可达（${modelApis.map((r) => r.target).join('、')}）—— 当前为离线环境，Agent 将不可用。` +
         '配置代理后重新检测，或带 acknowledgeOffline: true 明确以离线模式继续（平台其余功能可用）。',
