@@ -1,0 +1,15 @@
+# 契约漂移门禁（09 §2.3）—— CI 里那条的本地前置。
+#
+# ⚠️ api 的 openapi:emit 读的是 dist，所以必须【先 build】：dist 旧一轮，emit 出来的
+#    就是旧契约，门禁会静默变绿——那正是它要防的那种失败。
+set -e
+pnpm build
+if ! pnpm check:openapi; then
+  echo ""
+  echo "⛔ openapi.json 与源不同步，推送已拦下。"
+  echo "   check:openapi 已经把它重新生成好了 —— 工作区里现在就是正确的那份。"
+  echo "   下一步：git add openapi.json && git commit --amend --no-edit（或新起一个 commit），然后重推。"
+  echo "   ⚠️ 同时别忘了同步到 web：cp openapi.json ../web/openapi.json && (cd ../web && pnpm generate:api)"
+  echo "      —— 只更一边会让 docs 仓的 B3【两份 openapi 逐字节相同】红（09 §2.4）。"
+  exit 1
+fi
