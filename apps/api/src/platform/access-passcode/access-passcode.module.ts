@@ -4,6 +4,7 @@ import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
 import { PasscodeTerminalAuthenticator } from './passcode-terminal-authenticator';
 import { AccessController } from './access.controller';
+import { AccessPasscodeService } from './access-passcode.service';
 
 /**
  * @Global access-passcode assembly (shared/11 §3.1). Provides + exports the
@@ -19,9 +20,10 @@ import { AccessController } from './access.controller';
   controllers: [AccessController],
   providers: [
     PasscodeService,
+    AccessPasscodeService,
     PasscodeAttemptLimiter,
     { provide: TERMINAL_AUTHENTICATOR, useClass: PasscodeTerminalAuthenticator },
   ],
-  exports: [PasscodeService, PasscodeAttemptLimiter, TERMINAL_AUTHENTICATOR],
+  exports: [PasscodeService, AccessPasscodeService, PasscodeAttemptLimiter, TERMINAL_AUTHENTICATOR],
 })
 export class AccessPasscodeModule {}

@@ -108,8 +108,10 @@ export class SystemSettingsService {
       ...(row.proxyConfig ? { proxyConfig: row.proxyConfig as ProxyConfig } : {}),
       ...(row.publicBaseUrl ? { publicBaseUrl: row.publicBaseUrl } : {}),
       accessPasscodeEnabled: this.passcode.enabled,
-      ...(row.accessPasscodeUpdatedAt
-        ? { accessPasscodeUpdatedAt: row.accessPasscodeUpdatedAt.toISOString() }
+      // ⚠️ 只在口令**来自库**时才有「上次生成时刻」——env 形态下这一列恒 NULL，而
+      // `PasscodeService.updatedAt` 已经把这条判据收在一处，这里不再重复判断。
+      ...(this.passcode.updatedAt
+        ? { accessPasscodeUpdatedAt: this.passcode.updatedAt.toISOString() }
         : {}),
       version: { platform: platformVersion(), node: process.version },
     };

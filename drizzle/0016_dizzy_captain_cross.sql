@@ -1,0 +1,1 @@
+ALTER TABLE `system_settings` ADD `access_passcode_session_secret` text;

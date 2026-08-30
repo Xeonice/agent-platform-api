@@ -19,10 +19,13 @@ import {
   SandboxProviderError,
   SandboxProviderErrorCode,
   UnknownRuntimeError,
+  toExecFn,
 } from '@platform/contracts';
 import type {
   CreateSandboxInput,
   DestroySandboxInput,
+  ExecInSandboxInput,
+  ExecResult,
   ProviderDto,
   RequiredCapabilities,
   RuntimeAdapterRegistry,
@@ -52,6 +55,24 @@ import type { TriggeredBy } from '../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
+
+/**
+ * How long a `POST /api/sandboxes/:id/exec` command may run.
+ *
+ * ⚠️ IT IS A PLATFORM CONSTANT BECAUSE THE WIRE CONTRACT HAS NO FIELD FOR IT
+ * (10 §7.3 `ExecRequest { command }`), and that is the right shape: the budget being
+ * spent is a held-open HTTP connection, which is the platform's resource, not the
+ * caller's. Anything that legitimately runs longer is a headless Task
+ * (`POST …/runtimes/:rt/tasks`, 30/60/120/240 MINUTES) or an interactive terminal —
+ * both of which exist precisely so this endpoint does not have to grow a timeout knob.
+ *
+ * 60s rather than something tighter: the platform's own one-shot execs through the same
+ * `toExecFn` include package probes and file seeding on a cold sandbox, and a limit that
+ * cannot fit those would make the endpoint useless for the diagnostics people reach for
+ * it to run. It is NOT sized for installs — a cold runtime-CLI install measured 753s and
+ * has its own orchestrator, which is why it does not come through here.
+ */
+const EXEC_TIMEOUT_MS = 60_000;
 
 /**
  * HTTP status for each way the project facade can refuse (10 §6.8 「门口拒绝」).
@@ -419,6 +440,179 @@ export class SandboxApplicationService {
     const sandbox = await this.repo.findById(asSandboxId(id));
     if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
     return SandboxMapper.toDto(sandbox, false);
+  }
+
+  /**
+   * `POST /api/sandboxes/:id/start` (27 §2) — bring a STOPPED sandbox back up.
+   *
+   * ⚠️ IT IS ASYNCHRONOUS FOR THE SAME REASON `create` IS, AND THE SHAPE IS COPIED
+   * DELIBERATELY. A restart re-runs the whole `starting` 段 (I-SBX-9: it skips
+   * `preparing-workspace` because the workspace directory is still there, but the
+   * instance is a fresh process tree — CLI re-verified, credential re-injected, a NEW
+   * agent session started). The measured cost of that段 is not a request budget: a
+   * cold image store took 190529ms just to stage the rootfs. So the response is the
+   * aggregate as it stands the moment the platform has ACCEPTED the start, and the
+   * progress arrives on WS `sandbox.status_changed`.
+   *
+   * ⚠️ THE RETURNED DTO SAYS `starting`, NOT `stopped`. `restart()` performs its first
+   * transition synchronously (it persists + publishes before its first `await`), so
+   * mapping AFTER kicking it off reports what actually happened rather than the state
+   * the request arrived in. `create` relies on exactly the same property in the other
+   * direction (it snapshots `pending` BEFORE calling provision), and a test pins it —
+   * if that ever stops holding, this endpoint would start claiming a start it had not
+   * begun.
+   *
+   * The two rejections, both 409 `INVALID_STATE` (10 §6.8 类 C: "此刻不行"):
+   *   ① the status is not `stopped` — I-SBX-1's table has exactly one edge INTO
+   *     `starting` from a resting state, and honouring the table here rather than
+   *     letting `transitionTo` throw deep inside the background workflow is what makes
+   *     the refusal reach the CALLER instead of a log line;
+   *   ② there is no provider handle to start (I-SBX-3's contrapositive). Without this
+   *     the background restart dies on `handleOf`'s bare `Error`, `runSafely`'s sibling
+   *     swallows it, and the caller is told the sandbox is starting when nothing is.
+   */
+  async start(id: string): Promise<SandboxDto> {
+    const sandbox = await this.repo.findById(asSandboxId(id));
+    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+    if (sandbox.status !== 'stopped') {
+      throw this.invalidState(
+        `sandbox ${id} is '${sandbox.status}'; only a 'stopped' sandbox can be started ` +
+          '(I-SBX-1). A failed one has to be destroyed and re-created.',
+      );
+    }
+    if (!sandbox.providerSandboxId) {
+      throw this.invalidState(
+        `sandbox ${id} has no provider instance to start — it never reached the point ` +
+          'where one was created, so there is nothing to bring back up (I-SBX-3).',
+      );
+    }
+    const provider = this.registry.get(sandbox.provider);
+    // advances to `starting` synchronously, then runs the 段 in the background.
+    void this.provision.restartSafely(sandbox, provider);
+    return SandboxMapper.toDto(sandbox, false);
+  }
+
+  /**
+   * `POST /api/sandboxes/:id/stop` (27 §2) — graceful shutdown, instance kept.
+   *
+   * ⚠️ THIS ONE IS SYNCHRONOUS, AND THE ASYMMETRY WITH `start` IS THE POINT. Stopping
+   * is one `provider.stop()` call — no image staging, no CLI install, no agent
+   * bootstrap — which is why `destroy` (which walks the same `running → stopping →
+   * stopped` edge inline) has always awaited it too. Returning early here would mean
+   * inventing a second async path for the cheap half of the pair.
+   *
+   * ⚠️ IT DOES NOT DESTROY ANYTHING. The workspace directory, the instance and the
+   * `providerSandboxId` all survive — that is what makes `start` above possible. What
+   * does NOT survive is the agent's conversation: `stopped → start` is a NEW session
+   * (P22 §2), which is why the UI has to say so rather than calling it "resume".
+   *
+   * The failure path mirrors `destroy`: mark `failed` best-effort so a wedged instance
+   * does not sit in `stopping` forever, then surface the provider's own code (04 §4).
+   */
+  async stop(id: string): Promise<SandboxDto> {
+    const sandbox = await this.repo.findById(asSandboxId(id));
+    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+    if (sandbox.status !== 'running' && sandbox.status !== 'idle') {
+      throw this.invalidState(
+        `sandbox ${id} is '${sandbox.status}'; only a 'running' or 'idle' sandbox can be ` +
+          'stopped (I-SBX-1).',
+      );
+    }
+    const provider = this.registry.get(sandbox.provider);
+    const handle = this.handleOf(sandbox);
+    try {
+      this.advance(sandbox, 'stopping', 'user');
+      if (handle) await provider.stop(handle);
+      this.advance(sandbox, 'stopped', 'user');
+    } catch (e) {
+      this.tryAdvance(sandbox, 'failed', 'user');
+      throw this.mapProviderError(e);
+    }
+    return SandboxMapper.toDto(sandbox, false);
+  }
+
+  /**
+   * `POST /api/sandboxes/:id/exec` (27 §2) — ONE non-interactive command.
+   *
+   * ⚠️ THE INTERACTIVE PATH IS NOT THIS ONE (27 §2, 06). A TTY session is WS
+   * `/terminal`; a long agent run is `POST …/runtimes/:rt/tasks`. What is left for this
+   * endpoint is the thing neither of those does well: "run this, tell me what it
+   * printed and whether it worked" inside a request/response.
+   *
+   * ⚠️ `running` / `idle` ONLY (I-SBX-3). The exec derives from `spawn({tty:false})`,
+   * which needs a STARTED instance (04 §2.3) — that is physics, not policy. Refusing
+   * `starting` too is a judgement on top of it: a command sent while the CLI install is
+   * still running would race the very step that makes the sandbox usable.
+   *
+   * ⚠️ THE DEADLINE IS ENFORCED TWICE, ON PURPOSE. `timeoutMs` goes to the provider so
+   * the process is really killed INSIDE the sandbox (both built-ins implement it
+   * natively — boxlite wraps in `timeout(1)`, aio passes `hard_timeout`); the
+   * platform-side race is what guarantees the HTTP request ends, because a provider
+   * that silently ignores `timeoutMs` would otherwise hold the connection until
+   * something else gave up. Only the second one can produce `TIMEOUT`, and 27 §2 lists
+   * it as an outcome of this capability, so it needs a producer that does not depend on
+   * a provider being well-behaved.
+   */
+  async exec(id: string, input: ExecInSandboxInput): Promise<ExecResult> {
+    const sandbox = await this.repo.findById(asSandboxId(id));
+    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+    const handle = this.handleOf(sandbox);
+    if ((sandbox.status !== 'running' && sandbox.status !== 'idle') || !handle) {
+      throw this.invalidState(
+        `sandbox ${id} is '${sandbox.status}'; a command can only be executed in a ` +
+          "'running' or 'idle' sandbox (I-SBX-3).",
+      );
+    }
+    const provider = this.registry.get(sandbox.provider);
+    const exec = toExecFn(provider, handle);
+    try {
+      // `sh -c` so the caller's shell syntax (pipes, redirects, `&&`) means what it
+      // reads as — the same form the platform's own probes use (install-plan.util).
+      return await this.withDeadline(
+        exec(['sh', '-c', input.command], { timeoutMs: EXEC_TIMEOUT_MS }),
+        id,
+      );
+    } catch (e) {
+      throw this.mapProviderError(e);
+    }
+  }
+
+  /**
+   * Reject with `TIMEOUT` if the exec has not settled within the budget.
+   *
+   * ⚠️ The loser of the race is NOT cancelled here, and it must not be: the process is
+   * already being killed sandbox-side by `ProcessSpec.timeoutMs`, and the only thing
+   * this side still holds is a promise whose result nobody reads. Adding an abort here
+   * would mean a second, platform-side kill path for the same process.
+   */
+  private async withDeadline(work: Promise<ExecResult>, id: string): Promise<ExecResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new SandboxProviderError(
+              SandboxProviderErrorCode.TIMEOUT,
+              `command in sandbox ${id} did not finish within ${EXEC_TIMEOUT_MS / 1000}s`,
+              undefined,
+              true,
+            ),
+          ),
+        EXEC_TIMEOUT_MS,
+      );
+    });
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** 409 `INVALID_STATE` through the SAME contract→HTTP table as provider errors (04 §4). */
+  private invalidState(message: string): unknown {
+    return this.mapProviderError(
+      new SandboxProviderError(SandboxProviderErrorCode.INVALID_STATE, message),
+    );
   }
 
   /**

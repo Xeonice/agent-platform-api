@@ -174,3 +174,44 @@ export const SandboxDtoSchema = z.object({
   //   is easier than removing one.
 });
 export type SandboxDto = z.infer<typeof SandboxDtoSchema>;
+
+/**
+ * `POST /api/sandboxes/:id/exec` body (10 §7.3 `ExecRequest`).
+ *
+ * ⚠️ ONE FIELD, AND THAT IS THE WHOLE CONTRACT. 10 §7.3 spells it
+ * `interface ExecRequest { command: string; }` — no `timeoutMs`, no `cwd`, no `env`.
+ * The deadline is a PLATFORM constant (see `EXEC_TIMEOUT_MS` in
+ * `sandbox-application.service.ts`), not a caller-supplied number: this endpoint is a
+ * synchronous request/response, so a caller-chosen budget would only decide how long
+ * an HTTP connection is held open — and `run_agent_task` already exists for anything
+ * that legitimately runs for minutes or hours.
+ *
+ * ⚠️ INTERACTIVE WORK DOES NOT COME HERE (27 §2): a TTY session is WS `/terminal`.
+ * A command that waits for input on this path simply burns the deadline and returns
+ * `TIMEOUT`.
+ */
+export const ExecInSandboxSchema = z.object({
+  /** Run through `sh -c`, so shell syntax (pipes, redirects, `&&`) works as written. */
+  command: z.string().min(1).max(8000),
+});
+export type ExecInSandboxInput = z.infer<typeof ExecInSandboxSchema>;
+
+/**
+ * `ExecResult` (10 §7.3) — what the one-shot exec produced.
+ *
+ * ⚠️ `stderr` IS STRUCTURALLY ALWAYS EMPTY TODAY, AND THAT IS NOT A BUG TO PAPER OVER.
+ * `ProcessStream` is a single DEMULTIPLEXED byte stream (04 §2.4), so `toExecFn` cannot
+ * reconstruct the split — everything the command wrote arrives on `stdout`
+ * (`exec-fn.ts` says so at the point where the merge happens). The field is on the wire
+ * because the contract names it and because a provider that CAN separate the two would
+ * fill it; callers that need the split redirect inside the command (`2>&1`, `2>/dev/null`).
+ * Dropping the field would be a lie in the other direction — it would tell callers the
+ * platform has no notion of stderr at all.
+ */
+export const ExecResultSchema = z.object({
+  stdout: z.string(),
+  stderr: z.string(),
+  /** A process killed by a signal has no ordinary exit code; it surfaces as `-1` (SP-09). */
+  exitCode: z.number().int(),
+});
+export type ExecResult = z.infer<typeof ExecResultSchema>;
