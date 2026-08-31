@@ -22,6 +22,7 @@ import {
   toExecFn,
 } from '@platform/contracts';
 import type {
+  ResourceQuota,
   CreateSandboxInput,
   DestroySandboxInput,
   ExecInSandboxInput,
@@ -42,6 +43,7 @@ import type {
   WorkspaceSource,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
+import { ResourceAllocator } from './resource-allocator';
 import { SandboxHealthMonitor } from './sandbox-health.monitor';
 import { mapProviderErrorToHttp } from './provider-error.http';
 import {
@@ -56,6 +58,7 @@ import type { TriggeredBy } from '../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
+import { planQuota } from '../domain/services/resource-pool.domain-service';
 
 /**
  * How long a `POST /api/sandboxes/:id/exec` command may run.
@@ -97,6 +100,14 @@ interface AdmittedCreate {
   imageRef: string;
   /** where the workspace comes from, and which branch it must end up on (03 §7.2★). */
   workspaceSource: WorkspaceSource;
+  /**
+   * 这一发要登记多少资源（03 §1「quota 值的来源」：用户**不输入**任何资源参数，以镜像的
+   * `resource_defaults` 为基础，磁盘那一维按项目基线体积算）。
+   *
+   * ⚠️ 它由**门内**的两次只读查询（镜像目录 + 项目门面）算出，所以它没有给门增加任何副
+   * 作用 —— 门仍然是零副作用的（§3.1）。真正会改变世界的那一步（登记）在门**之后**。
+   */
+  quota: ResourceQuota;
 }
 
 /**
@@ -121,6 +132,8 @@ export class SandboxApplicationService {
     private readonly provision: ProvisionSandboxWorkflow,
     /** 运行期健康度的当前观测（03 §7.8）——派生字段，不落库、不进状态机。 */
     private readonly health: SandboxHealthMonitor,
+    /** 03 §3 的互斥登记 —— `RESOURCE_EXHAUSTED` 在本平台唯一的真实抛出点。 */
+    private readonly resources: ResourceAllocator,
   ) {}
 
   /**
@@ -167,7 +180,31 @@ export class SandboxApplicationService {
       idleTimeoutSec: 1800,
       now: this.clock.now(),
     });
-    this.persist(sandbox);
+
+    // ── 03 §3 互斥区：校验剩余容量 → 登记占用 → 落库，**一个事务** ────────────────
+    //
+    // ⚠️ **它必须在这里、在 `create` 同步返回之前。** 下面那行 `void runSafely(...)` 是
+    // 分钟级的后台流水线；把容量判定留在里面，失败就不在 `createSandbox` 的调用栈上，
+    // `AutomationTaskLauncherAdapter` 的 catch 一次都接不到，而 03 §8.2 决策表行 3
+    // （排队重试、不计失败）整条就是死代码 —— 那正是本切片之前的状态。
+    //
+    // ⚠️ **登记与 sandbox 行同事务。** 容量不够时抛 `RESOURCE_EXHAUSTED` 而**一行都没写**：
+    // 否则自动化那 5 次排队重试会在任务列表里留下 5 个空壳沙箱。
+    //
+    // ⚠️ **它刻意不带 `sideEffectFree`，尽管这次拒绝确实什么都没写。** 那个标记的可信度
+    // 来自它是**位置**决定的（`atDoor` 包住的那一段结构上就碰不到 `uow`，§3.1）；在门外
+    // 手写一个 `true`，等于把「零副作用」从一条结构性事实退回成一句每个抛出点各自记得
+    // 的承诺 —— 而 `create-door.spec.ts` 整个「零副作用靠位置而不是靠记性」的守卫就是
+    // 冲着这件事来的。缺席 = 保守读法，代价只是前端把它当「可能有副作用」；而
+    // `retryable:true` 已经把用户真正需要的下一步（等一会儿再来）说清楚了。
+    try {
+      await this.resources.reserve({ sandboxId: sandbox.id, quota: admitted.quota }, (tx) => {
+        this.repo.saveSync(tx, sandbox);
+        this.events.publishInTx(tx, sandbox.pullEvents());
+      });
+    } catch (e) {
+      throw this.mapProviderError(e);
+    }
 
     // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
     // MUST NOT block on provision→start→readiness — boxlite cold-pull alone
@@ -180,6 +217,24 @@ export class SandboxApplicationService {
     const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
     void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
     return dto;
+  }
+
+  /**
+   * 03 §8.2 决策表行 3 的**只读**产出方 —— 「现在有没有资源起这一发」。
+   *
+   * ⚠️ **它不是闸，`create` 才是。** 这里回答 `ok` 之后到真正创建之间，别人完全可能把
+   * 最后一格用掉；判错的代价只是多走一次 create 然后被互斥区拒（结果相同）。它存在的
+   * 理由是让 automation 在**还没创建任何东西**的时候就把这一发记成「排队重试」——那与
+   * 「记一次失败」对 `consecutive_failures` 的影响相反（I-AUT-1）。
+   *
+   * ⚠️ **它走的就是 `create` 的那一段门**（`admit`），因此 quota 是同一个数。另写一份
+   * 「大概要这么多」的估算，换来的是「probe 说行、reserve 说不行」这种只在生产上出现、
+   * 日志里还看不出来的分叉。`admit` 是只读的（§3.1 零副作用），所以复用它没有代价。
+   */
+  async hasCapacityFor(input: CreateSandboxInput): Promise<boolean> {
+    const admitted = await this.admit(input);
+    const verdict = await this.resources.probe(admitted.quota);
+    return verdict.ok;
   }
 
   /**
@@ -229,7 +284,7 @@ export class SandboxApplicationService {
       this.assertRuntimeRegistered(input.runtime);
       // ⚠️ **provider 必须先定下来**：两档的预制镜像不再是同一张（ADR 决策 C），
       // 所以「不给镜像时用哪一张」与「这张镜像跑不跑得了」都取决于它。
-      const imageRef = await this.resolveImage(input.image, provider.name);
+      const image = await this.resolveImage(input.image, provider.name);
 
       // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
       // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
@@ -240,8 +295,15 @@ export class SandboxApplicationService {
       return {
         providerName,
         provider,
-        imageRef,
+        imageRef: image.manifestId,
         workspaceSource: { baselinePath: projectCtx.baselinePath, branch: projectCtx.branch },
+        // 03 §1「quota 值的来源」：镜像的 `resource_defaults` 给 CPU/内存，项目的基线体积
+        // 给磁盘。两个来源都是**这道门刚刚已经读过**的东西 —— 没有新增一次 IO。
+        quota: planQuota({
+          imageDefaults: image.resourceDefaults,
+          baselineSizeBytes: projectCtx.baselineSizeBytes,
+          diskFloorMb: this.resources.diskFloorMb,
+        }),
       };
     });
   }
@@ -279,7 +341,10 @@ export class SandboxApplicationService {
    * i.e. no digest — the placeholder, back again, through the one door that was
    * supposed to have closed it.
    */
-  private async resolveImage(requested: string | undefined, provider: string): Promise<string> {
+  private async resolveImage(
+    requested: string | undefined,
+    provider: string,
+  ): Promise<{ manifestId: string; resourceDefaults: ResourceQuota }> {
     const ref = (requested ?? '').trim();
     if (ref !== '' && /[\s\p{Cc}]/u.test(ref)) {
       throw doorRejection(
@@ -293,7 +358,11 @@ export class SandboxApplicationService {
         ref === '' ? undefined : ref,
         provider,
       );
-      return selected.manifestId;
+      // 03 §1：CPU/内存那两维**由镜像声明**，不由请求方提供。
+      return {
+        manifestId: selected.manifestId,
+        resourceDefaults: selected.manifest.resourceDefaults,
+      };
     } catch (e) {
       if (e instanceof ImageAccessError) {
         // 400 alongside `UNKNOWN_PROVIDER` / `UNKNOWN_RUNTIME`: the request named
@@ -529,6 +598,9 @@ export class SandboxApplicationService {
       this.advance(sandbox, 'stopped', 'user');
     } catch (e) {
       this.tryAdvance(sandbox, 'failed', 'user');
+      // `stopped` **保留**登记（工作区还在盘上、实例还在，`start` 会把它接回来）；
+      // `failed` 不会 —— 它是终态，这条沙箱不会再回来占任何东西。
+      await this.resources.release(sandbox.id);
       throw this.mapProviderError(e);
     }
     return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
@@ -686,8 +758,17 @@ export class SandboxApplicationService {
         });
       }
       this.advance(sandbox, 'destroyed', 'user');
+      // 03 §3「失败时回滚已登记配额」的正常那一半：实例没了 ⇒ 它占的那份必须回池，
+      // 否则一台机器跑上几十次销毁之后，账本会说满了而实际一个容器都没有。
+      //
+      // ⚠️ **保留下来的目录不回池**（§1/§7.7：它已脱离 sandbox 生命周期，改为治理视角
+      // 展示）—— 而登记的是 sandbox 的占用，`keepVolume` 与否都要释放；留下的那块盘由
+      // 「保留卷占用」横幅去说，不由资源池去记。
+      await this.resources.release(sandbox.id);
     } catch (e) {
       this.tryAdvance(sandbox, 'failed', 'user');
+      // 销毁半途炸了 ⇒ 沙箱落 `failed`，它不会再跑任何东西了，配额同样必须回池。
+      await this.resources.release(sandbox.id);
       throw this.mapProviderError(e);
     }
   }

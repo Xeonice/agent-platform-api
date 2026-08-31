@@ -61,3 +61,43 @@ export class SandboxStateChanged implements DomainEvent {
     readonly errorCode?: string,
   ) {}
 }
+
+/**
+ * 对账判定这条沙箱的实例已经不在了（13 §4 第二格 / 23 §5.6）。
+ *
+ * ── 它凭什么是一个事件，而不是「顺手记一行日志」──────────────────────────────
+ * 17 §76 早就给它写好了消费方：**审计 / 前端提示**。而这件事发生在**没有任何人在看**
+ * 的时刻（进程刚起来、或者一次 5 分钟的后台扫描），用户下次打开平台时只会看见一个
+ * 状态没变、配额却已经被收走的沙箱 —— 「什么时候、为什么」在今天答不出来。
+ *
+ * ⚠️ **它不改 `sandboxes.status`，也不代表沙箱被判死。** 判死属于
+ * `SandboxHealthMonitor` / 生命周期那条链路；对账只管账本（13 §4 的表格原写
+ * 「status→failed」，已按实现回填）。所以本事件**不是** `SandboxStateChanged`，
+ * 消费方也不该拿它去推状态机。
+ *
+ * ⚠️ **它由 application 层（`QuotaReconciler`）直接 `publishInTx`，不经聚合。**
+ * 聚合此刻没有任何状态变化可言 —— 为了发一个事件而给 `Sandbox` 加一个什么都不改的
+ * 方法，再靠一次空 `saveSync` 把它冲出去，是把事件机制反过来用。它与释放登记**同一个
+ * 事务**（见 `ResourceAllocator.releaseAsOrphan` 的 `alsoInTx`），所以「账本改了但没人
+ * 知道」这个中间态不存在。
+ *
+ * ⚠️ **`name` 在载荷里**，理由与 `SandboxCreated.name` 完全一致：审计的 `summary` 要求
+ * 「一行人话，直接上 UI」，而审计是历史快照 —— 回查当前库拿名字会让历史随现状漂移。
+ */
+export class SandboxReconciledAsOrphan implements DomainEvent {
+  readonly type = 'SandboxReconciledAsOrphan';
+  constructor(
+    readonly sandboxId: SandboxId,
+    readonly projectId: ProjectId,
+    /** 任务显示名 —— 见类注释。 */
+    readonly name: string,
+    /**
+     * 判定时沙箱**当时**的状态。它不会被这次对账改写，记下来是为了让读的人一眼看出
+     * 「一个写着 `running` 的沙箱，实例其实已经没了」—— 那正是这条记录的价值。
+     */
+    readonly status: SandboxStatus,
+    /** 人类可读的判据（`container missing on reconcile` 之类）。 */
+    readonly reason: string,
+    readonly occurredAt: Date,
+  ) {}
+}

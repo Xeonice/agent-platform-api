@@ -21,5 +21,9 @@ export {
 // 入口 ①）。审计 projector 住在 `apps/api/src/platform/audit/`（那张表是平台表，
 // 不属于任何限界上下文），只能经公共出口拿到这几个类；靠 `event.type` 字符串比对
 // 也能跑，但那样字段被改名时**没有任何东西会红**。
-export { SandboxCreated, SandboxStateChanged } from './domain/events/sandbox-events';
+export {
+  SandboxCreated,
+  SandboxStateChanged,
+  SandboxReconciledAsOrphan,
+} from './domain/events/sandbox-events';
 export { AgentTaskStarted, AgentTaskFinished } from './domain/events/agent-task-events';

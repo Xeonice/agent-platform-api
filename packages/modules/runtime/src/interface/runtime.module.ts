@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import {
   RUNTIME_ADAPTER_REGISTRY,
+  RUNTIME_CREDENTIAL_STATE_READER,
   RUNTIME_INSTALL_ORCHESTRATOR,
   RUNTIME_SETTINGS_READER,
   RUNTIME_SETTINGS_WRITER,
@@ -11,6 +12,7 @@ import { RuntimeInstallOrchestratorService } from '../application/runtime-instal
 import { RuntimeEventProjector } from '../application/runtime-event.projector';
 import { SqliteRuntimeInstallationRepository } from '../infrastructure/persistence/sqlite/runtime-installation.repository.impl';
 import { RuntimeApplicationService } from '../application/runtime-application.service';
+import { DefaultRuntimeCredentialStateReader } from '../application/runtime-credential-state.reader';
 import { AuthSessionStore } from '../application/auth-session.store';
 import { AUTH_HELPER } from '../domain/ports/auth-helper.port';
 import { CodexAdapter } from '../infrastructure/adapters/codex/codex.adapter';
@@ -42,6 +44,7 @@ import { RuntimeController } from './http/runtime.controller';
     ClaudeCodeAdapter,
     CredentialRefreshScanner,
     RuntimeSettingsReaderWriter,
+    DefaultRuntimeCredentialStateReader,
     { provide: RUNTIME_ADAPTER_REGISTRY, useClass: DefaultRuntimeAdapterRegistry },
     { provide: AUTH_HELPER, useClass: HostAuthHelper },
     { provide: RUNTIME_SETTINGS_REPOSITORY, useClass: SqliteRuntimeSettingsRepository },
@@ -49,6 +52,8 @@ import { RuntimeController } from './http/runtime.controller';
     { provide: RUNTIME_INSTALL_ORCHESTRATOR, useExisting: RuntimeInstallOrchestratorService },
     { provide: RUNTIME_SETTINGS_READER, useExisting: RuntimeSettingsReaderWriter },
     { provide: RUNTIME_SETTINGS_WRITER, useExisting: RuntimeSettingsReaderWriter },
+    // 03 §8.2 行 2：automation 每分钟问一次「这个 runtime 有没有能用的凭证」。
+    { provide: RUNTIME_CREDENTIAL_STATE_READER, useExisting: DefaultRuntimeCredentialStateReader },
   ],
   exports: [
     RuntimeApplicationService,
@@ -56,6 +61,7 @@ import { RuntimeController } from './http/runtime.controller';
     RUNTIME_INSTALL_ORCHESTRATOR,
     RUNTIME_SETTINGS_READER,
     RUNTIME_SETTINGS_WRITER,
+    RUNTIME_CREDENTIAL_STATE_READER,
   ],
 })
 export class RuntimeModule {}

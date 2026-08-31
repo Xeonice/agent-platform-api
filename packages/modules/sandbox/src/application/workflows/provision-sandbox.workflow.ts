@@ -37,8 +37,15 @@ import type { SandboxStatus } from '../../domain/value-objects/sandbox-status.vo
 import type { TriggeredBy } from '../../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../../domain/repositories/sandbox.repository';
+import { ResourceAllocator } from '../resource-allocator';
 
-const DEFAULT_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
+/**
+ * 兜底 quota —— **只在账本里查不到这条 sandbox 的活跃登记时**才用。
+ *
+ * 那种情况今天只有一种成因：本切片之前建出来、重启后再 `start` 的老沙箱（它们从来没被
+ * 登记过）。给它一个能跑起来的默认值，而不是让一台升级过的机器上所有历史沙箱都起不来。
+ */
+const FALLBACK_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
 
 /**
  * Everything that happens AFTER the 202 (26 §1, 24 §1.3): the staged pipeline
@@ -86,6 +93,12 @@ export class ProvisionSandboxWorkflow {
      * 一次并不存在的转移（这正是 10 §7.4 不让它挤进 `status_changed` 的同一条理由）。
      */
     @Inject(SANDBOX_EVENT_BROADCASTER) private readonly broadcaster: SandboxEventBroadcaster,
+    /**
+     * 03 §3/§640：`WORKSPACE_PREPARE_FAILED` / `DISK_INSUFFICIENT`（以及这一段里任何
+     * 别的失败）都要**回滚配额登记**。⚠️ 它**不**在这里登记 —— 登记发生在 `create` 的
+     * 同步段（那正是 `RESOURCE_EXHAUSTED` 能被调用方接住的原因）；这里只负责还回去。
+     */
+    private readonly resources: ResourceAllocator,
   ) {}
 
   /** Background runner — never rejects into an unhandled promise. */
@@ -145,10 +158,14 @@ export class ProvisionSandboxWorkflow {
       // gain. Credentials are written LAST into the env map so a same-named user
       // variable can never win (05 §4.1 "凭证永远赢，靠顺序而非黑名单").
       const credential = await this.prepareCredential(sandbox);
+      // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
+      // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
+      // 超分配」防的是一个与真实占用无关的数。
+      const quota = (await this.resources.reservedQuotaOf(sandbox.id)) ?? FALLBACK_QUOTA;
       try {
         handle = await provider.create({
           sandboxId: sandbox.id,
-          quota: DEFAULT_QUOTA,
+          quota,
           image: image.spec,
           // ⚠️ ORDER IS THE GUARANTEE, NOT A BLACKLIST (05 §4.1「凭证永远赢，靠顺序而非
           // 校验」). The image's own run parameters go in FIRST and the runtime
@@ -204,6 +221,10 @@ export class ProvisionSandboxWorkflow {
       this.compensate(sandbox, e);
       if (handle) await provider.destroy(handle).catch(() => undefined);
       await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
+      // 03 §640：失败即**回滚配额登记**。沙箱已落 `failed`（终态），它不会再占任何东西
+      // —— 不还回去，一台机器上每一次 provision 失败都会永久吃掉一格容量，最终把整个
+      // 平台饿死在一堆早已消失的沙箱上。
+      await this.resources.release(sandbox.id);
       throw e;
     }
   }
@@ -260,6 +281,8 @@ export class ProvisionSandboxWorkflow {
     } catch (e) {
       this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
       this.compensate(sandbox, e);
+      // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
+      await this.resources.release(sandbox.id);
       throw e;
     }
   }

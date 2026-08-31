@@ -15,6 +15,7 @@
     { "path": "../../packages/modules/terminal" },
     { "path": "../../packages/modules/credential" },
     { "path": "../../packages/modules/runtime" },
-    { "path": "../../packages/modules/image" }
+    { "path": "../../packages/modules/image" },
+    { "path": "../../packages/modules/automation" }
   ]
 }

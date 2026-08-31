@@ -41,3 +41,30 @@ export const SANDBOX_FAILURE_CODES: ReadonlySet<string> = new Set<string>([
 export function isSandboxFailureCode(value: unknown): value is string {
   return typeof value === 'string' && SANDBOX_FAILURE_CODES.has(value);
 }
+
+/**
+ * 「这一发之所以没跑成，是因为**现在没有资源**」—— 决策表行 3 的码集合（03 §8.2）。
+ *
+ * ⚠️ **它与「失败」是两件事，而这个区分有真实后果。** 自动化侧对这两类的处置相反：
+ * 资源不足 ⇒ 排队重试（24min × 5），**不动** `consecutive_failures`（I-AUT-1：不是规则
+ * 的错）；真失败 ⇒ 计数 +1，攒够 3 次降频、10 次自动禁用（03 §8.4）。把「机器忙」记成
+ * 「规则坏」，结果就是一台忙碌的机器会在一个下午之内把自己的自动化规则全部关掉。
+ *
+ * ⚠️ **两个成员，两条路径，缺一条就漏掉一半**：
+ *   · `RESOURCE_EXHAUSTED` —— 创建那一刻同步抛（03 §3 互斥登记拒绝）；
+ *   · `DISK_INSUFFICIENT`  —— 后台 provision 阶段才撞上（工作区复制时盘写满，03 §7.6）。
+ * 只认前者，「另一半路径」上的容量失败照旧污染失败计数 —— 那正是本切片之前的状态。
+ *
+ * ⛔ `WORKSPACE_PREPARE_FAILED` **不在里面**：它是「工作区准备失败」的泛化码，涵盖权限、
+ * 分支不存在、git 炸了等等，这些重试一百次也不会好。磁盘那一格早已有更具体的
+ * `DISK_INSUFFICIENT`（`classifyWorkspacePrepareError` 就是干这个的），把泛化码一并算成
+ * 「等资源」，会让一条真坏了的规则永远停在「已排队 n/5」上不报警。
+ */
+export const CAPACITY_FAILURE_CODES: ReadonlySet<string> = new Set<string>([
+  SandboxProviderErrorCode.RESOURCE_EXHAUSTED,
+  DISK_INSUFFICIENT,
+]);
+
+export function isCapacityFailureCode(value: unknown): value is string {
+  return typeof value === 'string' && CAPACITY_FAILURE_CODES.has(value);
+}

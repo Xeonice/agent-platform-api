@@ -305,6 +305,8 @@ export const fakeProjectFacade: ProjectFacade = {
       projectId,
       baselinePath: `/tmp/platform-test-baseline/${projectId}`,
       sourceType: 'empty',
+      // 03 §1：配额登记的磁盘那一维读它。`null` = 还没量过 ⇒ 落到配置下限。
+      baselineSizeBytes: null,
     };
   },
   // 这个 fake 的沙箱没有真工作区（见 `fakeWorkspace.cleanup`），所以登记这一步在

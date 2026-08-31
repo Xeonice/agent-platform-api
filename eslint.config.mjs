@@ -102,6 +102,7 @@ export default tseslint.config(
             'packages/shared-kernel/tsconfig.json',
             'packages/contracts/tsconfig.json',
             'packages/modules/project/tsconfig.json',
+            'packages/modules/automation/tsconfig.json',
             'packages/modules/sandbox/tsconfig.json',
             'packages/modules/credential/tsconfig.json',
             'packages/modules/runtime/tsconfig.json',
