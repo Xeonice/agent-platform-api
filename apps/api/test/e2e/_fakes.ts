@@ -290,7 +290,12 @@ export const fakeWorkspace: WorkspacePreparer = {
   async prepare(sandboxId: string): Promise<PreparedWorkspace> {
     return { hostPath: `/tmp/platform-test-ws/${sandboxId}`, baselineExisted: true, entryCount: 1 };
   },
-  async cleanup(): Promise<void> {},
+  // ⚠️ **返回 `null` 而不是一个假路径**：e2e 的 fake workspace 从不在磁盘上建目录，
+  // 报一个不存在的目录会让销毁流程去登记一条永远打不开的保留卷。真实的
+  // `FsWorkspacePreparer` 只有在 `kept` 标记真的写进去之后才报路径（同一条纪律）。
+  async cleanup(): Promise<null> {
+    return null;
+  },
 };
 
 /** A project facade that always resolves a ready project (no docker/git needed). */
@@ -302,6 +307,9 @@ export const fakeProjectFacade: ProjectFacade = {
       sourceType: 'empty',
     };
   },
+  // 这个 fake 的沙箱没有真工作区（见 `fakeWorkspace.cleanup`），所以登记这一步在
+  // e2e 里从不会被调到；实现成 no-op 是为了让契约完整，而不是为了让它"能过"。
+  async registerRetainedVolume(): Promise<void> {},
 };
 
 /** A provider WITHOUT the two planes — the 409 admission branch needs one to exist. */

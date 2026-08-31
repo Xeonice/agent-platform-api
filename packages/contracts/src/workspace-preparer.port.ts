@@ -52,9 +52,25 @@ export interface WorkspaceSource {
   branch?: string;
 }
 
+/**
+ * `cleanup` 的返回：**保留下来的宿主目录**，只有 `keep: true` 且目录真的还在时才有。
+ *
+ * ⚠️ 它存在的唯一理由是 03 §7.7 的登记步。此前 `cleanup` 返回 `void`，于是「哪个
+ * 目录被留下来了」这件事**只有文件系统知道**，application 层要么去重新拼一遍
+ * `${DATA_ROOT}/workspaces/<id>`（把 adapter 的私有布局抄到调用方，两份早晚漂移），
+ * 要么干脆不登记 —— 后者正是本轮之前的实现：`destroy(keepVolume:true)` 只写了个
+ * 文件系统标记，`retained_volumes` 一条记录都没有。
+ *
+ * `null` = 没有保留（`keep:false`，或目录已经不在了）—— 调用方据此**不登记**，而不是
+ * 登记一个不存在的路径。
+ */
+export interface RetainedWorkspace {
+  hostPath: string;
+}
+
 export interface WorkspacePreparer {
   prepare(sandboxId: string, source: WorkspaceSource): Promise<PreparedWorkspace>;
-  cleanup(sandboxId: string, opts: { keep: boolean }): Promise<void>;
+  cleanup(sandboxId: string, opts: { keep: boolean }): Promise<RetainedWorkspace | null>;
 }
 
 export const WORKSPACE_PREPARER = Symbol('WorkspacePreparer');

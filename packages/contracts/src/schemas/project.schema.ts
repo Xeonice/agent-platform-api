@@ -84,3 +84,52 @@ export type ProjectDto = z.infer<typeof ProjectDtoSchema>;
  */
 export const ProjectBranchesSchema = z.array(z.string());
 export type ProjectBranches = z.infer<typeof ProjectBranchesSchema>;
+
+// ===========================================================================
+// 保留卷（v1.1）—— 表 13 §2.2.2 / 不变量 23 §6.2 / DTO 10 §7.3
+// ===========================================================================
+
+/** 卷是怎么留下来的：用户在销毁确认里勾了保留 / 自动化产物（13 §2.2.2 CHECK）。 */
+export const RetainedVolumeSourceSchema = z.enum(['manual-destroy', 'automation-artifact']);
+export type RetainedVolumeSource = z.infer<typeof RetainedVolumeSourceSchema>;
+
+/**
+ * 保留期，**只有三个取值**（I-RV-1；P20 §6 的 3/7/30 天）。自动化产物取规则的
+ * `artifactRetentionDays`，同样落在这三个值里。
+ */
+export const RETENTION_DAYS = [3, 7, 30] as const;
+export const RetentionDaysSchema = z.union([z.literal(3), z.literal(7), z.literal(30)]);
+export type RetentionDays = z.infer<typeof RetentionDaysSchema>;
+
+/**
+ * `RetainedVolumeDto`（10 §7.3）。
+ *
+ * ⚠️ **两个大小都给**，因为它们差一个数量级，只给一个必然误导（实测本仓 web 工作区：
+ * 磁盘占 1.0 GB、下载包 14 MB —— 差 70 倍）。清理决策看 `diskBytes`，下载预期看
+ * `downloadBytes`。
+ *
+ * ⛔ **不含 `workspacePath`**：宿主绝对路径对外等于泄露部署布局，而前端定位一条记录
+ * 用 `id` 就够。它留在库里（UNIQUE，I-RV-3 靠它保证同一目录不被登记两次）。
+ */
+export const RetainedVolumeDtoSchema = z.object({
+  /** uuid v7 —— **就是 DELETE / 下载用的那个 id**，不是 `sandboxId`。 */
+  id: z.string(),
+  projectId: z.string(),
+  /** 来源 Task。⚠️ 弱引用：sandbox 记录归档后置 undefined，卷仍可管理（13 §2.2.2）。 */
+  sandboxId: z.string().optional(),
+  source: RetainedVolumeSourceSchema,
+  retainedAt: z.string(),
+  /** 到点由 `VolumeReaper` 清理。 */
+  retainUntil: z.string(),
+  /** 宿主目录**实占**（reflink 之后可能远小于逻辑大小）。 */
+  diskBytes: z.number().int().nonnegative(),
+  /** 打包后的 tar 字节数 —— 与下载响应的 `Content-Length` 同一个数。 */
+  downloadBytes: z.number().int().nonnegative(),
+});
+export type RetainedVolumeDto = z.infer<typeof RetainedVolumeDtoSchema>;
+
+/** `GET /api/retained-volumes?projectId=` —— 不带即全部项目。 */
+export const ListRetainedVolumesQuerySchema = z.object({
+  projectId: z.string().min(1).optional(),
+});
+export type ListRetainedVolumesQuery = z.infer<typeof ListRetainedVolumesQuerySchema>;

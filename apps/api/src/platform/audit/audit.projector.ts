@@ -21,6 +21,7 @@ import {
   ProjectConvertedToEmpty,
   ProjectCreated,
   ProjectDeleted,
+  VolumeRetained,
 } from '@platform/project';
 import { RuntimeAuthModeChanged, RuntimeInstallationStateChanged } from '@platform/runtime';
 import {
@@ -204,6 +205,26 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       severity: 'warn',
       summary: `删除项目 ${e.name}`,
       detail: { keptBaseline: e.keptBaseline },
+    };
+  }
+
+  if (e instanceof VolumeRetained) {
+    return {
+      category: 'project',
+      type: 'project.volume_retained',
+      subjectType: 'retained_volume',
+      subjectId: e.volumeId,
+      actor: 'user',
+      // ⛔ summary 里不出现宿主路径（部署布局），也不出现 UUID 之外的定位信息 ——
+      // 两个大小才是用户看这一行要的：删掉能拿回多少 / 下载要拉多少。
+      summary: `保留工作区卷（磁盘 ${e.diskBytes} 字节 / 下载 ${e.downloadBytes} 字节）`,
+      detail: {
+        projectId: e.projectId,
+        sandboxId: e.sandboxId,
+        retainUntil: e.retainUntil.toISOString(),
+        diskBytes: e.diskBytes,
+        downloadBytes: e.downloadBytes,
+      },
     };
   }
 

@@ -55,6 +55,34 @@ describe('SandboxApplicationService provision pipeline (in-memory doubles)', () 
     expect(stored!.status).toBe('destroyed');
     expect(h.provider.calls).toContain('destroy');
     expect(h.wsCalls.some((c) => c.startsWith(`cleanup:${dto.id}:false`))).toBe(true);
+    // keepVolume:false ⇒ 目录被删了，没有什么可登记的
+    expect(h.retainedRegistrations).toHaveLength(0);
+  });
+
+  /**
+   * ★ 03 §7.7 / 24 §3：`keepVolume:true` 必须**登记**一条 `RetainedVolume`。
+   *
+   * 变异：把 `sandbox-application.service.ts` 里 `registerRetainedVolume(...)` 那一段
+   * 删掉（回到本轮之前的实现 —— 只写文件系统标记、一条记录都不登记）⇒ 本条红。
+   * 那正是 10 §6 记下的那个洞：「只把端点接上，GET 会永远返回空数组」。
+   */
+  it('destroy(keepVolume:true) 登记 RetainedVolume —— 不只是写个文件系统标记', async () => {
+    const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
+    await waitForStatus(h.service, dto.id, 'running');
+    await h.service.destroy(dto.id, { keepVolume: true });
+
+    expect(h.wsCalls.some((c) => c.startsWith(`cleanup:${dto.id}:true`))).toBe(true);
+    expect(h.retainedRegistrations).toEqual([
+      {
+        projectId: 'prj-1',
+        sandboxId: dto.id,
+        // 路径来自 preparer 报回来的那个，不是调用方自己重拼的
+        workspacePath: `/tmp/ws/${dto.id}`,
+        source: 'manual-destroy',
+      },
+    ]);
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.status).toBe('destroyed');
   });
 
   it('rejects an unknown provider before creating anything', async () => {

@@ -28,21 +28,24 @@
     "start:dev": "tsc -b && node --env-file-if-exists=.env apps/api/dist/main.js",
     "db:generate": "apps/api/node_modules/.bin/drizzle-kit generate",
     "db:migrate": "node --env-file-if-exists=.env apps/api/dist/platform/persistence/migrate.js",
+    "prepare": "husky || true",
+    "check:openapi": "pnpm openapi:emit && git diff --exit-code openapi.json",
     "openapi:emit": "node apps/api/dist/tooling/emit-openapi.js"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
     "@swc/core": "^1.7.0",
     "@types/node": "^22.7.0",
     "@types/supertest": "^6.0.2",
     "eslint": "^9.12.0",
     "eslint-import-resolver-typescript": "^3.6.3",
     "eslint-plugin-boundaries": "^5.0.0",
+    "husky": "^9.1.7",
     "prettier": "^3.3.3",
     "supertest": "^7.0.0",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.8.1",
     "unplugin-swc": "^1.5.1",
-    "vitest": "^2.1.2",
-    "@modelcontextprotocol/sdk": "^1.10.0"
+    "vitest": "^2.1.2"
   }
 }

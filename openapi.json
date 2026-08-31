@@ -491,6 +491,105 @@
         ]
       }
     },
+    "/api/retained-volumes": {
+      "get": {
+        "operationId": "RetainedVolumeController_list",
+        "parameters": [
+          {
+            "name": "projectId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RetainedVolumeResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List retained workspace volumes (cleaned-up ones excluded)",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/retained-volumes/{id}": {
+      "delete": {
+        "operationId": "RetainedVolumeController_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": "unknown id, or already cleaned up (I-RV-2)"
+          }
+        },
+        "summary": "Delete a retained volume now (the record stays, for audit)",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/api/retained-volumes/{id}/archive": {
+      "get": {
+        "operationId": "RetainedVolumeController_archive",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Uncompressed tar bytes (application/x-tar)",
+            "headers": {
+              "content-length": {
+                "required": true,
+                "description": "Exact archive size in bytes. It is computable BEFORE the first byte is sent precisely because the archive is not compressed — that is what keeps the browser's native download progress bar working.",
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "unknown id, already cleaned up, or gone from disk"
+          }
+        },
+        "summary": "Download the whole retained volume as an uncompressed tar stream",
+        "tags": [
+          "project"
+        ]
+      }
+    },
     "/api/sandboxes": {
       "post": {
         "operationId": "SandboxController_create",
@@ -2091,6 +2190,52 @@
           }
         }
       },
+      "RetainedVolumeResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "sandboxId": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual-destroy",
+              "automation-artifact"
+            ]
+          },
+          "retainedAt": {
+            "type": "string"
+          },
+          "retainUntil": {
+            "type": "string"
+          },
+          "diskBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "downloadBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "source",
+          "retainedAt",
+          "retainUntil",
+          "diskBytes",
+          "downloadBytes"
+        ]
+      },
       "CreateSandboxDto": {
         "type": "object",
         "properties": {
@@ -2251,6 +2396,36 @@
           },
           "failureMessage": {
             "type": "string"
+          },
+          "health": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "healthy",
+                  "unhealthy",
+                  "unknown",
+                  "starting"
+                ]
+              },
+              "lastCheckedAt": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "consecutiveFailures": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              }
+            },
+            "required": [
+              "state",
+              "lastCheckedAt",
+              "consecutiveFailures"
+            ]
           }
         },
         "required": [

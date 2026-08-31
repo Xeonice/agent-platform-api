@@ -168,5 +168,59 @@ describe.skipIf(!ready)(
       await p1.destroy(handle);
       createdBoxIds.delete(handle.providerSandboxId);
     }, 600_000);
+
+    /**
+     * ★ 03 §7.8 的**零成本层**，在**真微 VM** 上。
+     *
+     * ── 为什么必须在这里验，而不是只在单测里 ──────────────────────────────────
+     * `readBoxliteHealth` 的单测证明的是「给定这样的输入，映射成那样的输出」——它证明
+     * 不了**输入本身存在**。`JsBoxInfo.healthStatus` 与 `JsBoxMetrics.execErrorsTotal`
+     * 是 SDK 的形状，读错字段名、或某个版本压根不报，单测一条都不会红（替身照着我写的
+     * 形状造数据）。10 §6 那句「拿一个证明不了对错的探针去写『running 不许再撒谎』，
+     * 只会再造一层撒谎」说的就是这件事。
+     *
+     * ── 这里钉住什么 ────────────────────────────────────────────────────────
+     *  ① 跑着的 box：`inspect().health` **存在**，`state` 落在契约的四个取值里，
+     *     `lastCheckedAt` 可解析。
+     *     ⚠️ **实测这台机器上它是 `unknown`**（`healthStatus.state === 'None'` ——
+     *     `agent-infra/sandbox:latest` 根本没配 health check）。这条事实正是
+     *     `SandboxHealthMonitor` 为什么不把「没有异常迹象」写成 `healthy` 的依据：
+     *     零成本层此时的正面证据只有「VM 在跑」。所以断言只钉「取值合法」，**不钉
+     *     具体是哪个** —— 换一张配了 HEALTHCHECK 的镜像它就该是 `healthy`。
+     *  ② `execErrorsTotal` 真的从 `metrics()` 拿到了（monitor 的差分判据靠它）。
+     *  ③ **停掉之后**：`health.state === 'unhealthy'` —— 这是「零成本层能发现问题」的
+     *     最小证明，且它**不进沙箱**（没有任何 exec）。
+     *  ④ `status` 这一侧完全没被碰：provider 只报 `lifecycleState` + `health`。
+     */
+    it('★ inspect() 在真微 VM 上填出 health（零成本层，不进沙箱）', async () => {
+      // provider 是 `new` 出来的（不走 DI），所以显式喂一个 Clock —— 没有它就不填
+      // 时刻，而不是编一个（见 provider 构造函数的注释）。
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const provider = new BoxliteSandboxProvider({ now: () => at });
+      const sandboxId = `blhealth-${Date.now()}`;
+      const handle = await provider.create(ctxFor(sandboxId));
+      createdBoxIds.add(handle.providerSandboxId);
+      await provider.start(handle);
+
+      const running = await provider.inspect(handle);
+      expect(running.lifecycleState).toBe('instance_running');
+      expect(running.health).toBeDefined();
+      expect(['healthy', 'unhealthy', 'unknown', 'starting']).toContain(running.health?.state);
+      expect(Number.isNaN(Date.parse(running.health?.lastCheckedAt ?? ''))).toBe(false);
+      expect(running.health?.consecutiveFailures).toBeGreaterThanOrEqual(0);
+      // ② 零成本的异常指示器真的读到了（monitor 的差分判据靠它）
+      const raw = running.raw as { execErrorsTotal?: unknown };
+      expect(typeof raw.execErrorsTotal).toBe('number');
+
+      // ③ 停掉之后零成本层就答得出「不健康」，全程没有一次 exec 进沙箱
+      await provider.stop(handle);
+      const stopped = await provider.inspect(handle);
+      expect(stopped.lifecycleState).not.toBe('instance_running');
+      expect(stopped.health?.state).toBe('unhealthy');
+      expect(stopped.health?.consecutiveFailures).toBeGreaterThanOrEqual(1);
+
+      await provider.destroy(handle);
+      createdBoxIds.delete(handle.providerSandboxId);
+    }, 600_000);
   },
 );

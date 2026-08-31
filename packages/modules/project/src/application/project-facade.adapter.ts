@@ -1,13 +1,18 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { asProjectId } from '@platform/shared-kernel';
 import { ProjectAccessError } from '@platform/contracts';
-import type { ProjectFacade, ProjectRuntimeContext } from '@platform/contracts';
+import type {
+  ProjectFacade,
+  ProjectRuntimeContext,
+  RegisterRetainedVolumeCommand,
+} from '@platform/contracts';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
 import type { ProjectRepository } from '../domain/repositories/project.repository';
 import { BASELINE_GIT } from '../domain/ports/baseline-git.port';
 import type { BaselineGit } from '../domain/ports/baseline-git.port';
 import { ProjectStateError } from '../domain/errors/project-errors';
 import { listBaselineBranches } from './baseline-branches';
+import { RetainedVolumeService } from './retained-volume.service';
 
 /**
  * Implements the cross-context `ProjectFacade` (contracts) so the `sandbox`
@@ -17,10 +22,33 @@ import { listBaselineBranches } from './baseline-branches';
  */
 @Injectable()
 export class ProjectFacadeAdapter implements ProjectFacade {
+  private readonly logger = new Logger('ProjectFacadeAdapter');
+
   constructor(
     @Inject(PROJECT_REPOSITORY) private readonly repo: ProjectRepository,
     @Inject(BASELINE_GIT) private readonly git: BaselineGit,
+    private readonly retainedVolumes: RetainedVolumeService,
   ) {}
+
+  /**
+   * `RegisterRetainedVolumeCommand`（24 §3）—— sandbox 上下文销毁完 keepVolume 之后
+   * 把目录登记进 project 侧的账本。
+   *
+   * ⚠️ **永不向销毁流程抛。** 此刻实例已经没了、目录已经留下了；因为账本没记上就把
+   * 整个 destroy 判失败，换来的是一个停在 `destroying` 的沙箱 + 一个谁也管不到的目录
+   * —— 比「目录在、账本暂缺」坏得多。03 §7.7 的口径就是**目录是事实、表是索引**，
+   * 两者不一致时以目录为准（启动对账补记或标 `deleted_at`）。
+   */
+  async registerRetainedVolume(command: RegisterRetainedVolumeCommand): Promise<void> {
+    try {
+      await this.retainedVolumes.register(command);
+    } catch (e) {
+      this.logger.error(
+        `failed to register retained volume for sandbox ${command.sandboxId ?? '(unknown)'}: ` +
+          `${(e as Error).message}. The directory is kept; startup reconciliation will pick it up.`,
+      );
+    }
+  }
 
   async getRuntimeContextForTask(
     projectId: string,

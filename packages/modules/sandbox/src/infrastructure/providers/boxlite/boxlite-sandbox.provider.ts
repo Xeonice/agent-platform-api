@@ -1,5 +1,5 @@
 import { createServer } from 'node:net';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   pinnedImageRef,
   SandboxProviderError,
@@ -16,6 +16,8 @@ import {
   type SandboxRuntimeStatus,
   type ResolvedImageSpec,
 } from '@platform/contracts';
+import { CLOCK } from '@platform/shared-kernel';
+import type { Clock } from '@platform/shared-kernel';
 import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
 import { boxliteNamePrefix } from '../../reconcile/instance-id';
 import { spawnNative } from './boxlite-process.stream';
@@ -24,6 +26,7 @@ import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
 import { runGuestScript } from './boxlite-guest-shell';
 import { isImageStaged } from './boxlite-image-store';
+import { readBoxliteHealth } from './boxlite-health';
 
 /**
  * `boxlite` —— 微 VM provider（04 §2.1、SANDBOX-RUNTIME-DECISIONS 决策 B）。
@@ -68,6 +71,15 @@ import { isImageStaged } from './boxlite-image-store';
 @Injectable()
 export class BoxliteSandboxProvider implements SandboxProvider {
   readonly name = 'boxlite';
+
+  /**
+   * ⚠️ **`@Optional()` 且只用来盖采样时刻。** 基础设施层禁 `new Date()`（01 §3），而
+   * `HealthStatus.lastCheckedAt` 是必填 —— BoxLite 自己报了 `lastCheck` 时用它的，
+   * 没报时才需要一个「我们什么时候问的」。DI 里 `CLOCK` 永远在（`PlatformModule`
+   * 是 `@Global`）；直接 `new` 出来的（单测/契约测试）没有 clock，那时**两个来源
+   * 都没有 ⇒ 整个 `health` 字段缺席**，而不是编一个时刻出来。
+   */
+  constructor(@Optional() @Inject(CLOCK) private readonly clock?: Clock) {}
   readonly capabilities: SandboxProviderCapabilities = {
     spawnTty: true,
     volumeMount: true,
@@ -216,14 +228,63 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     });
   }
 
+  /**
+   * ⚠️ **`health` 是本轮补上的**（03 §7.8）。契约里 `SandboxRuntimeStatus.health` 早就
+   * 定义好了，两个 provider 的 `inspect()` 一直没填 —— 于是「running 但 agent 已挂」
+   * 这件事平台一个信号都没有。
+   *
+   * 这里填的是**零成本层**：`getInfo()` 是纯本地状态（实测 0ms），`metrics()` 0.1ms，
+   * **两者都不进沙箱**。进沙箱那一步（一次最小 exec）由 `SandboxHealthMonitor` 在
+   * 「出现异常迹象」时才做 —— 理由见 `boxlite-health.ts` 顶部那条教训。
+   *
+   * ⚠️ `metrics()` 拿不到就**不带** `execErrorsTotal`（不退化成 0）：0 是「一次都没
+   * 错过」这个断言，缺席才是「没问出来」。
+   */
   async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
     try {
       const runtime = await this.getRuntime();
       const info = await runtime.getInfo(handle.providerSandboxId);
       if (!info) return { lifecycleState: 'instance_missing' };
-      return { lifecycleState: this.mapState(info.state.status, info.state.running), raw: info };
+      const execErrorsTotal = await this.execErrorsTotal(handle);
+      const at = info.healthStatus?.lastCheck ?? this.clock?.now().toISOString();
+      const reading =
+        at === undefined
+          ? null
+          : readBoxliteHealth({
+              running: info.state.running,
+              state: {
+                state: info.healthStatus?.state ?? 'None',
+                failures: info.healthStatus?.failures ?? 0,
+                ...(info.healthStatus?.lastCheck === undefined
+                  ? {}
+                  : { lastCheck: info.healthStatus.lastCheck }),
+              },
+              ...(execErrorsTotal === undefined ? {} : { execErrorsTotal }),
+              at,
+            });
+      return {
+        lifecycleState: this.mapState(info.state.status, info.state.running),
+        ...(reading === null ? {} : { health: reading.health }),
+        raw: { ...info, ...(execErrorsTotal === undefined ? {} : { execErrorsTotal }) },
+      };
     } catch (e) {
       throw this.toProviderError(e);
+    }
+  }
+
+  /**
+   * 零成本的异常指示器（03 §7.8）。**拿不到就缺席**，不编一个 0 出来。
+   * ⚠️ 整段 catch 掉：一次拿不到 metrics 绝不该让 `inspect()` 抛 —— 那会把一个只想
+   * 「看看状态」的调用变成一次 provision 失败（03 §7.8 实现纪律 2 的同一形状）。
+   */
+  private async execErrorsTotal(handle: SandboxHandle): Promise<number | undefined> {
+    try {
+      const box = await this.findBox(handle);
+      if (!box) return undefined;
+      const metrics = await box.metrics();
+      return typeof metrics.execErrorsTotal === 'number' ? metrics.execErrorsTotal : undefined;
+    } catch {
+      return undefined;
     }
   }
 

@@ -13,6 +13,9 @@ import {
   type SandboxProviderContext,
   type SandboxRuntimeStatus,
 } from '@platform/contracts';
+import { CLOCK } from '@platform/shared-kernel';
+import type { Clock } from '@platform/shared-kernel';
+import { readAioHealth } from './aio-health';
 import { DOCKER_CLIENT } from '../docker/docker.token';
 import { DockerContainerRuntime } from '../docker/docker-container-runtime';
 import type { ContainerRuntime } from '../container-runtime.port';
@@ -58,6 +61,8 @@ export class AioSandboxProvider implements SandboxProvider {
 
   /** AIO 镜像内 agent 的固定监听端口。 */
   private static readonly AGENT_PORT = 8080;
+  /** 单次健康探测的超时；远小于 30s 采样周期（03 §7.8「否则探测自己会堆积」）。 */
+  private static readonly PROBE_TIMEOUT_MS = 3000;
 
   /**
    * ⚠️ **三位在 2026-08-29 从 `true` 改回 `false`，因为它们是谎报**（CAP-03 事故记录）。
@@ -113,6 +118,8 @@ export class AioSandboxProvider implements SandboxProvider {
      * （测试就是这么做的）——两条路都不需要碰数据面，这正是拆开它的目的。
      */
     @Optional() runtime?: ContainerRuntime,
+    /** 见 `BoxliteSandboxProvider` 同一处注释：只用来盖采样时刻，没有就不填 `health`。 */
+    @Optional() @Inject(CLOCK) private readonly clock?: Clock,
   ) {
     this.runtime = runtime ?? new DockerContainerRuntime(docker);
     const clientFor = (handle: SandboxHandle): Promise<AioSandboxAgentClient> =>
@@ -174,8 +181,63 @@ export class AioSandboxProvider implements SandboxProvider {
     await this.runtime.destroy(handle.providerSandboxId);
   }
 
+  /**
+   * ⚠️ **`health` 是本轮补上的**（03 §7.8）：契约里 `SandboxRuntimeStatus.health` 早就
+   * 定义好了，`inspect()` 一直没填。
+   *
+   * 判据是**平台自己用的那扇门**（`:8080` 的 `GET /v1/ping`，免鉴权），不是镜像自带
+   * 的 HEALTHCHECK —— 后者探 8091+9222，默认路径下 60s 后必报 unhealthy 而沙箱完全
+   * 可用。整段实测与论证在 `aio-health.ts`。`State.Health` 只作诊断详情进 `message`。
+   *
+   * ⚠️ **整个探测被 catch 包住，抛不出去。** 一次 ping 失败/超时是「这一刻不健康或
+   * 问不出来」，不是「inspect 失败」—— 让它冒泡就是 03 §7.8 实现纪律 2 那条坑
+   * （一次探测异常冒泡成 provision 失败）。
+   */
   async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
-    return this.runtime.inspect(handle.providerSandboxId);
+    const status = await this.runtime.inspect(handle.providerSandboxId);
+    const at = this.clock?.now().toISOString();
+    if (at === undefined) return status; // 没有 clock ⇒ 不编一个采样时刻出来
+    if (status.lifecycleState === 'instance_missing') return status;
+    const raw = status.raw as { Health?: { Status?: string; FailingStreak?: number } } | undefined;
+    return {
+      ...status,
+      health: readAioHealth({
+        agentReachable: await this.pingAgent(handle),
+        ...(raw?.Health?.Status === undefined ? {} : { dockerHealth: raw.Health.Status }),
+        ...(raw?.Health?.FailingStreak === undefined
+          ? {}
+          : { dockerFailingStreak: raw.Health.FailingStreak }),
+        running: status.lifecycleState === 'instance_running',
+        at,
+      }),
+    };
+  }
+
+  /**
+   * 零成本层的那一问：`GET :8080/v1/ping`（镜像唯一免鉴权的路由）。
+   *
+   * ⛔ **不用 runtime CLI**（`codex --version` 那类）—— 03 §7.8 开场那条教训：一次意在
+   * 「检查」的调用把被检查的 agent 打挂了。这里连沙箱都不进，只敲一次前门。
+   *
+   * `undefined` = **没问出来**（地址解析不出来 / 超时），不是「不健康」。
+   */
+  private async pingAgent(handle: SandboxHandle): Promise<boolean | undefined> {
+    try {
+      const base = await this.agentOrigin(handle);
+      const ctrl = new AbortController();
+      // ⚠️ 单次探测超时必须**远小于**采样周期（30s），否则探测自己会堆积。
+      const timer = setTimeout(() => ctrl.abort(), AioSandboxProvider.PROBE_TIMEOUT_MS);
+      try {
+        return (await fetch(`${base}${AGENT_PING_PATH}`, { method: 'GET', signal: ctrl.signal }))
+          .ok;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e) {
+      // 连接被拒 = 前门没起来，这是一个**结论**；其余（地址解析不出来、abort）没结论。
+      const message = e instanceof Error ? e.message : String(e);
+      return /ECONNREFUSED|connect|fetch failed/i.test(message) ? false : undefined;
+    }
   }
 
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
