@@ -286,6 +286,173 @@ describe('AutomationScheduler —— 决策表行 3：资源不足排队重试 2
   });
 });
 
+describe('★ 决策表行 3 的**判据**：schedulingDecision 现在有真实产出方', () => {
+  it('每一次触发都先问一次容量，问的是这条规则自己的项目/runtime', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+
+    await h.scheduler.runOnce();
+
+    // 落地之前这里恒传 `'ok'`，`capacityFor` 根本不存在 —— 「行 3 有没有判据」
+    // 这件事在测试里一次都没被问过。
+    expect(h.launcher.capacityProbes).toHaveLength(1);
+    expect(h.launcher.capacityProbes[0]).toMatchObject({
+      projectId: rule.projectId,
+      runtimeId: rule.runtimeId,
+    });
+  });
+
+  it('★★ 容量判定为 resource-exhausted ⇒ **一个沙箱都不建**，直接排队', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+    h.launcher.capacityVerdict = 'resource-exhausted';
+
+    await h.scheduler.runOnce();
+
+    // 明知会被互斥区拒还去撞一次，会在任务列表里留下痕迹、也说不清「已排队 n/5」的 n
+    // 是怎么来的。
+    expect(h.launcher.created).toHaveLength(0);
+    const runs = [...h.runs.rows.values()];
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('resource-exhausted');
+    expect(runs[0].retryCount).toBe(1);
+    expect(runs[0].retryAt?.toISOString()).toBe('2026-06-01T10:24:00.000Z');
+    // ★ 与「失败」的分界：资源不足**不动**失败计数（I-AUT-1）
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(0);
+  });
+
+  it('★ 排队的这一发照样发 AutomationTriggered —— 历史里必须看得见它触发过', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+    h.launcher.capacityVerdict = 'resource-exhausted';
+
+    await h.scheduler.runOnce();
+
+    expect(h.events.published.filter((e) => e.type === 'AutomationTriggered')).toHaveLength(1);
+  });
+
+  it('容量回来之后，到点的那次重试正常起沙箱（同一行 run）', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+    h.launcher.capacityVerdict = 'resource-exhausted';
+    await h.scheduler.runOnce();
+
+    h.launcher.capacityVerdict = 'ok';
+    setDue(h.rules.rows.get('aut-1') as never, at('2026-06-02T10:00:00Z'));
+    h.clock.advanceMinutes(24);
+    await h.scheduler.runOnce();
+
+    const runs = [...h.runs.rows.values()];
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('running');
+    expect(h.launcher.created).toHaveLength(1);
+  });
+});
+
+describe('★★ 决策表行 3 的**另一半**：后台 provision 阶段撞上容量，同样不计失败', () => {
+  /** 一发已经建出沙箱、正在 provision 的 run。 */
+  async function inFlight(): Promise<Harness> {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+    h.launcher.phaseQueue = [{ kind: 'provisioning' }];
+    await h.scheduler.runOnce();
+    setDue(h.rules.rows.get('aut-1') as never, at('2026-06-02T10:00:00Z'));
+    return h;
+  }
+
+  it('★★ 沙箱死于 DISK_INSUFFICIENT ⇒ 排队重试，`consecutive_failures` **不动**', async () => {
+    const h = await inFlight();
+    h.launcher.phaseQueue = [
+      {
+        kind: 'finished',
+        status: 'failed',
+        errorCode: 'DISK_INSUFFICIENT',
+        errorMessage: 'not enough free space to prepare the workspace',
+      },
+    ];
+
+    await h.scheduler.runOnce();
+
+    const runs = [...h.runs.rows.values()];
+    expect(runs).toHaveLength(1);
+    // 落地之前：这条路 100% 走 `applyOutcome('failed')` ⇒ 计数 +1。机器一忙、盘一紧，
+    // 连撞三次就 degraded、十次自动禁用 —— 而 I-AUT-1 说资源不足不是规则的错。
+    expect(runs[0].status).toBe('resource-exhausted');
+    expect(runs[0].retryCount).toBe(1);
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(0);
+    expect(h.rules.rows.get('aut-1')?.degraded).toBe(false);
+  });
+
+  it('★ 判据是**码**不是文案：同样一句话、没有码 ⇒ 照旧记一次失败', async () => {
+    const h = await inFlight();
+    h.launcher.phaseQueue = [
+      {
+        kind: 'finished',
+        status: 'failed',
+        errorMessage: 'not enough free space to prepare the workspace',
+      },
+    ];
+
+    await h.scheduler.runOnce();
+
+    const runs = [...h.runs.rows.values()];
+    expect(runs[0].status).toBe('failed');
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(1);
+  });
+
+  it('★ `WORKSPACE_PREPARE_FAILED` **不算**容量 —— 它重试一百次也不会好', async () => {
+    const h = await inFlight();
+    h.launcher.phaseQueue = [
+      { kind: 'finished', status: 'failed', errorCode: 'WORKSPACE_PREPARE_FAILED' },
+    ];
+
+    await h.scheduler.runOnce();
+
+    expect([...h.runs.rows.values()][0].status).toBe('failed');
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(1);
+  });
+
+  it('★ 普通的 Task 失败（TASK_FAILED）仍然计入失败计数 —— 没有被这条分支误伤', async () => {
+    const h = await inFlight();
+    h.launcher.phaseQueue = [{ kind: 'finished', status: 'failed', errorCode: 'TASK_FAILED' }];
+
+    await h.scheduler.runOnce();
+
+    expect([...h.runs.rows.values()][0].status).toBe('failed');
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(1);
+  });
+
+  it('后台容量失败排满 5 次之后，第 6 次转终态 failed —— 那一次才计入失败', async () => {
+    const h = await inFlight();
+    const exhausted = {
+      kind: 'finished' as const,
+      status: 'failed' as const,
+      errorCode: 'DISK_INSUFFICIENT',
+    };
+    for (let i = 1; i <= 5; i += 1) {
+      h.launcher.phaseQueue = [exhausted];
+      h.clock.advanceMinutes(24);
+      await h.scheduler.runOnce();
+      const rows = [...h.runs.rows.values()];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].retryCount).toBe(i);
+    }
+    h.launcher.phaseQueue = [exhausted];
+    h.clock.advanceMinutes(24);
+    await h.scheduler.runOnce();
+
+    const rows = [...h.runs.rows.values()];
+    expect(rows[0].status).toBe('failed');
+    expect(rows[0].errorCode).toBe('RESOURCE_EXHAUSTED');
+    expect(h.rules.rows.get('aut-1')?.failureCount).toBe(1);
+  });
+});
+
 describe('AutomationScheduler —— 相位机：provisioning → ready → running → finished', () => {
   it('沙箱 ready 之后才 POST Task；Task 落终态时 run 被 finalize 并记账', async () => {
     const h = harness(at('2026-06-01T10:00:00Z'));

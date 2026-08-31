@@ -260,7 +260,6 @@ export class AutomationApplicationService {
     };
   }
 
-
   /** `GET /api/automations/runs/:runId`。 */
   async getRun(runId: string): Promise<AutomationRunDto> {
     return AutomationMapper.runToDto(await this.requireRun(runId));

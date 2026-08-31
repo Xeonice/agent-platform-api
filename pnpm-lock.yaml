@@ -360,6 +360,9 @@ importers:
       '@rekog/mcp-nest':
         specifier: ^1.6.0
         version: 1.9.11(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.29)(@nestjs/jwt@11.0.2(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2)))(@nestjs/passport@11.0.5(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(passport@0.7.0))(express@5.2.1)(reflect-metadata@0.2.2)(zod@3.25.76)
+      async-mutex:
+        specifier: ^0.5.0
+        version: 0.5.0
       dockerode:
         specifier: ^4.0.2
         version: 4.0.12

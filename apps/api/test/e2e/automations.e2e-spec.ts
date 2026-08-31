@@ -194,7 +194,7 @@ describe('automation 运行历史与日志', () => {
       await http().post(`/api/projects/${projectId}/automations`).send(baseRule).expect(201)
     ).body;
     const res = await http().get(`/api/automations/${created.id}/runs`).expect(200);
-    expect(res.body).toEqual({ items: [], total: 0, page: 1, pageSize: 20 });
+    expect(res.body).toEqual({ items: [], hasMore: false });
   });
 
   it('GET /api/automations/runs/:runId ⇒ 未知 run 404', async () => {

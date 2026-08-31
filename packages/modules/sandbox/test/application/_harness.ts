@@ -3,6 +3,7 @@ import type {
   DomainEvent,
   EventBus,
   IdGenerator,
+  NodeId,
   SandboxId,
   Tx,
   UnitOfWork,
@@ -57,6 +58,13 @@ import type {
 } from '@platform/contracts';
 import { UnknownRuntimeError } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
+import { ResourceAllocator } from '../../src/application/resource-allocator';
+import { SchedulerQueue } from '../../src/application/scheduler-queue';
+import { QuotaReconciler } from '../../src/application/quota-reconciler';
+import { ResourceAllocation } from '../../src/domain/entities/resource-allocation.entity';
+import type { ResourceAllocationRepository } from '../../src/domain/repositories/resource-allocation.repository';
+import type { HostCapacityProbe } from '../../src/domain/ports/host-capacity.port';
+import type { HostCapacity } from '../../src/domain/services/resource-pool.domain-service';
 import { AgentTaskApplicationService } from '../../src/application/agent-task.service';
 import { ProvisionSandboxWorkflow } from '../../src/application/workflows/provision-sandbox.workflow';
 import { SandboxHealthMonitor } from '../../src/application/sandbox-health.monitor';
@@ -218,6 +226,11 @@ export class FakeFilePlane implements SandboxFiles {
 export class FakeProvider implements SandboxProvider {
   readonly calls: string[] = [];
   lastContext?: SandboxProviderContext;
+  /**
+   * **每一次** `create` 的入参，按顺序。`lastContext` 只留最后一次 —— 而并发用例要问的
+   * 恰恰是「一共建了几个、各自拿到什么 quota」。
+   */
+  readonly createdSpecs: SandboxProviderContext[] = [];
   /** commands the derived `SandboxExecFn` was asked to run, in order. */
   readonly execCalls: string[][] = [];
   /** exit codes to answer with, keyed by a substring of the joined argv. */
@@ -263,6 +276,7 @@ export class FakeProvider implements SandboxProvider {
     this.calls.push('create');
     this.log.push('provider.create');
     this.lastContext = ctx;
+    this.createdSpecs.push(ctx);
     return { provider: this.name, providerSandboxId: `fake-${ctx.sandboxId}` };
   }
   async start(): Promise<void> {
@@ -328,6 +342,17 @@ function fakeExecStream(output: string, code: number): ProcessStream {
   };
 }
 
+/**
+ * 当前正在执行的那个 `uow.run` 里，都写了些什么。
+ *
+ * ⚠️ **它存在是因为「同一个事务」这件事在内存替身里本来是看不见的。** 把
+ * `alsoInTx` 从 `ResourceAllocator.reserve` 里删掉（登记与 sandbox 行分成两个事务），
+ * 单测里所有断言照样全绿 —— 因为后台 provision 一转状态就把 sandbox 行补写进去了。
+ * 真库上那是一条 `FOREIGN KEY constraint failed`（`resource_allocations.sandbox_id`
+ * 指向一行还不存在的 sandbox），但那要跑到 e2e 才炸。这个 frame 让它在单测就红。
+ */
+let activeTxFrame: string[] | null = null;
+
 export class InMemorySandboxRepo implements SandboxRepository {
   readonly store = new Map<string, Sandbox>();
   async findById(id: SandboxId): Promise<Sandbox | null> {
@@ -351,6 +376,7 @@ export class InMemorySandboxRepo implements SandboxRepository {
     return out;
   }
   saveSync(_tx: Tx, sandbox: Sandbox): void {
+    activeTxFrame?.push(`sandbox:${sandbox.id}`);
     sandbox.markPersisted(sandbox.version);
     this.store.set(sandbox.id, sandbox);
   }
@@ -604,7 +630,54 @@ export interface HarnessOptions {
    * accepted any string」, which is exactly the pre-slice behaviour.
    */
   imageError?: Error;
+  /**
+   * 这台「宿主机」有多少资源（03 §1 / §3 的互斥登记要读它）。
+   *
+   * ⚠️ 默认给得**很大**是有意的：绝大多数用例问的不是容量，若默认值恰好卡在边界上，
+   * 那些用例会变成「偶尔红一次」的噪音。要测容量就在用例里显式调小 —— 那样「这条断言
+   * 到底靠什么成立」在用例本身里就读得出来。
+   */
+  hostCapacity?: Partial<HostCapacity>;
+  /**
+   * 让宿主容量探测**慢下来**。互斥区的存在与否只能用时间证明：串行 N 次 ⇒ 至少
+   * `(N-1) × delay`；并行 ⇒ 一个 delay 就够。没有这个 seam，删掉 `runExclusive`
+   * 之后剩下的断言只是「结果碰巧还对」。
+   */
+  hostProbeDelayMs?: number;
+  /**
+   * 项目基线体积（03 §1：`disk_mb_reserved = max(下限, baseline × 1.2)`）。
+   * `undefined` ⇒ 门面报 `null`（「还没量过」），也就是绝大多数用例的默认。
+   */
+  baselineSizeBytes?: number;
   now?: Date;
+}
+
+/**
+ * 配额账本的内存替身。
+ *
+ * ⚠️ **它不模拟 `uq_alloc_active` 那条部分唯一索引**（I-RA-2 的存储层落点）—— 内存里
+ * 假装有一条唯一索引，只会让「真索引其实没建出来」这种事在单测里永远发现不了。那条
+ * 约束由 `test/integration/resource-allocation-repository.spec.ts` 在**真 sqlite** 上钉。
+ */
+export class InMemoryResourceAllocationRepo implements ResourceAllocationRepository {
+  readonly store = new Map<string, ResourceAllocation>();
+
+  async listActive(nodeId: NodeId): Promise<ResourceAllocation[]> {
+    return [...this.store.values()].filter((a) => a.isActive && a.nodeId === nodeId);
+  }
+
+  async findActiveBySandbox(sandboxId: SandboxId): Promise<ResourceAllocation | null> {
+    return [...this.store.values()].find((a) => a.isActive && a.sandboxId === sandboxId) ?? null;
+  }
+
+  async listAll(): Promise<ResourceAllocation[]> {
+    return [...this.store.values()];
+  }
+
+  saveSync(_tx: Tx, allocation: ResourceAllocation): void {
+    activeTxFrame?.push(`allocation:${allocation.sandboxId}`);
+    this.store.set(allocation.id, allocation);
+  }
 }
 
 export function harness(opts: HarnessOptions = {}) {
@@ -704,6 +777,7 @@ export function harness(opts: HarnessOptions = {}) {
         baselinePath: `/tmp/baseline/${projectId}`,
         sourceType: 'empty',
         branch,
+        baselineSizeBytes: opts.baselineSizeBytes ?? null,
       };
     },
     async registerRetainedVolume(command) {
@@ -765,10 +839,20 @@ export function harness(opts: HarnessOptions = {}) {
   };
 
   const repo = new InMemorySandboxRepo();
+  /** 每一个 `uow.run` 写了些什么，按事务分组 —— 「同事务」的断言读它。 */
+  const txFrames: string[][] = [];
   const uow: UnitOfWork = {
     run: (fn) => {
       txLog.push('tx:sandbox');
-      return fn({} as Tx);
+      const frame: string[] = [];
+      const outer = activeTxFrame;
+      activeTxFrame = frame;
+      try {
+        return fn({} as Tx);
+      } finally {
+        activeTxFrame = outer;
+        txFrames.push(frame);
+      }
     },
   };
   /**
@@ -783,6 +867,8 @@ export function harness(opts: HarnessOptions = {}) {
   };
   let n = 0;
   const ids: IdGenerator = { next: () => `sbx-${++n}` };
+  /** 登记行的 id 与 sandbox id 刻意**不同源** —— 两者混用会让「登记挂错沙箱」看不出来。 */
+  let allocSeq = 0;
   /**
    * ⚠️ A MOVABLE CLOCK, NOT A CONSTANT. With `now` frozen, `overdue()` is identically
    * false and the platform-side hard-timeout backstop is STRUCTURALLY untestable — the
@@ -883,6 +969,40 @@ export function harness(opts: HarnessOptions = {}) {
   // `/events` 帧的记录式替身 —— `sandbox.instance_progress` 的断言直接读它（10 §7.4）。
   const wsEvents: SandboxWsEvent[] = [];
   const broadcaster: SandboxEventBroadcaster = { broadcast: (e) => void wsEvents.push(e) };
+  /**
+   * 03 §3 的配额账本 + 宿主容量替身。
+   *
+   * `hostCapacity` 是**可变对象**：容量类用例先创建几个沙箱、再把余量掐掉，
+   * 才能测到「盘在运行途中被别人写满」那一格。
+   */
+  const hostCapacity: HostCapacity = {
+    cores: opts.hostCapacity?.cores ?? 64,
+    ramMb: opts.hostCapacity?.ramMb ?? 262_144,
+    diskTotalBytes: opts.hostCapacity?.diskTotalBytes ?? 4 * 1024 ** 4,
+    diskAvailableBytes: opts.hostCapacity?.diskAvailableBytes ?? 2 * 1024 ** 4,
+  };
+  const hostProbe: HostCapacityProbe = {
+    capacity: async () => {
+      if (opts.hostProbeDelayMs !== undefined) {
+        await new Promise((r) => setTimeout(r, opts.hostProbeDelayMs));
+      }
+      return { ...hostCapacity };
+    },
+  };
+  const allocations = new InMemoryResourceAllocationRepo();
+  const allocIds: IdGenerator = { next: () => `alloc-${++allocSeq}` };
+  // 03 §3 的显式 FIFO。⚠️ 用**真的**那个（它只依赖 clock + audit，没有 IO）——
+  // 造一个替身等于把「排队真的发生了没有」这件事测在替身上。
+  const schedulerQueue = new SchedulerQueue(clock, audit);
+  const resources = new ResourceAllocator(
+    allocations,
+    hostProbe,
+    uow,
+    clock,
+    allocIds,
+    schedulerQueue,
+  );
+
   const provision = new ProvisionSandboxWorkflow(
     repo,
     uow,
@@ -896,6 +1016,7 @@ export function harness(opts: HarnessOptions = {}) {
     imageFacade,
     audit,
     broadcaster,
+    resources,
   );
   // 03 §7.8：健康度是 DTO 上的**派生字段**，与 `waitingInput` 同款 —— 这里用**真的**
   // monitor（它只依赖 repo/registry/clock/audit，没有 IO），所以健康度的用例可以直接
@@ -914,6 +1035,7 @@ export function harness(opts: HarnessOptions = {}) {
     runtimes,
     provision,
     healthMonitor,
+    resources,
   );
   /**
    * Build a workflow that shares NOTHING but the persisted state — this is how a
@@ -978,9 +1100,21 @@ export function harness(opts: HarnessOptions = {}) {
     adapter: adapters[0],
     calls,
     txLog,
+    txFrames,
     wsCalls,
     retainedRegistrations,
     healthMonitor,
+    /** 03 §3 的互斥登记器（容量用例直接问它 `snapshot()` / `probe()`）。 */
+    resources,
+    /** 配额账本 —— 断言「拒绝时一行都没写」靠它。 */
+    allocations,
+    /** 可变的宿主容量：用例改它就能把余量掐到刚好不够。 */
+    hostCapacity,
+    /** 13 §4 的启动对账（构造在这里，因为它与 service 共用同一份账本与 registry）。 */
+    /** 03 §3 的显式 FIFO —— 队列深度断言直接读 `schedulerQueue.snapshot()`。 */
+    schedulerQueue,
+    /** 13 §4 的对账（开机全量 + 运行期增量）。 */
+    quotaReconciler: new QuotaReconciler(allocations, repo, registry, events, clock, resources),
     wsSources,
     branchesAsked,
     installInputs,

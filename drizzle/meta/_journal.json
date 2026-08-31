@@ -134,6 +134,13 @@
       "when": 1788168488015,
       "tag": "0018_hesitant_bushwacker",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1788186334037,
+      "tag": "0019_abnormal_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

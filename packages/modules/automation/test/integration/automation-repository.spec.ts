@@ -49,7 +49,7 @@ function makeHarness() {
     now: T0,
   });
   uow.run((tx) => projects.saveSync(tx, project));
-  return { sqlite, db, rules, runs, uow };
+  return { sqlite, db, rules, runs, uow, project };
 }
 
 function rule(id: string, overrides: Partial<Parameters<typeof Automation.create>[0]> = {}) {
@@ -176,6 +176,62 @@ describe('SqliteAutomationRepository（真 sqlite + 真 migration）', () => {
       /FOREIGN KEY/i,
     );
   });
+
+  /**
+   * ⭐⭐ **一行坏数据不许拖垮整批**（2026-08-31，code review 后补）。
+   *
+   * `toDomain` 每行都跑完整值对象校验（`Schedule.create` 真解 IANA、`normalizeConfig`、
+   * `TimeoutPolicy.of`、`assertRetentionDays`、`WebhookTarget.create`）。上一版是裸
+   * `.map(toDomain)` ⇒ **任何一行抛，整个 `listDue` 的结果全没**，而 `fireDue` 的
+   * per-rule try/catch 在下游救不了、`runOnce` 只 log 一行「automation sweep failed」。
+   *
+   * ⇒ 症状是「**全部规则再也不触发**，每分钟一行日志」。真实触发路径不止一种：
+   * tzdata/ICU 变更让某个曾经合法的 IANA 名解不出来（DB 侧 CHECK 只有
+   * `length(timezone) > 0`）；或 `schedule_config` 这个**零 CHECK 的 JSON TEXT** 被
+   * 迁移/手工改数据写进不合法组合。
+   *
+   * 这里直接用 SQL 绕过聚合写一行坏数据 —— 正是那两条路径的形状。
+   */
+  it('⭐⭐ listDue：一行坏数据被跳过，其余规则照常返回（不是整批失败）', async () => {
+    const good = rule('aut-good');
+    good.advanceTrigger(T0);
+    h.uow.run((tx) => {
+      h.rules.saveSync(tx, good);
+    });
+    // 坏行：timezone 是一个解不出来的 IANA 名（DB 的 CHECK 只管非空，拦不住）
+    h.sqlite
+      .prepare(
+        `INSERT INTO automations (id, project_id, name, runtime_id, prompt, schedule_kind,
+           schedule_config, timezone, timeout_minutes, artifact_retention_days, trigger_on,
+           concurrency_mode, enabled, degraded, consecutive_failures, next_trigger_at,
+           created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        'aut-broken',
+        h.project.id,
+        '坏行',
+        'codex',
+        'x',
+        'daily',
+        JSON.stringify({ time: '08:00' }),
+        'Not/AZone',
+        120,
+        7,
+        'failure',
+        'skip',
+        1,
+        0,
+        0,
+        Math.floor(T0.getTime() / 1000),
+        Math.floor(T0.getTime() / 1000),
+        Math.floor(T0.getTime() / 1000),
+      );
+
+    const due = await h.rules.listDue(at('2026-06-01T02:00:00Z'));
+    // ⛔ 上一版这里是 []（整批被那一行带走），好规则再也不会被触发
+    expect(due.map((a) => a.id)).toEqual(['aut-good']);
+  });
 });
 
 describe('SqliteAutomationRunRepository（真 sqlite + 真 migration）', () => {
@@ -227,11 +283,17 @@ describe('SqliteAutomationRunRepository（真 sqlite + 真 migration）', () => 
     expect(p1.items.map((r) => r.id)).toEqual(['run-4', 'run-3']);
     expect(p1.hasMore).toBe(true);
 
-    const p2 = await h.runs.listByAutomation(asAutomationId('aut-1'), { before: 'run-3', limit: 2 });
+    const p2 = await h.runs.listByAutomation(asAutomationId('aut-1'), {
+      before: 'run-3',
+      limit: 2,
+    });
     expect(p2.items.map((r) => r.id)).toEqual(['run-2', 'run-1']);
     expect(p2.hasMore).toBe(true);
 
-    const p3 = await h.runs.listByAutomation(asAutomationId('aut-1'), { before: 'run-1', limit: 2 });
+    const p3 = await h.runs.listByAutomation(asAutomationId('aut-1'), {
+      before: 'run-1',
+      limit: 2,
+    });
     expect(p3.items.map((r) => r.id)).toEqual(['run-0']);
     expect(p3.hasMore).toBe(false);
   });
@@ -253,7 +315,10 @@ describe('SqliteAutomationRunRepository（真 sqlite + 真 migration）', () => 
     // 用户还在看第 1 页时，调度器又落了一条（头部追加）
     seedRun('run-9', at('2026-06-01T09:00:00Z'));
 
-    const p2 = await h.runs.listByAutomation(asAutomationId('aut-1'), { before: 'run-3', limit: 2 });
+    const p2 = await h.runs.listByAutomation(asAutomationId('aut-1'), {
+      before: 'run-3',
+      limit: 2,
+    });
     expect(p2.items.map((r) => r.id)).toEqual(['run-2', 'run-1']);
     // ⛔ 关键：run-3 绝不能再出现一次
     expect(p2.items.map((r) => r.id)).not.toContain('run-3');

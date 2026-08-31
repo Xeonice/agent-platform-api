@@ -1,4 +1,4 @@
-import { HttpException, Inject, Injectable } from '@nestjs/common';
+import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
 import { asSandboxId } from '@platform/shared-kernel';
 import {
   AutomationResourceExhausted,
@@ -35,12 +35,44 @@ import type { AgentTask } from '../domain/entities/agent-task.entity';
  */
 @Injectable()
 export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
+  private readonly logger = new Logger('AutomationTaskLauncherAdapter');
+
   constructor(
     private readonly sandboxes: SandboxApplicationService,
     private readonly tasks: AgentTaskApplicationService,
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(AGENT_TASK_REPOSITORY) private readonly taskRepo: AgentTaskRepository,
   ) {}
+
+  /**
+   * 决策表行 3 的判据（03 §8.2）—— **只读**，问的是「现在有没有资源起这一发」。
+   *
+   * ⚠️ **它问的是与 `createSandbox` 完全相同的那道门与那份 quota**（`hasCapacityFor`
+   * 内部就调 `admit`），所以「probe 说行、create 说不行」只可能来自两次调用之间真的有人
+   * 占走了容量，而不是两套算法算出了两个数。
+   *
+   * ⚠️ **永不抛**（见 port 注释）。项目不存在、镜像没注册、runtime 没注册 —— 这些都会让
+   * `admit` 抛，而它们**不是**「没有资源」。在这里把它们吞掉答 `'ok'`，让 `createSandbox`
+   * 去产生那个真正的错误并按「失败一次」记账；抛出去只会让 `fireOne` 的 catch 把整条规则
+   * 跳过，而 `next_trigger_at` 早已推进 —— 一次静默的漏跑。
+   */
+  async capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'> {
+    try {
+      const ok = await this.sandboxes.hasCapacityFor({
+        projectId: input.projectId,
+        runtime: input.runtimeId,
+        headless: true,
+        timeoutMinutes: input.timeoutMinutes,
+      });
+      return ok ? 'ok' : 'resource-exhausted';
+    } catch (e) {
+      this.logger.debug(
+        `capacity probe for automation ${input.automationId} could not be answered ` +
+          `(${(e as Error).message}); letting the create path decide`,
+      );
+      return 'ok';
+    }
+  }
 
   async createSandbox(input: AutomationTaskLaunchInput): Promise<{ sandboxId: string }> {
     try {
@@ -96,6 +128,10 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
         return {
           kind: 'finished',
           status: 'failed',
+          // ⚠️ **码必须带出去**（决策表行 3 的另一半）。后台 provision 撞上磁盘写满时
+          // 落的是 `DISK_INSUFFICIENT`；只回 `errorMessage`，调度器就只能把它当成一次
+          // 普通失败 +1，而它其实是「排队等资源」。
+          ...(sandbox.failureCode !== null ? { errorCode: sandbox.failureCode } : {}),
           errorMessage: sandbox.failureReason ?? 'sandbox failed before the task could run',
         };
       case 'stopping':
@@ -113,7 +149,9 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
     return {
       kind: 'finished',
       status,
-      ...(task.errorCode !== null ? { errorMessage: task.errorCode } : {}),
+      ...(task.errorCode !== null
+        ? { errorCode: task.errorCode, errorMessage: task.errorCode }
+        : {}),
       // ⚠️ 指向 **Task 自己的那份 stdout**，不复制（03 §8.6「正文只写一份」）。
       logPath: `${task.logPath}/stdout.jsonl`,
       logBytes: task.stdoutBytes,

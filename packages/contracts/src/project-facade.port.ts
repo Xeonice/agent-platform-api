@@ -23,6 +23,17 @@ export interface ProjectRuntimeContext {
    * the baseline has checked out (its default branch).
    */
   branch?: string;
+  /**
+   * `projects.baseline_size_bytes` —— **配额登记那一维的唯一输入**（03 §1/§3：创建时在
+   * 互斥区内按 `baseline_size_bytes × 1.2` 登记 `disk_mb_reserved`）。
+   *
+   * ⚠️ **`null` 是「还没量过」，不是「0 字节」。** 一个刚建、基线还没 clone 完的项目
+   * 与一个真的空项目，在这一列上长得一样，但把 `null` 当 0 只在这里恰好无害（两者都
+   * 落到同一个配置下限上）。它仍然分开写，因为下限一旦改成「按体积比例算」，把 `null`
+   * 悄悄当 0 就会变成给未知体积的项目登记 0 MB —— 而 `disk_mb_reserved > 0` 的 CHECK
+   * 会在半个事务之后才炸。
+   */
+  baselineSizeBytes: number | null;
 }
 
 /**

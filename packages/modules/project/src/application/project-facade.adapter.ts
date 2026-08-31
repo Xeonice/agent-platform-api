@@ -89,6 +89,9 @@ export class ProjectFacadeAdapter implements ProjectFacade {
       baselinePath: project.baselinePath,
       sourceType: project.sourceType,
       branch,
+      // 03 §1：sandbox 侧的配额登记按它 × 1.2 算 `disk_mb_reserved`。原样透出，
+      // **不在这里换算** —— 换算规则属于调度（03 §3），住在 sandbox 上下文。
+      baselineSizeBytes: project.baselineSizeBytes,
     };
   }
 }

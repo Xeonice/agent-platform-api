@@ -30,6 +30,18 @@ export interface AutomationTaskLaunchInput {
 /** 终态 Task 的结果面。`logPath` 是**可直接按字节区间读的文件**，不是目录。 */
 export interface AutomationTaskOutcome {
   status: 'success' | 'failed' | 'timeout';
+  /**
+   * 平台侧的失败码（`sandboxes.failure_code` / `agent_tasks.error_code`），**闭集之外的
+   * 一切都不该出现在这里**。
+   *
+   * ⚠️ **它专门为「决策表行 3 的另一半」而存在。** 容量不足有两条路径：创建那一刻同步
+   * 抛（`AutomationResourceExhausted`，adapter 的 catch 认得），以及**后台 provision
+   * 阶段**才撞上（最典型的是工作区复制时磁盘写满 ⇒ `DISK_INSUFFICIENT`）。第二条只能
+   * 从相位机回来，而相位机此前只带 `errorMessage` —— 一个人类可读的字符串。于是那一半
+   * 一律被记成「失败一次」，`consecutive_failures++`，最终把一条**只是排队等资源**的规则
+   * 自动禁用（I-AUT-1 说这不是规则的错）。要分得开就必须有码，不能靠 grep 文案。
+   */
+  errorCode?: string;
   errorMessage?: string;
   logPath?: string;
   logBytes?: number;
@@ -61,6 +73,21 @@ export type AutomationTaskPhase =
  * —— 没有第二条更短的路，也不该有。
  */
 export interface AutomationTaskLauncher {
+  /**
+   * 决策表**行 3** 的判据（03 §8.2「调度决策返回 `RESOURCE_EXHAUSTED`」）——
+   * **只读**：不建任何东西、不登记任何配额、不落任何库。
+   *
+   * ⚠️ **它不是闸。** 唯一的闸是 `createSandbox` 里那段互斥登记（03 §3）：这里回答
+   * `'ok'` 之后到真正创建之间，别人完全可能把最后一格用掉，那时 `createSandbox` 会照样
+   * 抛 {@link AutomationResourceExhausted}。它存在只是为了让调度器在**还没写任何东西**
+   * 的时候就把这一发记成「排队重试」而不是「失败一次」——两者对 `consecutive_failures`
+   * 的影响相反（I-AUT-1）。
+   *
+   * ⚠️ **永不抛。** 判不出来（项目/镜像/runtime 有别的毛病）一律答 `'ok'`，把真正的
+   * 错误留给 `createSandbox` 去产生 —— 在一个只回答「有没有资源」的问题上抛出「项目不
+   * 存在」，会让调度器把这一轮整条规则跳过，而 `next_trigger_at` 已经推进了。
+   */
+  capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'>;
   /** 行 4 第一步：创建**标准无头** sandbox，返回它的 id（= Task id，23 D-1）。 */
   createSandbox(input: AutomationTaskLaunchInput): Promise<{ sandboxId: string }>;
   /** 行 4 第二步：沙箱 `running` 之后，按标准路径 POST 一个无头 Task。 */

@@ -22,7 +22,7 @@ import { AutomationRun } from '../../src/domain/entities/automation-run.entity';
 import type { AutomationRepository } from '../../src/domain/repositories/automation.repository';
 import type {
   AutomationRunRepository,
-  RunPage,
+  RunCursor,
   RunSlice,
 } from '../../src/domain/repositories/automation-run.repository';
 
@@ -132,11 +132,20 @@ export class InMemoryRunRepo implements AutomationRunRepository {
       .sort((a, b) => b.triggeredAt.getTime() - a.triggeredAt.getTime() || (a.id < b.id ? 1 : -1));
     return Promise.resolve(mine[0] ?? null);
   }
-  listByAutomation(automationId: AutomationId, page: RunPage): Promise<RunSlice> {
-    const mine = [...this.rows.values()].filter((r) => r.automationId === automationId);
-    const start = (page.page - 1) * page.pageSize;
-    return Promise.resolve({ items: mine.slice(start, start + page.pageSize), total: mine.length });
+  listByAutomation(automationId: AutomationId, cursor: RunCursor): Promise<RunSlice> {
+    const mine = this.rows.filter((r) => r.automationId === automationId);
+    // 与生产同序：(triggeredAt DESC, id DESC)，游标取严格早于 anchor 的那一批。
+    const sorted = [...mine].sort((a, b) =>
+      a.triggeredAt.getTime() === b.triggeredAt.getTime()
+        ? b.id.localeCompare(a.id)
+        : b.triggeredAt.getTime() - a.triggeredAt.getTime(),
+    );
+    const start =
+      cursor.before === undefined ? 0 : sorted.findIndex((r) => r.id === cursor.before) + 1;
+    const page = sorted.slice(start, start + cursor.limit);
+    return Promise.resolve({ items: page, hasMore: start + cursor.limit < sorted.length });
   }
+
   listPendingRetries(now: Date): Promise<AutomationRun[]> {
     return Promise.resolve(
       [...this.rows.values()].filter(
@@ -175,7 +184,18 @@ export class FakeLauncher implements AutomationTaskLauncher {
   /** 依次消费；用完之后恒定回最后一个。 */
   phaseQueue: AutomationTaskPhase[] = [{ kind: 'provisioning' }];
   createBehaviour: () => { sandboxId: string } = () => ({ sandboxId: 'sbx-1' });
+  /**
+   * 决策表行 3 的只读判据。默认 `'ok'` —— 绝大多数用例问的不是容量，而一个默认答
+   * `'resource-exhausted'` 的替身会让每一条用例都在测行 3。
+   */
+  capacityVerdict: 'ok' | 'resource-exhausted' = 'ok';
+  /** 每一次被问容量的入参 —— 断言「问过没有」「问的是哪条规则」。 */
+  readonly capacityProbes: AutomationTaskLaunchInput[] = [];
 
+  capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'> {
+    this.capacityProbes.push(input);
+    return Promise.resolve(this.capacityVerdict);
+  }
   createSandbox(input: AutomationTaskLaunchInput): Promise<{ sandboxId: string }> {
     this.created.push(input);
     return Promise.resolve(this.createBehaviour());

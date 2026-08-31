@@ -12,6 +12,13 @@ import type {
 } from '../../domain/ports/webhook-sender.port';
 
 /** 03 §8.5「投递纪律」：10s 超时；失败重试 2 次（指数退避 5s / 25s）后放弃。 */
+/** 手动跟随的跳数上限。⛔ 每一跳都要重新过 SSRF 判定，见 `post()`。 */
+const MAX_REDIRECTS = 3;
+
+function isRedirect(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
 const TIMEOUT_MS = 10_000;
 const BACKOFF_MS = [5_000, 25_000] as const;
 
@@ -116,12 +123,42 @@ export class HttpWebhookSender implements WebhookSender {
       controller.abort();
     }, TIMEOUT_MS);
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      // ⚠️⚠️ **`redirect: 'manual'` 不是可选项** —— 上一版没传，undici 默认 `follow`（20 跳），
+      //   而 `assertSendable` 只查**原始 URL**：目标回一个
+      //   `307 Location: http://169.254.169.254/...`，POST 连同 JSON body 会被原样重放到内网，
+      //   SSRF 谓词形同虚设。实测复现过（307 → loopback，body 一字不差）。
+      //   ⛔ 更糟的是 `POST /api/automations/webhook-test` 把它变成一个由公开 API 驱动的
+      //   内网端口/服务扫描器 —— 调用方能从 `目标返回 ${status}` / `UPSTREAM_UNAVAILABLE`
+      //   两种回答里读出内网某个地址通不通。
+      //
+      //   ⇒ 自己跟随，**每一跳都重新过一遍 SSRF 判定**。
+      let target = url;
+      let res: Response | undefined;
+      for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+        res = await fetch(target, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+          redirect: 'manual',
+        });
+        if (!isRedirect(res.status)) break;
+        const location = res.headers.get('location');
+        if (location === null || location === '') {
+          return {
+            ok: false,
+            status: res.status,
+            message: `目标返回 ${String(res.status)} 但没有 Location`,
+          };
+        }
+        // 相对 Location 也要解析成绝对地址再判 —— `/x` 会落回同一个 host（那个已经过检了），
+        // 但 `//evil.example.com/x` 是换 host，必须重新判。
+        target = new URL(location, target).toString();
+        await this.assertSendable(target);
+      }
+      if (res === undefined || isRedirect(res.status)) {
+        return { ok: false, message: `重定向超过 ${String(MAX_REDIRECTS)} 跳，已放弃` };
+      }
       return res.ok
         ? { ok: true, status: res.status, message: 'ok' }
         : { ok: false, status: res.status, message: `目标返回 HTTP ${String(res.status)}` };

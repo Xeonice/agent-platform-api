@@ -4,6 +4,7 @@ import {
   AgentTaskStarted,
   SandboxCreated,
   SandboxStateChanged,
+  SandboxReconciledAsOrphan,
 } from '@platform/sandbox';
 import { CredentialInjected, CredentialRevoked, CredentialStored } from '@platform/credential';
 import {
@@ -332,6 +333,46 @@ describe('RuntimeAuthModeChanged：改完之后系统行为变了，得知道是
  * 现在 `AUDIT_ACTORS = TRIGGERED_BY ∪ {'system'}`（派生，不是手抄），下面两条把两个
  * 方向都钉住：清单不许漏掉 projector 会透传的值，projector 也不许写出清单外的值。
  */
+describe('SandboxReconciledAsOrphan —— 17 §76 说的那个消费方，本轮才接上', () => {
+  const orphan = new SandboxReconciledAsOrphan(
+    'sbx-1',
+    'prj-1',
+    '我的任务',
+    'running',
+    'container missing on reconcile',
+    AT,
+  );
+
+  it('★★ 投影成 `sandbox.reconciled_orphan`，warn 级，actor 是 system', () => {
+    const r = project(orphan);
+    expect(r).toMatchObject({
+      category: 'sandbox',
+      type: 'sandbox.reconciled_orphan',
+      // 平台自己把账本改对了，没有东西坏掉 —— 但这是需要人知道的事实。
+      severity: 'warn',
+      subjectType: 'sandbox',
+      subjectId: 'sbx-1',
+      actor: 'system',
+      outcome: 'ok',
+    });
+  });
+
+  it('★ summary 是一行人话（带任务名，不是一屏 UUID）', () => {
+    expect(project(orphan)?.summary).toContain('我的任务');
+    expect(project(orphan)?.summary).not.toContain('sbx-1');
+  });
+
+  it('★★ detail 里的 `status` 是**当时**的状态，而这次对账并不会改它', () => {
+    // 读的人看到 `running` 才明白这条记录在说什么：库里写着在跑、实例其实没了。
+    // 13 §4 表格原写「status→failed」，已按实现回填 —— 判死属于生命周期链路。
+    expect(project(orphan)?.detail).toMatchObject({
+      projectId: 'prj-1',
+      status: 'running',
+      reason: 'container missing on reconcile',
+    });
+  });
+});
+
 describe('actor 取值集合：契约清单与实写不许再漂移', () => {
   it('AUDIT_ACTORS 覆盖 TRIGGERED_BY 的每一个值（projector 是原样透传的）', () => {
     // ⚠️ 这不是同义反复：`AUDIT_ACTORS` 手抄成一串字面量时，这一条正是红的那条。
@@ -343,6 +384,7 @@ describe('actor 取值集合：契约清单与实写不许再漂移', () => {
     const events: DomainEvent[] = [
       new SandboxCreated('sbx-1', 'prj-1', '我的任务', AT),
       ...TRIGGERED_BY.map((by) => new SandboxStateChanged('sbx-1', 'idle', 'stopping', by, AT)),
+      new SandboxReconciledAsOrphan('sbx-1', 'prj-1', '我的任务', 'running', 'gone', AT),
       new AgentTaskStarted('tsk-1', 'sbx-1', 'claude-code', undefined, AT),
       new AgentTaskFinished('tsk-1', 'sbx-1', 'succeeded', 0, AT),
       new ProjectCreated('prj-1', '我的项目', AT),

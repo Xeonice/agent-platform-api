@@ -10,6 +10,7 @@ import {
 import {
   SandboxCreated,
   SandboxStateChanged,
+  SandboxReconciledAsOrphan,
   AgentTaskStarted,
   AgentTaskFinished,
 } from '@platform/sandbox';
@@ -103,6 +104,27 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       detail: { from: e.from, to: e.to },
       outcome: failed ? 'failed' : 'ok',
       ...(e.errorCode === undefined ? {} : { errorCode: e.errorCode }),
+    };
+  }
+
+  if (e instanceof SandboxReconciledAsOrphan) {
+    return {
+      category: 'sandbox',
+      // 03 §7.8 的清单名。
+      type: 'sandbox.reconciled_orphan',
+      // ⚠️ `warn` 而不是 `error`：平台自己把账本改对了，没有任何东西坏掉；但一个
+      // 「库里写着 running、实例其实没了」的沙箱是需要人知道的事实。
+      severity: 'warn',
+      subjectType: 'sandbox',
+      subjectId: e.sandboxId,
+      // 13 §2.8.2：actor 是排障第一个要问的。对账既不是用户也不是调度器推动的
+      // —— `AUDIT_ACTORS` 里对应「平台自己」的那个值是 `system`。
+      actor: 'system',
+      summary: `对账判定沙箱 ${e.name} 的实例已不存在，已释放其配额`,
+      // ⚠️ `status` 记的是**当时**的状态，而这次对账**不会**改它（13 §4 已按实现回填）。
+      // 读的人看到 `running` 才明白这条记录在说什么。
+      detail: { projectId: e.projectId, status: e.status, reason: e.reason },
+      outcome: 'ok',
     };
   }
 

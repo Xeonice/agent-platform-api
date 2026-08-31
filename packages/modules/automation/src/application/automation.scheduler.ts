@@ -13,6 +13,7 @@ import {
   AUTOMATION_TASK_LAUNCHER,
   AutomationResourceExhausted,
   RUNTIME_CREDENTIAL_STATE_READER,
+  isCapacityFailureCode,
 } from '@platform/contracts';
 import type {
   AuditRecorder,
@@ -28,7 +29,7 @@ import type { AutomationRepository } from '../domain/repositories/automation.rep
 import { AUTOMATION_RUN_REPOSITORY } from '../domain/repositories/automation-run.repository';
 import type { AutomationRunRepository } from '../domain/repositories/automation-run.repository';
 import { TriggerDecisionService } from '../domain/services/trigger-decision.domain-service';
-import { DEFAULT_MISSED_THRESHOLD_MIN } from '../domain/value-objects/policies.vo';
+import { DEFAULT_MISSED_THRESHOLD_MIN, RetryPolicy } from '../domain/value-objects/policies.vo';
 import type { TimeoutMinutes } from '../domain/value-objects/policies.vo';
 import { AutomationRunFinished, AutomationTriggered } from '../domain/events/automation-events';
 import { AutomationNotifier } from './automation.notifier';
@@ -200,6 +201,17 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         case 'finished': {
           const automation = await this.rules.findById(run.automationId);
           if (automation === null) break;
+          // ★ 决策表行 3 的**另一半**（03 §8.2）：沙箱是建出来了，但它死在「没资源」上
+          // （典型：工作区复制时磁盘写满 ⇒ `DISK_INSUFFICIENT`）。这**不是**规则失败，
+          // 与创建那一刻被互斥区拒完全同源，所以走同一段记账 —— 排队重试、不计失败。
+          //
+          // ⚠️ 判据是**码**不是文案。`errorMessage` 是给人看的自由文本，靠它做分支就是
+          // 把一条领域判定挂在一句随时会被改写的句子上。
+          if (phase.status === 'failed' && isCapacityFailureCode(phase.errorCode)) {
+            this.queueOrGiveUp(automation, run);
+            touched += 1;
+            break;
+          }
           if (run.status === 'pending') run.markRunning(run.sandboxId, this.clock.now());
           const finishedAt = this.clock.now();
           if (phase.logPath !== undefined) {
@@ -276,9 +288,15 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       previousRun,
       previousTaskActive,
       credentialState: await this.credentials.stateOf(automation.runtimeId),
-      // 今天没有同步的资源判定（03 §3 的互斥登记未落地）——真正的 RESOURCE_EXHAUSTED
-      // 由创建那一刻的 provider 错误带回来，见下面 `tryStartSandbox` 的 catch。
-      schedulingDecision: 'ok',
+      // 03 §8.2 行 3 的**真实产出方**（S? 本切片）。此前这里恒传 `'ok'`，理由是
+      // 「`resource_allocations` 未建、互斥登记未落地，没有真实产出方」—— 那条注释
+      // 曾经是对的，现在不是了：`SandboxApplicationService.hasCapacityFor` 走的就是
+      // 创建门那份 quota + 资源池账本。
+      //
+      // ⚠️ **它只是「先问一句」，不是闸。** 真正拦住超分配的是创建那一刻的互斥登记；
+      // 这一问的价值在于：容量不够时**一行 sandbox 都不建**就把这一发记成「排队重试」，
+      // 而不是建出来、失败、再记一次失败（I-AUT-1：资源不足不是规则的错）。
+      schedulingDecision: await this.launcher.capacityFor(launchInput(automation)),
       now,
       missedThresholdMin: missedThresholdMin(),
     });
@@ -324,28 +342,55 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         }
         return;
       }
-      case 'retry':
-      case 'fail':
-      case 'trigger': {
-        const run = AutomationRun.pending(this.ids.next(), automation.id, now);
-        automation.markTriggered(now);
-        this.uow.run((tx) => {
-          this.rules.saveSync(tx, automation);
-          this.runs.saveSync(tx, run);
-          this.events.publishInTx(tx, [
-            new AutomationTriggered(
-              automation.id,
-              automation.name,
-              automation.projectId,
-              run.id,
-              now,
-            ),
-          ]);
+      case 'retry': {
+        // 行 3：资源不足 ⇒ 落一条 run 并**直接排队**（`resource-exhausted` + `retry_at`），
+        // ⛔ **不调 `createSandbox`**。调了就是明知会被互斥区拒还要去撞一次，而那次撞击
+        // 会在任务列表里留下痕迹（审计一条 provision 失败），历史上也说不清「已排队 n/5」
+        // 里的 n 是怎么来的。`listPendingRetries` 会在 `retry_at` 到点时接手。
+        const run = this.openRun(automation, now);
+        run.queueRetry(now);
+        this.persistRun(run);
+        return;
+      }
+      case 'fail': {
+        // 行 3 的尽头：5 次仍无资源 ⇒ 终态 `failed`。**这一次才计入失败计数**
+        // （03 §8.4：failed 累加）—— 两小时窗口里一直没有资源，已经不是「稍等一下」了。
+        const run = this.openRun(automation, now);
+        run.finalize('failed', this.clock.now(), {
+          errorCode: 'RESOURCE_EXHAUSTED',
+          errorMessage: `no capacity after ${String(RetryPolicy.MAX_ATTEMPTS)} queued retries`,
         });
+        this.applyOutcome(automation, run, 'failed');
+        this.notify(this.notifier.afterRunFinished(automation, run));
+        return;
+      }
+      case 'trigger': {
+        const run = this.openRun(automation, now);
         await this.tryStartSandbox(automation, run);
         return;
       }
     }
+  }
+
+  /**
+   * 落一条新的 `pending` run + 推进 `last_triggered_at` + 发 `AutomationTriggered`。
+   *
+   * 行 3（retry / fail）与行 4（trigger）**共用**它：三条都算「这一发触发了」，历史里
+   * 都该有一条记录，区别只在这条记录接下来变成什么。抽出来是因为它们此前写在同一个
+   * `case` 里，而把 retry/fail 分出去时最容易漏掉的就是这半段（少发一条
+   * `AutomationTriggered`，前端的「刚刚触发」提示就对着一条不存在的 run）。
+   */
+  private openRun(automation: Automation, now: Date): AutomationRun {
+    const run = AutomationRun.pending(this.ids.next(), automation.id, now);
+    automation.markTriggered(now);
+    this.uow.run((tx) => {
+      this.rules.saveSync(tx, automation);
+      this.runs.saveSync(tx, run);
+      this.events.publishInTx(tx, [
+        new AutomationTriggered(automation.id, automation.name, automation.projectId, run.id, now),
+      ]);
+    });
+    return run;
   }
 
   /**
@@ -388,19 +433,38 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         this.notify(this.notifier.afterRunFinished(automation, run));
         return true;
       }
-      if (run.retryCount >= 5) {
-        run.finalize('failed', this.clock.now(), {
-          errorCode: 'RESOURCE_EXHAUSTED',
-          errorMessage: 'no capacity after 5 queued retries (24min apart)',
-        });
-        this.applyOutcome(automation, run, 'failed');
-        this.notify(this.notifier.afterRunFinished(automation, run));
-        return true;
-      }
-      run.queueRetry(this.clock.now());
-      this.persistRun(run);
+      this.queueOrGiveUp(automation, run);
       return true;
     }
+  }
+
+  /**
+   * 决策表行 3 的**记账**那一半，两条路径共用（这是它抽出来的全部理由）：
+   *
+   *   · **同步路径** —— `createSandbox` 那一刻互斥登记拒了（`AutomationResourceExhausted`）；
+   *   · **后台路径** —— 沙箱已经建出来了，但 provision 阶段撞上容量（工作区复制时磁盘
+   *     写满 ⇒ `DISK_INSUFFICIENT`），由相位机带着 `errorCode` 回来。
+   *
+   * ⚠️ **后台那一条此前一律走「记一次失败」**，于是 `consecutive_failures++`：机器一忙、
+   * 盘一紧，连撞三次就 `degraded`、十次就**自动禁用** —— 而 I-AUT-1 明说资源不足不是规则
+   * 的错。修一半等于没修，两条都必须落在这里。
+   *
+   * 只有 5 次都排完仍无资源才转终态 `failed`（那一次才计入失败计数，03 §8.4）。
+   */
+  private queueOrGiveUp(automation: Automation, run: AutomationRun): void {
+    if (!RetryPolicy.canRetry(run.retryCount)) {
+      run.finalize('failed', this.clock.now(), {
+        errorCode: 'RESOURCE_EXHAUSTED',
+        errorMessage:
+          `no capacity after ${String(RetryPolicy.MAX_ATTEMPTS)} queued retries ` +
+          `(${String(RetryPolicy.INTERVAL_MS / 60_000)}min apart)`,
+      });
+      this.applyOutcome(automation, run, 'failed');
+      this.notify(this.notifier.afterRunFinished(automation, run));
+      return;
+    }
+    run.queueRetry(this.clock.now());
+    this.persistRun(run);
   }
 
   private async startTaskOn(automation: Automation, run: AutomationRun): Promise<void> {

@@ -77,7 +77,6 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
     };
   }
 
-
   async listPendingRetries(now: Date): Promise<AutomationRun[]> {
     return this.db
       .select()

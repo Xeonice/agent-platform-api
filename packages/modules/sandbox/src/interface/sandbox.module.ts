@@ -11,6 +11,8 @@ import {
 } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.repository';
+import { RESOURCE_ALLOCATION_REPOSITORY } from '../domain/repositories/resource-allocation.repository';
+import { HOST_CAPACITY_PROBE } from '../domain/ports/host-capacity.port';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
 import { AgentTaskApplicationService } from '../application/agent-task.service';
 import { RunAgentTaskWorkflow } from '../application/workflows/run-agent-task.workflow';
@@ -21,9 +23,14 @@ import { ProvisionSandboxWorkflow } from '../application/workflows/provision-san
 import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
 import { AutomationTaskLauncherAdapter } from '../application/automation-task-launcher.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
+import { ResourceAllocator } from '../application/resource-allocator';
+import { SchedulerQueue } from '../application/scheduler-queue';
+import { QuotaReconciler } from '../application/quota-reconciler';
 import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/agent-task.repository.impl';
+import { SqliteResourceAllocationRepository } from '../infrastructure/persistence/sqlite/resource-allocation.repository.impl';
+import { OsHostCapacityProbe } from '../infrastructure/scheduler/host-capacity.probe';
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
@@ -71,6 +78,14 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: TASK_LOG_STORE, useClass: FsTaskLogStore },
     { provide: SANDBOX_REPOSITORY, useClass: SqliteSandboxRepository },
     { provide: AGENT_TASK_REPOSITORY, useClass: SqliteAgentTaskRepository },
+    { provide: RESOURCE_ALLOCATION_REPOSITORY, useClass: SqliteResourceAllocationRepository },
+    { provide: HOST_CAPACITY_PROBE, useClass: OsHostCapacityProbe },
+    // 03 §3：显式 FIFO（创建/销毁/对账的读-改-写都从它过）+ 互斥登记
+    // —— `RESOURCE_EXHAUSTED` 的唯一真实抛出点。
+    SchedulerQueue,
+    ResourceAllocator,
+    // 13 §4 / 03 §6：重启后按「扫描存活容器 + 落库配额对账」恢复资源池视图。
+    QuotaReconciler,
     { provide: WORKSPACE_PREPARER, useClass: FsWorkspacePreparer },
     { provide: DOCKER_CLIENT, useFactory: createDockerClient },
     SandboxHealthMonitor,

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, asc, eq, lte, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
@@ -17,6 +17,8 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 
 @Injectable()
 export class SqliteAutomationRepository implements AutomationRepository {
+  private readonly logger = new Logger(SqliteAutomationRepository.name);
+
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
   async findById(id: AutomationId): Promise<Automation | null> {
@@ -25,13 +27,13 @@ export class SqliteAutomationRepository implements AutomationRepository {
   }
 
   async listByProject(projectId: ProjectId): Promise<Automation[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(automations)
       .where(eq(automations.projectId, projectId))
       .orderBy(asc(automations.createdAt))
-      .all()
-      .map(toDomain);
+      .all();
+    return hydrateAll(rows, this.logger, 'listByProject');
   }
 
   async countByProject(projectId: ProjectId): Promise<number> {
@@ -51,22 +53,18 @@ export class SqliteAutomationRepository implements AutomationRepository {
    * 会置 NULL）或还没算出下一次的规则，两者都不该触发。
    */
   async listDue(now: Date): Promise<Automation[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(automations)
       .where(and(eq(automations.enabled, true), lte(automations.nextTriggerAt, now)))
       .orderBy(asc(automations.nextTriggerAt))
-      .all()
-      .map(toDomain);
+      .all();
+    return hydrateAll(rows, this.logger, 'listDue');
   }
 
   async listAllForSweep(): Promise<Automation[]> {
-    return this.db
-      .select()
-      .from(automations)
-      .orderBy(asc(automations.createdAt))
-      .all()
-      .map(toDomain);
+    const rows = this.db.select().from(automations).orderBy(asc(automations.createdAt)).all();
+    return hydrateAll(rows, this.logger, 'listAllForSweep');
   }
 
   saveSync(_tx: Tx, a: Automation): void {
@@ -158,4 +156,36 @@ function toDomain(row: AutomationRow): Automation {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });
+}
+/**
+ * 逐行水化，**一行坏数据不许拖垮整批**。
+ *
+ * ⚠️ `toDomain` 每行都跑完整值对象校验（`Schedule.create` 真解 IANA + `normalizeConfig`、
+ * `TimeoutPolicy.of`、`assertRetentionDays`、`WebhookTarget.create`）。上一版是裸
+ * `.map(toDomain)`：**任何一行抛，整个 `listDue` 的结果全没**，而 `fireDue` 的
+ * per-rule try/catch 在它**下游**，救不了；`runOnce` 只有一个总 catch，只 log 一行
+ * `automation sweep failed`。
+ *
+ * ⇒ 症状是「**全部规则再也不触发**，每分钟一行日志」。可触发的输入不止一种：
+ *  · tzdata/ICU 变更 —— Node 升级后某个曾经合法的 IANA 名解不出来（DB 侧 CHECK 只有
+ *    `length(timezone) > 0`，拦不住）；
+ *  · `schedule_config` 是 **JSON TEXT、零 CHECK** —— 任何绕过聚合的写入（迁移、手工
+ *    改数据）写进 `weekly + days:[]`，`normalizeConfig` 就抛。
+ *
+ * ⛔ 坏行**不静默吞掉**：每行单独 log 一次，带上 id —— 否则「这条规则怎么不跑了」
+ * 又变成一个查不出来的问题。
+ */
+function hydrateAll(rows: readonly AutomationRow[], logger: Logger, where: string): Automation[] {
+  const out: Automation[] = [];
+  for (const row of rows) {
+    try {
+      out.push(toDomain(row));
+    } catch (e) {
+      logger.error(
+        `automation ${row.id} 的行数据无法水化（${where}），本轮跳过它、其余规则照常跑：` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  return out;
 }
