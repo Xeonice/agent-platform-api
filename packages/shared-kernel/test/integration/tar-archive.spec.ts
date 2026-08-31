@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
@@ -198,7 +198,14 @@ describe('tar 打包：大小是确定的算术，内容按 git 口径挑', () =
       try {
         expect(await packTarToFile(plan, dest)).toBe(plan.totalBytes);
         const streamed = await drain(tarReadable(plan));
-        expect(execFileSync('cmp', ['-s', dest, '/dev/stdin'], { input: streamed }).length).toBe(0);
+        // ⚠️ 这里**不用** `cmp -s dest /dev/stdin`（上一版那么写，CI 上必挂）：
+        //    `/dev/stdin` 在 Linux 下配合 execFileSync 的管道 input 拿不到，`cmp` 退出码是
+        //    **2（错误）而不是 1（不同）** —— 于是失败信息说的是"内容不一致"，实际是
+        //    命令根本没跑成。macOS 上却是过的，典型的「本地绿 CI 红」。
+        //    Buffer 比对不需要外部进程，跨平台，而且长度先断一次让失败信息更有用。
+        const onDisk = readFileSync(dest);
+        expect(onDisk.length).toBe(streamed.length);
+        expect(Buffer.compare(onDisk, streamed)).toBe(0);
       } finally {
         rmSync(dest, { force: true });
       }
