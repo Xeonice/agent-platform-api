@@ -9,6 +9,8 @@ export type SandboxId = Brand<string, 'SandboxId'>;
 export type AgentTaskId = Brand<string, 'AgentTaskId'>;
 export type ProjectId = Brand<string, 'ProjectId'>;
 export type CredentialId = Brand<string, 'CredentialId'>;
+/** 已保留的工作区卷（23 §6.2 独立聚合 D-4）。**不是** `SandboxId`：卷的生命周期长于 sandbox 记录。 */
+export type RetainedVolumeId = Brand<string, 'RetainedVolumeId'>;
 export type ImageId = Brand<string, 'ImageId'>;
 export type AutomationId = Brand<string, 'AutomationId'>;
 export type NodeId = Brand<string, 'NodeId'>;
@@ -20,5 +22,6 @@ export const asSandboxId = (v: string): SandboxId => v as SandboxId;
 export const asAgentTaskId = (v: string): AgentTaskId => v as AgentTaskId;
 export const asProjectId = (v: string): ProjectId => v as ProjectId;
 export const asCredentialId = (v: string): CredentialId => v as CredentialId;
+export const asRetainedVolumeId = (v: string): RetainedVolumeId => v as RetainedVolumeId;
 export const asImageId = (v: string): ImageId => v as ImageId;
 export const asAutomationId = (v: string): AutomationId => v as AutomationId;

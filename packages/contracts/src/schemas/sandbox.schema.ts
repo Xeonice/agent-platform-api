@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { SandboxProviderCapabilities } from '../sandbox-provider.contract';
+import type { HealthStatus, SandboxProviderCapabilities } from '../sandbox-provider.contract';
 import { SandboxStatusSchema, TimeoutMinutesSchema } from './enums';
 
 /**
@@ -116,6 +116,55 @@ export const DestroySandboxSchema = z.object({
 });
 export type DestroySandboxInput = z.infer<typeof DestroySandboxSchema>;
 
+/**
+ * 运行期健康度（03 §7.8）—— **线上镜像**，SPI 那一份是 `HealthStatus`。
+ *
+ * ⚠️ **它不是第 13 个 `status`，`SANDBOX_STATUSES` 那 12 个取值一个都没动。**
+ * 03 §7.8 曾写「`status: running → unhealthy`」，那句话与本仓自己的契约冲突：SPI 里
+ * `lifecycleState`（生命周期）与 `health`（健康度）**从一开始就是分开的**。三条理由：
+ *
+ *  1. **枚举不可扩展。** Kubernetes [#7856]：「Enums aren't extensible. Every addition
+ *     is a breaking, non-backward-compatible API change.」—— 加一个状态值是一次破坏性
+ *     的跨仓契约变更（两仓各有一份 `status-enum-parity` 对账），还牵动转移表、DTO 与
+ *     WS 事件语义，而它换来的东西一个可选字段就能表达。
+ *  2. **把健康度塞进 phase 会被读成状态机迁移。** 同一个 issue：「users and developers
+ *     apparently think of phases as states in a state machine」。现代做法是 conditions
+ *     是事实来源、phase 是推导出来的摘要。
+ *  3. ⭐ **03 §7.8 自己写着「`unhealthy` ⇏ agent 不可用」**（aio 的 HEALTHCHECK 那段：
+ *     语义是单向的，`healthy` 才是充分条件）。一个连「不可用」都推不出来的信号，没有
+ *     资格决定生命周期 —— 它进 `status` 之后 `running` 反而更不可信，恰好是该节要消灭
+ *     的那种「状态字段在撒谎」。
+ *
+ * ⚠️ **可选字段的全部好处**：老客户端读不到它时行为与今天完全一致（`status` 仍是
+ * `running`）。
+ */
+export const HealthStateSchema = z.enum(['healthy', 'unhealthy', 'unknown', 'starting']);
+export type HealthStateWire = z.infer<typeof HealthStateSchema>;
+
+export const SandboxHealthSchema = z.object({
+  state: HealthStateSchema,
+  lastCheckedAt: z.string(),
+  /** 一行判据（哪个信号翻的），给排障看；**不是**面向用户的文案。 */
+  message: z.string().optional(),
+  /**
+   * 抗抖动计数。
+   *
+   * ⚠️ **DTO 上这个数是平台的，不是 provider 的。** `SandboxRuntimeStatus.health`
+   * 里那一份是 provider **这一次**观测所知道的（boxlite 报它自己 health check 的连续
+   * 失败数、aio 的一次 ping 只有 0/1）；这里这一份是 `SandboxHealthMonitor` 跨采样
+   * 维护的那个 —— **决定翻不翻的是后者**。两者同形不同源，别互相赋值。
+   */
+  consecutiveFailures: z.number().int().nonnegative(),
+});
+export type SandboxHealthWire = z.infer<typeof SandboxHealthSchema>;
+
+/**
+ * 编译期对账：SPI 的 `HealthStatus` 与线上形状必须逐字段相等 —— 给 SPI 加一个字段
+ * （或改名）会在**这里**先 typecheck 失败，而不是让 `GET /api/sandboxes` 悄悄少报一半。
+ * 与上面 `SandboxProviderCapabilitiesWireParity` 同一手法。
+ */
+export type SandboxHealthWireParity = AssertTrue<Exact<SandboxHealthWire, HealthStatus>>;
+
 export const SandboxDtoSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -165,6 +214,12 @@ export const SandboxDtoSchema = z.object({
   failureCode: z.string().optional(),
   /** Free-text detail behind `failureCode` (never the user-facing sentence). */
   failureMessage: z.string().optional(),
+  /**
+   * 运行期健康度（03 §7.8）—— **可选**，缺席 = 平台这一刻没有观测（刚重启、非
+   * `running`/`idle`、或 provider 答不上）。⛔ 缺席**不等于** `unhealthy`：少报是降级，
+   * 多报是撒谎（同 10 §6.8 `sideEffectFree` 那条纪律）。
+   */
+  health: SandboxHealthSchema.optional(),
   // ★ DELIBERATELY ABSENT: `initialPrompt` (S5 裁决 D-14, TASK-LAUNCH-DECISIONS T-1).
   //   The backend DOES persist it (`sandboxes.initial_prompt`, 13 §2.1.1) — the
   //   decision is only about echoing it back. The decisive reason is the MCP面:

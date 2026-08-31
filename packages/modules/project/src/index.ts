@@ -13,4 +13,8 @@ export {
   ProjectCloneCancelled,
   ProjectBaselineSynced,
   ProjectDeleted,
+  VolumeRetained,
 } from './domain/events/project-events';
+export { RetainedVolumeService } from './application/retained-volume.service';
+export { VolumeReaper } from './application/volume.reaper';
+export { retainedVolumes } from './infrastructure/persistence/schema/retained-volume.sqlite';

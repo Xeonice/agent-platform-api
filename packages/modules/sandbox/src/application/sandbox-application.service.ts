@@ -42,6 +42,7 @@ import type {
   WorkspaceSource,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
+import { SandboxHealthMonitor } from './sandbox-health.monitor';
 import { mapProviderErrorToHttp } from './provider-error.http';
 import {
   INVALID_IMAGE_REFERENCE_CODE,
@@ -118,6 +119,8 @@ export class SandboxApplicationService {
     @Inject(IMAGE_FACADE) private readonly imageFacade: ImageFacade,
     @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
     private readonly provision: ProvisionSandboxWorkflow,
+    /** 运行期健康度的当前观测（03 §7.8）——派生字段，不落库、不进状态机。 */
+    private readonly health: SandboxHealthMonitor,
   ) {}
 
   /**
@@ -174,7 +177,7 @@ export class SandboxApplicationService {
     // synchronously up to its first await), return it immediately, and let provision
     // drive the state machine in the background (each transition persists + publishes
     // a SandboxStateChanged event for the WS relay). Failures land `failed`.
-    const dto = SandboxMapper.toDto(sandbox, false);
+    const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
     void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
     return dto;
   }
@@ -439,7 +442,7 @@ export class SandboxApplicationService {
   async get(id: string): Promise<SandboxDto> {
     const sandbox = await this.repo.findById(asSandboxId(id));
     if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    return SandboxMapper.toDto(sandbox, false);
+    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
   }
 
   /**
@@ -489,7 +492,7 @@ export class SandboxApplicationService {
     const provider = this.registry.get(sandbox.provider);
     // advances to `starting` synchronously, then runs the 段 in the background.
     void this.provision.restartSafely(sandbox, provider);
-    return SandboxMapper.toDto(sandbox, false);
+    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
   }
 
   /**
@@ -528,7 +531,7 @@ export class SandboxApplicationService {
       this.tryAdvance(sandbox, 'failed', 'user');
       throw this.mapProviderError(e);
     }
-    return SandboxMapper.toDto(sandbox, false);
+    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
   }
 
   /**
@@ -632,7 +635,7 @@ export class SandboxApplicationService {
       : await this.repo.findAll();
     return sandboxes
       .filter((s) => s.status !== 'destroyed')
-      .map((s) => SandboxMapper.toDto(s, false));
+      .map((s) => SandboxMapper.toDto(s, false, this.health.healthOf(s.id)));
   }
 
   /**
@@ -666,7 +669,22 @@ export class SandboxApplicationService {
       }
       this.advance(sandbox, 'destroying', 'user');
       if (handle) await provider.destroy(handle);
-      await this.workspace.cleanup(id, { keep: input.keepVolume ?? false });
+      const retained = await this.workspace.cleanup(id, { keep: input.keepVolume ?? false });
+      // 03 §7.7 / 24 §3：保留下来的目录必须**登记**进 project 侧的账本，否则「已保留卷」
+      // 永远是空的 —— 此前这里只到 `cleanup` 为止，一条记录都不写。
+      //
+      // ⚠️ **两个聚合两个事务**（24 §5.2）：登记走 PRJ 侧，sandbox 终态走 SBX 侧，中间
+      // 崩溃时重放靠 `workspacePath` 的 UNIQUE（I-RV-3）保证不重复登记。
+      // ⚠️ 登记失败**不打断销毁**（门面内部吞掉并记日志）：实例已经没了、目录已经留下了，
+      // 此时把 destroy 判失败只会留下一个停在 `destroying` 的沙箱。
+      if (retained !== null) {
+        await this.projectFacade.registerRetainedVolume({
+          projectId: sandbox.projectId,
+          sandboxId: id,
+          workspacePath: retained.hostPath,
+          source: 'manual-destroy',
+        });
+      }
       this.advance(sandbox, 'destroyed', 'user');
     } catch (e) {
       this.tryAdvance(sandbox, 'failed', 'user');

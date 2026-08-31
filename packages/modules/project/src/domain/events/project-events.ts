@@ -122,3 +122,27 @@ export class ProjectDeleted implements DomainEvent {
     readonly occurredAt: Date,
   ) {}
 }
+
+/**
+ * `DELETE /api/sandboxes/:id { keepVolume: true }` 之后，工作区卷被登记进账本
+ * （23 §6.4 `VolumeRetained`，由 `SandboxDestroyed(keepVolume=true)` 触发后产生）。
+ *
+ * ⚠️ **不带 `workspacePath`。** 宿主绝对路径是部署布局，而事件会一路进审计流、进
+ * 面板、进用户截图（同 `RetainedVolumeDto` 刻意不含它的理由，10 §7.3）。要定位一条
+ * 记录，`volumeId` 就够。
+ *
+ * ⚠️ `retainUntil` 随事件走：保留期是这条审计行**唯一**能回答「什么时候会被自动清掉」
+ * 的地方，而记录本身到期后会被置 `deletedAt`，事后回查只能看到「已清理」。
+ */
+export class VolumeRetained implements DomainEvent {
+  readonly type = 'VolumeRetained';
+  constructor(
+    readonly volumeId: string,
+    readonly projectId: ProjectId,
+    readonly sandboxId: string | null,
+    readonly retainUntil: Date,
+    readonly diskBytes: number,
+    readonly downloadBytes: number,
+    readonly occurredAt: Date,
+  ) {}
+}

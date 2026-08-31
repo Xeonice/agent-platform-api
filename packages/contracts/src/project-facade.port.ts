@@ -1,4 +1,8 @@
-import type { ProjectSourceType } from './schemas/project.schema';
+import type {
+  ProjectSourceType,
+  RetainedVolumeSource,
+  RetentionDays,
+} from './schemas/project.schema';
 
 /**
  * Cross-context facade (docs/backend/26 §3 link①, 01 §5): the `sandbox` context
@@ -21,6 +25,25 @@ export interface ProjectRuntimeContext {
   branch?: string;
 }
 
+/**
+ * `RegisterRetainedVolumeCommand`（24 §3/§5）—— sandbox 上下文销毁 keepVolume 之后
+ * 把「这个宿主目录被留下来了」登记进 project 上下文的账本。
+ *
+ * ⚠️ **两个聚合两个事务**（24 §5.2）：登记（PRJ 侧）与 sandbox 终态（SBX 侧）不共享
+ * 事务。若登记成功而 sandbox 终态失败，重放时 `workspacePath` 的 UNIQUE 约束
+ * （I-RV-3）保证不会重复登记 —— 所以实现必须把「已登记」当**成功**，不是冲突。
+ */
+export interface RegisterRetainedVolumeCommand {
+  projectId: string;
+  /** 来源 Task。弱引用：sandbox 记录归档后会被置空，卷仍可管理（13 §2.2.2）。 */
+  sandboxId?: string;
+  /** 保留下来的宿主目录绝对路径 —— 也是 I-RV-3 的唯一键。 */
+  workspacePath: string;
+  source: RetainedVolumeSource;
+  /** 缺省 30 天（P20 §6）；自动化产物传规则的 `artifactRetentionDays`。 */
+  retentionDays?: RetentionDays;
+}
+
 export interface ProjectFacade {
   /**
    * Resolve the runtime context for a NEW task, asserting the project exists and
@@ -34,6 +57,19 @@ export interface ProjectFacade {
    * than half-way through preparing a workspace.
    */
   getRuntimeContextForTask(projectId: string, branch?: string): Promise<ProjectRuntimeContext>;
+
+  /**
+   * 登记一个被保留下来的工作区卷（03 §7.7 / 24 §5）。
+   *
+   * ⚠️ **幂等**：同一个 `workspacePath` 登记两次是 no-op，不是错误（见
+   * {@link RegisterRetainedVolumeCommand} 的事务注释）。
+   *
+   * ⚠️ **永不抛给销毁流程**。销毁已经走到「实例没了、目录留下了」这一步，此时因为
+   * 账本没记上而把整个 destroy 判失败，换来的是一个停在 `destroying` 的沙箱 + 一个
+   * 谁也管不到的目录 —— 比「目录在、账本暂缺」坏。目录是事实、表是索引，两者不一致
+   * 时以目录为准（03 §7.7），启动对账会补。
+   */
+  registerRetainedVolume(command: RegisterRetainedVolumeCommand): Promise<void>;
 }
 
 export const PROJECT_FACADE = Symbol('ProjectFacade');

@@ -26,6 +26,7 @@ import type {
   ProcessStream,
   ImageFacade,
   ProjectFacade,
+  RegisterRetainedVolumeCommand,
   ProviderRegistry,
   RefreshableRuntimeCredential,
   RuntimeAdapter,
@@ -50,6 +51,7 @@ import type {
   TaskEventBroadcaster,
   TaskLogStore,
   TaskServerFrame,
+  RetainedWorkspace,
   WorkspacePreparer,
   WorkspaceSource,
 } from '@platform/contracts';
@@ -57,6 +59,7 @@ import { UnknownRuntimeError } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
 import { AgentTaskApplicationService } from '../../src/application/agent-task.service';
 import { ProvisionSandboxWorkflow } from '../../src/application/workflows/provision-sandbox.workflow';
+import { SandboxHealthMonitor } from '../../src/application/sandbox-health.monitor';
 import { RunAgentTaskWorkflow } from '../../src/application/workflows/run-agent-task.workflow';
 import type { Sandbox } from '../../src/domain/entities/sandbox.entity';
 import { AgentTask } from '../../src/domain/entities/agent-task.entity';
@@ -274,16 +277,44 @@ export class FakeProvider implements SandboxProvider {
   async destroy(): Promise<void> {
     this.calls.push('destroy');
   }
+  /**
+   * `inspect()` 的答案。默认「实例在跑、没有健康度」（= 一个不填 `health` 的 provider，
+   * 也就是本轮之前两个内建 provider 的样子）。给它一个 `Error` 就是「inspect 抛了」。
+   */
+  inspectResult: SandboxRuntimeStatus | Error = { lifecycleState: 'instance_running' };
+  /** argv 命中就**抛异常** —— 实测：命令不存在是抛，不是返回非零（03 §7.8 纪律 2）。 */
+  execThrows?: RegExp;
+  /** argv 命中就报「没有退出码」的流（实测出现过；`toExecFn` 归一成 -1，SP-09）。 */
+  execNoExitCode?: RegExp;
+
   async inspect(): Promise<SandboxRuntimeStatus> {
-    return { lifecycleState: 'instance_running' };
+    this.calls.push('inspect');
+    if (this.inspectResult instanceof Error) throw this.inspectResult;
+    return this.inspectResult;
   }
   async spawn(_h: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
     if (spec.tty) throw new Error('tty spawn is not used by these tests');
     this.execCalls.push(spec.cmd);
     const joined = spec.cmd.join(' ');
+    if (this.execThrows?.test(joined)) {
+      throw new Error(`executable '${spec.cmd[0]}' not found in $PATH`);
+    }
     const rule = this.execExitCodes.find((r) => r.match.test(joined));
+    if (this.execNoExitCode?.test(joined)) return fakeExecStreamWithoutExitCode();
     return fakeExecStream(rule?.stdout ?? '', rule?.exitCode ?? 0);
   }
+}
+
+/**
+ * 一条**没有退出码**的流。`onExit` 回调收到 `undefined` —— 实测中真的出现过一批
+ * （03 §7.8 实现纪律 1）。`toExecFn` 把它归一成 `-1`（SP-09），健康判定因此必须
+ * 显式要求 `=== 0` 才不会把它读成成功。
+ */
+function fakeExecStreamWithoutExitCode(): ProcessStream {
+  const stream = fakeExecStream('', 0) as ProcessStream & {
+    onExit: (cb: (code?: number) => void) => void;
+  };
+  return { ...stream, onExit: (cb) => cb(undefined) };
 }
 
 function fakeExecStream(output: string, code: number): ProcessStream {
@@ -650,10 +681,15 @@ export function harness(opts: HarnessOptions = {}) {
       }
       return { hostPath: `/tmp/ws/${id}`, baselineExisted: true, entryCount: 1 };
     },
-    async cleanup(id, o): Promise<void> {
+    async cleanup(id, o): Promise<RetainedWorkspace | null> {
       wsCalls.push(`cleanup:${id}:${o.keep}`);
+      // 03 §7.7: `keep` 时把留下来的目录报回去 —— 登记 `RetainedVolume` 的唯一路径来源。
+      return o.keep ? { hostPath: `/tmp/ws/${id}` } : null;
     },
   };
+
+  /** 每一次 `RegisterRetainedVolumeCommand`（24 §3），供保留卷登记的用例断言。 */
+  const retainedRegistrations: RegisterRetainedVolumeCommand[] = [];
 
   let projectLookups = 0;
   /** Branch argument of each facade call — `undefined` when the request named none. */
@@ -669,6 +705,9 @@ export function harness(opts: HarnessOptions = {}) {
         sourceType: 'empty',
         branch,
       };
+    },
+    async registerRetainedVolume(command) {
+      retainedRegistrations.push(command);
     },
   };
 
@@ -858,6 +897,10 @@ export function harness(opts: HarnessOptions = {}) {
     audit,
     broadcaster,
   );
+  // 03 §7.8：健康度是 DTO 上的**派生字段**，与 `waitingInput` 同款 —— 这里用**真的**
+  // monitor（它只依赖 repo/registry/clock/audit，没有 IO），所以健康度的用例可以直接
+  // `healthMonitor.runOnce()` 而不必再造一套替身。
+  const healthMonitor = new SandboxHealthMonitor(repo, registry, clock, audit);
   const service = new SandboxApplicationService(
     repo,
     uow,
@@ -870,6 +913,7 @@ export function harness(opts: HarnessOptions = {}) {
     imageFacade,
     runtimes,
     provision,
+    healthMonitor,
   );
   /**
    * Build a workflow that shares NOTHING but the persisted state — this is how a
@@ -920,6 +964,7 @@ export function harness(opts: HarnessOptions = {}) {
     runtimes,
     forgetRuntime,
     repo,
+    uow,
     taskService,
     taskWorkflow,
     newTaskWorkflow,
@@ -934,6 +979,8 @@ export function harness(opts: HarnessOptions = {}) {
     calls,
     txLog,
     wsCalls,
+    retainedRegistrations,
+    healthMonitor,
     wsSources,
     branchesAsked,
     installInputs,

@@ -9,7 +9,12 @@ import {
   DISK_INSUFFICIENT,
   classifyWorkspacePrepareError,
 } from '@platform/contracts';
-import type { PreparedWorkspace, WorkspacePreparer, WorkspaceSource } from '@platform/contracts';
+import type {
+  PreparedWorkspace,
+  RetainedWorkspace,
+  WorkspacePreparer,
+  WorkspaceSource,
+} from '@platform/contracts';
 
 const STATE_FILE = '.platform-workspace-state';
 const execFileAsync = promisify(execFile);
@@ -207,13 +212,29 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
     });
   }
 
-  async cleanup(sandboxId: string, opts: { keep: boolean }): Promise<void> {
+  /**
+   * 销毁时的工作区处置（03 §7.7）。
+   *
+   * ⚠️ **`keep` 时返回的那个路径不是装饰。** 它是 application 层登记
+   * `RetainedVolume`（24 §3）唯一正当的路径来源 —— 此前这里返回 `void`，于是「哪个
+   * 目录被留下来了」只有文件系统知道，登记那一步要么去别处重拼一遍
+   * `${DATA_ROOT}/workspaces/<id>`（把 adapter 的私有布局抄到调用方），要么干脆不做。
+   * 实际发生的是后者：`kept` 标记写下去了，`retained_volumes` 一条记录都没有。
+   *
+   * ⚠️ 标记写不进去（目录已经不在）⇒ 返回 `null` 而不是那个路径。登记一条指向不存在
+   * 目录的记录，只会让「已保留卷」列出一个点开就 404 的条目。
+   */
+  async cleanup(sandboxId: string, opts: { keep: boolean }): Promise<RetainedWorkspace | null> {
     const hostPath = this.dir(sandboxId);
     if (opts.keep) {
-      await writeFile(resolve(hostPath, STATE_FILE), 'kept').catch(() => undefined);
-      return;
+      const marked = await writeFile(resolve(hostPath, STATE_FILE), 'kept').then(
+        () => true,
+        () => false,
+      );
+      return marked ? { hostPath } : null;
     }
     await rm(hostPath, { recursive: true, force: true });
+    return null;
   }
 }
 

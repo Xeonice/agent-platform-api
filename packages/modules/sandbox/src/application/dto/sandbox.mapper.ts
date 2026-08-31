@@ -1,4 +1,4 @@
-import type { SandboxDto } from '@platform/contracts';
+import type { SandboxDto, SandboxHealthWire } from '@platform/contracts';
 import type { Sandbox } from '../../domain/entities/sandbox.entity';
 
 /**
@@ -11,7 +11,15 @@ import type { Sandbox } from '../../domain/entities/sandbox.entity';
  * one `list_sandboxes`. `name` (derived from it at create time) is the display half.
  */
 export const SandboxMapper = {
-  toDto(agg: Sandbox, waitingInput: boolean): SandboxDto {
+  /**
+   * `health` 与 `waitingInput` 一样是**派生字段**：它不在聚合上，由调用方从
+   * `SandboxHealthMonitor` 的当前观测里取（03 §7.8）。
+   *
+   * ⚠️ **没有观测就整个字段缺席**，不退化成 `unknown` 或 `healthy` —— 缺席的语义是
+   * 「平台这一刻没有观测」，而老客户端读不到它时行为与今天完全一致（`status` 仍是
+   * `running`）。这正是可选字段相对枚举扩展的全部好处。
+   */
+  toDto(agg: Sandbox, waitingInput: boolean, health?: SandboxHealthWire): SandboxDto {
     return {
       id: agg.id as string,
       projectId: agg.projectId as string,
@@ -30,6 +38,7 @@ export const SandboxMapper = {
       // persisted code is what survives a page reload; `undefined` unless failed.
       failureCode: agg.failureCode ?? undefined,
       failureMessage: agg.failureReason ?? undefined,
+      ...(health === undefined ? {} : { health }),
     };
   },
 };

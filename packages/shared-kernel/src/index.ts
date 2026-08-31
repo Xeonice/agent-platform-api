@@ -13,5 +13,6 @@ export * from './domain/builtin-image';
 export * from './domain/sandbox-network';
 export * from './crypto/master-key';
 export * from './fs/free-space';
+export * from './fs/tar-archive';
 export * from './net/git-remote';
 export * from './net/git-platform-registry';

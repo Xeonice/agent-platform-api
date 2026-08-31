@@ -25,6 +25,7 @@ import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
+import { SandboxHealthMonitor } from '../application/sandbox-health.monitor';
 import { AioSandboxProvider } from '../infrastructure/providers/aio/aio-sandbox.provider';
 import { BoxliteSandboxProvider } from '../infrastructure/providers/boxlite/boxlite-sandbox.provider';
 import { DOCKER_CLIENT } from '../infrastructure/providers/docker/docker.token';
@@ -70,6 +71,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: AGENT_TASK_REPOSITORY, useClass: SqliteAgentTaskRepository },
     { provide: WORKSPACE_PREPARER, useClass: FsWorkspacePreparer },
     { provide: DOCKER_CLIENT, useFactory: createDockerClient },
+    SandboxHealthMonitor,
     AioSandboxProvider,
     BoxliteSandboxProvider,
     { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
