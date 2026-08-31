@@ -6,6 +6,7 @@ export * from './schemas/credential.schema';
 export * from './schemas/runtime.schema';
 export * from './schemas/system.schema';
 export * from './schemas/image.schema';
+export * from './schemas/automation.schema';
 export * from './errors';
 export * from './validation-envelope';
 export * from './registry.tokens';
@@ -28,6 +29,7 @@ export * from './image-facade.port';
 export * from './credential-facade.port';
 export * from './terminal-auth.port';
 export * from './workspace-preparer.port';
+export * from './automation-collaborators.port';
 export * from './sandbox-failure-codes';
 export * from './ws-protocol';
 // SSE 帧契约 —— 与 ws-protocol 同放（10 §6「流帧类型必须手写并与 WS 协议文件同放」）。

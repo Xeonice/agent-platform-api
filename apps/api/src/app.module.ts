@@ -6,6 +6,7 @@ import { TerminalModule } from '@platform/terminal';
 import { CredentialModule } from '@platform/credential';
 import { RuntimeModule } from '@platform/runtime';
 import { ImageModule } from '@platform/image';
+import { AutomationModule } from '@platform/automation';
 import { PlatformModule } from './platform/persistence/platform.module';
 import { SystemModule } from './platform/system/system.module';
 import { AuditModule } from './platform/audit/audit.module';
@@ -34,6 +35,10 @@ import { guardProviders } from './bootstrap/guards.setup';
     CredentialModule,
     RuntimeModule,
     ImageModule,
+    // ⚠️ 放在 sandbox / runtime / access-passcode 之后：automation 消费它们提供的三个
+    //    contracts 口（`AUTOMATION_TASK_LAUNCHER` / `RUNTIME_CREDENTIAL_STATE_READER` /
+    //    `ACCESS_GATE_READER`），依赖方向单向进来。
+    AutomationModule,
     // ⚠️ 放在各限界上下文之后：`SystemModule` 注入三个扩展点 registry
     //    （provider / runtime adapter / image spec）与 `IMAGE_FACADE`，它们由那几个
     //    @Global 模块提供 —— 装配顺序与图上的可读性一致，省得下一个人去猜。

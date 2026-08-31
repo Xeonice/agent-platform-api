@@ -1749,6 +1749,437 @@
         ]
       }
     },
+    "/api/projects/{id}/automations": {
+      "get": {
+        "operationId": "ProjectAutomationController_list",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AutomationResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List a project's automation rules",
+        "tags": [
+          "automation"
+        ]
+      },
+      "post": {
+        "operationId": "ProjectAutomationController_create",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAutomationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "unknown project"
+          },
+          "409": {
+            "description": "AUTOMATION_LIMIT_REACHED — 20 rules per project (I-AUT-7)"
+          }
+        },
+        "summary": "Create an automation rule (timezone is snapshotted here)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/webhook-test": {
+      "post": {
+        "operationId": "AutomationController_webhookTest",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookTestRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookTestResultDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Send a sample webhook payload (same timeout + SSRF policy)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/runs/{runId}": {
+      "get": {
+        "operationId": "AutomationController_getRun",
+        "parameters": [
+          {
+            "name": "runId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationRunResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Get one automation run",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/runs/{runId}/logs": {
+      "get": {
+        "operationId": "AutomationController_readRunLogs",
+        "parameters": [
+          {
+            "name": "runId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "description": "absent ⇒ the trailing `limit` bytes",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "default 65536, max 1048576",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw log bytes as UTF-8 text",
+            "headers": {
+              "x-log-offset": {
+                "description": "first byte of this slice",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-log-total": {
+                "description": "total bytes on disk",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-log-eof": {
+                "description": "\"true\" when this slice reaches EOF",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Read a byte range of a run log (defaults to the trailing 64KB)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/{id}": {
+      "get": {
+        "operationId": "AutomationController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Get an automation rule",
+        "tags": [
+          "automation"
+        ]
+      },
+      "put": {
+        "operationId": "AutomationController_update",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAutomationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Update a rule — omitting `timezone` keeps the snapshot (I-AUT-9)",
+        "tags": [
+          "automation"
+        ]
+      },
+      "delete": {
+        "operationId": "AutomationController_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Delete a rule (its run history cascades)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/{id}/enable": {
+      "post": {
+        "operationId": "AutomationController_enable",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Re-enable a rule (clears failure count and the degraded flag)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/{id}/disable": {
+      "post": {
+        "operationId": "AutomationController_disable",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "Disable a rule",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/{id}/runs": {
+      "get": {
+        "operationId": "AutomationController_listRuns",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "required": false,
+            "in": "query",
+            "description": "run id; returns strictly older ones",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "default 20, max 100",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedAutomationRunsDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        },
+        "summary": "List a rule’s run history, newest first (cursor)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "HealthController_health",
@@ -3932,6 +4363,625 @@
           "current",
           "upstream",
           "changed"
+        ]
+      },
+      "AutomationResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "scheduleKind": {
+            "type": "string",
+            "enum": [
+              "hourly",
+              "daily",
+              "weekly"
+            ]
+          },
+          "scheduleConfig": {
+            "type": "object",
+            "properties": {
+              "minute": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "maximum": 59,
+                "exclusiveMaximum": false
+              },
+              "time": {
+                "type": "string",
+                "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+              },
+              "days": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false,
+                  "maximum": 6,
+                  "exclusiveMaximum": false
+                }
+              }
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          },
+          "artifactRetentionDays": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 3,
+                "maximum": 3
+              },
+              {
+                "type": "number",
+                "minimum": 7,
+                "maximum": 7
+              },
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              }
+            ]
+          },
+          "webhookUrl": {
+            "type": "string"
+          },
+          "triggerOn": {
+            "type": "string",
+            "enum": [
+              "failure",
+              "success",
+              "all"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "consecutiveFailures": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "lastTriggeredAt": {
+            "type": "string"
+          },
+          "nextTriggerAt": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "name",
+          "runtime",
+          "prompt",
+          "scheduleKind",
+          "scheduleConfig",
+          "timezone",
+          "timeoutMinutes",
+          "artifactRetentionDays",
+          "triggerOn",
+          "enabled",
+          "degraded",
+          "consecutiveFailures",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "CreateAutomationDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "runtime": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "scheduleKind": {
+            "type": "string",
+            "enum": [
+              "hourly",
+              "daily",
+              "weekly"
+            ]
+          },
+          "scheduleConfig": {
+            "type": "object",
+            "properties": {
+              "minute": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "maximum": 59,
+                "exclusiveMaximum": false
+              },
+              "time": {
+                "type": "string",
+                "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+              },
+              "days": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false,
+                  "maximum": 6,
+                  "exclusiveMaximum": false
+                }
+              }
+            }
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          },
+          "artifactRetentionDays": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 3,
+                "maximum": 3
+              },
+              {
+                "type": "number",
+                "minimum": 7,
+                "maximum": 7
+              },
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              }
+            ]
+          },
+          "webhookUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "triggerOn": {
+            "type": "string",
+            "enum": [
+              "failure",
+              "success",
+              "all"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "runtime",
+          "prompt",
+          "scheduleKind",
+          "scheduleConfig",
+          "timezone",
+          "timeoutMinutes",
+          "artifactRetentionDays"
+        ]
+      },
+      "WebhookTestRequestDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "WebhookTestResultDto": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "VALIDATION_FAILED",
+              "HOST_NOT_ALLOWED",
+              "TIMEOUT",
+              "UPSTREAM_UNAVAILABLE"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "message"
+        ]
+      },
+      "AutomationRunResponseDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "automationId": {
+            "type": "string"
+          },
+          "sandboxId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "success",
+              "failed",
+              "timeout",
+              "resource-exhausted",
+              "skipped",
+              "missed"
+            ]
+          },
+          "errorCode": {
+            "type": "string",
+            "enum": [
+              "PREVIOUS_RUNNING",
+              "AUTH_EXPIRED",
+              "RESOURCE_EXHAUSTED"
+            ]
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "retryCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "maximum": 5,
+            "exclusiveMaximum": false
+          },
+          "retryAt": {
+            "type": "string"
+          },
+          "triggeredAt": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "completedAt": {
+            "type": "string"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "outputSummary": {
+            "type": "string"
+          },
+          "webhookStatus": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "failed",
+              "skipped"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "automationId",
+          "status",
+          "retryCount",
+          "triggeredAt"
+        ]
+      },
+      "UpdateAutomationDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "runtime": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "scheduleKind": {
+            "type": "string",
+            "enum": [
+              "hourly",
+              "daily",
+              "weekly"
+            ]
+          },
+          "scheduleConfig": {
+            "type": "object",
+            "properties": {
+              "minute": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "maximum": 59,
+                "exclusiveMaximum": false
+              },
+              "time": {
+                "type": "string",
+                "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+              },
+              "days": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 7,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false,
+                  "maximum": 6,
+                  "exclusiveMaximum": false
+                }
+              }
+            }
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "timeoutMinutes": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              },
+              {
+                "type": "number",
+                "minimum": 60,
+                "maximum": 60
+              },
+              {
+                "type": "number",
+                "minimum": 120,
+                "maximum": 120
+              },
+              {
+                "type": "number",
+                "minimum": 240,
+                "maximum": 240
+              }
+            ]
+          },
+          "artifactRetentionDays": {
+            "oneOf": [
+              {
+                "type": "number",
+                "minimum": 3,
+                "maximum": 3
+              },
+              {
+                "type": "number",
+                "minimum": 7,
+                "maximum": 7
+              },
+              {
+                "type": "number",
+                "minimum": 30,
+                "maximum": 30
+              }
+            ]
+          },
+          "webhookUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "triggerOn": {
+            "type": "string",
+            "enum": [
+              "failure",
+              "success",
+              "all"
+            ]
+          }
+        }
+      },
+      "PaginatedAutomationRunsDto": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "automationId": {
+                  "type": "string"
+                },
+                "sandboxId": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "running",
+                    "success",
+                    "failed",
+                    "timeout",
+                    "resource-exhausted",
+                    "skipped",
+                    "missed"
+                  ]
+                },
+                "errorCode": {
+                  "type": "string",
+                  "enum": [
+                    "PREVIOUS_RUNNING",
+                    "AUTH_EXPIRED",
+                    "RESOURCE_EXHAUSTED"
+                  ]
+                },
+                "errorMessage": {
+                  "type": "string"
+                },
+                "retryCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false,
+                  "maximum": 5,
+                  "exclusiveMaximum": false
+                },
+                "retryAt": {
+                  "type": "string"
+                },
+                "triggeredAt": {
+                  "type": "string"
+                },
+                "startedAt": {
+                  "type": "string"
+                },
+                "completedAt": {
+                  "type": "string"
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "exclusiveMinimum": false
+                },
+                "outputSummary": {
+                  "type": "string"
+                },
+                "webhookStatus": {
+                  "type": "string",
+                  "enum": [
+                    "sent",
+                    "failed",
+                    "skipped"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "automationId",
+                "status",
+                "retryCount",
+                "triggeredAt"
+              ]
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
         ]
       },
       "InitStatusResponseDto": {

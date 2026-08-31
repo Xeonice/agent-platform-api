@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import {
+  AUTOMATION_TASK_LAUNCHER,
   SANDBOX_EXEC_PORT,
   SANDBOX_PROVIDER_REGISTRY,
   SANDBOX_PTY_PORT,
@@ -18,6 +19,7 @@ import { SandboxPtyAdapter } from '../application/sandbox-pty.adapter';
 import { SandboxExecAdapter } from '../application/sandbox-exec.adapter';
 import { ProvisionSandboxWorkflow } from '../application/workflows/provision-sandbox.workflow';
 import { SandboxFacadeAdapter } from '../application/sandbox-facade.adapter';
+import { AutomationTaskLauncherAdapter } from '../application/automation-task-launcher.adapter';
 import { SandboxEventProjector } from '../application/sandbox-event.projector';
 import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
@@ -78,6 +80,9 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: SANDBOX_PTY_PORT, useClass: SandboxPtyAdapter },
     { provide: SANDBOX_EXEC_PORT, useClass: SandboxExecAdapter },
     { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
+    // 03 §8.2 行 4：automation 起的必须是**标准**无头 Task —— 这个 adapter 就是那条
+    // 「不许绕过」的落点，它内部调的是人手动建 Task 走的同一个 application 方法。
+    { provide: AUTOMATION_TASK_LAUNCHER, useClass: AutomationTaskLauncherAdapter },
     RuntimeReconciler,
     // 开机自检：填了 SANDBOX_DOCKER_NETWORK 就证实「我自己也在那个网络里」——
     // 那句声明里唯一填得错的一半（shared/11 §1.4）。没填 = 直接返回。
@@ -92,6 +97,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     SANDBOX_PTY_PORT,
     SANDBOX_EXEC_PORT,
     SANDBOX_FACADE,
+    AUTOMATION_TASK_LAUNCHER,
   ],
 })
 export class SandboxModule {}

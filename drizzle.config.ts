@@ -12,6 +12,7 @@ export default defineConfig({
     './packages/modules/sandbox/src/infrastructure/persistence/schema/agent-task.sqlite.ts',
     './packages/modules/project/src/infrastructure/persistence/schema/project.sqlite.ts',
     './packages/modules/project/src/infrastructure/persistence/schema/retained-volume.sqlite.ts',
+    './packages/modules/automation/src/infrastructure/persistence/schema/automation.sqlite.ts',
     './packages/modules/credential/src/infrastructure/persistence/schema/credential.sqlite.ts',
     './packages/modules/credential/src/infrastructure/persistence/schema/credential-sandbox-binding.sqlite.ts',
     './packages/modules/runtime/src/infrastructure/persistence/schema/runtime.sqlite.ts',
