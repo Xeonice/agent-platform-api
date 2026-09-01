@@ -4,10 +4,13 @@ import boundaries from 'eslint-plugin-boundaries';
 /**
  * Flat ESLint config. Harness pillars enforced here (docs/backend/01 §3, shared/09 §2.2):
  *   1. eslint-plugin-boundaries — DDD four-layer dependency rules (error level).
- *   2. no-restricted-syntax — bans new Date() / Date.now() / crypto.randomUUID()
- *      (Clock / IdGenerator ports, 25 §1.4) AND `as unknown as` double casts
+ *   2. no-restricted-syntax — bans new Date() / Date.now() / randomUUID()（成员调用与裸调
+ *      两种写法都挡，Clock / IdGenerator ports, 25 §1.4），domain/application 另禁
+ *      Math.random() / randomBytes()，AND `as unknown as` double casts
  *      (parity with the frontend repo; forces honest type narrowing).
- * Both are `error` and CI runs with --max-warnings=0, so violations cannot merge.
+ *   3. @typescript-eslint/no-restricted-imports — domain 的 import 白名单：三方库一律禁
+ *      （boundaries 管不到 node_modules，见 DOMAIN_PURE_IMPORTS 的注释）。
+ * 三者都是 `error`，CI 跑 --max-warnings=0，所以违例合不进来。
  */
 
 // `x as unknown as Y` — banned everywhere, tests included (parity with frontend).
@@ -57,8 +60,8 @@ const NO_SCATTERED_DEFAULT_IMAGE = {
     '不要各自读 SANDBOX_DEFAULT_IMAGE —— 用 builtinImageRef()（@platform/shared-kernel）。三处各读一次曾经分裂出两个不同的兜底值，把用户指向了错误的下一步。',
 };
 
-// time / random bans — exempted only in port implementations and tests.
-const NO_DIRECT_TIME_RANDOM = [
+// time bans — exempted only in port implementations and tests.
+const NO_DIRECT_TIME = [
   {
     selector: "NewExpression[callee.name='Date']",
     message: 'Use the Clock port — new Date() is banned (01 §3 / 25 §1.4).',
@@ -67,11 +70,122 @@ const NO_DIRECT_TIME_RANDOM = [
     selector: "CallExpression[callee.object.name='Date'][callee.property.name='now']",
     message: 'Use the Clock port — Date.now() is banned (01 §3 / 25 §1.4).',
   },
+];
+
+/**
+ * ID 生成禁令 —— **两种写法都要挡**。
+ *
+ * ⚠️ 这条以前只有一个选择器 `CallExpression[callee.property.name='randomUUID']`，
+ * 它匹配的是**成员调用** `crypto.randomUUID()`。而
+ * `import { randomUUID } from 'node:crypto'` 之后裸调 `randomUUID()` 是
+ * `callee.name`、不是 `callee.property.name` —— 选择器压根匹配不到，一行 import
+ * 就把整条禁令绕干净了。这不是假想：`apps/api/src/bootstrap/error-envelope.filter.ts`
+ * 正是这么写的，在门禁全绿的情况下活到了今天（那一处的豁免与理由见文件底部）。
+ *
+ * 「看着有规则、实际匹配不到」比没有规则更糟：它让每个来 review 的人以为这里查过了。
+ * 所以成员形式与裸调形式各留一条，缺一不可。
+ */
+const NO_RANDOM_ID = [
   {
     selector: "CallExpression[callee.property.name='randomUUID']",
     message: 'Use the IdGenerator port — crypto.randomUUID() is banned (01 §3).',
   },
+  {
+    selector: "CallExpression[callee.name='randomUUID']",
+    message:
+      'Use the IdGenerator port — 裸调 randomUUID() 同样禁止（换个 import 写法不算绕过，01 §3）。',
+  },
 ];
+
+// 全仓禁令的本体：时间 + 业务 ID。端口实现处豁免（见文件底部的 files 块）。
+const NO_DIRECT_TIME_AND_ID = [...NO_DIRECT_TIME, ...NO_RANDOM_ID];
+
+/**
+ * domain / application 里另禁通用随机源：`Math.random()` 与 `randomBytes()`。
+ *
+ * 01 §3 给这条禁令的理由是「时间与 ID 是本项目最大的测试不确定性来源」。按这个理由，
+ * 随机源本来就该在名单里 —— 而此前它们**一个都不在**：domain 里写
+ * `Math.random()` 是全绿的。
+ *
+ * ★ 但射程只画到 domain / application，同样是按那句理由画的：它保护的是**业务逻辑
+ * 能被写成确定性用例**。再往外一层，随机恰恰是正确答案而不是问题 ——
+ *   · `credential/infrastructure/crypto/aes-gcm.crypto.ts` 的 AES IV
+ *   · `shared-kernel/src/crypto/master-key.ts` 的主密钥
+ *   · `terminal/interface/gateway/terminal.gateway.ts` 的 128-bit WS session key
+ *   · `sandbox/infrastructure/providers/aio/*` 的容器内临时目录名
+ * 这些要的是**密码学强度的不可预测**。把它们赶去走 `IdGenerator` 端口是把「给业务实体
+ * 发 ID」的端口挪作他用，还会让下一个人误以为这些值是可复现的 —— 那是安全事故，不是洁癖。
+ *
+ * 所以边界画在**层**上，而不是逐处 `eslint-disable`：domain/application 里出现随机
+ * 一定是坏味道，infrastructure/interface/platform 里出现随机是本分。层是结构性的判据，
+ * 不需要每个新文件的作者重新判断一次。
+ */
+const NO_NONDETERMINISTIC_RANDOM = [
+  {
+    selector: "CallExpression[callee.object.name='Math'][callee.property.name='random']",
+    message:
+      'domain/application 禁止 Math.random() —— 随机会让业务用例不可复现；需要随机就把它推到 infrastructure（01 §3）。',
+  },
+  {
+    selector: "CallExpression[callee.property.name='randomBytes']",
+    message:
+      'domain/application 禁止 randomBytes() —— 随机会让业务用例不可复现；密码学随机属于 infrastructure/interface（01 §3）。',
+  },
+  {
+    selector: "CallExpression[callee.name='randomBytes']",
+    message:
+      'domain/application 禁止 randomBytes() —— 随机会让业务用例不可复现；密码学随机属于 infrastructure/interface（01 §3）。',
+  },
+];
+
+/**
+ * ① domain 的三方库禁令 —— 白名单制。
+ *
+ * ⚠️ 这条补的是一个**门禁根本不存在**的缺口。01 §3 写着 domain「明确禁止任何三方 IO 库
+ * （provider SDK/drizzle/socket.io）」，而在此之前**没有任何一行配置在执行这句话**：
+ * `boundaries` 只认仓内元素（domain/application/infrastructure/...），`node_modules`
+ * 里的包压根不是元素，六条层间规则对它们一言不发。实测把 `dockerode`、`drizzle-orm`、
+ * `socket.io`、`better-sqlite3` 逐个 import 进 domain 实体，`pnpm lint` 全绿。
+ *
+ * ★ 为什么是白名单而不是黑名单：黑名单只挡得住今天 package.json 里那几个名字，
+ * 下一个被引进来的 SDK 照样通过 —— 而「下一个」正是这条规则要防的东西。domain 该依赖
+ * 什么是**可枚举的**（自己人 + 纯计算），列白名单才是照着规约执行。
+ *
+ * ★ 豁免边界画在「这个 import 会不会带来 IO / 不确定性」，不画在「是不是三方包」：
+ *   · `./ ../`                 —— 同上下文 domain 内部，boundaries 已管住层。
+ *   · `@platform/shared-kernel` —— 唯一允许的仓内包（与 boundaries 的 domain 规则一致）。
+ *     `@platform/contracts` 与别的 module 一律不放行。
+ *   · `node:crypto`            —— **纯计算**，不碰 fd/socket/子进程。现役用法：
+ *     `credential/domain/value-objects/masked-identifier.vo.ts` 的 `createHash`
+ *     做 sha256。它是个纯函数，禁它没有任何道理。node:crypto 里唯一危险的那部分
+ *     （randomUUID/randomBytes）由上面的 syntax 禁令单独挡，两条规则各管一段。
+ *   · `node:stream`            —— **只许 `import type`**（`allowTypeImports`）。现役用法：
+ *     `project/domain/ports/retained-volume-store.port.ts` 用 `Readable` 写端口签名，
+ *     那是类型，编译后一行代码都不剩。运行时 `import { Readable }` 去构造流就是 IO 了，
+ *     照红。这一条是「按 import type 划线」这个手法在本配置里的唯一一处，值得记住。
+ *
+ * 其余 node 内建（`node:fs` / `node:child_process` / `node:net` …）一律红：它们就是 IO 本身。
+ *
+ * 用 `regex` 而不是 gitignore 风格的 `group`：`group` 的否定项遵循 gitignore 的
+ * 「父目录被排除就无法再放行子路径」规则，`'!@platform/shared-kernel'` 与 `'!../**'`
+ * 实测都不生效（相对路径会被整片误伤）。下面这条正则读法很直白：
+ * 「不以 `.` 开头（即包名 import），且不是这三项之一」。
+ */
+const DOMAIN_PURE_IMPORTS = {
+  patterns: [
+    {
+      regex: '^(?!\\.)(?!@platform/shared-kernel(/|$))(?!node:crypto$)(?!node:stream$)',
+      message:
+        'domain 只能 import 相对路径 / @platform/shared-kernel / node:crypto / node:stream(type-only)。三方 IO 库（provider SDK、drizzle、socket.io、better-sqlite3…）与框架代码属于 infrastructure（01 §3）。',
+    },
+    {
+      group: ['node:stream'],
+      allowTypeImports: true,
+      message:
+        'domain 只能以 `import type` 形式引用 node:stream（用于端口签名）；运行时构造流是 IO，放 infrastructure（01 §3）。',
+    },
+  ],
+};
 
 export default tseslint.config(
   {
@@ -200,7 +314,7 @@ export default tseslint.config(
       ],
       'no-restricted-syntax': [
         'error',
-        ...NO_DIRECT_TIME_RANDOM,
+        ...NO_DIRECT_TIME_AND_ID,
         NO_AS_UNKNOWN_AS,
         NO_SCATTERED_DEFAULT_IMAGE,
       ],
@@ -208,6 +322,34 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
+  },
+  // ── ① domain 的 import 白名单（见 DOMAIN_PURE_IMPORTS 的注释）───────────────
+  // 只作用于 `packages/modules/*/src/domain/**`。shared-kernel 不在其内：它自己就是
+  // domain 允许依赖的那一格，且 `src/crypto`、`src/fs` 明摆着是给别人用的 IO 工具。
+  {
+    files: ['packages/modules/*/src/domain/**/*.ts'],
+    rules: {
+      'no-restricted-imports': 'off', // 基础规则不认 allowTypeImports，统一用 TS 版
+      '@typescript-eslint/no-restricted-imports': ['error', DOMAIN_PURE_IMPORTS],
+    },
+  },
+  // ── ③ domain / application 另禁通用随机源（见 NO_NONDETERMINISTIC_RANDOM 的注释）──
+  // `shared-kernel/src/domain` 一并纳入 —— 它是 domain 允许依赖的那一格，同一条理由。
+  {
+    files: [
+      'packages/modules/*/src/domain/**/*.ts',
+      'packages/modules/*/src/application/**/*.ts',
+      'packages/shared-kernel/src/domain/**/*.ts',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...NO_DIRECT_TIME_AND_ID,
+        ...NO_NONDETERMINISTIC_RANDOM,
+        NO_AS_UNKNOWN_AS,
+        NO_SCATTERED_DEFAULT_IMAGE,
       ],
     },
   },
@@ -231,7 +373,38 @@ export default tseslint.config(
   {
     files: ['packages/shared-kernel/src/domain/builtin-image.ts'],
     rules: {
-      'no-restricted-syntax': ['error', ...NO_DIRECT_TIME_RANDOM, NO_AS_UNKNOWN_AS],
+      'no-restricted-syntax': [
+        'error',
+        ...NO_DIRECT_TIME_AND_ID,
+        ...NO_NONDETERMINISTIC_RANDOM,
+        NO_AS_UNKNOWN_AS,
+      ],
+    },
+  },
+  /**
+   * `error-envelope.filter.ts` 的 `randomUUID()` —— 唯一一处 ID 禁令豁免，而它正是
+   * 缺口 ② 的**现场**：这个文件用 `import { randomUUID } from 'node:crypto'` + 裸调，
+   * 于是旧选择器（只匹配 `crypto.randomUUID()` 成员调用）从来没看见过它。禁令修好之后
+   * 它会立刻变红，所以必须在这里表态，而不是默默放过。
+   *
+   * 判它豁免而不是改代码，理由有三，缺一不可：
+   *   ① 它生成的 `traceId` 是**可观测性关联 ID**，不是业务实体 ID。`IdGenerator` 端口
+   *      的存在意义是「让实体 ID 在测试里可钉」，而 traceId 恰恰要求每个响应都不一样，
+   *      没有任何断言在钉它（`error-envelope.filter.spec.ts` 只断言它存在）。
+   *   ② 这个 filter 由 `configure-app.ts` 手工 `new ErrorEnvelopeFilter()` 装上，
+   *      **不走 DI** —— 为了拿一个 traceId 给它开一条注入通道，是让门禁反过来改架构。
+   *   ③ 它在 bootstrap 层（组装根），与已豁免的 `platform/time/**` 同一档。
+   * 豁免只画到这一个文件，不是整个 `bootstrap/`：下一个在 bootstrap 里发 ID 的人仍要红。
+   */
+  {
+    files: ['apps/api/src/bootstrap/error-envelope.filter.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...NO_DIRECT_TIME,
+        NO_AS_UNKNOWN_AS,
+        NO_SCATTERED_DEFAULT_IMAGE,
+      ],
     },
   },
   // Tests may use wall-clock time and cross layers freely — but NOT `as unknown as`.
@@ -240,6 +413,7 @@ export default tseslint.config(
     rules: {
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS],
       'boundaries/element-types': 'off',
+      '@typescript-eslint/no-restricted-imports': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
