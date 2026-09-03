@@ -250,24 +250,87 @@ describe('classifyCloneError (03 §7.5)', () => {
 });
 
 describe('sanitizeCloneMessage', () => {
+  /**
+   * ⚠️ 这一组断言全部用 `toBe` 而不是 `not.toContain(secret)`。
+   * 「秘密不在结果里」在**脱敏把整段都吃掉**时同样为真（29 §3.5.2 的假绿形状二）——
+   * 把 `'***'` 换成 `''`、把 `[^\s&]+` 缩成 `[^\s&]`，旧断言全都照绿。
+   * 逐字比对同时锁住两件事：秘密没了，**且**周围的诊断信息还在。
+   */
   it('strips URL userinfo and tokens', () => {
     const s = sanitizeCloneMessage(
       'fatal: unable to access https://user:secretpw@github.com/x.git ghp_ABCDEFGHIJKLMNOPQRSTUVWX',
     );
     expect(s).not.toContain('secretpw');
     expect(s).not.toContain('user:');
-    expect(s).toContain('https://github.com/x.git');
     expect(s).not.toContain('ghp_ABCDEFGHIJKLMNOPQRSTUVWX');
+    // ⭐ 正向证据：token 位置留下的是 `***`，不是被整段删掉。
+    expect(s).toBe('fatal: unable to access https://github.com/x.git ***');
   });
+
+  it('⭐ URL 就在消息开头时也要脱敏 —— 前面没有任何字符可以垫', () => {
+    // git 有的行第一个字符就是 URL（`https://…: Permission denied`）。
+    // 把 `[a-z]` 写成 `[^a-z]` 的实现在「URL 前面有个空格」时看不出区别，
+    // 只有这一条能把它逼出来。
+    const s = sanitizeCloneMessage('https://user:secretpw@github.com/x.git: Permission denied');
+    expect(s).toBe('https://github.com/x.git: Permission denied');
+  });
+
+  it('⭐ 只有 token、没有密码的 userinfo 同样抹掉（`https://<PAT>@host` 是最常见写法）', () => {
+    // `(?::…)?` 那个 `?` 一旦丢了，这种写法就一个字符都不脱敏。
+    const s = sanitizeCloneMessage('fatal: unable to access https://s3cr3t-pat@github.com/x.git');
+    expect(s).toBe('fatal: unable to access https://github.com/x.git');
+  });
+
+  it('⭐⭐ `Authorization:` 整行被抹掉 —— curl trace 会把 PAT 原样打出来', () => {
+    // 03 §7.3 G：`GIT_CURL_VERBOSE=1` 的 stderr 里有
+    // `Authorization: Basic base64(x-access-token:PAT)`，base64 不匹配任何 token 规则，
+    // 只有这条整行规则拦得住它。
+    const s = sanitizeCloneMessage(
+      '> GET /x.git/info/refs HTTP/1.1\nAuthorization: Basic eC1hY2Nlc3MtdG9rZW46Z2hwX1NFQ1JFVA==\n< HTTP/1.1 401',
+    );
+    expect(s).not.toContain('eC1hY2Nlc3MtdG9rZW46Z2hwX1NFQ1JFVA==');
+    // ⭐ 正向证据：这一行确实被替换过（不是"整段没了"），且**只**吃掉这一行。
+    expect(s).toBe('> GET /x.git/info/refs HTTP/1.1 Authorization: *** < HTTP/1.1 401');
+  });
+
+  it('⭐⭐ `authorization:` 冒号后没空格 / 多个空格的写法一样抹掉', () => {
+    // `\s*` 被改成 `\s` 或 `\s+`（都要求至少一个空白）时，这两种写法就漏出去了。
+    expect(sanitizeCloneMessage('authorization:Bearer s3cr3t-token-value')).toBe(
+      'Authorization: ***',
+    );
+    expect(sanitizeCloneMessage('Authorization:   Basic s3cr3t-token-value')).toBe(
+      'Authorization: ***',
+    );
+  });
+
+  it('⭐ `github_pat_` 新式 PAT 与 `x-access-token:` 头都在名单里', () => {
+    // 这两条规则此前一个字符都没被测过 —— 删掉它们、或把 `{20,}` 写成 `{1}`，全绿。
+    expect(
+      sanitizeCloneMessage('remote: token github_pat_11ABCDEFG0abcdefghijklmnop rejected'),
+    ).toBe('remote: token *** rejected');
+    expect(sanitizeCloneMessage('fatal: could not read x-access-token:ghs_SUPERSECRET from')).toBe(
+      'fatal: could not read x-access-token:*** from',
+    );
+  });
+
   it('redacts query-string secrets', () => {
     const s = sanitizeCloneMessage(
       'unable to access https://h/x.git?token=abc123&password=hunter2&ref=main',
     );
     expect(s).not.toContain('abc123');
     expect(s).not.toContain('hunter2');
-    expect(s).toContain('token=***');
-    expect(s).toContain('password=***');
-    expect(s).toContain('ref=main');
+    // ⭐ `[^\s&]+` 缩成 `[^\s&]` 时只吃掉第一个字符（`token=***bc123`），
+    //   而 `not.toContain('abc123')` 与 `toContain('token=***')` **两条都照绿**。
+    expect(s).toBe('unable to access https://h/x.git?token=***&password=***&ref=main');
+  });
+
+  it('⭐ 尾部整形：空白折成一个空格、首尾去空白、截断到 500', () => {
+    // 落库/上报的是这个结果：不折行会把多行 stderr 原样塞进一列，不截断则一次失败
+    // 能写进几十 KB。三个动作各自都有变异体在活着。
+    expect(sanitizeCloneMessage('  fatal:\n\tremote  hung up  ')).toBe('fatal: remote hung up');
+    const long = sanitizeCloneMessage(`fatal: ${'x'.repeat(600)}`);
+    expect(long).toHaveLength(500);
+    expect(long.startsWith('fatal: xxx')).toBe(true);
   });
 });
 
