@@ -197,6 +197,10 @@ export default tseslint.config(
       '**/*.cjs',
       'drizzle/**',
       'coverage/**',
+      // Stryker 的运行时沙箱与报告（29 §3.3）：沙箱里是被插桩的源码副本，
+      // 中断时会残留；扫它等于把整个仓库又 lint 一遍。
+      '.stryker-tmp/**',
+      'reports/**',
       // ⚠️ 运行期数据根（DATA_ROOT 默认 ./data）。CI 是干净检出、这个目录不存在，
       // 所以少了这一条 CI 照样绿；但**本机跑过后端之后**，里面是沙箱工作区和 git
       // 基线（别人的仓库源码），`pnpm lint` 会被几百个与本仓无关的错淹掉 —— 实测

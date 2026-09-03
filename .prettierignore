@@ -8,3 +8,7 @@ pnpm-lock.yaml
 data
 # byte-exact CLI golden fixtures (OSC-8 / pty-fold control bytes must not be reformatted)
 packages/modules/runtime/test/fixtures/cli-output
+
+# Stryker 运行时沙箱（29 §3.3）——中断时会残留，且会被 prettier/eslint 扫进去
+.stryker-tmp/
+reports/
