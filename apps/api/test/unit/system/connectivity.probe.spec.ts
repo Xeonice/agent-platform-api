@@ -174,7 +174,7 @@ describe('本地 registry 的真实回环探测（本次事故的回归测试）
     process.env.SANDBOX_DEFAULT_IMAGE = `127.0.0.1:${String(port)}/x:v1`;
     const r = await probeRegistry();
     expect(r.ok).toBe(false);
-    expect(r.hint).toContain('docker run');
+    expect(r.hint).toContain('不像一个镜像仓库');
   });
 
   it('⛔ 本地 registry 没起来时 **hint 一个字都不许提代理**', async () => {
@@ -189,6 +189,26 @@ describe('本地 registry 的真实回环探测（本次事故的回归测试）
     expect(r.hint).not.toContain('HTTPS_PROXY');
     expect(r.hint).not.toContain('HTTP_PROXY');
     expect(r.hint).toContain('loopback 不出网');
+  });
+
+  it('⛔ 本地 registry 的建议必须说清**谁要它**，并给出**不依赖 docker** 的路', async () => {
+    // ⚠️ 2026-09-05 补的第二条同型误判：这一项本身是对的（boxlite 确实要这个本地镜像站
+    //    中转大镜像），但建议只写了 `docker run` —— 在「mac + boxlite + 没装 docker」下
+    //    **执行不了**，还会让人以为平台依赖 docker，而官方明确写着不需要。
+    //    它躲过了「支去配代理」，掉进了「支去装 docker」。
+    const port = await startRegistry((_req, res) => res.end());
+    server?.close();
+    server = undefined;
+    process.env.SANDBOX_DEFAULT_IMAGE = `127.0.0.1:${String(port)}/x:v1`;
+    const hint = (await probeRegistry()).hint ?? '';
+
+    expect(hint).toContain('boxlite'); // 谁要它
+    expect(hint).toContain('断点续传'); // 为什么要
+    expect(hint).toContain('平台本身不需要 Docker'); // ⛔ 别把人推向 docker
+    expect(hint).toContain('OCI registry'); // 不依赖 docker 的路
+    expect(hint).toContain('SANDBOX_DEFAULT_IMAGE'); // 连 registry 都不必起的路
+    // docker 仍然可以是**其中一条**（有 docker 的人一条命令最快），但不能是唯一一条。
+    expect(hint).toContain('docker run');
   });
 
   it('⛔ 配了代理也不许把 loopback 送进代理', async () => {

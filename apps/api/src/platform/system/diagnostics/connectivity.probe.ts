@@ -254,11 +254,22 @@ function hintFor(e: Error, target: Target, viaProxy: boolean): string {
   // ⛔ **loopback 永远不要提代理。** 代理修不了本机上没起来的东西，而这条错误建议正是
   //    2026-08-28 实测那次的第二半伤害：诊断不但把一个好的 registry 报成坏的，还把用户
   //    支去配一个根本不需要的代理。「说错下一步比不说更贵」。
+  //
+  // ⛔ **也不要无条件说 `docker run`**（2026-09-05 实测补的第二条）。这一项本身是对的
+  //    —— 微 VM 档（boxlite）确实要这个本地 HTTP 镜像站（`boxlite-runtime.ts`：BoxLite
+  //    自己的 store 没有断点续传，十几 GB 的预制镜像靠它中转）。但在「mac + boxlite +
+  //    没装 docker」下，一条只给 `docker run` 的建议**执行不了**，还会让人以为平台依赖
+  //    docker —— 而 boxlite 官方明确写着不需要（"no root, no background service"）。
+  //    这一条躲过了「支去配代理」，却掉进了同一个坑的另一半：**支去装 docker**。
+  // ⇒ 文案要回答三件事：**谁**要它、**为什么**要、以及一条**不依赖 docker** 的路。
   if (isLoopback(target.host)) {
     return (
-      `本机 registry ${label} 没有应答（${msg}）。起一个：` +
-      `docker run -d -p ${String(target.port)}:5000 --name registry registry:2` +
-      `；或把 SANDBOX_DEFAULT_IMAGE 指向一个可达的仓库。⚠️ 这一项与代理无关 —— loopback 不出网`
+      `本机 registry ${label} 没有应答（${msg}）。它是**微 VM 档（boxlite）**用来中转大镜像的本地镜像站` +
+      `（BoxLite 自己的镜像库不支持断点续传）—— ⛔ 平台本身不需要 Docker。三条路任选：` +
+      `① 起任意一个 OCI registry 监听 ${String(target.port)}（zot 是单个二进制，不必有 docker）；` +
+      `② 有 docker 就一条命令：docker run -d -p ${String(target.port)}:5000 --name registry registry:2；` +
+      `③ 把 SANDBOX_DEFAULT_IMAGE 指向一个已经可达的仓库（公网也行，如 ghcr.io/agent-infra/sandbox:latest）。` +
+      `⚠️ 这一项与代理无关 —— loopback 不出网`
     );
   }
   if (msg.includes('407')) {
