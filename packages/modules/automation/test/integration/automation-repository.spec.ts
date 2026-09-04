@@ -183,7 +183,9 @@ describe('SqliteAutomationRepository（真 sqlite + 真 migration）', () => {
    * `toDomain` 每行都跑完整值对象校验（`Schedule.create` 真解 IANA、`normalizeConfig`、
    * `TimeoutPolicy.of`、`assertRetentionDays`、`WebhookTarget.create`）。上一版是裸
    * `.map(toDomain)` ⇒ **任何一行抛，整个 `listDue` 的结果全没**，而 `fireDue` 的
-   * per-rule try/catch 在下游救不了、`runOnce` 只 log 一行「automation sweep failed」。
+   * per-rule try/catch 在下游救不了、调度器的阶段隔离（H2）也只保证别的阶段照跑 ——
+   * 这一轮仍然一条规则都不触发，日志上只有一行「automation sweep failed at stage
+   * 'fire-due'」。
    *
    * ⇒ 症状是「**全部规则再也不触发**，每分钟一行日志」。真实触发路径不止一种：
    * tzdata/ICU 变更让某个曾经合法的 IANA 名解不出来（DB 侧 CHECK 只有

@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Logger } from '@nestjs/common';
 import { asAutomationId } from '@platform/shared-kernel';
 import { AutomationResourceExhausted } from '@platform/contracts';
 import { AutomationScheduler } from '../../src/application/automation.scheduler';
@@ -1106,6 +1107,272 @@ describe('AutomationScheduler —— 一条规则出问题不带走整批（fire
     expect(h.rules.rows.get('aut-1')?.lastTriggeredAt?.toISOString()).toBe(
       '2026-06-01T10:00:00.000Z',
     );
+  });
+});
+
+/**
+ * ⭐⭐ **一条坏数据不许让整轮停摆**（H2，2026-09-05，code review 后补）。
+ *
+ * 上一版三个阶段的异常粒度是**不对称**的：`fireDue` 有 per-rule try/catch，
+ * `applyPendingOutcomes` 与 `advanceInFlight` 的三个循环一个都没有 —— 一条坏 run 或一次
+ * 跨模块调用失败会把**它后面的阶段一起带走**，那一分钟所有规则都不跑。而排在第一个的
+ * `applyPendingOutcomes` 处理的恰恰是「上一轮崩溃留下的残局」：最容易坏的数据放在最脆弱
+ * 的位置，坏到每轮都抛就是**所有规则永久停摆**。
+ *
+ * ⇒ 下面每一条的形状都一样，而且**第二问才是这个修复的价值**：
+ *   ① 坏的那条自己被跳过，并且**留下痕迹**（带 id 的日志，不是静默吞掉）；
+ *   ② **同一轮里**后面的 run / 阶段 / 规则照常执行。
+ */
+describe('AutomationScheduler —— ⭐ 一条坏数据不带走整轮（H2：逐条隔离 + 阶段隔离）', () => {
+  interface Logs {
+    warns: string[];
+    debugs: string[];
+    errors: string[];
+  }
+  /** 三档日志都收着 —— 「留下痕迹」这半条断言只能在这里验。 */
+  function captureLogs(): Logs {
+    const logs: Logs = { warns: [], debugs: [], errors: [] };
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation((m: unknown) => {
+      logs.warns.push(String(m));
+    });
+    vi.spyOn(Logger.prototype, 'debug').mockImplementation((m: unknown) => {
+      logs.debugs.push(String(m));
+    });
+    vi.spyOn(Logger.prototype, 'error').mockImplementation((m: unknown) => {
+      logs.errors.push(String(m));
+    });
+    return logs;
+  }
+  const lines = (all: string[], needle: string): string[] => all.filter((l) => l.includes(needle));
+
+  /** 一条「已终态但还没记账」的孤儿 run —— 上一轮崩在 `recordOutcome` 之前留下的残局。 */
+  function orphanRun(id: string, automationId: string): AutomationRun {
+    const run = AutomationRun.pending(id, asAutomationId(automationId), at('2026-06-01T09:00:00Z'));
+    run.markRunning(`sbx-${id}`, at('2026-06-01T09:00:10Z'));
+    run.finalize('failed', at('2026-06-01T09:05:00Z'), { errorMessage: 'crashed' });
+    return run;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('★★ 阶段①一条孤儿 run 每次都炸 ⇒ 它被跳过留痕，同一轮里到期的规则照常触发', async () => {
+    // 坏数据的真实形状：`applyPendingOutcomes` 要先 `findById` 那条规则，而 `findById`
+    // 走的是**裸 `toDomain`** —— 仓储层的 `hydrateAll` 逐行隔离只护住 list 取数，护不住
+    // 它。库里一行 `timezone='Not/AZone'` 就让这条孤儿每一轮都抛。
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const good = h.rules.seed(hourlyRule('aut-good', at('2026-06-01T09:00:00Z')));
+    setDue(good, at('2026-06-01T10:00:00Z'));
+
+    // ⚠️ 坏的**排在前面**：要证明的是它后面的那条还跑。两条都是自己造的，不靠上一步残留。
+    const bad = orphanRun('run-orphan-bad', 'aut-broken');
+    h.runs.seed(bad);
+    const ok = orphanRun('run-orphan-ok', 'aut-good');
+    h.runs.seed(ok);
+    const realFindById = h.rules.findById.bind(h.rules);
+    vi.spyOn(h.rules, 'findById').mockImplementation((id) =>
+      id === 'aut-broken'
+        ? Promise.reject(new Error("invalid time zone 'Not/AZone'"))
+        : realFindById(id),
+    );
+
+    // ★ 失败的那条**不计入** touched：动了的是「补记 run-orphan-ok」+「触发 aut-good」
+    // MUTATION: 把 `applied += 1` 挪出 try（失败也算一条）⇒ 本行变成 3 ⇒ 红。
+    await expect(h.scheduler.runOnce()).resolves.toBe(2);
+
+    // ① 它自己被跳过 + 留下痕迹（带 id、带原因，不是静默吞掉）
+    expect(h.runs.rows.get('run-orphan-bad')?.outcomeApplied).toBe(false); // 留到下一轮，不丢账
+    expect(lines(logs.warns, 'run-orphan-bad')).toHaveLength(1);
+    expect(lines(logs.warns, 'run-orphan-bad')[0]).toContain("invalid time zone 'Not/AZone'");
+
+    // ②（价值所在之一）**同一个循环里**后面那条照常被补记
+    // MUTATION: 删掉 applyPendingOutcomes 的 per-item try/catch ⇒ 下面两行红。
+    expect(h.runs.rows.get('run-orphan-ok')?.outcomeApplied).toBe(true);
+    expect(h.rules.rows.get('aut-good')?.failureCount).toBe(1);
+
+    // ②（价值所在之二）后面的**阶段**照常跑：到期的规则真的触发了
+    expect(h.launcher.created.map((c) => c.automationId)).toEqual(['aut-good']);
+    expect(h.rules.rows.get('aut-good')?.nextTriggerAt?.toISOString()).toBe(
+      '2026-06-01T11:00:00.000Z',
+    );
+  });
+
+  it('★★ 阶段②一条 run 的 phaseOf 炸了 ⇒ 同一轮里另一条照常落终态、到期的规则照常触发', async () => {
+    // `phaseOf` 打的是 provider，**会真的失败**（不可达、限流）—— 比坏行更常见。
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const owner = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T08:00:00Z')));
+    setDue(owner, at('2026-06-01T12:00:00Z')); // 这条本轮不到期：它只提供两条在飞 run
+    const due = h.rules.seed(hourlyRule('aut-due', at('2026-06-01T09:00:00Z')));
+    setDue(due, at('2026-06-01T10:00:00Z'));
+
+    const bad = AutomationRun.pending(
+      'run-bad',
+      asAutomationId('aut-1'),
+      at('2026-06-01T09:00:00Z'),
+    );
+    bad.markRunning('sbx-bad', at('2026-06-01T09:00:10Z'));
+    h.runs.seed(bad); // ⚠️ 先种坏的：要证明的是它**后面**的还跑
+    const ok = AutomationRun.pending('run-ok', asAutomationId('aut-1'), at('2026-06-01T09:30:00Z'));
+    ok.markRunning('sbx-ok', at('2026-06-01T09:30:10Z'));
+    h.runs.seed(ok);
+    h.launcher.phaseFailures.set('sbx-bad', new Error('provider unreachable'));
+    h.launcher.phaseQueue = [{ kind: 'finished', status: 'success' }];
+
+    // 动了两条：run-ok 落终态 + aut-due 触发。坏的那条不算。
+    await expect(h.scheduler.runOnce()).resolves.toBe(2);
+
+    // ① 坏的那条原地不动 + 留痕
+    expect(h.runs.rows.get('run-bad')?.status).toBe('running');
+    expect(lines(logs.warns, 'run-bad')).toHaveLength(1);
+    expect(lines(logs.warns, 'run-bad')[0]).toContain('provider unreachable');
+
+    // ② 同一个循环里后面那条照常推进
+    // MUTATION: 去掉 advanceInFlight 循环②的 try/catch ⇒ run-ok 停在 running ⇒ 红。
+    expect(h.runs.rows.get('run-ok')?.status).toBe('success');
+    expect(h.runs.rows.get('run-ok')?.outcomeApplied).toBe(true);
+    // ② 后面的**阶段**也照常跑：fireDue 没有被前一个阶段带走
+    expect(h.launcher.created.map((c) => c.automationId)).toEqual(['aut-due']);
+  });
+
+  it('★ 阶段②重试到点的那条炸了 ⇒ 同一轮里另一条重试照常起沙箱', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T08:00:00Z')));
+    setDue(rule, at('2026-06-01T12:00:00Z')); // 本轮不到期：只看重试循环
+
+    const bad = AutomationRun.pending(
+      'run-retry-bad',
+      asAutomationId('aut-broken'),
+      at('2026-06-01T09:00:00Z'),
+    );
+    bad.queueRetry(at('2026-06-01T09:00:00Z')); // retryAt = 09:24 ⇒ 本轮到点
+    h.runs.seed(bad);
+    const ok = AutomationRun.pending(
+      'run-retry-ok',
+      asAutomationId('aut-1'),
+      at('2026-06-01T09:00:00Z'),
+    );
+    ok.queueRetry(at('2026-06-01T09:00:00Z'));
+    h.runs.seed(ok);
+    const realFindById = h.rules.findById.bind(h.rules);
+    vi.spyOn(h.rules, 'findById').mockImplementation((id) =>
+      id === 'aut-broken' ? Promise.reject(new Error('row is unhydratable')) : realFindById(id),
+    );
+
+    await expect(h.scheduler.runOnce()).resolves.toBe(1);
+
+    expect(h.runs.rows.get('run-retry-bad')?.status).toBe('resource-exhausted'); // 原地不动
+    expect(lines(logs.warns, 'run-retry-bad')).toHaveLength(1);
+    // MUTATION: 去掉 advanceInFlight 循环①的 try/catch ⇒ 下面两行红。
+    expect(h.runs.rows.get('run-retry-ok')?.status).toBe('running');
+    expect(h.launcher.created.map((c) => c.automationId)).toEqual(['aut-1']);
+  });
+
+  it('★★ 阶段的**取数**整批抛（逐条 try/catch 够不着）⇒ 后面的阶段照样跑', async () => {
+    // ⚠️ 与上面三条不是同一件事：`listOutcomePending` / `listActive` 走的是裸
+    // `.map(toDomain)`（`automation_runs` 侧还没有 `hydrateAll` 那样的逐行隔离），一行坏
+    // 的 run 会让取数抛在**循环之外** —— 条目级 try/catch 根本没机会执行。这一层是
+    // `runStage` 兜的。
+    for (const broken of ['listOutcomePending', 'listActive'] as const) {
+      const h = harness(at('2026-06-01T10:00:00Z'));
+      const logs = captureLogs();
+      const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+      setDue(rule, at('2026-06-01T10:00:00Z'));
+      vi.spyOn(h.runs, broken).mockRejectedValue(new Error('unhydratable automation_runs row'));
+
+      // MUTATION: 把 runStage 的 try/catch 拆掉（恢复成一个总 catch）⇒ 本行变成 0 ⇒ 红。
+      await expect(h.scheduler.runOnce(), broken).resolves.toBe(1);
+      expect(
+        h.launcher.created.map((c) => c.automationId),
+        broken,
+      ).toEqual(['aut-1']);
+      // 阶段整段没跑是 error 一档（一条被跳过才是 warn），且说得出是**哪个**阶段
+      // MUTATION: 把 runStage 日志里的 stage 去掉 ⇒ 本行红。
+      const stage =
+        broken === 'listOutcomePending' ? 'apply-pending-outcomes' : 'advance-in-flight';
+      expect(lines(logs.errors, 'automation sweep failed'), broken).toEqual([
+        `automation sweep failed at stage '${stage}': unhydratable automation_runs row`,
+      ]);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('★★ 反复失败：首轮 warn、中间降 debug、第 60 轮再 warn —— 既不刷屏也不静默', async () => {
+    // 取舍见 `noteSkipped` 的注释：每轮都 warn ⇒ 一天 1440 行同一句话；只 warn 一次 ⇒
+    // 半夜开始看日志的人什么都看不到。warn 这一档保持每小时一行的心跳。
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const orphan = orphanRun('run-orphan', 'aut-broken');
+    h.runs.seed(orphan);
+    vi.spyOn(h.rules, 'findById').mockRejectedValue(new Error('still unhydratable'));
+
+    for (let i = 0; i < 59; i += 1) await h.scheduler.runOnce();
+    // MUTATION: 把 `sweeps === 1` 之外的分支也写成 warn（每轮都刷）⇒ 本行变成 59 ⇒ 红。
+    expect(lines(logs.warns, 'run-orphan')).toHaveLength(1);
+    expect(lines(logs.debugs, 'run-orphan')).toHaveLength(58); // 中间那些没丢，只是降了档
+
+    await h.scheduler.runOnce(); // 第 60 轮
+    // MUTATION: 删掉 `sweeps % SKIP_WARN_REPEAT_SWEEPS === 0` 那一支（只 warn 一次）⇒ 红。
+    expect(lines(logs.warns, 'run-orphan')).toHaveLength(2);
+    expect(lines(logs.warns, 'run-orphan')[1]).toContain('已连续 60 轮');
+  });
+
+  it('★ 中间恢复过一轮 ⇒ 下次失败重新算第一次（账本不许当成同一次的延续）', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const orphan = orphanRun('run-orphan', 'aut-broken');
+    vi.spyOn(h.rules, 'findById').mockRejectedValue(new Error('unhydratable'));
+    // 「这一轮它没失败」= 这一轮它根本没进批次（批次上限 100，坏行时进时不进是常态）
+    let batch: AutomationRun[] = [orphan];
+    vi.spyOn(h.runs, 'listOutcomePending').mockImplementation(() => Promise.resolve(batch));
+
+    await h.scheduler.runOnce(); // 失败第一次 ⇒ warn
+    batch = [];
+    await h.scheduler.runOnce(); // 这一轮它没失败 ⇒ 账本里的那条该被丢掉
+    batch = [orphan];
+    await h.scheduler.runOnce(); // 又失败 ⇒ 这是一次**新的**失败，值一条 warn
+
+    // MUTATION: 删掉 `forgetHealedSkips()` ⇒ 第三轮变 debug ⇒ 本行变成 1 ⇒ 红。
+    expect(lines(logs.warns, 'run-orphan')).toHaveLength(2);
+    expect(lines(logs.debugs, 'run-orphan')).toHaveLength(0);
+  });
+
+  it('★ 失败原因**变了**立刻重新 warn —— 换了个错法是新信息，不该被冷却期盖住', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const orphan = orphanRun('run-orphan', 'aut-broken');
+    h.runs.seed(orphan);
+    const findById = vi.spyOn(h.rules, 'findById');
+
+    findById.mockRejectedValueOnce(new Error('unhydratable row'));
+    await h.scheduler.runOnce();
+    findById.mockRejectedValueOnce(new Error('database is locked'));
+    await h.scheduler.runOnce();
+    // 第三轮换回第二次那句 ⇒ 与上一轮同因，降到 debug
+    findById.mockRejectedValueOnce(new Error('database is locked'));
+    await h.scheduler.runOnce();
+
+    // MUTATION: 去掉 `previous.message === message` 这个判据 ⇒ 第二轮变 debug ⇒ 本行红。
+    expect(lines(logs.warns, 'run-orphan')).toHaveLength(2);
+    expect(lines(logs.warns, 'run-orphan')[1]).toContain('database is locked');
+    expect(lines(logs.debugs, 'run-orphan')).toHaveLength(1);
+  });
+
+  it('★ 抛出来的不是 Error（JS 里合法）⇒ 日志里也要看得见它，而不是一行 undefined', async () => {
+    const h = harness(at('2026-06-01T10:00:00Z'));
+    const logs = captureLogs();
+    const rule = h.rules.seed(hourlyRule('aut-1', at('2026-06-01T09:00:00Z')));
+    setDue(rule, at('2026-06-01T10:00:00Z'));
+    // ⚠️ `mockRejectedValue` 一个裸字符串 —— `throw 'x'` 在 JS 里合法，端口实现里真的出现过
+    vi.spyOn(h.runs, 'findLatest').mockRejectedValue('boom-as-a-bare-string');
+
+    await h.scheduler.runOnce();
+
+    // MUTATION: 把 `reason()` 换回 `(e as Error).message` ⇒ 这里是 'undefined' ⇒ 红。
+    expect(lines(logs.warns, 'aut-1')[0]).toContain('boom-as-a-bare-string');
   });
 });
 

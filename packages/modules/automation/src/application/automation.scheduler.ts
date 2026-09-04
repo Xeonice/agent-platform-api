@@ -41,6 +41,25 @@ export const SWEEP_INTERVAL_MS = 60_000;
 const OUTCOME_PENDING_BATCH = 100;
 
 /**
+ * 同一条坏 item **连续**失败时，`warn` 的复述间隔（单位：轮）。60 轮 ≈ 1 小时。
+ * 取舍写在 {@link AutomationScheduler.noteSkipped} 上。
+ */
+const SKIP_WARN_REPEAT_SWEEPS = 60;
+
+/** `runOnce` 的三个阶段 —— 每个各自兜底，一个挂了不带走后面的（见 `runStage`）。 */
+type SweepStage = 'apply-pending-outcomes' | 'advance-in-flight' | 'fire-due';
+
+/** 阶段**内部**逐条隔离时，被跳过的那一条属于哪个循环（见 `noteSkipped`）。 */
+type SkipScope = 'outcome-pending' | 'retry-due' | 'in-flight' | 'fire-due';
+
+/** 一条 item 连续失败的账本项。`lastSweep` 只用来把「已经不失败了」的条目清掉。 */
+interface SkipStreak {
+  readonly message: string;
+  readonly sweeps: number;
+  readonly lastSweep: number;
+}
+
+/**
  * `AutomationScheduler`（03 §8.1，逐条实现）。
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +86,10 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
   private readonly logger = new Logger('AutomationScheduler');
   private readonly mutex = new Mutex();
   private timer: NodeJS.Timeout | null = null;
+  /** 单调递增的轮次号。**只用来数轮，不用来读时间** —— 与 `clock` 无关，测试里可确定复现。 */
+  private sweepSeq = 0;
+  /** `scope:id` → 连续失败账本。只保留**这一轮还在失败**的条目（`forgetHealedSkips`）。 */
+  private readonly skipStreaks = new Map<string, SkipStreak>();
 
   constructor(
     @Inject(AUTOMATION_REPOSITORY) private readonly rules: AutomationRepository,
@@ -107,21 +130,105 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    *
    * 返回这一轮真正「动了」的条数（触发 + 推进 + 补扫），供日志与测试断言。
    * 上一轮还在跑 ⇒ **立即返回 0**（T-AUT-42），不排队。
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * ⭐ **三个阶段各自兜底，阶段内还要逐条兜底。**
+   *
+   * 这里曾经只有**一个总 try/catch**，于是三个阶段的异常粒度是不对称的：`fireDue` 自己
+   * 做对了（per-rule try/catch，一条规则挂了不影响其余），前两个没有 —— 任何一条坏 run、
+   * 任何一次跨模块调用失败（`launcher.phaseOf` 撞上 provider 不可达）都会把**它后面的
+   * 阶段一起带走**，这一分钟所有规则都不跑，外部只看到一行 `automation sweep failed`。
+   *
+   * ⚠️ 最要命的是**顺序**：排在第一个的 `applyPendingOutcomes` 处理的恰恰是「上一轮崩溃
+   * 留下的残局」—— 最容易坏的数据放在了最脆弱的位置。坏到每轮都抛的话（真实先例：
+   * `automations.timezone` 是一个解不出来的 IANA 名，`findById` 里的 `toDomain` 每次都炸，
+   * 而 `hydrateAll` 的逐行隔离**只护住 list 取数、护不住 `findById`**），调度器会每分钟
+   * 都挂在第一步，**所有规则永久停摆**。
+   *
+   * ⇒ 修法是把仓储层早就立好的那条纪律（`hydrateAll`：坏行逐条跳过 + 逐条带 id log）
+   * 推到应用层，与 `fireDue` 对称。**两层**：
+   *   · `runStage`   —— 阶段级：取数本身抛（`.map(toDomain)` 在循环之外）时兜住；
+   *   · `noteSkipped` —— 条目级：一条坏数据跳过它自己，同一轮里后面的照常跑。
+   *
+   * ⚠️ **被跳过的那条不计入 `touched`。** `touched` 的语义是「这一轮真的动了多少东西」，
+   * 上层拿它判断有没有活干；把失败算进去就是拿「没干成」冒充「干了」。`fireDue` 一直是
+   * 这么算的（`fired += 1` 在 `await fireOne()` **之后**），另外两个照它对齐 —— 结构上让
+   * `+= 1` 待在 try 的末尾，抛了就到不了，而不是靠人记得别加。
+   * ─────────────────────────────────────────────────────────────────────────
    */
   async runOnce(): Promise<number> {
     if (this.mutex.isLocked()) return 0;
     return this.mutex.runExclusive(async () => {
+      this.sweepSeq += 1;
       let touched = 0;
-      try {
-        touched += await this.applyPendingOutcomes();
-        touched += await this.advanceInFlight();
-        touched += await this.fireDue();
-      } catch (e) {
-        // 一轮扫挂了不该带走定时器：下一分钟还会来。
-        this.logger.error(`automation sweep failed: ${(e as Error).message}`);
-      }
+      touched += await this.runStage('apply-pending-outcomes', () => this.applyPendingOutcomes());
+      touched += await this.runStage('advance-in-flight', () => this.advanceInFlight());
+      touched += await this.runStage('fire-due', () => this.fireDue());
+      this.forgetHealedSkips();
       return touched;
     });
+  }
+
+  /**
+   * 跑一个阶段，**它挂了不许带走后面的阶段**：下一分钟还会来，但这一分钟的规则得照常触发。
+   *
+   * ⚠️ 它与 `noteSkipped` 管的不是同一件事。逐条隔离管「一条数据坏了」；这一层管**取数
+   * 本身**抛 —— `listActive()` / `listOutcomePending()` / `listPendingRetries()` 走的都是
+   * 裸 `.map(toDomain)`（`automation_runs` 侧还没有 `hydrateAll` 那样的逐行隔离），一行坏
+   * 的 run 会让整批取数抛在**循环之外**，条目级 try/catch 根本没机会执行。那一刻仍然要
+   * 保证 `fireDue()` 跑得起来：**规则不触发是这条链路上最贵的失败**。
+   */
+  private async runStage(stage: SweepStage, body: () => Promise<number>): Promise<number> {
+    try {
+      return await body();
+    } catch (e) {
+      // ⚠️ 保留 `automation sweep failed` 这个子串：既有的日志检索按它匹配。
+      this.logger.error(`automation sweep failed at stage '${stage}': ${reason(e)}`);
+      return 0;
+    }
+  }
+
+  /**
+   * 一条 item 被跳过时留下的**痕迹**。四个循环共用一份 —— 两套日志形态没有理由。
+   *
+   * ⛔ **不许吞成静默。** 这是 `hydrateAll` 那条注释的原话：坏行不静默吞掉、每条单独 log
+   * 一次、带上 id，否则「这条规则怎么不跑了」又变成一个查不出来的问题。
+   *
+   * ⚠️ **但也不许刷屏。** 一条坏到每轮都抛的数据一分钟来一次：
+   *   · 每轮都 `warn` ⇒ 一天 1440 行同一句话，真正的新问题淹在里面；
+   *   · 只在第一次 `warn` ⇒ 进程刚起时闪一行，之后永远安静 —— 半夜才开始翻日志的人什么
+   *     都看不到，等于回到了「查不出来」。
+   * ⇒ 取的是中间：**首次 warn + 每 60 轮（≈1h）复述一次 + 中间降到 debug**。warn 这一档
+   *   永远有心跳、量是每小时一行；把 debug 打开就有完整的逐轮记录。失败原因**变了**立刻
+   *   重新 warn —— 换了个错法是新信息，不该被上一次的冷却期盖住。
+   */
+  private noteSkipped(scope: SkipScope, id: string, e: unknown): void {
+    const message = reason(e);
+    const key = `${scope}:${id}`;
+    const previous = this.skipStreaks.get(key);
+    const sweeps = previous !== undefined && previous.message === message ? previous.sweeps + 1 : 1;
+    this.skipStreaks.set(key, { message, sweeps, lastSweep: this.sweepSeq });
+    const line = `automation sweep skipped ${scope} ${id}: ${message}`;
+    if (sweeps === 1) {
+      this.logger.warn(line);
+    } else if (sweeps % SKIP_WARN_REPEAT_SWEEPS === 0) {
+      this.logger.warn(`${line}（已连续 ${String(sweeps)} 轮跳过它）`);
+    } else {
+      this.logger.debug(line);
+    }
+  }
+
+  /**
+   * 这一轮没再失败的条目丢掉。两个理由，缺一不可：
+   *   ① 账本不许**只增不减** —— 与 `SandboxHealthMonitor.forget()` 同款纪律，否则它就是
+   *      一条随进程寿命增长的泄漏；清完之后大小被这一轮的批量上限夹住。
+   *   ② 中间恢复过一轮的，下次失败要**重新算作第一次**：那是一次新的失败，不是同一次的
+   *      延续，值一条 warn。
+   */
+  private forgetHealedSkips(): void {
+    for (const [key, streak] of this.skipStreaks) {
+      if (streak.lastSweep !== this.sweepSeq) this.skipStreaks.delete(key);
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -140,17 +247,25 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
     const orphans = await this.runs.listOutcomePending(OUTCOME_PENDING_BATCH);
     let applied = 0;
     for (const run of orphans) {
-      const automation = await this.rules.findById(run.automationId);
-      if (automation === null) {
-        // 规则已被删（run 也会随 CASCADE 走，这里是竞态窗口里的残影）——标掉即可。
-        run.markOutcomeApplied();
-        this.uow.run((tx) => {
-          this.runs.saveSync(tx, run);
-        });
-        continue;
+      try {
+        const automation = await this.rules.findById(run.automationId);
+        if (automation === null) {
+          // 规则已被删（run 也会随 CASCADE 走，这里是竞态窗口里的残影）——标掉即可。
+          run.markOutcomeApplied();
+          this.uow.run((tx) => {
+            this.runs.saveSync(tx, run);
+          });
+          continue;
+        }
+        this.applyOutcome(automation, run, run.status as AutomationOutcome);
+        applied += 1;
+      } catch (e) {
+        // ⚠️ 跳过它 = **留到下一轮**，不丢账：`outcome_applied` 保持 false，下一轮照样扫得
+        // 到，而补扫本来就是幂等的补偿路径。这里最常见的抛法是 `findById` 水化那条规则时
+        // 炸（坏 `timezone` / 坏 `schedule_config`）—— 那条规则自己也活不了，但它没有理由
+        // 顺手带走同一轮里其余的孤儿 run 和**后面两个阶段**。
+        this.noteSkipped('outcome-pending', run.id, e);
       }
-      this.applyOutcome(automation, run, run.status as AutomationOutcome);
-      applied += 1;
     }
     if (applied > 0) {
       this.logger.warn(`recovered ${String(applied)} outcome-pending automation run(s)`);
@@ -178,69 +293,97 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
 
     // ① 资源重试到点的（同一行 run，I-AUR-2）
     for (const run of await this.runs.listPendingRetries(now)) {
-      const automation = await this.rules.findById(run.automationId);
-      if (automation === null) continue;
-      touched += (await this.tryStartSandbox(automation, run)) ? 1 : 0;
+      try {
+        const automation = await this.rules.findById(run.automationId);
+        if (automation === null) continue;
+        touched += (await this.tryStartSandbox(automation, run)) ? 1 : 0;
+      } catch (e) {
+        this.noteSkipped('retry-due', run.id, e);
+      }
     }
 
     // ② provisioning / ready / running
     for (const run of await this.inFlightRuns()) {
-      if (run.sandboxId === null) continue;
-      const phase = await this.launcher.phaseOf(run.sandboxId);
-      switch (phase.kind) {
-        case 'provisioning':
-        case 'running':
-          break;
-        case 'ready': {
-          const automation = await this.rules.findById(run.automationId);
-          if (automation === null) break;
-          await this.startTaskOn(automation, run);
-          touched += 1;
-          break;
-        }
-        case 'finished': {
-          const automation = await this.rules.findById(run.automationId);
-          if (automation === null) break;
-          // ★ 决策表行 3 的**另一半**（03 §8.2）：沙箱是建出来了，但它死在「没资源」上
-          // （典型：工作区复制时磁盘写满 ⇒ `DISK_INSUFFICIENT`）。这**不是**规则失败，
-          // 与创建那一刻被互斥区拒完全同源，所以走同一段记账 —— 排队重试、不计失败。
-          //
-          // ⚠️ 判据是**码**不是文案。`errorMessage` 是给人看的自由文本，靠它做分支就是
-          // 把一条领域判定挂在一句随时会被改写的句子上。
-          if (phase.status === 'failed' && isCapacityFailureCode(phase.errorCode)) {
-            this.queueOrGiveUp(automation, run);
-            touched += 1;
-            break;
-          }
-          if (run.status === 'pending') run.markRunning(run.sandboxId, this.clock.now());
-          const finishedAt = this.clock.now();
-          if (phase.logPath !== undefined) {
-            run.attachLog(phase.logPath, Math.min(phase.logBytes ?? 0, LOG_CEILING));
-          }
-          run.finalize(phase.status, finishedAt, {
-            ...(phase.errorMessage !== undefined ? { errorMessage: phase.errorMessage } : {}),
-            outputSummary: await this.notifier.summarize(run.logPath),
-          });
-          this.applyOutcome(automation, run, phase.status);
-          this.notify(this.notifier.afterRunFinished(automation, run));
-          touched += 1;
-          break;
-        }
-        case 'gone': {
-          const automation = await this.rules.findById(run.automationId);
-          if (automation === null) break;
-          if (run.status === 'pending') run.markRunning(run.sandboxId, this.clock.now());
-          run.finalize('failed', this.clock.now(), {
-            errorMessage: 'the sandbox backing this run no longer exists',
-          });
-          this.applyOutcome(automation, run, 'failed');
-          this.notify(this.notifier.afterRunFinished(automation, run));
-          touched += 1;
-          break;
-        }
+      try {
+        touched += await this.advanceOne(run);
+      } catch (e) {
+        this.noteSkipped('in-flight', run.id, e);
       }
     }
     return touched;
+  }
+
+  /**
+   * 推进**一条**在飞 run。⭐ 隔离粒度就到这一层：**一条 run 一个 try/catch**，不再往里细分。
+   *
+   * ⚠️ 为什么不按子步骤各兜各的（`phaseOf` → `startTaskOn` → `summarize` → `applyOutcome`
+   * 是好几步）：那样会造出**半途而废**的状态，而半途而废比整条跳过更糟 —— 典型是「沙箱起
+   * 来了、run 上没记」。这里每条 run 的形状都是「读状态 → 判断 → **一次**事务写」，两种
+   * 断点都不需要补偿代码：
+   *   · 写之前抛 ⇒ 库里什么都没变，下一轮从同一个起点重来（相位是 provider 那边的事实，
+   *     重问一次得到的还是它）；
+   *   · 写之后抛 ⇒ 那一步已经落库，下一轮从新状态接着走。
+   *
+   * ⛔ 唯一不在事务里的副作用是 `createSandbox`（外部资源），它在**另一个**循环里，且早就
+   * 被 `tryStartSandbox` 自己的 try/catch 包着 —— 不归这一层管。
+   *
+   * `notifier.summarize()` 也不必单独兜：它自己吞掉读日志的失败并回 `undefined`（摘要读不
+   * 到不该让一条 run 落不了终态）。
+   */
+  private async advanceOne(run: AutomationRun): Promise<number> {
+    const sandboxId = run.sandboxId;
+    // 拿 `null` 去问 provider 相位是一次必然失败的调用；这条 run 还在等沙箱，
+    // 它的下一步是**创建**而不是**推进**。
+    if (sandboxId === null) return 0;
+    const phase = await this.launcher.phaseOf(sandboxId);
+    switch (phase.kind) {
+      case 'provisioning':
+      case 'running':
+        return 0;
+      case 'ready': {
+        const automation = await this.rules.findById(run.automationId);
+        if (automation === null) return 0;
+        await this.startTaskOn(automation, run);
+        return 1;
+      }
+      case 'finished': {
+        const automation = await this.rules.findById(run.automationId);
+        if (automation === null) return 0;
+        // ★ 决策表行 3 的**另一半**（03 §8.2）：沙箱是建出来了，但它死在「没资源」上
+        // （典型：工作区复制时磁盘写满 ⇒ `DISK_INSUFFICIENT`）。这**不是**规则失败，
+        // 与创建那一刻被互斥区拒完全同源，所以走同一段记账 —— 排队重试、不计失败。
+        //
+        // ⚠️ 判据是**码**不是文案。`errorMessage` 是给人看的自由文本，靠它做分支就是
+        // 把一条领域判定挂在一句随时会被改写的句子上。
+        if (phase.status === 'failed' && isCapacityFailureCode(phase.errorCode)) {
+          this.queueOrGiveUp(automation, run);
+          return 1;
+        }
+        if (run.status === 'pending') run.markRunning(sandboxId, this.clock.now());
+        const finishedAt = this.clock.now();
+        if (phase.logPath !== undefined) {
+          run.attachLog(phase.logPath, Math.min(phase.logBytes ?? 0, LOG_CEILING));
+        }
+        run.finalize(phase.status, finishedAt, {
+          ...(phase.errorMessage !== undefined ? { errorMessage: phase.errorMessage } : {}),
+          outputSummary: await this.notifier.summarize(run.logPath),
+        });
+        this.applyOutcome(automation, run, phase.status);
+        this.notify(this.notifier.afterRunFinished(automation, run));
+        return 1;
+      }
+      case 'gone': {
+        const automation = await this.rules.findById(run.automationId);
+        if (automation === null) return 0;
+        if (run.status === 'pending') run.markRunning(sandboxId, this.clock.now());
+        run.finalize('failed', this.clock.now(), {
+          errorMessage: 'the sandbox backing this run no longer exists',
+        });
+        this.applyOutcome(automation, run, 'failed');
+        this.notify(this.notifier.afterRunFinished(automation, run));
+        return 1;
+      }
+    }
   }
 
   /**
@@ -273,7 +416,10 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       } catch (e) {
         // 一条规则出问题不该带走整批 —— 它的 `next_trigger_at` 已经推进过了
         // （I-AUT-8），所以下一轮不会把它反复触发。
-        this.logger.warn(`automation ${automation.id} failed to fire: ${(e as Error).message}`);
+        //
+        // ⚠️ 这条 catch 是本文件里**最早写对的那一个**，另外三个循环是照它补齐的；日志出口
+        // 也一并收编进 `noteSkipped`（同一件事没有理由有两套形态、两套刷屏策略）。
+        this.noteSkipped('fire-due', automation.id, e);
       }
     }
     return fired;
@@ -546,6 +692,15 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
 
 /** I-AUR-4 的上限，用于把 provider 报上来的体积夹住（超限会被聚合拒绝）。 */
 const LOG_CEILING = 31_457_280;
+
+/**
+ * 与 `hydrateAll` 同款的取文案方式：**非 Error 也要能读**。
+ * `(e as Error).message` 遇到 `throw 'boom'`（JS 里合法）会把一行日志写成 `undefined`
+ * —— 而这几处日志的全部价值就是「说清楚它为什么被跳过」。
+ */
+function reason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 function launchInput(automation: Automation): AutomationTaskLaunchInput {
   return {

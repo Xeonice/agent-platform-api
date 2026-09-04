@@ -163,8 +163,9 @@ function toDomain(row: AutomationRow): Automation {
  * ⚠️ `toDomain` 每行都跑完整值对象校验（`Schedule.create` 真解 IANA + `normalizeConfig`、
  * `TimeoutPolicy.of`、`assertRetentionDays`、`WebhookTarget.create`）。上一版是裸
  * `.map(toDomain)`：**任何一行抛，整个 `listDue` 的结果全没**，而 `fireDue` 的
- * per-rule try/catch 在它**下游**，救不了；`runOnce` 只有一个总 catch，只 log 一行
- * `automation sweep failed`。
+ * per-rule try/catch 在它**下游**，救不了；调度器的 `runStage`（H2 之后）也只保证**别的
+ * 阶段**照跑 —— 这一轮仍然是一条规则都不触发，日志上只有一行
+ * `automation sweep failed at stage 'fire-due'`。**这一层的隔离必须在这里做。**
  *
  * ⇒ 症状是「**全部规则再也不触发**，每分钟一行日志」。可触发的输入不止一种：
  *  · tzdata/ICU 变更 —— Node 升级后某个曾经合法的 IANA 名解不出来（DB 侧 CHECK 只有
