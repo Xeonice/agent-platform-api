@@ -1,8 +1,34 @@
-# 契约漂移门禁（09 §2.3）—— CI 里那条的本地前置。
+# 推送前门禁（09 §2.3「本地检查必须对齐 CI」）。
 #
+# ⚠️ 这条纪律是踩出来的：同一个「本地没跑、推上去才被 CI 拦」的坑吃过多次。
+#    2026-09-04 又中一次 —— 一个 agent 中断时没来得及跑 `pnpm format`，
+#    `format:check` 在 CI 前的全量复核里才红。三道检查加起来 ~7 秒，
+#    而下面那个 `pnpm build` 本来就更慢，成本可以忽略。
+set -e
+
+# ── 快检三连：格式 / lint / 类型 ──────────────────────────────────────────
+if ! pnpm format:check; then
+  echo ""
+  echo "⛔ 有文件没过 Prettier，推送已拦下。"
+  echo "   下一步：pnpm format && git add -A && git commit --amend --no-edit"
+  exit 1
+fi
+
+if ! pnpm lint; then
+  echo ""
+  echo "⛔ ESLint 未通过（含 DDD 分层 boundaries 与时间/ID 禁令），推送已拦下。"
+  exit 1
+fi
+
+if ! pnpm typecheck; then
+  echo ""
+  echo "⛔ tsc 未通过，推送已拦下。"
+  exit 1
+fi
+
+# ── 契约漂移门禁 ────────────────────────────────────────────────────────
 # ⚠️ api 的 openapi:emit 读的是 dist，所以必须【先 build】：dist 旧一轮，emit 出来的
 #    就是旧契约，门禁会静默变绿——那正是它要防的那种失败。
-set -e
 pnpm build
 if ! pnpm check:openapi; then
   echo ""
