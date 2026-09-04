@@ -827,3 +827,107 @@ describe('replay never reports a FAILED read as "you are up to date"', () => {
     await expect(h.taskService.replay(dto.id, 0)).rejects.toThrow(/EIO/);
   });
 });
+
+describe('artifact collection — what the drop box listing is allowed to become', () => {
+  it('★ asks for the WHOLE tree with a bounded listing, and only files become artifacts', async () => {
+    const h = harness();
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+
+    const asked: { path: string; opts?: { recursive?: boolean; maxEntries?: number } }[] = [];
+    h.provider.files!.listFiles = (_handle, path, opts) => {
+      asked.push({ path, opts });
+      return Promise.resolve([
+        // a DIRECTORY is not an artifact: the download endpoint streams bytes, and a
+        // directory has none — advertising it produces a row that can only 404.
+        { path: `${TASK_ARTIFACT_DIR}/out`, kind: 'dir' as const },
+        { path: `${TASK_ARTIFACT_DIR}/out/report.md`, kind: 'file' as const, size: 12 },
+        // a plane that reports NO size still yields a usable row (`size` is required
+        // on the DTO); 0 is the honest stand-in for "the listing did not say".
+        { path: `${TASK_ARTIFACT_DIR}/notes.txt`, kind: 'file' as const },
+      ]);
+    };
+
+    [...h.provider.jobs!.jobs.values()][0].finish(0);
+    await until(() => h.provider.jobs!.released.length === 1, 'completion');
+
+    // 正向执行证据：收集确实发生了，问的就是那个 drop box
+    expect(asked).toHaveLength(1);
+    expect(asked[0].path).toBe(TASK_ARTIFACT_DIR);
+    // recursive, or `out/report.md` below would never be seen at all
+    expect(asked[0].opts?.recursive).toBe(true);
+    // …and bounded, or a runaway agent's 200k files would sit between the exit code
+    // and the terminal state.
+    expect(asked[0].opts?.maxEntries).toBe(500);
+
+    expect(h.taskRepo.store.get(dto.id)!.artifacts).toEqual([
+      { name: 'out/report.md', size: 12, modifiedAt: undefined },
+      { name: 'notes.txt', size: 0, modifiedAt: undefined },
+    ]);
+  });
+});
+
+describe('a resume that attached to the WRONG conversation', () => {
+  it('★ is recorded and let go — it must not throw the running job away', async () => {
+    const h = harness();
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+    const job = [...h.provider.jobs!.jobs.values()][0];
+
+    // the CLI announced one conversation and then a DIFFERENT one on the same run —
+    // `bindSessionRef` refuses the second, which is a real failure but not one worth
+    // discarding a job that is producing output.
+    job.emit(claudeInit('sess-first') + claudeText('working') + claudeInit('sess-other'));
+    job.emit(claudeResult(false));
+    job.finish(0);
+    await until(() => h.provider.jobs!.released.length === 1, 'completion');
+
+    const stored = h.taskRepo.store.get(dto.id)!;
+    expect(stored.status).toBe('succeeded');
+    // the FIRST ref stands — a silently overwritten one would send the next turn's
+    // `--resume` at the wrong conversation.
+    expect(stored.sessionRef).toBe('sess-first');
+    // 正向执行证据：那一整块 stdout 真的被解析并推出去了，第二个 init 没有把它截断
+    const texts = frames(h)
+      .filter((f) => f.type === 'event')
+      .map((f) => f.event.type);
+    expect(texts).toContain('agent-message');
+    expect(texts).toContain('task-complete');
+  });
+});
+
+describe('replay is exact from EVERY seq, not just from 0', () => {
+  it('★ every fromSeq yields precisely the tail the subscriber has not seen', async () => {
+    const h = harness();
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+    const job = [...h.provider.jobs!.jobs.values()][0];
+    // several lines, and deliberately NOT one event per line: the `init` line yields
+    // one event, each text line one, the result line one — while a line the parser
+    // drops yields none. That is what makes the line→seq index non-trivial (and a
+    // binary search over it worth testing at every boundary).
+    job.emit(claudeInit('s1'));
+    job.emit(`${JSON.stringify({ type: 'system', subtype: 'thinking_tokens' })}\n`);
+    for (const t of ['one', 'two', 'three', 'four']) job.emit(claudeText(t));
+    job.emit(claudeResult(false));
+    job.finish(0);
+    await until(() => h.provider.jobs!.released.length === 1, 'completion');
+
+    const all = await h.taskService.replay(dto.id, 0);
+    expect(all.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+
+    // ⚠️ 每一个 fromSeq 都单独验：`firstLineAfter` 是一个二分，而二分的 off-by-one
+    // 只在**某一个**边界上出错 —— 只验 fromSeq=0 和一个中间值会漏掉它。
+    for (let from = 0; from <= 7; from += 1) {
+      const tail = await h.taskService.replay(dto.id, from);
+      expect(
+        tail.map((e) => e.seq),
+        `fromSeq=${from}`,
+      ).toEqual(all.map((e) => e.seq).filter((s) => s > from));
+      expect(
+        tail.map((e) => e.event),
+        `fromSeq=${from}`,
+      ).toEqual(all.filter((e) => e.seq > from).map((e) => e.event));
+    }
+  });
+});

@@ -118,6 +118,15 @@ export class InMemoryAutomationRepo implements AutomationRepository {
 
 export class InMemoryRunRepo implements AutomationRunRepository {
   readonly rows = new Map<string, AutomationRun>();
+  /**
+   * 每一次 `saveSync` 的**快照**。
+   *
+   * ⚠️ 它存在的理由是 `rows` 存的是**同一个聚合对象**：调度器改完内存里的 run 之后，
+   * `rows.get(id)` 读到的就是改过的那一份 —— 于是「写库那一步被删掉」在断言里
+   * **完全看不出来**（实测：把 `applyOutcome` 里的 `runs.saveSync` 整段挖掉，
+   * 26 条用例一条都不红）。快照是唯一能把「改了内存」和「落了库」分开的东西。
+   */
+  readonly saveLog: { id: string; status: string; outcomeApplied: boolean }[] = [];
 
   seed(r: AutomationRun): AutomationRun {
     this.rows.set(r.id, r);
@@ -133,7 +142,7 @@ export class InMemoryRunRepo implements AutomationRunRepository {
     return Promise.resolve(mine[0] ?? null);
   }
   listByAutomation(automationId: AutomationId, cursor: RunCursor): Promise<RunSlice> {
-    const mine = this.rows.filter((r) => r.automationId === automationId);
+    const mine = [...this.rows.values()].filter((r) => r.automationId === automationId);
     // 与生产同序：(triggeredAt DESC, id DESC)，游标取严格早于 anchor 的那一批。
     const sorted = [...mine].sort((a, b) =>
       a.triggeredAt.getTime() === b.triggeredAt.getTime()
@@ -170,6 +179,11 @@ export class InMemoryRunRepo implements AutomationRunRepository {
   }
   saveSync(_tx: Tx, run: AutomationRun): void {
     this.rows.set(run.id, run);
+    this.saveLog.push({
+      id: run.id,
+      status: run.status,
+      outcomeApplied: run.outcomeApplied,
+    });
   }
 }
 
@@ -191,6 +205,15 @@ export class FakeLauncher implements AutomationTaskLauncher {
   capacityVerdict: 'ok' | 'resource-exhausted' = 'ok';
   /** 每一次被问容量的入参 —— 断言「问过没有」「问的是哪条规则」。 */
   readonly capacityProbes: AutomationTaskLaunchInput[] = [];
+  /**
+   * 让**指定沙箱**的 `phaseOf` 抛。
+   *
+   * ⚠️ 这是本文件里唯一能把「跨模块调用会真的失败」摆出来的地方：`phaseOf` 打的是
+   * provider（不可达、限流、日志读不到都会抛），而它在 `advanceInFlight` 的循环里 ——
+   * 一条 run 的相位问不到，不该让同一轮里其余的 run 和后面的阶段一起停摆。
+   * 按 sandboxId 分而不是全局开关，正是为了断言「坏的那条被跳过、好的那条照常推进」。
+   */
+  readonly phaseFailures = new Map<string, Error>();
 
   capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'> {
     this.capacityProbes.push(input);
@@ -204,7 +227,10 @@ export class FakeLauncher implements AutomationTaskLauncher {
     this.started.push(sandboxId);
     return Promise.resolve();
   }
-  phaseOf(): Promise<AutomationTaskPhase> {
+  phaseOf(sandboxId: string): Promise<AutomationTaskPhase> {
+    const boom = this.phaseFailures.get(sandboxId);
+    // 抛在**消费队列之前**：坏沙箱不该顺手吃掉排给别人的那一格相位。
+    if (boom !== undefined) return Promise.reject(boom);
     const next = this.phaseQueue.length > 1 ? this.phaseQueue.shift() : this.phaseQueue[0];
     return Promise.resolve(next ?? { kind: 'gone' });
   }
