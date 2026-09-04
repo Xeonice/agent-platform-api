@@ -36,6 +36,22 @@ import type {
  * docker daemon (the real docker providers are exercised only in the skipping
  * docker-required e2e).
  */
+/**
+ * ⭐ **这是一份镜像，不是场景取值**：`makeFakeRegistry` 用它造出两个**与内置真 provider
+ * 同名**的替身（`aio` / `boxlite`），而 `GET /api/providers` 的响应体逐位来自它们
+ * —— 主仓 6 条真链路契约 e2e 录到的那份 `providers` 也是这里的值，不是真 provider 的值
+ * （29 §3.7.2 Q3）。⇒ **这七位必须逐位等于**
+ * `packages/modules/sandbox/src/infrastructure/providers/{aio,boxlite}/*-sandbox.provider.ts`
+ * 的 `readonly capabilities`。
+ *
+ * ⚠️ 此前这条同步**只靠人手**：真 provider 改一位 ⇒ `builtin-providers.contract.spec.ts`
+ * 的 `expectedCapabilities` pin 会红 ⇒ 有人把 pin 更新了 ⇒ **没有任何东西提醒他这里还有
+ * 一份**，于是替身独自留在旧值上，而 220 条 e2e 与 6 条契约 e2e 全都照绿（它们跑的就是
+ * 这个替身）。现在有机器在对：`node scripts/check-fake-provider-caps.mjs`（AST，非正则）。
+ *
+ * ⛔ 想测「某一位关掉」的降级分支，**另起一个名字**（见 `makeNoHeadlessProvider`），
+ * ⛔ 不要改这里 —— 改这里等于让两个冒充真 provider 的替身开始说谎。
+ */
 const CAPS: SandboxProviderCapabilities = {
   spawnTty: true,
   volumeMount: true,

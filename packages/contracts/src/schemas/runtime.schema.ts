@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AbsoluteUrlSchema, IsoInstantSchema } from './primitives';
 
 /**
  * Runtime auth / credential wire contracts (docs/backend/05, 27 §4, shared/10 §7.2/§7.3).
@@ -59,9 +60,9 @@ export const AuthChallengeSchema = z.object({
   challengeRef: z.string(),
   method: RuntimeAuthMethodSchema,
   kind: AuthChallengeKindSchema,
-  verificationUrl: z.string().optional(),
+  verificationUrl: AbsoluteUrlSchema.optional(),
   userCode: z.string().optional(),
-  expiresAt: z.string().optional(),
+  expiresAt: IsoInstantSchema.optional(),
   instructions: z.string(),
 });
 export type AuthChallengeDto = z.infer<typeof AuthChallengeSchema>;
@@ -83,8 +84,8 @@ export const RuntimeCredentialSummarySchema = z.object({
   mode: RuntimeAuthModeSchema,
   maskedIdentifier: z.string(),
   status: RuntimeCredentialSummaryStatusSchema,
-  expiresAt: z.string().optional(),
-  lastUsedAt: z.string().optional(),
+  expiresAt: IsoInstantSchema.optional(),
+  lastUsedAt: IsoInstantSchema.optional(),
 });
 export type RuntimeCredentialSummary = z.infer<typeof RuntimeCredentialSummarySchema>;
 
@@ -97,7 +98,7 @@ export const RuntimeDtoSchema = z.object({
   /** Aggregate status of the ACTIVE credential (badge). Per-mode detail is `credentials`. */
   credentialStatus: CredentialStatusSchema,
   maskedIdentifier: z.string().optional(),
-  expiresAt: z.string().optional(),
+  expiresAt: IsoInstantSchema.optional(),
   /** Which mode is [生效中]; `null`/absent when nothing is configured. */
   activeAuthMethod: RuntimeAuthModeSchema.optional(),
   /** One entry per CONFIGURED mode (P21-3 §3 parallel cards); each carries its id. */

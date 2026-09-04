@@ -30,10 +30,13 @@
     "db:migrate": "node --env-file-if-exists=.env apps/api/dist/platform/persistence/migrate.js",
     "prepare": "husky || true",
     "check:openapi": "pnpm openapi:emit && git diff --exit-code openapi.json",
-    "openapi:emit": "node apps/api/dist/tooling/emit-openapi.js"
+    "openapi:emit": "node apps/api/dist/tooling/emit-openapi.js",
+    "test:mutation": "stryker run stryker.conf.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "@swc/core": "^1.7.0",
     "@types/node": "^22.7.0",
     "@types/supertest": "^6.0.2",

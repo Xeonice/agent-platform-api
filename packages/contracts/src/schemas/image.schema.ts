@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IsoInstantSchema } from './primitives';
 
 /**
  * Image wire contracts (docs/backend/27 §6, shared/10 §6.4, 13 §2.4).
@@ -141,9 +142,9 @@ export const ImageManifestSchema = z.object({
   validationErrors: z.array(ValidationIssueSchema).nullable(),
   isActive: z.boolean(),
   imageConfig: ImageConfigSchema.nullable(),
-  registeredAt: z.string(),
+  registeredAt: IsoInstantSchema,
   /** ISO instant of the resolution that produced `digest`. */
-  resolvedAt: z.string(),
+  resolvedAt: IsoInstantSchema,
 });
 export type ImageManifestDto = z.infer<typeof ImageManifestSchema>;
 
@@ -208,7 +209,7 @@ export type RevalidateOutcomeDto = z.infer<typeof RevalidateOutcomeSchema>;
 
 /** `POST /api/images/:id/check-update` — read-only drift probe; never stores anything. */
 export const CheckImageUpdateSchema = z.object({
-  current: z.object({ digest: z.string(), resolvedAt: z.string() }),
+  current: z.object({ digest: z.string(), resolvedAt: IsoInstantSchema }),
   upstream: z.object({ digest: z.string(), validation: ValidationOutcomeSchema }).nullable(),
   changed: z.boolean(),
 });

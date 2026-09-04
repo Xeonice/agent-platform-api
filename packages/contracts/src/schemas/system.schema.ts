@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IsoInstantSchema } from './primitives';
 import type { ErrorEnvelope } from '../errors';
 import { TRIGGERED_BY } from './enums';
 import { VALIDATION_FAILED_CODE } from '../validation-envelope';
@@ -70,7 +71,7 @@ export const AuditEventDtoSchema = z.object({
    * 不一致** —— 那边是 stdout/stderr 双偏移的内部结构，这边就是一列主键。
    */
   seq: z.number().int().positive(),
-  at: z.string(),
+  at: IsoInstantSchema,
   category: AuditCategorySchema,
   /** `sandbox.provision.stage` 等；**开放集合**，前端不得穷举 switch（10 §7.3）。 */
   type: z.string(),
@@ -233,11 +234,11 @@ export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
 export const InitStatusDtoSchema = z.object({
   initialized: z.boolean(),
   /** 完成初始化的时刻；未初始化时缺席。 */
-  initializedAt: z.string().optional(),
+  initializedAt: IsoInstantSchema.optional(),
   /** 上次出网检测的逐条结果（可能来自 `/init`，也可能来自最近一次 `/diagnose`）。 */
   lastConnectivityCheck: z.array(ConnectivityResultSchema).optional(),
   /** 上次出网检测的时刻 —— 没有它，前端无法判断那份结果是三秒前的还是三周前的。 */
-  lastConnectivityCheckAt: z.string().optional(),
+  lastConnectivityCheckAt: IsoInstantSchema.optional(),
 });
 export type InitStatusDto = z.infer<typeof InitStatusDtoSchema>;
 
@@ -273,11 +274,18 @@ export type InitRequest = z.infer<typeof InitRequestSchema>;
 export const SystemSettingsDtoSchema = z.object({
   initialized: z.boolean(),
   proxyConfig: ProxyConfigSchema.optional(),
-  /** 拼 webhook 载荷里的 Task 深链（03 §8.5）；未配置时省略。 */
+  /**
+   * 拼 webhook 载荷里的 Task 深链（03 §8.5）；未配置时省略。
+   *
+   * ⛔ **不是 `AbsoluteUrlSchema`。** 入站 `UpdateSystemSettingsDtoSchema.publicBaseUrl`
+   * 只做 `trim()` 就落库（`system-settings.service.ts`），**没有任何一层校验它是 URL**。
+   * 出站标 `format: uri` 会声称一件后端并不保证的事。真要保证，得先在入站/服务层加校验
+   * （那是 breaking change，要单独评估），而不是先在契约上写好看。
+   */
   publicBaseUrl: z.string().optional(),
   /** 口令**是否启用**（= hash 非空）。⛔ hash 本身永不出现在响应里。 */
   accessPasscodeEnabled: z.boolean(),
-  accessPasscodeUpdatedAt: z.string().optional(),
+  accessPasscodeUpdatedAt: IsoInstantSchema.optional(),
   /** 版本信息（P21-8 §4 的 [检查更新] 区块要显示「当前版本」）。 */
   version: z.object({
     platform: z.string(),
@@ -396,7 +404,7 @@ export const SystemResourcesDtoSchema = z.object({
     percentOfDisk: z.number().nonnegative(),
     level: ResourceLevelSchema,
     /** 最早的那一份成果卷的清理时刻（保留时刻 + 30 天）；一份都没有时缺席。 */
-    oldestExpiresAt: z.string().optional(),
+    oldestExpiresAt: IsoInstantSchema.optional(),
     /**
      * 统计是否**被截断**（目录过多时停止遍历）。
      * ⚠️ 少报是降级、多报是撒谎：截断了却说 45GB，会让人以为清完就够了。

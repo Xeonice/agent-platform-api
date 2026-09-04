@@ -1,0 +1,183 @@
+# 变异测试（Stryker）的 CI 编排 —— docs/shared/29 §3.3.4。
+#
+# 刻意**不放进 ci.yml**：ci.yml 的每一步都是阻断门禁（typecheck / lint / format /
+# unit / contract / integration / e2e / build / openapi drift），而这里两条路径
+# **都不阻断合并**。混在一起会让「CI 红 = 不能合」这条最重要的信号变浑浊。
+#
+# ⛔ 为什么两条都不设分数门禁（29 §3.3.3 第 1 条）：
+#   - 等价变异体（改了但语义不变，如 `i++` → `i+=1`）本就杀不掉，业界经验 10–20%
+#     ⇒ 100% 永不可达，任何绝对阈值都只是在给这个不可达的数字画一条随意的线。
+#   - 一个新门禁如果第一周就误伤，会立刻被 `--no-verify` 绕过或被人关掉。
+#     先让它跑、让人看见数字，稳定后再谈是否阻断。
+#   落地方式是 stryker.conf.mjs 里的 `thresholds.break: null` + PR 那条的
+#   `continue-on-error`。
+name: mutation
+
+on:
+  schedule:
+    # 18:00 UTC = 02:00 Asia/Shanghai。全仓实测 33 分 04 秒（4 并发），nightly 跑得动。
+    - cron: '0 18 * * *'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 路径 1：nightly 全量 —— 广度基线，看趋势 ────────────────────────────────
+  # 369 文件 / 19669 变异体 / 33 分钟 / 已覆盖分数 70.0%（29 §3.3.2b-2）。
+  full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # 33 分钟是本机 4 并发的实测。runner 的核数不一定有本机多（stryker.conf.mjs 的
+    # `concurrency` 默认 4，可用 STRYKER_CONCURRENCY 调），所以留足冗余 —— 但别让一次
+    # 挂死的跑白占满 GitHub 默认的 6 小时。
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # 变异跑的是 TS 源码（vitest + swc 现编），不需要 pnpm build。
+      # ⚠️ 只覆盖 unit 层：integration 因 better-sqlite3 的 native 模块在插桩沙箱里
+      # SIGSEGV 而进不来，e2e 太慢（29 §3.3.3 第 2、3 条）。范围定义在
+      # vitest.stryker.workspace.ts，不要在这里改。
+      - name: stryker (full repo)
+        run: pnpm test:mutation --reporters json,html,clear-text
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '## 变异测试（Stryker）· nightly 全量'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          node scripts/mutation-summary.mjs reports/mutation/full.json >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report-full
+          # reports/ 与 .stryker-tmp/ 都在 .gitignore / .prettierignore / eslint ignores 里
+          # （29 §3.3.2c 末尾：一次残留的 .stryker-tmp 让 format:check 报了 157 个文件）。
+          # 这里只收 reports/mutation，**不要**把 .stryker-tmp 传上去 —— 那是整个仓库的
+          # 插桩副本，几百 MB 且毫无价值。
+          path: reports/mutation
+          retention-days: 30
+
+  # ── 路径 2：PR 增量 —— 只变异这个 PR 改动到的 src 文件，分钟级 ───────────────
+  # ⛔ 不阻断合并（见文件头）。它的作用是「让人看见数字」，不是拦人。
+  changed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ⚠️ 必须 0：默认是浅检出（fetch-depth: 1），拿不到 base 分支，
+          # `git merge-base` 会直接失败 ⇒ 算不出改动文件。
+          fetch-depth: 0
+
+      - name: 算出这个 PR 改动到的可变异源文件
+        id: changed
+        run: |
+          set -euo pipefail
+          base=$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)
+          echo "merge-base: $base"
+          # 排除项与 stryker.conf.mjs 里的 `excludes` 同源：装配/出口文件没有行为，
+          # 生成物不是手写代码。两边都写一遍是刻意的冗余 —— 这里少过滤会白跑几分钟，
+          # 配置里少过滤会把噪音算进分数。
+          git diff --name-only --diff-filter=ACMR "$base" HEAD \
+            | grep -E '^(packages/.+/src/.+\.ts|apps/api/src/.+\.ts)$' \
+            | grep -Ev '(\.module\.ts|/src/index\.ts|\.d\.ts)$' \
+            | grep -Ev '^apps/api/src/main\.ts$' \
+            | grep -Ev '/drizzle/' \
+            > changed-src.txt || true
+          count=$(wc -l < changed-src.txt | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "改动到 $count 个可变异源文件："
+          cat changed-src.txt
+
+      - uses: pnpm/action-setup@v4
+        if: steps.changed.outputs.count != '0'
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.count != '0'
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: steps.changed.outputs.count != '0'
+
+      # ⚠️ 走 STRYKER_MUTATE_FILES 而不是 CLI 的 `--mutate`：CLI 传 `--mutate` 会**整体
+      # 替换**配置里那份数组，连 `!**/*.module.ts` 这些排除项一起丢掉。
+      - name: stryker (changed files only)
+        id: stryker
+        if: steps.changed.outputs.count != '0'
+        # ⛔ 不阻断：Stryker 自己崩了、某个变异体超时、或改动的文件在 unit 层没有相关测试，
+        # 都不该拦住一个 PR。这一步**永远 exit 0**，只把结果分成三种状态交给 summary。
+        # （外层还留了一道 continue-on-error 兜底 —— 万一 shell 自己出错。）
+        continue-on-error: true
+        run: |
+          set +e
+          STRYKER_MUTATE_FILES="$(cat changed-src.txt)" pnpm test:mutation 2>&1 | tee stryker.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" = "0" ]; then
+            echo 'status=ok' >> "$GITHUB_OUTPUT"
+            # 报告名带改动文件集的指纹（见 stryker.conf.mjs），这里把真实路径传下去，
+            # 而不是让 summary 去猜「目录里最新的那个」—— 猜出来的路径正是当初
+            # `scoped.json` 那个张冠李戴的坑的另一种写法。
+            echo "report=$(ls -t reports/mutation/changed-*.json | head -1)" >> "$GITHUB_OUTPUT"
+          elif grep -q 'No tests were executed' stryker.log; then
+            # 不是跑挂了：`vitest.related` 只跑「import 到被变异文件」的测试，改动的文件
+            # 在 unit 层一条相关测试都没有时就会走到这里（多半是只由 e2e 覆盖的
+            # controller / bootstrap service）。这本身就是一条有用的信息。
+            echo 'status=no-unit-tests' >> "$GITHUB_OUTPUT"
+          else
+            echo 'status=failed' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '## 变异测试（Stryker）· PR 增量'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ '${{ steps.changed.outputs.count }}' = '0' ]; then
+            echo '这个 PR 没有改动可变异的源文件（`packages/**/src` 或 `apps/api/src`），跳过。' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo '本次只变异了这个 PR 改动的文件（全仓基线看 nightly 的 `mutation-report-full`）：'
+            echo
+            sed 's/^/- `/; s/$/`/' changed-src.txt
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          case '${{ steps.stryker.outputs.status }}' in
+            no-unit-tests)
+              {
+                echo '⚠️ 这些文件在 **unit 层没有任何相关测试** —— Stryker 无从下手。'
+                echo '多半是只由 integration / e2e 覆盖的层（controller、bootstrap service）。'
+                echo '这不是跑挂了，但值得问一句：这段逻辑真的只能靠 e2e 守吗？'
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            failed)
+              echo '❌ Stryker 跑挂了（**不阻断合并**）。看 job 日志与 `mutation-report-changed` artifact。' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              node scripts/mutation-summary.mjs '${{ steps.stryker.outputs.report }}' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.stryker.outputs.status == 'ok'
+        with:
+          name: mutation-report-changed
+          path: reports/mutation
+          retention-days: 14

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AbsoluteUrlSchema, IsoInstantSchema } from './primitives';
 import { TimeoutMinutesSchema } from './enums';
 import { RetentionDaysSchema } from './project.schema';
 
@@ -128,16 +129,17 @@ export const AutomationDtoSchema = z.object({
   timezone: z.string(),
   timeoutMinutes: TimeoutMinutesSchema,
   artifactRetentionDays: RetentionDaysSchema,
-  webhookUrl: z.string().optional(),
+  /** ⚠️ 出站保证是绝对 http/https URL —— `WebhookTarget.create` 在域里把关（I-AUT-6）。 */
+  webhookUrl: AbsoluteUrlSchema.optional(),
   triggerOn: TriggerOnSchema,
   enabled: z.boolean(),
   /** 降频态（I-AUT-2/3）。**与 `enabled=false` 是两回事**，列表上要能区分 🟡 vs 🔴。 */
   degraded: z.boolean(),
   consecutiveFailures: z.number().int().nonnegative(),
-  lastTriggeredAt: z.string().optional(),
-  nextTriggerAt: z.string().optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  lastTriggeredAt: IsoInstantSchema.optional(),
+  nextTriggerAt: IsoInstantSchema.optional(),
+  createdAt: IsoInstantSchema,
+  updatedAt: IsoInstantSchema,
 });
 export type AutomationDto = z.infer<typeof AutomationDtoSchema>;
 
@@ -159,11 +161,11 @@ export const AutomationRunDtoSchema = z.object({
   errorCode: AutomationRunErrorCodeSchema.optional(),
   errorMessage: z.string().optional(),
   retryCount: z.number().int().min(0).max(5),
-  retryAt: z.string().optional(),
+  retryAt: IsoInstantSchema.optional(),
   /** 调度器决定触发的那一刻 —— **每条 run 都有**。 */
-  triggeredAt: z.string(),
-  startedAt: z.string().optional(),
-  completedAt: z.string().optional(),
+  triggeredAt: IsoInstantSchema,
+  startedAt: IsoInstantSchema.optional(),
+  completedAt: IsoInstantSchema.optional(),
   durationMs: z.number().int().nonnegative().optional(),
   /** stdout 末尾 1KB，列表快速预览（13 §2.7.2）。 */
   outputSummary: z.string().optional(),

@@ -22,3 +22,7 @@ tmp-e2e-data-*/
 # boxlite micro-VM e2e DATA_ROOT (mkdtemp'd in cwd; the afterAll rm only runs when the
 # suite completes, so an interrupted run leaves one behind)
 tmp-boxlite-e2e-*/
+
+# Stryker 变异测试报告（29 §3.3）——体积大且每次重跑，不进版本库
+reports/
+.stryker-tmp/

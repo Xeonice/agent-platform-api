@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ProcessStream, SandboxHandle } from '@platform/contracts';
-import { SandboxProviderError } from '@platform/contracts';
+import { SandboxProviderError, TaskArtifactSchema } from '@platform/contracts';
 import type {
   BoxliteExecution,
   ExecCapableBox,
@@ -404,6 +404,36 @@ describe('boxlite 文件面 —— exec + base64（不是 copyIn/copyOut）', ()
   it('目录不存在时 listFiles 回空数组（「任务没产出」是正常结局，不是故障）', async () => {
     const box = new FakeBox(() => ({ code: 1, stderr: 'find: no such' }));
     expect(await files(box).listFiles(HANDLE, '/nope')).toEqual([]);
+  });
+
+  /**
+   * ⛔ **这条断言是一个缺口的快照，不是一条期望。**
+   *
+   * `parseFindRow` 写的是 `epochSecondsToIso(mtime) ?? ''` —— `find -printf '%T@'`
+   * 给不出可解析的 mtime 时，`FileEntry.modifiedAt`（→ 一路走到
+   * `AgentTaskDto.artifacts[].modifiedAt`）出线的是**空串**。aio 那条路径同一行代码，
+   * `agent-task.repository` 的 JSON 回读还有第三处同样的 `?? ''` 兜底。
+   *
+   * ⇒ 这就是 `TaskArtifactSchema.modifiedAt` **必须**留成裸 `z.string()`、不能跟着
+   * 其它时刻字段收成 `IsoInstantSchema` 的全部理由（那边的注释指向这里）。
+   * 契约声称「必是 ISO 瞬时」而实现随时能发 `''`，是把已知缺口伪装成保证。
+   *
+   * ⭐ **要真正修掉它，动的是产出侧而不是契约**：决定 `''` 该换成「该条目缺席」还是
+   * 「`modifiedAt` 变 optional」——那是实现决策。改完之后这条用例会红，那时它就完成了
+   * 使命：把 `expect('')` 换成新的期望，再去把契约收成 `IsoInstantSchema`。
+   */
+  it('⛔ mtime 不可解析时 modifiedAt 是空串 —— 契约里那个裸 string 的原因', async () => {
+    // `%T@` 那一列是 `-`（find 在某些 fs 上对特殊文件就这么打），Number('-') = NaN。
+    const rows = ['f', '12', '-', '/w/odd.txt'].join('\t') + '\0';
+    const box = new FakeBox(() => ({ stdout: rows, code: 0 }));
+    const entries = await files(box).listFiles(HANDLE, '/w');
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].modifiedAt).toBe('');
+    // 而这个值今天是**合法出线值**：契约收紧的那一刻，出线的东西就违约了。
+    expect(
+      TaskArtifactSchema.safeParse({ name: 'odd.txt', size: 12, modifiedAt: '' }).success,
+    ).toBe(true);
   });
 
   it('handle 不属于本 provider 时拒绝', async () => {
