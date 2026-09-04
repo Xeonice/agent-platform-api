@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { SandboxId } from '@platform/shared-kernel';
 import { classifyWorkspacePrepareError } from '@platform/contracts';
 import { harness, waitForStatus } from './_harness';
 
@@ -204,5 +205,71 @@ describe('provision 失败路径的审计（13 §2.8.2 入口 ②）', () => {
     // ⚠️ 对照组：凭证缺席**不改变任何状态**，因此聚合一个事件都不发 —— projector
     // 这条路上收到的是零。没有入口 ②，这件事在平台上不存在任何记录。
     expect(h.publishedEvents.some((e) => e.type.toLowerCase().includes('credential'))).toBe(false);
+  });
+});
+
+/**
+ * `sandbox.agent_session`（03 §7.8）—— 「起没起 / 跑的是什么」。
+ *
+ * ⚠️ 上面那条成功路径的断言只看了这条记录**存在**。存在不等于说得清：一个把
+ * `started` 恒写成 `true`、把 prompt 正文原样塞进 detail 的实现，在那条断言下
+ * 完全通过。这两条看的是内容。
+ */
+describe('sandbox.agent_session 这条记录说清了什么', () => {
+  it('★ 首次启动：started=true / reusedExisting=false / promptCarried=true，且 detail 里没有 prompt 正文', async () => {
+    const prompt = '把 README 翻译成英文，并在结尾加一段变更说明';
+    const h = harness();
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: prompt,
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const rec = h.auditRecords.find((r) => r.type === 'sandbox.agent_session');
+    expect(rec).toBeDefined();
+    expect(rec).toMatchObject({
+      category: 'sandbox',
+      subjectType: 'sandbox',
+      subjectId: dto.id,
+      actor: 'scheduler',
+      outcome: 'ok',
+      detail: {
+        runtimeId: 'claude-code',
+        started: true,
+        reusedExisting: false,
+        promptCarried: true,
+      },
+    });
+    expect(typeof rec?.durationMs).toBe('number');
+    expect(rec?.durationMs).toBeGreaterThanOrEqual(0);
+    // ⚠️ **审计要的是身份，不是正文**（同 `AgentTaskStarted` 的纪律）：最长 8000 字符
+    // 的用户内容不进审计流。上面的 `promptCarried: true` 是这条否定断言的正向证据 ——
+    // 指令确实被带进去了，只是它的正文没有被抄进记录。
+    expect(JSON.stringify(rec)).not.toContain(prompt);
+    expect(JSON.stringify(rec)).not.toContain('README');
+  });
+
+  it('★ 会话本来就在 ⇒ started=false，摘要说的是「沿用」而不是「已启动」', async () => {
+    const h = harness({ bootstrapReusesExisting: true });
+    const dto = await h.service.create({
+      projectId: 'prj-1',
+      runtime: 'claude-code',
+      initialPrompt: '继续上次的活',
+    });
+    await waitForStatus(h.service, dto.id, 'running');
+
+    const rec = h.auditRecords.find((r) => r.type === 'sandbox.agent_session');
+    expect(rec?.detail).toMatchObject({
+      started: false,
+      reusedExisting: true,
+      promptCarried: false,
+    });
+    expect(rec?.summary).toContain('沿用');
+    expect(rec?.summary).not.toContain('已启动');
+    // ★ 指令没有被带进去 ⇒ 它**不能**被标记成已消费，否则用户那句话就永远丢了
+    // （I-SBX-10：重启不重放，但也不能吞掉一条从未送达的指令）。
+    const stored = await h.repo.findById(dto.id as SandboxId);
+    expect(stored!.initialTask.consumedAt).toBeUndefined();
   });
 });

@@ -594,6 +594,16 @@ export interface HarnessOptions {
   installError?: Error;
   /** Make `bootstrapAgentSession` throw (E2E-1-bootstrapNoTmux). */
   bootstrapError?: Error;
+  /**
+   * 让 `bootstrapAgentSession` 报「会话已经在了，沿用」。
+   *
+   * ⚠️ 这个 seam 存在的理由：`reusedExisting: true` 这一支在替身里**根本到不了**，
+   * 于是 workflow 里 `started: !result.reusedExisting` 与那句「已存在，沿用」的
+   * 摘要从来没有被任何断言看过 —— 一个恒写 `started: true` 的实现在测试里与正确
+   * 实现长得一模一样，而 `sandbox.agent_session` 这条记录的全部价值就是回答
+   * 「这次到底起没起」（03 §7.8）。
+   */
+  bootstrapReusesExisting?: boolean;
   /** What `prepareRuntimeCredential` returns; `null` ⇒ throws NO_CREDENTIAL. */
   credential?: InjectableRuntimeCredential | null;
   /**
@@ -803,6 +813,7 @@ export function harness(opts: HarnessOptions = {}) {
       bootstrapInputs.push(input);
       calls.push('bootstrapAgentSession');
       if (opts.bootstrapError) throw opts.bootstrapError;
+      if (opts.bootstrapReusesExisting) return { promptConsumed: false, reusedExisting: true };
       const prompt = input.initialPrompt?.trim();
       // mirror the real service: consult the adapter so the tests can assert WHICH
       // command was built (E2E-1-bootstrap / E2E-8-attachOnly / T-SBX-35).

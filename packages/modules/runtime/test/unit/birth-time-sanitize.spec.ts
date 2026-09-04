@@ -82,3 +82,41 @@ describe('codex birth-time sanitization (05 §4.3 ②)', () => {
     );
   });
 });
+
+/**
+ * 消毒器面对**畸形输入**时的行为。
+ *
+ * ⚠️ 这一组补的是一个真空：上面四条喂的全是形状正确的 auth.json，于是
+ * 「`parsed` 不是对象就抛」与「`tokens` 不是对象就重建」这两道闸**一次都没被走过**。
+ * 它们不是防御性冗余 —— 消毒器的契约是「出去的这份文件里一定没有真 refresh_token」，
+ * 而一个把非对象原样 `JSON.stringify` 回去、或者把字符串 `tokens` 展开成
+ * `{0:'a',1:'b'}` 的实现，会让这条契约以最安静的方式失效。
+ */
+describe('codex 消毒器面对畸形 auth.json', () => {
+  it('★ 顶层不是 JSON 对象 ⇒ 抛，而不是原样放行', () => {
+    for (const notAnObject of ['null', '[]', '"a string"', '42', 'true']) {
+      expect(() => sanitizeCodexAuthJson(notAnObject), notAnObject).toThrow(/not a JSON object/);
+    }
+    // 正向对照：一个合法对象照样过得去，所以上面的抛不是「消毒器整个坏了」
+    expect(sanitizeCodexAuthJson('{}')).toContain(RUNTIME_REFRESH_TOKEN_PLACEHOLDER);
+  });
+
+  it('★ `tokens` 不是对象（null / 数组 / 字符串）⇒ 重建成只含占位符的对象', () => {
+    for (const tokens of [null, ['REAL-A', 'REAL-B'], 'REAL-LOOKING-STRING', 42] as unknown[]) {
+      const out = parse(sanitizeCodexAuthJson(JSON.stringify({ auth_mode: 'chatgpt', tokens })));
+      // ⚠️ 展开一个字符串会得到 `{0:'R',1:'E',…}`；展开一个数组会得到一个带下标键的
+      // 对象。两种都还是「一份 codex 读不懂、但里面可能带着原文」的文件。
+      expect(out.tokens).toEqual({ refresh_token: RUNTIME_REFRESH_TOKEN_PLACEHOLDER });
+      // 其余字段不受影响
+      expect(out.auth_mode).toBe('chatgpt');
+    }
+    // 正向对照：合法的 tokens 对象里的其它字段一个都不能丢（与首条断言同源）
+    const kept = parse(
+      sanitizeCodexAuthJson(JSON.stringify({ tokens: { access_token: 'a', refresh_token: 'r' } })),
+    );
+    expect(kept.tokens).toEqual({
+      access_token: 'a',
+      refresh_token: RUNTIME_REFRESH_TOKEN_PLACEHOLDER,
+    });
+  });
+});

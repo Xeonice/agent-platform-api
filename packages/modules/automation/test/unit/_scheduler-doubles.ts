@@ -118,6 +118,15 @@ export class InMemoryAutomationRepo implements AutomationRepository {
 
 export class InMemoryRunRepo implements AutomationRunRepository {
   readonly rows = new Map<string, AutomationRun>();
+  /**
+   * 每一次 `saveSync` 的**快照**。
+   *
+   * ⚠️ 它存在的理由是 `rows` 存的是**同一个聚合对象**：调度器改完内存里的 run 之后，
+   * `rows.get(id)` 读到的就是改过的那一份 —— 于是「写库那一步被删掉」在断言里
+   * **完全看不出来**（实测：把 `applyOutcome` 里的 `runs.saveSync` 整段挖掉，
+   * 26 条用例一条都不红）。快照是唯一能把「改了内存」和「落了库」分开的东西。
+   */
+  readonly saveLog: { id: string; status: string; outcomeApplied: boolean }[] = [];
 
   seed(r: AutomationRun): AutomationRun {
     this.rows.set(r.id, r);
@@ -133,7 +142,7 @@ export class InMemoryRunRepo implements AutomationRunRepository {
     return Promise.resolve(mine[0] ?? null);
   }
   listByAutomation(automationId: AutomationId, cursor: RunCursor): Promise<RunSlice> {
-    const mine = this.rows.filter((r) => r.automationId === automationId);
+    const mine = [...this.rows.values()].filter((r) => r.automationId === automationId);
     // 与生产同序：(triggeredAt DESC, id DESC)，游标取严格早于 anchor 的那一批。
     const sorted = [...mine].sort((a, b) =>
       a.triggeredAt.getTime() === b.triggeredAt.getTime()
@@ -170,6 +179,11 @@ export class InMemoryRunRepo implements AutomationRunRepository {
   }
   saveSync(_tx: Tx, run: AutomationRun): void {
     this.rows.set(run.id, run);
+    this.saveLog.push({
+      id: run.id,
+      status: run.status,
+      outcomeApplied: run.outcomeApplied,
+    });
   }
 }
 

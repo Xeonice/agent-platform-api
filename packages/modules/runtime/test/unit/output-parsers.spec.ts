@@ -41,6 +41,32 @@ describe('codex device-auth parser (golden)', () => {
     // guard the exact failure phrasing too, independent of the fixture.
     expect(codexLoginSucceeded('You are not logged in.')).toBe(false);
   });
+
+  it('★ a HALF challenge is no challenge — both the URL and the code are required', () => {
+    // The device flow needs the two together: the URL is where the user goes and the
+    // code is what proves it is THIS login. Returning one of them would put a card in
+    // front of the user that cannot complete — and the missing half would surface as
+    // `undefined` inside a string, not as an error anyone handles.
+    const codeOnly = 'and enter the code:\n\n  ABCD-2WXYZ\n';
+    const urlOnly = 'To authenticate, visit:\n\n  https://auth.openai.com/codex/device\n';
+    expect(parseCodexDeviceChallenge(codeOnly)).toBeNull();
+    expect(parseCodexDeviceChallenge(urlOnly)).toBeNull();
+    // …and the two together still parse, so the null above is the missing half talking
+    // and not a parser that stopped working.
+    expect(parseCodexDeviceChallenge(`${urlOnly}${codeOnly}`)).toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-2WXYZ',
+    });
+  });
+
+  it('the success phrase is matched case-insensitively — the CLI capitalises it', () => {
+    // 実測 output is "Successfully logged in." (capital S); the parser lower-cases the
+    // haystack rather than listing spellings. `AUTHENTICATION COMPLETE` is the second
+    // documented phrase and has no fixture of its own.
+    expect(codexLoginSucceeded('SUCCESSFULLY LOGGED IN')).toBe(true);
+    expect(codexLoginSucceeded('Authentication complete.')).toBe(true);
+    expect(codexLoginSucceeded('Waiting for authorization...')).toBe(false);
+  });
 });
 
 describe('claude setup-token parser (golden)', () => {
