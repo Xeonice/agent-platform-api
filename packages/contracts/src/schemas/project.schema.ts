@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IsoInstantSchema } from './primitives';
 
 /**
  * Project zod single source (docs/backend/02 §3, 13 §2.2, shared/10 §6). One place
@@ -64,15 +65,22 @@ export const ProjectDtoSchema = z.object({
   cloneStatus: CloneStatusSchema,
   cloneErrorCode: CloneErrorCodeSchema.nullable(),
   taskCount: z.number().int().nonnegative(),
-  createdAt: z.string(),
-  /** absent for an empty project (and after convert-to-empty). */
+  createdAt: IsoInstantSchema,
+  /**
+   * absent for an empty project (and after convert-to-empty).
+   *
+   * ⛔ **不是 `AbsoluteUrlSchema`，别"顺手"补上 `format: uri`。** git 远端合法地包含
+   * scp 形式 `user@host:path`（`RepoUrl` 值对象 / `parseGitRemote` 明确放行，SSH 私有
+   * 仓库正是这么写的），那不是合法 URI。标上去出站是撒谎，而下一个人照着给入站的
+   * `CreateProjectSchema.repoUrl` 加 `.url()` 时，会把所有 SSH 远端整片 400 掉。
+   */
   repoUrl: z.string().optional(),
   /** absent when the project was created without pinning a branch (= remote default). */
   repoBranch: z.string().optional(),
   /** bytes on disk under the baseline dir; the full clone made this worth showing. */
   baselineSizeBytes: z.number().int().nonnegative().optional(),
   /** last `POST /:id/sync` (or the last clone-status change / creation). */
-  updatedAt: z.string(),
+  updatedAt: IsoInstantSchema,
 });
 export type ProjectDto = z.infer<typeof ProjectDtoSchema>;
 
@@ -118,9 +126,9 @@ export const RetainedVolumeDtoSchema = z.object({
   /** 来源 Task。⚠️ 弱引用：sandbox 记录归档后置 undefined，卷仍可管理（13 §2.2.2）。 */
   sandboxId: z.string().optional(),
   source: RetainedVolumeSourceSchema,
-  retainedAt: z.string(),
+  retainedAt: IsoInstantSchema,
   /** 到点由 `VolumeReaper` 清理。 */
-  retainUntil: z.string(),
+  retainUntil: IsoInstantSchema,
   /** 宿主目录**实占**（reflink 之后可能远小于逻辑大小）。 */
   diskBytes: z.number().int().nonnegative(),
   /** 打包后的 tar 字节数 —— 与下载响应的 `Content-Length` 同一个数。 */

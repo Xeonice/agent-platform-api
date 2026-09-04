@@ -143,6 +143,16 @@ export type HealthStateWire = z.infer<typeof HealthStateSchema>;
 
 export const SandboxHealthSchema = z.object({
   state: HealthStateSchema,
+  /**
+   * ⛔ **刻意留成裸 `z.string()`，不许改成 `IsoInstantSchema`。**
+   *
+   * `readBoxliteHealth` 取的是 `input.state.lastCheck ?? input.at` —— 前者是 **BoxLite
+   * 自己报的字符串**，格式由 provider 决定、平台没有归一。只有走 `?? input.at` 那条
+   * 兜底路径才是 `clock.now().toISOString()`。契约不能只按兜底路径写。
+   *
+   * 要收紧，得先在 provider 适配层把 `state.lastCheck` 归一成 ISO（同 04 §2.6
+   * 「provider 归一」那条），归一之后这里再换成 `IsoInstantSchema`。
+   */
   lastCheckedAt: z.string(),
   /** 一行判据（哪个信号翻的），给排障看；**不是**面向用户的文案。 */
   message: z.string().optional(),

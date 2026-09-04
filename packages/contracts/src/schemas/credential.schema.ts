@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IsoInstantSchema } from './primitives';
 import { GIT_PLATFORM_IDS } from '@platform/shared-kernel';
 import type { GitPlatform } from '@platform/shared-kernel';
 
@@ -45,7 +46,7 @@ export const KnownHostSchema = z.object({
   host: z.string(),
   keyType: z.string(),
   fingerprint: z.string(),
-  firstSeenAt: z.string(),
+  firstSeenAt: IsoInstantSchema,
 });
 export type KnownHost = z.infer<typeof KnownHostSchema>;
 
@@ -62,8 +63,8 @@ export const MaskedGitCredentialSchema = z.object({
   platform: GitPlatformSchema.optional(),
   allowedHosts: z.array(z.string()),
   knownHosts: z.array(KnownHostSchema).optional(),
-  lastUsedAt: z.string().nullable().optional(),
-  createdAt: z.string(),
+  lastUsedAt: IsoInstantSchema.nullable().optional(),
+  createdAt: IsoInstantSchema,
 });
 export type MaskedGitCredential = z.infer<typeof MaskedGitCredentialSchema>;
 

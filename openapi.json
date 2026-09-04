@@ -2424,7 +2424,8 @@
                   "exclusiveMinimum": true
                 },
                 "at": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "category": {
                   "type": "string",
@@ -2585,7 +2586,8 @@
             "exclusiveMinimum": false
           },
           "createdAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "repoUrl": {
             "type": "string"
@@ -2599,7 +2601,8 @@
             "exclusiveMinimum": false
           },
           "updatedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -2641,10 +2644,12 @@
             ]
           },
           "retainedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "retainUntil": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "diskBytes": {
             "type": "integer",
@@ -3068,10 +3073,12 @@
             ]
           },
           "startedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "finishedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -3189,7 +3196,8 @@
                   "type": "string"
                 },
                 "firstSeenAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 }
               },
               "required": [
@@ -3202,10 +3210,12 @@
           },
           "lastUsedAt": {
             "type": "string",
+            "format": "date-time",
             "nullable": true
           },
           "createdAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -3408,7 +3418,8 @@
             "type": "string"
           },
           "expiresAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "activeAuthMethod": {
             "type": "string",
@@ -3444,10 +3455,12 @@
                   ]
                 },
                 "expiresAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "lastUsedAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 }
               },
               "required": [
@@ -3507,13 +3520,15 @@
             ]
           },
           "verificationUrl": {
-            "type": "string"
+            "type": "string",
+            "format": "uri"
           },
           "userCode": {
             "type": "string"
           },
           "expiresAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "instructions": {
             "type": "string"
@@ -3789,10 +3804,12 @@
             "nullable": true
           },
           "registeredAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "resolvedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -3991,10 +4008,12 @@
                 "nullable": true
               },
               "registeredAt": {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               },
               "resolvedAt": {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               }
             },
             "required": [
@@ -4273,7 +4292,8 @@
                 "type": "string"
               },
               "resolvedAt": {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               }
             },
             "required": [
@@ -4469,7 +4489,8 @@
             ]
           },
           "webhookUrl": {
-            "type": "string"
+            "type": "string",
+            "format": "uri"
           },
           "triggerOn": {
             "type": "string",
@@ -4491,16 +4512,20 @@
             "exclusiveMinimum": false
           },
           "lastTriggeredAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "nextTriggerAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "createdAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "updatedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -4733,16 +4758,20 @@
             "exclusiveMaximum": false
           },
           "retryAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "triggeredAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "startedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "completedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "durationMs": {
             "type": "integer",
@@ -4938,16 +4967,20 @@
                   "exclusiveMaximum": false
                 },
                 "retryAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "triggeredAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "startedAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "completedAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "durationMs": {
                   "type": "integer",
@@ -4991,7 +5024,8 @@
             "type": "boolean"
           },
           "initializedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "lastConnectivityCheck": {
             "type": "array",
@@ -5024,7 +5058,8 @@
             }
           },
           "lastConnectivityCheckAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -5086,7 +5121,8 @@
             "type": "boolean"
           },
           "accessPasscodeUpdatedAt": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "version": {
             "type": "object",
@@ -5316,7 +5352,8 @@
                 ]
               },
               "oldestExpiresAt": {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               },
               "truncated": {
                 "type": "boolean"

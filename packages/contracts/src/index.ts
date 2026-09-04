@@ -1,4 +1,5 @@
 export * from './schemas/enums';
+export * from './schemas/primitives';
 export * from './schemas/sandbox.schema';
 export * from './schemas/task.schema';
 export * from './schemas/project.schema';

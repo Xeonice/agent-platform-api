@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IsoInstantSchema } from './primitives';
 
 /**
  * 无头 Task 的对外契约(S6)。REST 面见 27 §2 `runAgentTask` 行,WS 面见 `ws-protocol.ts`
@@ -126,6 +127,21 @@ export type RunAgentTaskInput = z.infer<typeof RunAgentTaskSchema>;
 export const TaskArtifactSchema = z.object({
   name: z.string(),
   size: z.number().int().nonnegative(),
+  /**
+   * ⛔ **刻意留成裸 `z.string()`，不许改成 `IsoInstantSchema`。**
+   *
+   * 它不是平台自己 `toISOString()` 出来的，而是**沙箱内 agent 报的文件 mtime 经归一**：
+   * `aio-files.ts` / `boxlite-files.ts` 都写着 `epochSecondsToIso(...) ?? ''` ——
+   * provider 给不出可解析的 mtime 时，这里发出去的是**空串**（`agent-task.repository`
+   * 的 JSON 回读也有同一条 `?? ''` 兜底）。写上 `format: date-time` 就是把一个已知缺口
+   * 伪装成保证：契约会声称「必是 ISO 瞬时」，而实现随时能发 `''`。
+   *
+   * 机械钉子：`sandbox/test/unit/boxlite-native-data-plane.spec.ts` 里那条「⛔ mtime
+   * 不可解析时 modifiedAt 是空串」——它把这个缺口的可达性钉住了，产出侧一改它就红。
+   *
+   * 想让它配得上 `IsoInstantSchema`，要先改的是**产出侧**（决定 `''` 该换成缺席，
+   * 还是该让 `TaskArtifact` 的 `modifiedAt` 变 optional）——那是实现决策，不是契约装饰。
+   */
   modifiedAt: z.string(),
 });
 export type TaskArtifactDto = z.infer<typeof TaskArtifactSchema>;
@@ -167,7 +183,7 @@ export const AgentTaskDtoSchema = z.object({
    * 闭集,见 `TaskErrorCodeSchema` ——它进 openapi,前端由此拿到可 `satisfies` 的类型。
    */
   errorCode: TaskErrorCodeSchema.optional(),
-  startedAt: z.string(),
-  finishedAt: z.string().optional(),
+  startedAt: IsoInstantSchema,
+  finishedAt: IsoInstantSchema.optional(),
 });
 export type AgentTaskDto = z.infer<typeof AgentTaskDtoSchema>;
