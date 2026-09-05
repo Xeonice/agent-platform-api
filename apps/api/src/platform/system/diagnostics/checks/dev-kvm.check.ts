@@ -88,7 +88,7 @@ export class DevKvmCheck implements DiagnoseCheck {
         isDefault,
       );
     }
-    return linuxKvmVerdict(await errnoOf(KVM));
+    return linuxKvmVerdict(await errnoOf(KVM), isDefault);
   }
 }
 
@@ -205,26 +205,48 @@ export function darwinMicroVmVerdict(
  * linux 的结论。参数是 `access(/dev/kvm, R|W)` 的 errno，`null` = 可读写。
  *
  * ⚠️ 两种失败的下一步完全不同：设备不在 ⇒ 宿主机没开虚拟化；在但没权限 ⇒ 加用户组。
- * （本轮未改口径，只是从 `run()` 里抽出来，好让 Linux 这一支在 macOS 上也能被断言。）
+ *
+ * ── ⛔ 严重程度按「谁需要它」分岔（2026-09-05 补齐 §9F 的判据总纲）─────────────
+ * 上一版**无条件 warn**：一台默认跑容器档（aio）的 Linux 机器，只因为没有 `/dev/kvm`
+ * 就常年顶着一个 ⚠️ —— 而它**完全健康**，那条路它根本不走。
+ *
+ * ⛔ 这正是本项自己那条纪律的反面：**无条件要求某个依赖在，与恒 ⚠️ 的噪音项是同一种
+ * 失败**（P21-5 §9D/§9F）。一个永远黄着的格子看久了没人看，还会把其余七项的可信度
+ * 一起拉低。darwin 那一支 2026-09-05 已经收了 `isDefaultProvider`，**Linux 这支当时漏了**。
+ *
+ * ⇒ 默认档是微 VM ⇒ ⚠️（它挡住了这台机器实际要走的路）；不是 ⇒ ℹ️「当前默认档不需要它」。
  */
-export function linuxKvmVerdict(errno: string | null): DiagnoseCheckResult {
+export function linuxKvmVerdict(
+  errno: string | null,
+  isDefaultProvider: boolean,
+): DiagnoseCheckResult {
   if (errno === null) {
     return {
       status: 'ok',
-      summary: '/dev/kvm 可读写 —— 微 VM 档位（boxlite）可用',
-      detail: { platform: 'linux', path: KVM, errno: null },
+      summary:
+        '/dev/kvm 可读写 —— 微 VM 档位（boxlite）可用' +
+        (isDefaultProvider ? '，且是这台机器的默认档' : ''),
+      detail: { platform: 'linux', path: KVM, errno: null, isDefaultProvider },
     };
   }
   const missing = errno === 'ENOENT';
+  const what = missing ? '/dev/kvm 不存在' : `/dev/kvm 存在但当前进程无读写权限（${errno}）`;
+
+  if (!isDefaultProvider) {
+    // ℹ️ 不是 ⚠️：这台机器的默认档不走微 VM，缺它什么都不耽误。
+    return {
+      status: 'info',
+      summary: `${what} —— 微 VM 档位（boxlite）不可用，但**当前默认档不需要它**（走容器档 aio）`,
+      detail: { platform: 'linux', path: KVM, errno, isDefaultProvider: false },
+    };
+  }
   return {
     status: 'warn',
-    summary: missing
-      ? '/dev/kvm 不存在 —— 微 VM 档位（boxlite）不可用，容器档位（aio）不受影响'
-      : `/dev/kvm 存在但当前进程无读写权限（${errno}）—— 微 VM 档位不可用`,
+    summary: `${what} —— 微 VM 档位（boxlite）不可用，而它正是这台机器的默认档`,
     hint: missing
       ? '宿主机需开启硬件虚拟化（BIOS VT-x/AMD-V）并加载 kvm 模块：lsmod | grep kvm；云主机需选支持嵌套虚拟化的规格'
       : `把平台进程的运行用户加入 kvm 组：sudo usermod -aG kvm $(whoami) && ls -l ${KVM}`,
-    detail: { platform: 'linux', path: KVM, errno },
+    detail: { platform: 'linux', path: KVM, errno, isDefaultProvider: true },
   };
 }
 

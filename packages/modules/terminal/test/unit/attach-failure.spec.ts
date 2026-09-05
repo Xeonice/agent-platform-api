@@ -8,6 +8,9 @@
 // 这类瞬时故障。一律发终止信号 = 把本来能自愈的抖动也判成永久故障。下面两条分别
 // 钉住这两半。
 import { describe, it, expect } from 'vitest';
+import { unusedSessions } from '../_unused-sessions';
+import type { TerminalSessionService } from '../../src/application/terminal-session.service';
+import type { TerminalAuthenticator } from '@platform/contracts';
 import {
   SandboxProviderError,
   SandboxProviderErrorCode,
@@ -22,10 +25,27 @@ interface Sent {
 
 /** 造一个 openSession 必抛 `err` 的网关，并记录它对客户端说了什么。 */
 async function attachWith(err: unknown): Promise<Sent> {
-  const sessions = {
+  // ⚠️ 只实现 `openSession`（本组用例只走它）；其余摊 `unused` 补齐契约 ——
+  //    ⛔ 被调到要响亮地抛，不给空壳。
+  // ⚠️ 两个方法一个不少（`TerminalSessionService` 共 bootstrapAgentSession/openSession）。
+  //    本组用例只走 `openSession`，⛔ 另一个不给空壳 —— 被调到要响亮地抛。
+  const sessions: Pick<TerminalSessionService, 'openSession' | 'bootstrapAgentSession'> = {
     openSession: (): Promise<never> => Promise.reject(err),
+    bootstrapAgentSession: (): Promise<never> => {
+      throw new Error('TerminalSessionService.bootstrapAgentSession 不该被这组用例调用');
+    },
   };
-  const gw = new TerminalGateway(...([sessions, {}] as never[]));
+  const gw = new TerminalGateway(
+    // ⚠️ 不能 `{...unusedSessions(), ...sessions}` —— 展开会丢掉类的原型形状。
+    //    ⇒ 拿到 stub 之后**在它身上覆盖**那一个方法。
+    Object.assign(unusedSessions(), sessions),
+    // ⚠️ 第二个参数是 `TerminalAuthenticator`；本组用例不走鉴权那一步。
+    //    ⛔ 原写法是 `...([sessions, {}] as never[])` —— spread 一个 never[] 只是在
+    //    骗过参数检查，连"这里少了个什么"都看不出来。
+    // 本组用例不走鉴权那一步。
+    // ⚠️ 契约方法叫 `authorize` 且**同步返回 boolean**（不是 async authenticate）。
+    { authorize: () => true } satisfies TerminalAuthenticator,
+  );
   const sent: Sent = { frames: [], disconnected: false };
   const client = {
     id: 'c1',

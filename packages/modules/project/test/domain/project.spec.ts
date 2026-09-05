@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { eventField } from '../../../../../test-support/unused';
 import { asProjectId } from '@platform/shared-kernel';
 import { Project } from '../../src/domain/entities/project.entity';
 import { RepoUrl } from '../../src/domain/value-objects/repo-url.vo';
@@ -262,16 +263,16 @@ describe('Project 的改动型操作各发一条事件', () => {
     p.retryClone(NOW);
     const events = p.pullEvents();
     expect(events.map((e) => e.type)).toEqual(['ProjectCloneRetried']);
-    expect((events[0] as { name: string }).name).toBe('demo');
+    expect(eventField<string>(events[0]!, 'name')).toBe('demo');
   });
 
   it('convert-to-empty 记下被丢弃的远端 host —— 只有 host，不是整条 URL', () => {
     const p = failedGit();
     p.convertToEmpty(NOW);
-    const [e] = p.pullEvents() as { type: string; discardedRepoHost: string | null }[];
-    expect(e.type).toBe('ProjectConvertedToEmpty');
+    const [e] = p.pullEvents();
+    expect(e!.type).toBe('ProjectConvertedToEmpty');
     // ⚠️ host 必须在归零**之前**取：转完之后平台里再没有任何一处记得它指向哪儿。
-    expect(e.discardedRepoHost).toBe('git.company.com:8443');
+    expect(eventField<string | null>(e!, 'discardedRepoHost')).toBe('git.company.com:8443');
     // ⛔ 整条 URL 不进事件：`RepoUrl` 保留原始串，`https://user:token@host/…` 会把
     // token 一起带进来，而 log-redactor 认的是密钥的形状，userinfo 那一段不遮。
     expect(JSON.stringify(e)).not.toContain('https://');
@@ -296,18 +297,18 @@ describe('Project 的改动型操作各发一条事件', () => {
     p.markCloneReady(1_000, NOW);
     p.pullEvents();
     p.syncBaseline(7_777, NOW);
-    const [e] = p.pullEvents() as { type: string; baselineSizeBytes: number }[];
-    expect(e.type).toBe('ProjectBaselineSynced');
-    expect(e.baselineSizeBytes).toBe(7_777);
+    const [e] = p.pullEvents();
+    expect(e!.type).toBe('ProjectBaselineSynced');
+    expect(eventField<number>(e!, 'baselineSizeBytes')).toBe(7_777);
   });
 
   it('删除发 ProjectDeleted，名字随事件走 —— 行没了之后没有任何库可以回查', () => {
     const p = Project.create({ ...base, sourceType: 'empty' });
     p.pullEvents();
     p.markDeleted(true, NOW);
-    const [e] = p.pullEvents() as { type: string; name: string; keptBaseline: boolean }[];
-    expect(e.type).toBe('ProjectDeleted');
-    expect(e.name).toBe('demo');
-    expect(e.keptBaseline).toBe(true);
+    const [e] = p.pullEvents();
+    expect(e!.type).toBe('ProjectDeleted');
+    expect(eventField<string>(e!, 'name')).toBe('demo');
+    expect(eventField<boolean>(e!, 'keptBaseline')).toBe(true);
   });
 });

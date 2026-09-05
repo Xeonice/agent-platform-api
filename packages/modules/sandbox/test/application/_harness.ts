@@ -7,6 +7,7 @@ import type {
   SandboxId,
   Tx,
   UnitOfWork,
+  ProjectId,
 } from '@platform/shared-kernel';
 import type {
   AgentSessionBootstrap,
@@ -248,7 +249,10 @@ export class FakeProvider implements SandboxProvider {
   constructor(
     readonly name: string,
     readonly capabilities: SandboxProviderCapabilities = FULL_CAPS,
-    private readonly log: string[] = [],
+    // ⚠️ `readonly` 不是 `private`：用例要从外面读这份调用日志（T-SBX-31 的五步顺序
+    //    正是断言它）。此前标成 private 而测试照读 —— 测试代码不被 typecheck，
+    //    所以这个矛盾一直没人发现（2026-09-05 改）。
+    readonly log: string[] = [],
   ) {
     if (capabilities.headlessTask) {
       this.jobs = new FakeJobPlane(name);
@@ -326,14 +330,17 @@ export class FakeProvider implements SandboxProvider {
  */
 function fakeExecStreamWithoutExitCode(): ProcessStream {
   const stream = fakeExecStream('', 0) as ProcessStream & {
-    onExit: (cb: (code?: number) => void) => void;
+    onExit: (cb: (code: number | null) => void) => void;
   };
-  return { ...stream, onExit: (cb) => cb(undefined) };
+  // ⚠️ 契约的退出码是 `number | null`（null = 被信号杀掉），不是 `undefined`。
+  return { ...stream, onExit: (cb) => cb(null) };
 }
 
 function fakeExecStream(output: string, code: number): ProcessStream {
   return {
     ref: 'fake-exec',
+    // ⚠️ `detach` 是契约必需的，此前这个替身缺着（2026-09-05 补）。
+    detach: () => undefined,
     onData: (cb) => cb(Buffer.from(output, 'utf8')),
     onExit: (cb) => cb(code),
     write: () => {},
@@ -524,7 +531,8 @@ export class FakeAdapter implements RuntimeAdapter {
   constructor(
     readonly id: string,
     displayName?: string,
-    private readonly log: string[] = [],
+    // ⚠️ 同上：用例要从外面读它（provision.spec 的四处断言）。
+    readonly log: string[] = [],
   ) {
     this.displayName = displayName ?? id;
   }

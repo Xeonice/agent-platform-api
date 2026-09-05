@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { RuntimeCredentialService } from '../../src/application/runtime-credential.service';
+import { unused, unusedCredentialReads } from '../../../../../test-support/unused';
 import { asCredentialId } from '@platform/shared-kernel';
 import { CredentialPreparationError } from '@platform/contracts';
 import { CredentialFacadeAdapter } from '../../src/application/credential-facade.adapter';
@@ -33,6 +35,7 @@ function makeAdapter(opts: {
     saveSync: () => undefined,
     revokeAndEraseSync: () => undefined,
     touchLastUsedSync: () => undefined,
+    ...unusedCredentialReads,
   } satisfies CredentialRepository;
   const materialize =
     opts.materialize ?? vi.fn(async () => ({ env: {}, dispose: async () => undefined }));
@@ -42,6 +45,9 @@ function makeAdapter(opts: {
     materializer,
     { run: (fn) => fn({} as never) },
     { now: () => NOW },
+    // ⚠️ `runtimeCredentials` 是后加的第 5 个参数，本组用例只走 git 凭证那半边。
+    //    ⇒ 被调用就抛（`test-support/unused`），⛔ 不给空壳。
+    unused<RuntimeCredentialService>('RuntimeCredentialService'),
   );
   return { adapter, materialize };
 }

@@ -21,6 +21,8 @@ import { harness, waitForStatus } from './_harness';
 function neverExits(): ProcessStream {
   return {
     ref: 'hanging-exec',
+    // ⚠️ 契约必需，此前这个替身缺着（2026-09-05 补）。
+    detach: () => undefined,
     onData: () => {},
     onExit: () => {},
     write: () => {},

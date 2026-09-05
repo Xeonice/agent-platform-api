@@ -1,6 +1,11 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import {
+  AutomationRunErrorCodeSchema,
+  AutomationRunStatusSchema,
+  WebhookStatusSchema,
+} from '@platform/contracts';
 import { DATABASE } from '@platform/shared-kernel';
 import type { AutomationId, Tx } from '@platform/shared-kernel';
 import { AutomationRun } from '../../../domain/entities/automation-run.entity';
@@ -72,29 +77,29 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .all();
     const hasMore = rows.length > cursor.limit;
     return {
-      items: rows.slice(0, cursor.limit).map(toDomain),
+      items: hydrateAll(rows.slice(0, cursor.limit), 'listHistory'),
       hasMore,
     };
   }
 
   async listPendingRetries(now: Date): Promise<AutomationRun[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(automationRuns)
       .where(and(eq(automationRuns.status, 'resource-exhausted'), lte(automationRuns.retryAt, now)))
       .orderBy(asc(automationRuns.retryAt))
-      .all()
-      .map(toDomain);
+      .all();
+    return hydrateAll(rows, 'listPendingRetries');
   }
 
   async listActive(): Promise<AutomationRun[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(automationRuns)
       .where(inArray(automationRuns.status, ['pending', 'running']))
       .orderBy(asc(automationRuns.triggeredAt))
-      .all()
-      .map(toDomain);
+      .all();
+    return hydrateAll(rows, 'listActive');
   }
 
   /**
@@ -104,7 +109,7 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
    * `true`（I-AUT-1 说它们不改 `failureCount`，补扫它们注定是 no-op）。
    */
   async listOutcomePending(limit: number): Promise<AutomationRun[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(automationRuns)
       .where(
@@ -115,8 +120,8 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       )
       .orderBy(asc(automationRuns.triggeredAt))
       .limit(limit)
-      .all()
-      .map(toDomain);
+      .all();
+    return hydrateAll(rows, 'listOutcomePending');
   }
 
   saveSync(_tx: Tx, run: AutomationRun): void {
@@ -167,14 +172,74 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
   }
 }
 
+/**
+ * 逐行水化，**一行坏数据不许拖垮整批** —— 与 `automation.repository.impl.ts::hydrateAll`
+ * 同一条（2026-09-05 补齐）。
+ *
+ * ⚠️ **这里的危险与姊妹文件不是同一个，别照抄结论。** 那边 `Automation.rehydrate` 会跑
+ * 一串值对象校验（`Schedule.create` 真解 IANA 等），所以裸 `.map` 的症状是**抛出来、
+ * 整批全没**。而 `AutomationRun.rehydrate` 只是纯赋值 —— 它**根本不会抛**。
+ *
+ * ⛔ **它原本的毛病是反过来的：坏数据静默流进领域层。** 三个 `as` 断言零校验，
+ * 而 DB 侧只有两条 CHECK 兜着：
+ *
+ * | 列 | DB CHECK | 断言有没有依据 |
+ * |---|---|---|
+ * | `status` | ✅ `automation_runs_status_ck` | 有 |
+ * | `webhook_status` | ✅ `automation_runs_webhook_status_ck` | 有 |
+ * | **`error_code`** | ❌ **没有** | **没有** —— 任何绕过聚合的写入（迁移、手工改数据）都能塞进去 |
+ *
+ * ⇒ 先让 `toDomain` **真的校验**（用契约里那三个 zod 闭集），它才会抛；
+ * 然后 per-row 隔离才不是仪式 —— 它现在真的挡着一件会发生的事。
+ *
+ * ⛔ 坏行**不静默吞掉**：每行单独 log 一次带上 id，否则「这条 run 怎么不见了」
+ * 又变成一个查不出来的问题。
+ */
+function hydrateAll(rows: readonly AutomationRunRow[], where: string): AutomationRun[] {
+  const out: AutomationRun[] = [];
+  for (const row of rows) {
+    try {
+      out.push(toDomain(row));
+    } catch (e) {
+      HYDRATE_LOGGER.error(
+        `automation run ${row.id} 的行数据无法水化（${where}），本轮跳过它、其余照常：` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  return out;
+}
+
+const HYDRATE_LOGGER = new Logger('AutomationRunRepository');
+
+/** 闭集列的解码。⛔ **解不出就抛**——让 `hydrateAll` 跳过这一行，而不是放一个非法值进领域。 */
+function decodeEnum<T>(
+  schema: { safeParse: (v: unknown) => { success: boolean; data?: T } },
+  raw: unknown,
+  column: string,
+): T {
+  const r = schema.safeParse(raw);
+  if (!r.success || r.data === undefined) {
+    throw new Error(`${column} 的值 ${JSON.stringify(raw)} 不在闭集里`);
+  }
+  return r.data;
+}
+
 function toDomain(row: AutomationRunRow): AutomationRun {
   return AutomationRun.rehydrate({
     id: row.id,
     automationId: row.automationId as AutomationId,
     sandboxId: row.sandboxId,
     triggeredAt: row.triggeredAt,
-    status: row.status as AutomationRunStatus,
-    errorCode: row.errorCode as AutomationRunErrorCode | null,
+    status: decodeEnum<AutomationRunStatus>(AutomationRunStatusSchema, row.status, 'status'),
+    errorCode:
+      row.errorCode === null
+        ? null
+        : decodeEnum<AutomationRunErrorCode>(
+            AutomationRunErrorCodeSchema,
+            row.errorCode,
+            'error_code',
+          ),
     errorMessage: row.errorMessage,
     retryCount: row.retryCount,
     retryAt: row.retryAt,
@@ -184,7 +249,10 @@ function toDomain(row: AutomationRunRow): AutomationRun {
     outputSummary: row.outputSummary,
     logPath: row.logPath,
     logBytes: row.logBytes,
-    webhookStatus: row.webhookStatus as WebhookStatus | null,
+    webhookStatus:
+      row.webhookStatus === null
+        ? null
+        : decodeEnum<WebhookStatus>(WebhookStatusSchema, row.webhookStatus, 'webhook_status'),
     outcomeApplied: row.outcomeApplied,
   });
 }

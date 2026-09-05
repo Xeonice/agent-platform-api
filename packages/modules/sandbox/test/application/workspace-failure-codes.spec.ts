@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { asSandboxId } from '@platform/shared-kernel';
 import {
   DISK_INSUFFICIENT,
   SANDBOX_FAILURE_CODES,
@@ -39,7 +40,7 @@ describe('workspace 失败必须带闭集里的码，不能是 errno', () => {
     const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
     await waitForStatus(h.service, dto.id, 'failed');
 
-    const sandbox = await h.repo.findById(dto.id);
+    const sandbox = await h.repo.findById(asSandboxId(dto.id));
     // ① 出线的码一定属于这套词汇表 —— 前端能拿它查到一句话。
     expect(SANDBOX_FAILURE_CODES.has(sandbox?.failureCode ?? '')).toBe(true);
     // ② 具体地说：errno 没有逃出去。
@@ -57,7 +58,7 @@ describe('workspace 失败必须带闭集里的码，不能是 errno', () => {
     const dto = await h.service.create({ projectId: 'prj-1', runtime: 'claude-code' });
     await waitForStatus(h.service, dto.id, 'failed');
 
-    const sandbox = await h.repo.findById(dto.id);
+    const sandbox = await h.repo.findById(asSandboxId(dto.id));
     // 这是 ① 层（抛出处命名）真正的收益：用户拿到的不是"内部错误"，而是"磁盘不足"——
     // 一句他自己能处理的话。出口兜底给不出这个，因为它不知道刚才在做什么 IO。
     expect(sandbox?.failureCode).toBe(DISK_INSUFFICIENT);

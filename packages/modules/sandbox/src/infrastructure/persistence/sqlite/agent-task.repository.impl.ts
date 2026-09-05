@@ -178,7 +178,11 @@ function decodeArtifacts(raw: string): TaskArtifact[] {
         {
           name: o.name,
           size: typeof o.size === 'number' ? o.size : 0,
-          modifiedAt: typeof o.modifiedAt === 'string' ? o.modifiedAt : '',
+          // ⛔ 回读也照缺席（2026-09-05）：老行里存着 `''` 的，读出来同样是**缺席**
+          //    —— 一条历史遗留的空串不该在今天被当成「时间是空字符串」渲染出去。
+          ...(typeof o.modifiedAt === 'string' && o.modifiedAt !== ''
+            ? { modifiedAt: o.modifiedAt }
+            : {}),
         },
       ];
     });

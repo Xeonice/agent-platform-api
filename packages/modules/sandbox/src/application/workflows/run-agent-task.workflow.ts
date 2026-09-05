@@ -554,7 +554,8 @@ export class RunAgentTaskWorkflow {
           // hand an API client (`TaskArtifactSchema.name`).
           name: relativeArtifactName(e.path),
           size: e.size ?? 0,
-          modifiedAt: e.modifiedAt,
+          // ⛔ 缺席原样传下去，不在这里补一个 `?? ''` —— 那会把「不知道」变回一句谎。
+          ...(e.modifiedAt === undefined ? {} : { modifiedAt: e.modifiedAt }),
         }))
         // ⚠️ A NAME IS DROPPED, NOT SANITISED. `relativeArtifactName` only strips the drop
         // box prefix, so a listing that reported `../../etc/passwd` under it would put a

@@ -262,6 +262,7 @@ describe('SandboxHealthMonitor（03 §7.8）', () => {
   it('★ `running` 但没有实例 id ⇒ 连 inspect 都不调', async () => {
     const bare = harness();
     const orphan = Sandbox.create({
+      imageRef: 'localhost:5001/platform/sandbox:v2',
       id: asSandboxId('sbx-orphan'),
       projectId: asProjectId('prj-1'),
       runtime: 'claude-code',

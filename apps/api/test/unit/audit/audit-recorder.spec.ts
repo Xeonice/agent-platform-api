@@ -44,9 +44,20 @@ const INPUT: AuditRecordInput = {
  * 而是写这一侧自己的故障。
  */
 function throwingRepo(message: string): AuditRepository {
-  const repo = {
+  // ⚠️ 三个方法一个不少地实现出来（`AuditRepository` 是个类，共 insert/list/count）。
+  //    本组用例只走 `insert`，⛔ 但另外两个不给空壳 —— 被调到要**响亮地抛**，
+  //    而不是悄悄返回一个假的空列表让用例继续绿着。
+  //    ⚠️ 此前这里是 `repo as AuditRepository` 的部分替身，靠「测试不被 typecheck」
+  //    活着（2026-09-05 补齐）。
+  const repo: Pick<AuditRepository, 'insert' | 'list' | 'count'> = {
     insert(): void {
       throw new Error(message);
+    },
+    list(): ReturnType<AuditRepository['list']> {
+      throw new Error('AuditRepository.list 不该被这组用例调用');
+    },
+    count(): number {
+      throw new Error('AuditRepository.count 不该被这组用例调用');
     },
   };
   return repo as AuditRepository;

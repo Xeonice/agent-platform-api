@@ -143,7 +143,9 @@ describe('bootstrapAgentSession — the tmux self-check (03 §4.3 ⑤.1)', () =>
    */
   it('⭐ 沙箱内 agent 不可达 ⇒ IMAGE_CONTRACT_VIOLATION，不是 INTERNAL', async () => {
     const h = harness([
-      { match: /command -v tmux/, throws: 'connect ECONNREFUSED 127.0.0.1:8080' },
+      // ⚠️ `exitCode` 是 `ExecRule` 的必填项：抛出的那一条**不会用到它**，但契约要求它在。
+      //    ⛔ 给 0 会读成「成功」，给 -1 才明确是「这条根本没跑到退出码」。
+      { match: /command -v tmux/, exitCode: -1, throws: 'connect ECONNREFUSED 127.0.0.1:8080' },
     ]);
     const err = await h.service
       .bootstrapAgentSession({

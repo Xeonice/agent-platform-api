@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { runHalfStub } from '../_run-half';
 import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import type { Clock } from '@platform/shared-kernel';
 import type {
@@ -93,6 +94,8 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
     // A new runtime added by writing ONLY an adapter (validateApiKey + createCredentialFromSecret)
     // and registering it. submitSecret dispatches to it verbatim — proving the extension point.
     const acme: RuntimeAdapter = {
+      // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+      ...runHalfStub,
       id: 'acme',
       displayName: 'Acme',
       vendor: 'Acme Inc',
@@ -139,6 +142,8 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
 
   it('a runtime whose adapter has no createCredentialFromSecret → BadRequest (no api-key support)', async () => {
     const noApiKey: RuntimeAdapter = {
+      // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+      ...runHalfStub,
       id: 'noapikey',
       displayName: 'NoApiKey',
       vendor: 'X',

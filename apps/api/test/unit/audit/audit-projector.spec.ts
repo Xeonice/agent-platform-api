@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { asAgentTaskId, asCredentialId, asProjectId, asSandboxId } from '@platform/shared-kernel';
 import {
   AgentTaskFinished,
   AgentTaskStarted,
@@ -38,8 +39,12 @@ const AT = new Date('2026-08-27T12:00:00.000Z');
 
 describe('AuditProjector.project', () => {
   it('SandboxStateChanged 的 actor 来自 triggeredBy，不是笼统的 system', () => {
-    const reaped = project(new SandboxStateChanged('sbx-1', 'idle', 'stopping', 'reaper', AT));
-    const byUser = project(new SandboxStateChanged('sbx-1', 'running', 'stopping', 'user', AT));
+    const reaped = project(
+      new SandboxStateChanged(asSandboxId('sbx-1'), 'idle', 'stopping', 'reaper', AT),
+    );
+    const byUser = project(
+      new SandboxStateChanged(asSandboxId('sbx-1'), 'running', 'stopping', 'user', AT),
+    );
     // ⚠️ 「这个沙箱是自己 idle 被 reaper 收走的，还是用户按了停止」——13 §2.8.2 说
     // actor 是排障第一个要问的。两条记录必须分得开。
     expect(reaped?.actor).toBe('reaper');
@@ -48,7 +53,14 @@ describe('AuditProjector.project', () => {
 
   it('转到 failed 时是 error 级 + outcome failed + 带上错误码', () => {
     const r = project(
-      new SandboxStateChanged('sbx-1', 'starting', 'failed', 'scheduler', AT, 'INSTALL_FAILED'),
+      new SandboxStateChanged(
+        asSandboxId('sbx-1'),
+        'starting',
+        'failed',
+        'scheduler',
+        AT,
+        'INSTALL_FAILED',
+      ),
     );
     expect(r).toMatchObject({
       type: 'sandbox.state_changed',
@@ -59,7 +71,9 @@ describe('AuditProjector.project', () => {
   });
 
   it('正常流转是 info + ok，且不凭空造一个 errorCode', () => {
-    const r = project(new SandboxStateChanged('sbx-1', 'creating', 'starting', 'scheduler', AT));
+    const r = project(
+      new SandboxStateChanged(asSandboxId('sbx-1'), 'creating', 'starting', 'scheduler', AT),
+    );
     expect(r?.severity).toBe('info');
     expect(r?.outcome).toBe('ok');
     expect(r && 'errorCode' in r).toBe(false);
@@ -67,21 +81,29 @@ describe('AuditProjector.project', () => {
 
   it('CredentialInjected 的 subject 是**沙箱**，凭证 id 进 detail', () => {
     // 这条记录的读者在看「这个沙箱经历了什么」（P21-5 §10.2 的时间线按 subjectId 筛）。
-    const r = project(new CredentialInjected('cred-9', 'sbx-7', AT));
+    const r = project(new CredentialInjected(asCredentialId('cred-9'), 'sbx-7', AT));
     expect(r).toMatchObject({ subjectType: 'sandbox', subjectId: 'sbx-7' });
     expect(r?.detail).toMatchObject({ credentialId: 'cred-9' });
   });
 
   it('各上下文落到各自的 category', () => {
-    expect(project(new SandboxCreated('sbx-1', 'prj-1', '我的任务', AT))?.category).toBe('sandbox');
-    expect(project(new ProjectCreated('prj-1', '我的项目', AT))?.category).toBe('project');
-    expect(project(new CredentialRevoked('cred-1', 'codex', 'oauth-device', AT))?.category).toBe(
-      'credential',
+    expect(
+      project(new SandboxCreated(asSandboxId('sbx-1'), asProjectId('prj-1'), '我的任务', AT))
+        ?.category,
+    ).toBe('sandbox');
+    expect(project(new ProjectCreated(asProjectId('prj-1'), '我的项目', AT))?.category).toBe(
+      'project',
     );
+    expect(
+      project(new CredentialRevoked(asCredentialId('cred-1'), 'codex', 'oauth-device', AT))
+        ?.category,
+    ).toBe('credential');
   });
 
   it('project.created 的 summary 写项目名,不写 UUID', () => {
-    const r = project(new ProjectCreated('621510e4-d357-498f-9b87-83a2984ad051', '我的项目', AT));
+    const r = project(
+      new ProjectCreated(asProjectId('621510e4-d357-498f-9b87-83a2984ad051'), '我的项目', AT),
+    );
 
     // 13 §2.8.2 对 summary 的要求是「一行人话,直接上 UI」。写 id 的那一版在真实面板上
     // 长这样:「创建项目 621510e4-d357-498f-9b87-83a2984ad051」—— 五行除了 UUID 全一样,
@@ -99,8 +121,8 @@ describe('AuditProjector.project', () => {
     // 流转），写 id 的那一版让面板整屏都是 UUID —— 用户第一次点开就再也不点第二次。
     const r = project(
       new SandboxCreated(
-        '8f3c1d02-4b77-4c20-9f2e-6d1b0a5e77aa',
-        'prj-1',
+        asSandboxId('8f3c1d02-4b77-4c20-9f2e-6d1b0a5e77aa'),
+        asProjectId('prj-1'),
         '修复登录页的样式问题',
         AT,
       ),
@@ -118,14 +140,19 @@ describe('AuditProjector.project', () => {
     // 凭证**没有用户起的名字**，能认人的只有这个组合。
     const stored = project(
       new CredentialStored(
-        '3f9a77c1-8b04-4f0e-9a1d-2c5e8f0b7d31',
+        asCredentialId('3f9a77c1-8b04-4f0e-9a1d-2c5e8f0b7d31'),
         'claude-code',
         'oauth-device',
         AT,
       ),
     );
     const revoked = project(
-      new CredentialRevoked('3f9a77c1-8b04-4f0e-9a1d-2c5e8f0b7d31', 'claude-code', 'api-key', AT),
+      new CredentialRevoked(
+        asCredentialId('3f9a77c1-8b04-4f0e-9a1d-2c5e8f0b7d31'),
+        'claude-code',
+        'api-key',
+        AT,
+      ),
     );
 
     expect(stored?.summary).toBe('保存凭证 claude-code（oauth-device）');
@@ -137,8 +164,10 @@ describe('AuditProjector.project', () => {
   });
 
   it('git 凭证没有 runtimeId,读作 Git(方式)——不读成 null,也不读成 Git(git-…)', () => {
-    const ssh = project(new CredentialStored('cred-1', null, 'git-ssh-key', AT));
-    const https = project(new CredentialRevoked('cred-2', null, 'git-https-token', AT));
+    const ssh = project(new CredentialStored(asCredentialId('cred-1'), null, 'git-ssh-key', AT));
+    const https = project(
+      new CredentialRevoked(asCredentialId('cred-2'), null, 'git-https-token', AT),
+    );
 
     expect(ssh?.summary).toBe('保存凭证 Git（ssh-key）');
     expect(https?.summary).toBe('吊销凭证 Git（https-token）');
@@ -148,7 +177,9 @@ describe('AuditProjector.project', () => {
   });
 
   it('被信号杀掉的 Task 不编造 exitCode 0', () => {
-    const r = project(new AgentTaskFinished('tsk-1', 'sbx-1', 'killed', undefined, AT));
+    const r = project(
+      new AgentTaskFinished(asAgentTaskId('tsk-1'), asSandboxId('sbx-1'), 'killed', undefined, AT),
+    );
     expect(r?.detail && 'exitCode' in r.detail).toBe(false);
     expect(r?.outcome).toBe('failed');
   });
@@ -239,7 +270,7 @@ describe('image 档：summary 写用户认得的 ref，不写 manifestId', () =>
  * 四个 POST 加上 `DELETE /api/projects/:id`，此前**一个事件都不发**。
  */
 describe('project 档：四个改动型 POST + 删除', () => {
-  const PID = '621510e4-d357-498f-9b87-83a2984ad051';
+  const PID = asProjectId('621510e4-d357-498f-9b87-83a2984ad051');
   const NAME = '我的项目';
 
   it('五种操作各有自己的 type，且都落在 category=project / subjectId=项目 id', () => {
@@ -335,8 +366,8 @@ describe('RuntimeAuthModeChanged：改完之后系统行为变了，得知道是
  */
 describe('SandboxReconciledAsOrphan —— 17 §76 说的那个消费方，本轮才接上', () => {
   const orphan = new SandboxReconciledAsOrphan(
-    'sbx-1',
-    'prj-1',
+    asSandboxId('sbx-1'),
+    asProjectId('prj-1'),
     '我的任务',
     'running',
     'container missing on reconcile',
@@ -382,15 +413,30 @@ describe('actor 取值集合：契约清单与实写不许再漂移', () => {
 
   it('project() 对每一类事件产出的 actor 都在 AUDIT_ACTORS 里', () => {
     const events: DomainEvent[] = [
-      new SandboxCreated('sbx-1', 'prj-1', '我的任务', AT),
-      ...TRIGGERED_BY.map((by) => new SandboxStateChanged('sbx-1', 'idle', 'stopping', by, AT)),
-      new SandboxReconciledAsOrphan('sbx-1', 'prj-1', '我的任务', 'running', 'gone', AT),
-      new AgentTaskStarted('tsk-1', 'sbx-1', 'claude-code', undefined, AT),
-      new AgentTaskFinished('tsk-1', 'sbx-1', 'succeeded', 0, AT),
-      new ProjectCreated('prj-1', '我的项目', AT),
-      new CredentialStored('cred-1', 'codex', 'oauth-device', AT),
-      new CredentialRevoked('cred-1', 'codex', 'oauth-device', AT),
-      new CredentialInjected('cred-1', 'sbx-1', AT),
+      new SandboxCreated(asSandboxId('sbx-1'), asProjectId('prj-1'), '我的任务', AT),
+      ...TRIGGERED_BY.map(
+        (by) => new SandboxStateChanged(asSandboxId('sbx-1'), 'idle', 'stopping', by, AT),
+      ),
+      new SandboxReconciledAsOrphan(
+        asSandboxId('sbx-1'),
+        asProjectId('prj-1'),
+        '我的任务',
+        'running',
+        'gone',
+        AT,
+      ),
+      new AgentTaskStarted(
+        asAgentTaskId('tsk-1'),
+        asSandboxId('sbx-1'),
+        'claude-code',
+        undefined,
+        AT,
+      ),
+      new AgentTaskFinished(asAgentTaskId('tsk-1'), asSandboxId('sbx-1'), 'succeeded', 0, AT),
+      new ProjectCreated(asProjectId('prj-1'), '我的项目', AT),
+      new CredentialStored(asCredentialId('cred-1'), 'codex', 'oauth-device', AT),
+      new CredentialRevoked(asCredentialId('cred-1'), 'codex', 'oauth-device', AT),
+      new CredentialInjected(asCredentialId('cred-1'), 'sbx-1', AT),
       new RuntimeInstallationStateChanged(
         'sbx-1',
         'claude-code',
@@ -400,11 +446,11 @@ describe('actor 取值集合：契约清单与实写不许再漂移', () => {
         AT,
       ),
       new RuntimeAuthModeChanged('claude-code', 'account', 'api-key', AT),
-      new ProjectCloneRetried('prj-1', '我的项目', AT),
-      new ProjectConvertedToEmpty('prj-1', '我的项目', 'github.com', AT),
-      new ProjectCloneCancelled('prj-1', '我的项目', AT),
-      new ProjectBaselineSynced('prj-1', '我的项目', 4096, AT),
-      new ProjectDeleted('prj-1', '我的项目', false, AT),
+      new ProjectCloneRetried(asProjectId('prj-1'), '我的项目', AT),
+      new ProjectConvertedToEmpty(asProjectId('prj-1'), '我的项目', 'github.com', AT),
+      new ProjectCloneCancelled(asProjectId('prj-1'), '我的项目', AT),
+      new ProjectBaselineSynced(asProjectId('prj-1'), '我的项目', 4096, AT),
+      new ProjectDeleted(asProjectId('prj-1'), '我的项目', false, AT),
       new ImageRegistered('img-m-1', 'img-1', 'repo/name:tag', 'sha256:abc', AT),
       new ImageValidated('img-m-1', 'repo/name:tag', 'valid', AT),
       new ImageActivated('img-m-1', 'repo/name:tag', AT),

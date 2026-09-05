@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { runHalfStub } from '../_run-half';
 import { UnknownRuntimeError } from '@platform/contracts';
 import type { RuntimeAdapter } from '@platform/contracts';
 import { DefaultRuntimeAdapterRegistry } from '../../src/infrastructure/registry/runtime-adapter.registry';
@@ -11,6 +12,8 @@ const makeRegistry = (): DefaultRuntimeAdapterRegistry =>
 
 function thirdParty(id: string): RuntimeAdapter {
   return {
+    // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+    ...runHalfStub,
     id,
     displayName: 'Acme Agent',
     vendor: 'Acme Inc',

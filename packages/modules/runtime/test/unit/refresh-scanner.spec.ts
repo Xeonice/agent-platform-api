@@ -1,4 +1,5 @@
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { runHalfStub } from '../_run-half';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
@@ -47,6 +48,8 @@ function fakeHelper(refreshedAccess: string): AuthHelper {
         homeDir,
         pty: {
           ref: 'x',
+          // ⚠️ 契约必需，此前这个替身缺着（2026-09-05 补）。
+          detach: () => undefined,
           onData() {},
           write() {},
           resize() {},
@@ -186,6 +189,8 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
     // a refreshCapability with its OWN probe command + auth-file format. The scanner
     // discovers both through the registry — proving the extension point is closed.
     const acme: RuntimeAdapter = {
+      // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+      ...runHalfStub,
       id: 'acme',
       displayName: 'Acme',
       vendor: 'Acme Inc',
@@ -218,6 +223,8 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
           homeDir,
           pty: {
             ref: 'x',
+            // ⚠️ 契约必需，此前这个替身缺着（2026-09-05 补）。
+            detach: () => undefined,
             onData() {},
             write() {},
             resize() {},

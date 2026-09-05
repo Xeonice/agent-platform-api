@@ -370,8 +370,13 @@ export interface FileEntry {
   /**
    * ISO-8601. ⚠️ The agent reports epoch SECONDS in a STRING (`"1787396751"`), so the
    * provider converts; the contract does not leak that encoding to callers.
+   *
+   * ⛔ **ABSENT when the agent's mtime does not parse — never an empty string**
+   * (2026-09-05). It used to be `epochSecondsToIso(...) ?? ''`: an empty string is a lie
+   * shaped like data — the UI renders a blank cell (is the timestamp missing, or is the
+   * cell broken?) and `new Date('')` is `Invalid Date`. Same discipline as `size` above.
    */
-  modifiedAt: string;
+  modifiedAt?: string;
 }
 
 /**
