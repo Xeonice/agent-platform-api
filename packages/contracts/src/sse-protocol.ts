@@ -185,6 +185,61 @@ export const PRESET_IMAGE_NOT_PLATFORM_BUILT = 'PRESET_IMAGE_NOT_PLATFORM_BUILT'
 /** 第 4 步：是对的那张，但平台里没有一条 `valid` 且启用的注册记录（开机播种没成）。 */
 export const PRESET_IMAGE_NOT_SEEDED = 'PRESET_IMAGE_NOT_SEEDED';
 
+/**
+ * 搬运不可行：这台机器上够不着这张镜像的字节（本机 docker 库没有、发布资产清单也没命中）。
+ *
+ * ⚠️ **它是「去构建」而不是「重试」**，所以 `retryable: false`：同一台机器上再点一次
+ * 只会得到同一个答案。这也是它必须与下面那个码分开的理由 —— 两者处置相反。
+ */
+export const PRESET_IMAGE_NOT_PROVISIONABLE = 'PRESET_IMAGE_NOT_PROVISIONABLE';
+/**
+ * 已经有一次搬运在进行中。
+ *
+ * ⚠️ **不做成幂等 200「复用那条流」**：两条流同时往 registry 写同一个 tag 是竞态，而且
+ * 第二个调用方通常是用户手抖点了第二下 —— 告诉他「已经在搬了」比默默再开一条正确得多。
+ */
+export const PRESET_IMAGE_PROVISION_IN_FLIGHT = 'PRESET_IMAGE_PROVISION_IN_FLIGHT';
+
+/** 搬运阶段的闭集 —— 与 `PROVISION_STAGES` 同源，前端按它画进度格。 */
+export const PROVISION_STAGE_NAMES = ['plan', 'fetch', 'verify', 'load', 'register'] as const;
+export type ProvisionStageName = (typeof PROVISION_STAGE_NAMES)[number];
+
+/**
+ * 搬运流的帧。
+ *
+ * ⚠️ **`progress` 可以是 `null` 且那是有意义的取值**：docker 的进度帧不一定带 `total`
+ * （见 `fractionOf`）。前端读到 `null` 要画**不确定态**（转圈），⛔ 不许当成 0 ——
+ * 一个停在 0% 不动的进度条与「卡死了」在观感上完全一致。
+ */
+export interface ProvisionStageFrame {
+  event: 'stage';
+  stage: ProvisionStageName;
+  status: 'running' | 'ok' | 'failed' | 'skipped';
+  message: string;
+  progress: number | null;
+}
+
+/**
+ * 收尾帧。
+ *
+ * ⚠️ **失败也要有这一帧，不能静静断开**：断开在前端看来与网络抖动无法区分，
+ * 而这两者的下一步不同（重试 vs 去看 error 说的是哪一阶段）。
+ */
+export interface ProvisionDoneFrame {
+  event: 'done';
+  ok: boolean;
+  error?: string;
+}
+
+export type ProvisionServerFrame = ProvisionStageFrame | ProvisionDoneFrame;
+
+/** 搬运的两个码 —— ⛔ 处置相反（去构建 / 等着），不许合成一个。 */
+export const PRESET_IMAGE_PROVISION_CODES = [
+  PRESET_IMAGE_NOT_PROVISIONABLE,
+  PRESET_IMAGE_PROVISION_IN_FLIGHT,
+] as const;
+export type PresetImageProvisionCode = (typeof PRESET_IMAGE_PROVISION_CODES)[number];
+
 /** 四个码的闭集 —— 第 5 步没有码，因为它不是失败。 */
 export const PRESET_IMAGE_CODES = [
   PRESET_IMAGE_NOT_CONFIGURED,
@@ -218,7 +273,11 @@ export const SSE_PROTOCOL_CANONICAL =
   'outbound-network,ws-loopback,data-root-fs,preset-image|' +
   'diagnose.preset-image.steps:config,registry,lineage,registration,staged|' +
   'diagnose.preset-image.codes:PRESET_IMAGE_NOT_CONFIGURED,PRESET_IMAGE_NOT_IN_REGISTRY,' +
-  'PRESET_IMAGE_NOT_PLATFORM_BUILT,PRESET_IMAGE_NOT_SEEDED';
+  'PRESET_IMAGE_NOT_PLATFORM_BUILT,PRESET_IMAGE_NOT_SEEDED|' +
+  'provision.server:stage{stage,status,message,progress},done{ok,error?}|' +
+  'provision.stages:plan,fetch,verify,load,register|' +
+  'provision.status:running,ok,failed,skipped|' +
+  'provision.codes:PRESET_IMAGE_NOT_PROVISIONABLE,PRESET_IMAGE_PROVISION_IN_FLIGHT';
 
 /**
  * 诊断流的 schema 版本，随响应头 `X-Schema-Hash` 下发。

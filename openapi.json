@@ -2398,6 +2398,28 @@
           "system"
         ]
       }
+    },
+    "/api/system/preset-image/provision": {
+      "post": {
+        "operationId": "SystemController_provisionPresetImage",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "SSE 帧流：event: stage（plan/fetch/verify/load/register）+ done。帧类型手写于两仓 sse-protocol.ts",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "summary": "把预制镜像搬到位（只搬不建）：本机 docker 库已有 ⇒ 直接推；发布资产清单命中 ⇒ 校验 sha256 后装载再推。搬不了返 409，已在搬返 409（两个码）",
+        "tags": [
+          "system"
+        ]
+      }
     }
   },
   "info": {

@@ -23,6 +23,11 @@ import type {
 import type { DiagnoseCheck, DiagnoseCheckResult } from './check.types';
 
 /** 平台预制镜像的构建脚本位置 —— 每一步的建议都要指向它，所以只写一次。 */
+import {
+  PresetImageProvisioner,
+  type ProvisionPlanner,
+} from '../../preset-image/preset-image-provisioner';
+
 const BUILD_SCRIPT = 'api/images/platform-sandbox';
 
 /**
@@ -59,6 +64,11 @@ export class PresetImageCheck implements DiagnoseCheck {
     @Inject(IMAGE_SPEC_REGISTRY) private readonly specs: ImageSpecRegistry,
     @Inject(IMAGE_FACADE) private readonly images: ImageFacade,
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
+    // ⚠️ **必须显式 `@Inject`**：`ProvisionPlanner` 是 interface，运行期不存在，
+    //    Nest 拿不到注入 token（2026-09-05 实测：24 个 e2e 文件一起挂在
+    //    「argument at index [3]」）。⇒ 类型用窄口子（测试替身写一个方法就够），
+    //    token 用那个类 —— 两件事各自取所需，不必为了 DI 把类型放宽回去。
+    @Inject(PresetImageProvisioner) private readonly provisioner: ProvisionPlanner,
   ) {}
 
   async run(): Promise<DiagnoseCheckResult> {
@@ -86,16 +96,22 @@ export class PresetImageCheck implements DiagnoseCheck {
       resolved = await this.specs.get(this.specs.defaultProvider).resolve(ref);
     } catch (e) {
       const reason = (e as Error).message;
+      // ⛔ **先问「字节够不够得着」，够得着就别让用户去敲命令**（P21-8 §2 ⇒ 新判据）。
+      //    2026-09-05 实测：清空 registry 后镜像的字节仍躺在本机 docker 库里，而这里
+      //    原样输出的 hint 是「docker build ... && docker push ...」—— 让用户**重新
+      //    build 一遍已经有的东西**。平台明明能做而让用户去敲命令，那不是指路，
+      //    是把自己的活派给用户。
+      const plan = await this.provisioner.plan();
       return {
         status: 'fail',
         step: 'registry',
         errorCode: PRESET_IMAGE_NOT_IN_REGISTRY,
         summary: `镜像 '${ref}' 在 registry 里解析不到：${reason}`,
-        hint:
-          `确认镜像已推上去：docker pull ${ref}；没有就先构建再推 —— ` +
-          `docker build -t ${ref} ${BUILD_SCRIPT} && docker push ${ref}。` +
-          '内网 registry 需要凭证或走代理时，先在系统设置里配好代理再重新诊断',
-        detail: { ref, reason },
+        hint: plan.provisionable
+          ? `${plan.why}。⇒ 在初始化向导或系统状态页点 [准备镜像]，平台会自己把它搬到位（${plan.from} → ${plan.to}${plan.sizeBytes === null ? '' : `，约 ${String(Math.round(plan.sizeBytes / 1024 / 1024))} MB`}）`
+          : `${plan.why}。⇒ 用平台的构建脚本构建再推：docker build -t ${ref} ${BUILD_SCRIPT} && docker push ${ref}。` +
+            '内网 registry 需要凭证或走代理时，先在系统设置里配好代理再重新诊断',
+        detail: { ref, reason, provision: plan },
       };
     }
 

@@ -1,4 +1,4 @@
-import type { DiagnoseServerFrame } from '@platform/contracts';
+import type { DiagnoseServerFrame, ProvisionServerFrame } from '@platform/contracts';
 import { SSE_DIAGNOSE_SCHEMA_HASH } from '@platform/contracts';
 
 /** 只用到 express `Response` 的这几样 —— 为几个 header 引入 `express` 类型依赖不划算。 */
@@ -16,6 +16,15 @@ export interface SseResponse {
  * `text/event-stream` 那四个 header 的地方一多，漏掉 `X-Accel-Buffering` 的那一份就会
  * 在装了 nginx 的部署上「什么都不流，最后一次性全出来」，而本机永远复现不了。
  */
+/**
+ * 这个写出口服务的两条流。
+ *
+ * ⚠️ **写成闭集联合而不是 `{ event: string }`**：`event` 是消费方的判别键，放开成 string
+ * 就等于允许新增一条前端没有分支的流 —— 而那种缺失是静默的（掉进 default 分支，
+ * 界面上什么都不发生）。加一条流就要在这里显式登记一次。
+ */
+export type SseFrame = DiagnoseServerFrame | ProvisionServerFrame;
+
 export class SseWriter {
   constructor(private readonly res: SseResponse) {}
 
@@ -44,7 +53,7 @@ export class SseWriter {
    * —— 否则多行 payload 需要每行前缀 `data: `，而漏掉那一步的表现是「解析器安静地只
    * 看到第一行」。
    */
-  send(frame: DiagnoseServerFrame): void {
+  send(frame: SseFrame): void {
     if (this.res.writableEnded) return;
     this.res.write(`event: ${frame.event}\ndata: ${JSON.stringify(frame)}\n\n`);
   }

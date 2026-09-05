@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Post, Put, Res } from '@nestjs/common';
+import { Body, ConflictException, Controller, Get, HttpCode, Post, Put, Res } from '@nestjs/common';
 import {
   ApiCreatedResponse,
   ApiOkResponse,
@@ -31,6 +31,8 @@ import { SystemSettingsService } from './system-settings.service';
 import { SystemResourcesService } from './system-resources.service';
 import { SystemProvidersService } from './system-providers.service';
 import { DiagnosticsService } from './diagnostics/diagnostics.service';
+import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
+import { PRESET_IMAGE_NOT_PROVISIONABLE } from '@platform/contracts';
 import { SseWriter, type SseResponse } from './diagnostics/sse-writer';
 
 export class InitStatusResponseDto extends createZodDto(InitStatusDtoSchema) {}
@@ -55,6 +57,7 @@ export class AccessPasscodeResponseDto extends createZodDto(AccessPasscodeResult
 export class SystemController {
   constructor(
     private readonly init: InitializationService,
+    private readonly provisioner: PresetImageProvisioner,
     private readonly settings: SystemSettingsService,
     private readonly resources: SystemResourcesService,
     private readonly providers: SystemProvidersService,
@@ -187,6 +190,70 @@ export class SystemController {
     writer.open();
     try {
       await this.diagnostics.run((frame) => writer.send(frame), controller.signal);
+    } finally {
+      writer.close();
+    }
+  }
+
+  /**
+   * `POST /api/system/preset-image/provision` —— **平台自己把预制镜像搬到位**。
+   *
+   * ── 它修的是什么 ────────────────────────────────────────────────────────
+   * 预制镜像缺位时，诊断第 ⑧ 项原本只会报一个 ❌ 并给出两条 `docker` 命令 —— 而
+   * 2026-09-05 实测里那张镜像的字节**就躺在本机 docker 库**，其中一条命令还是让用户
+   * 重新 build 一遍已经有的东西。⛔ **平台明明能做而让用户去敲命令，那不是指路，
+   * 是把自己的活派给用户**（P21-8 §2 ⇒ 新判据）。
+   *
+   * ⚠️ **SSE 而不是「POST 完了轮询」**：这是分钟级操作，而它最要紧的产出恰恰是**过程**
+   * ——失败在下载、校验、装载还是推送，四件事的下一步完全不同。
+   *
+   * ⚠️ **两种 409 两个码**（与 `/init` 同一条纪律）：`PRESET_IMAGE_NOT_PROVISIONABLE`
+   * 是「这台机器上搬不了，去构建」，`PRESET_IMAGE_PROVISION_IN_FLIGHT` 是「已经在搬了，
+   * 等着」——处置相反，合成一个码会让前端只能二选一地猜。
+   *
+   * ⛔ **409 必须在开流之前判掉。** 一旦发出 SSE 头，状态码就定死在 200 了，此时再想
+   * 说「不可搬运」只能塞进流里 —— 而照着 openapi 生成的调用方看到的是一次成功的 200。
+   */
+  @Post('preset-image/provision')
+  @HttpCode(200)
+  @ApiProduces('text/event-stream')
+  @ApiResponse({
+    status: 200,
+    description:
+      'SSE 帧流：event: stage（plan/fetch/verify/load/register）+ done。帧类型手写于两仓 sse-protocol.ts',
+    content: { 'text/event-stream': { schema: { type: 'string' } } },
+  })
+  @ApiOperation({
+    summary:
+      '把预制镜像搬到位（只搬不建）：本机 docker 库已有 ⇒ 直接推；发布资产清单命中 ⇒ 校验 sha256 后装载再推。搬不了返 409，已在搬返 409（两个码）',
+  })
+  async provisionPresetImage(@Res() res: SseResponse): Promise<void> {
+    // ⛔ **先判可行性，再开流** —— 一旦发出 SSE 头，状态码就定死在 200 了。
+    //    ⚠️ 抛 `ConflictException` 而不是手写 `res.status(409).json(...)`：走全局
+    //    `ErrorEnvelopeFilter` 才能拿到与其余端点一致的错误信封（`traceId` 等）。
+    //    手写那份看起来一样，但少了 traceId —— 而排障时那正是要拿来串日志的那个字段。
+    const plan = await this.provisioner.plan();
+    if (!plan.provisionable) {
+      throw new ConflictException({
+        code: PRESET_IMAGE_NOT_PROVISIONABLE,
+        message: plan.why,
+        retryable: false,
+        // 只读的探查，一个字节都没写 —— 前端据此渲染成「就地改」而不是「重试」。
+        sideEffectFree: true,
+      });
+    }
+
+    const writer = new SseWriter(res);
+    writer.open();
+    try {
+      for await (const e of this.provisioner.provision()) {
+        writer.send({ event: 'stage', ...e });
+      }
+      writer.send({ event: 'done', ok: true });
+    } catch (e) {
+      // ⚠️ 流已经开了 ⇒ 失败只能在流里说，但**必须说得出是哪一阶段**。
+      //    `done { ok: false }` 而不是静静断开：断开在前端看来与网络抖动无法区分。
+      writer.send({ event: 'done', ok: false, error: (e as Error).message });
     } finally {
       writer.close();
     }

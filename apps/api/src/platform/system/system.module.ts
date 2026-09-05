@@ -17,6 +17,11 @@ import { OutboundNetworkCheck } from './diagnostics/checks/outbound-network.chec
 import { WsLoopbackCheck } from './diagnostics/checks/ws-loopback.check';
 import { DataRootFsCheck } from './diagnostics/checks/data-root-fs.check';
 import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
+import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
+import { ImageSeeder, OciRegistryClient } from '@platform/image';
+import { copyImage } from './preset-image/registry-copy';
+import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
+import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.adapter';
 
 /**
  * 系统端点的装配（01 §2 `platform/system/`；23 D-11/D-12：不属任何限界上下文）。
@@ -47,6 +52,46 @@ import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
     WsLoopbackCheck,
     DataRootFsCheck,
     PresetImageCheck,
+    DockerodeProvisionAdapter,
+    {
+      // ⚠️ 三个依赖都收窄成窄口子（`PresetImageDockerPort` / `AssetsDirSource` /
+      //    `HostFacts`），于是搬运的全部判据可以在纯单测里钉住，而不必起一个 docker。
+      provide: PresetImageProvisioner,
+      inject: [DockerodeProvisionAdapter, SANDBOX_PROVIDER_REGISTRY, ImageSeeder],
+      useFactory: (
+        docker: DockerodeProvisionAdapter,
+        providers: ProviderRegistry,
+        seeder: ImageSeeder,
+      ): PresetImageProvisioner =>
+        new PresetImageProvisioner(
+          docker,
+          {
+            assetsDir: (): string | undefined => process.env['SANDBOX_IMAGE_ASSETS_DIR'],
+            upstreamRef: (): string | undefined => process.env['SANDBOX_PRESET_IMAGE_SOURCE'],
+          },
+          {
+            // ⚠️ **权威是 registry 的 `defaultProvider`，不是 `process.platform`**
+            //    —— 与 `substrate.ts` 同一条：第三方 provider 用
+            //    `register(p, { default: true })` 能把默认档移走（04 §8），
+            //    照着平台再推一次等于造第二个真相源，而两个真相源迟早会打架。
+            defaultProvider: (): string => providers.defaultProvider,
+            // ⚠️ 资产清单用 OCI 的 `os/arch` 写法（`linux/arm64`），而 node 的
+            //    `process.arch` 是 `arm64`、`process.platform` 是 `darwin`。
+            //    ⛔ **沙箱镜像永远是 linux**（容器/微 VM 里跑的是 linux），所以 os 段
+            //    恒为 `linux` —— 拿宿主的 `darwin` 去比会一条都匹配不上。
+            platform: (): string => `linux/${process.arch}`,
+          },
+          // ⚠️ 复用开机播种那条路，不另写一份注册逻辑 —— 两份「怎么算注册好了」
+          //    迟早会对不上，而其中一份还是诊断第 4 步的判据。
+          { seed: (): Promise<void> => seeder.onApplicationBootstrap() },
+          // ⚠️ 用 image 模块的 `OciRegistryClient` —— 认证握手只此一份。
+          //    平台层再造一个客户端 = 两份「怎么算认证过了」，而其中一份还管着注册路径。
+          {
+            copy: (from, to, onProgress): Promise<unknown> =>
+              copyImage(new OciRegistryClient(), from, to, process.arch, onProgress),
+          },
+        ),
+    },
     {
       provide: DIAGNOSE_CHECKS,
       inject: [
