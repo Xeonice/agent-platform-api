@@ -356,10 +356,16 @@ describe('AioWsProcessStream.kill — PTY 通过 tty 投递信号', () => {
   class RecordingSocket implements PtySocket {
     readonly sent: string[] = [];
     closed = false;
-    private handlers = new Map<string, (arg?: never) => void>();
+    // ⚠️ 两种 handler 都要装得下：`message` 收 `MessageEvent`，`close`/`error` 不收参数。
+    //    ⇒ 值类型标成「参数可选」，`get('close')?.()` 与 `get('message')?.(ev)` 都合法。
+    private handlers = new Map<string, (...args: never[]) => void>();
+    // ⚠️ 实现签名要**同时兼容**两个重载：`message` 收 `MessageEvent`、`close|error` 不收
+    //    参数。原写法 `(ev?: never)` 谁都不兼容（`never` 接不住 `MessageEvent`）——TS2394，
+    //    而这个矛盾一直没人发现，因为测试代码从来没被 typecheck 看过（2026-09-05 补）。
+    //    ⇒ 实现侧收 `(...args: unknown[])`，两个重载都塞得进去。
     addEventListener(type: 'message', cb: (ev: MessageEvent) => void): void;
     addEventListener(type: 'close' | 'error', cb: () => void): void;
-    addEventListener(type: string, cb: (ev?: never) => void): void {
+    addEventListener(type: string, cb: (...args: never[]) => void): void {
       this.handlers.set(type, cb);
     }
     send(data: string): void {

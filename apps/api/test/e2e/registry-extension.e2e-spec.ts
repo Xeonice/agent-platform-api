@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { runHalfStub } from '../../../../packages/modules/runtime/test/_run-half';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, it, expect } from 'vitest';
@@ -79,7 +80,9 @@ const ACME_CAPS: SandboxProviderCapabilities = {
 
 /** A third-party provider — implements the 6 required methods, nothing platform-side. */
 class AcmeSandboxProvider implements SandboxProvider {
-  readonly name = 'acme';
+  // ⚠️ 显式标 `string`：不标的话它被推断成字面量类型 `'acme'`，子类
+  //    `HeadlessOnlyProvider` 就覆盖不了（TS2416）。契约上它本就是 `string`。
+  readonly name: string = 'acme';
   readonly capabilities = ACME_CAPS;
   readonly calls: string[] = [];
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
@@ -119,6 +122,8 @@ const ACME_KEY_TTL_MS = 30 * 24 * 60 * 60_000;
 
 /** A third-party runtime adapter, api-key only, with its OWN credential lifetime. */
 const acmeAdapter: RuntimeAdapter = {
+  // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+  ...runHalfStub,
   id: 'acme-agent',
   displayName: 'Acme Agent',
   vendor: 'Acme Inc',

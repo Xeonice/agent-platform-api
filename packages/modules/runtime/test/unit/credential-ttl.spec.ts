@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { runHalfStub } from '../_run-half';
 import type { Clock } from '@platform/shared-kernel';
 import type {
   RuntimeAdapter,
@@ -93,6 +94,8 @@ function stubAdapter(
   credentialTtlMs?: Readonly<Partial<Record<RuntimeAuthMethod, number>>>,
 ): RuntimeAdapter {
   return {
+    // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
+    ...runHalfStub,
     id,
     displayName: id,
     vendor: 'test',

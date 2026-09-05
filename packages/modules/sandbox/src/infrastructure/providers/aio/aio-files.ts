@@ -4,6 +4,7 @@ import {
   SandboxProviderErrorCode,
   type FileEntry,
 } from '@platform/contracts';
+import { spreadModifiedAt } from '../shared/modified-at';
 import { epochSecondsToIso } from '@platform/shared-kernel';
 import {
   isJsonResponse,
@@ -172,6 +173,7 @@ function toFileEntry(row: Record<string, unknown>): FileEntry {
     kind: isDir ? 'dir' : 'file',
     // measured: the agent reports `size: null` for a directory ⇒ ABSENT, not 0.
     ...(isDir || size === undefined ? {} : { size }),
-    modifiedAt: epochSecondsToIso(row.modified_time) ?? '',
+    // ⛔ 解析不出就**缺席**，不发空串 —— 与上面 `size` 同一条：空串是一个伪装成数据的谎。
+    ...spreadModifiedAt(epochSecondsToIso(row.modified_time)),
   };
 }

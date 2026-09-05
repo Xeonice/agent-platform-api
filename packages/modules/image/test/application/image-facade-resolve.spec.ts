@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { SealedEnvValue } from '../../src/domain/ports/env-secret.cipher.port';
 import { ImageFacadeAdapter } from '../../src/application/image-facade.adapter';
 import type { ImageRepository } from '../../src/domain/repositories/image.repository';
 import type { ImageManifestRepository } from '../../src/domain/repositories/image-manifest.repository';
@@ -40,7 +41,9 @@ function emptyRepos(): { images: MinimalImages; manifests: MinimalManifests } {
 }
 
 const cipher: EnvSecretCipher = {
-  seal: () => ({ ciphertext: '', iv: '', tag: '' }) as ReturnType<EnvSecretCipher['seal']>,
+  // ⛔ 字段名此前与契约**完全对不上**（`ciphertext`/`tag` vs `blob`/`authTag`，还少了
+  //    `keyId`）—— 一个 `as` 把它全遮住了，而测试代码没人 typecheck（2026-09-05 补）。
+  seal: (): SealedEnvValue => ({ blob: '', iv: '', authTag: '', keyId: 'k1' }),
   open: () => '',
 };
 

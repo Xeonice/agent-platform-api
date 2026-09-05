@@ -33,6 +33,9 @@ describe('Sandbox aggregate', () => {
     projectId: asProjectId('prj-1'),
     runtime: 'claude-code',
     provider: 'aio',
+    // ⚠️ `imageRef` 是 `Sandbox.create` 的必填项 —— 夹具漏了它，而**测试代码从来没被
+    //    typecheck 看过**，所以这个缺口活到了今天（2026-09-05 补）。
+    imageRef: 'localhost:5001/platform/sandbox:v2',
     headless: false,
     timeoutMinutes: null,
     idleTimeoutSec: 1800,

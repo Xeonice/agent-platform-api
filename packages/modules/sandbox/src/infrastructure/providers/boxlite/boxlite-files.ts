@@ -6,6 +6,7 @@ import {
   type SandboxFiles,
   type SandboxHandle,
 } from '@platform/contracts';
+import { spreadModifiedAt } from '../shared/modified-at';
 import { epochSecondsToIso } from '@platform/shared-kernel';
 import { runGuestScript } from './boxlite-guest-shell';
 import type { BoxFor } from './boxlite-box-ref';
@@ -169,6 +170,7 @@ function parseFindRow(row: string): FileEntry | null {
     path,
     kind: isDir ? 'dir' : 'file',
     ...(isDir || !Number.isFinite(size) ? {} : { size }),
-    modifiedAt: epochSecondsToIso(mtime) ?? '',
+    // ⛔ 解析不出就**缺席**，不发空串 —— 与上面 `size` 同一条：空串是一个伪装成数据的谎。
+    ...spreadModifiedAt(epochSecondsToIso(mtime)),
   };
 }

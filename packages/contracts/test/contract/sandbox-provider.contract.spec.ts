@@ -47,6 +47,9 @@ class FakeSandboxProvider implements SandboxProvider {
       write() {},
       resize() {},
       onExit() {},
+      // ⚠️ `detach` 是契约必需的 —— 这个替身一直缺着，而测试代码此前没被 typecheck
+      //    看过（2026-09-05 补）。⛔ 这正是「替身扮演不全，契约改了它也不红」的形态。
+      detach() {},
       async kill() {},
     };
   }

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { unusedCredentialReads } from '../../../../../test-support/unused';
 import { CredentialApplicationService } from '../../src/application/credential-application.service';
 import { EncryptedBlob } from '../../src/domain/value-objects/encrypted-blob.vo';
 import type { CryptoService } from '../../src/domain/ports/crypto.port';
@@ -34,6 +35,7 @@ function makeService() {
     saveSync: () => undefined,
     revokeAndEraseSync: () => undefined,
     touchLastUsedSync: () => undefined,
+    ...unusedCredentialReads,
   } satisfies CredentialRepository;
   const svc = new CredentialApplicationService(
     repo,

@@ -1,4 +1,6 @@
 import { resolve } from 'node:path';
+import { unused } from '../../../../../test-support/unused';
+import type { RuntimeCredentialService } from '../../src/application/runtime-credential.service';
 import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
@@ -45,9 +47,14 @@ function makeHarness() {
     tester,
     materializer,
   );
-  const facade = new CredentialFacadeAdapter(repo, materializer, uow, {
-    now: () => new Date('2026-08-18T00:00:00Z'),
-  });
+  const facade = new CredentialFacadeAdapter(
+    repo,
+    materializer,
+    uow,
+    { now: () => new Date('2026-08-18T00:00:00Z') },
+    // ⚠️ 后加的第 5 个参数；本组用例只走 git 凭证那半边 ⇒ 被调用就抛。
+    unused<RuntimeCredentialService>('RuntimeCredentialService'),
+  );
   return { sqlite, repo, app, facade };
 }
 

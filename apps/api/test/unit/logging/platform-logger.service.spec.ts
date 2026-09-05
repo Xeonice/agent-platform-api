@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,8 +25,12 @@ const fixedClock: Clock = { now: () => new Date(FROZEN) };
 let dir: string;
 let writer: RuntimeLogWriter;
 let logger: PlatformLoggerService;
-let stdout: ReturnType<typeof vi.spyOn>;
-let stderr: ReturnType<typeof vi.spyOn>;
+// ⚠️ `ReturnType<typeof vi.spyOn>` 是**泛型未实例化**的形态，接不住
+//    `process.stdout.write` 那个重载签名。⇒ 直接取那两个 spy 的实际类型。
+// ⚠️ `ReturnType<typeof vi.spyOn>` 是**泛型未实例化**的形态，接不住
+//    `process.stdout.write` 那个重载签名。⇒ 用 `MockInstance` 直接描述被 spy 的那个函数。
+let stdout: MockInstance<typeof process.stdout.write>;
+let stderr: MockInstance<typeof process.stderr.write>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'runtime-logger-'));

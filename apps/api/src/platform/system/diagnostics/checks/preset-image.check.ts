@@ -223,8 +223,16 @@ export class PresetImageCheck implements DiagnoseCheck {
         return {
           status: 'ok',
           step: 'staged',
-          summary: `预制镜像就绪：'${ref}' 已注册、已在本机铺开，可以立即发起任务`,
-          detail: { ...detail, staged: true },
+          // ⛔ **「已在本机铺开」必须自带那半句「不依赖 registry 此刻在不在」**
+          //    （2026-09-05 修）。此前它只说「已铺开，可以立即发起任务」，而同一屏上
+          //    第 ⑤ 项可能正报 `localhost:5001` ❌（registry 现在没起）。两个结论**都对**
+          //    ——字节早就在本机了，registry 只在**拉取时**需要——但界面没说它们问的是
+          //    两件事，用户只会读成「诊断自相矛盾」，进而两条都不信。
+          //    ⇒ 结论不变，把它成立的**前提**说出来。
+          summary:
+            `预制镜像就绪：'${ref}' 已注册、已在本机铺开，可以立即发起任务` +
+            ' —— 字节在本机，此刻不需要 registry（第 ⑤ 项若报镜像仓库不可达，只影响**拉新镜像**）',
+          detail: { ...detail, staged: true, dependsOnRegistryNow: false },
         };
       }
       return {
@@ -234,8 +242,11 @@ export class PresetImageCheck implements DiagnoseCheck {
         step: 'staged',
         summary: `预制镜像已就绪，但尚未在本机铺开 —— **首个任务需要数分钟准备镜像**（13GB 镜像实测冷启动约 190 秒），之后每次 3–4 秒`,
         hint:
-          '不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ' + ref,
-        detail: { ...detail, staged: false },
+          '不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ' +
+          ref +
+          '。⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个',
+        // ⚠️ 与上面那格相反：还没铺开 ⇒ 首个任务真的要去 registry 拉。
+        detail: { ...detail, staged: false, dependsOnRegistryNow: true },
       };
     } catch (e) {
       // provider 实现了这个方法但**这一次答不上来**（store 读不了 / 运行时不可用）：

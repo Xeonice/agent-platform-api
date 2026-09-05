@@ -11,6 +11,8 @@
 // shell 收到的是 `xit` ⇒ 命令没执行。**恰恰是这个丢字节救了会话**——否则 shell
 // 会干净地退出，现象就变成"刷新一下任务就没了"，而不是一句莫名其妙的报错。
 import { describe, it, expect } from 'vitest';
+import { unusedSessions } from '../_unused-sessions';
+import type { TerminalAuthenticator } from '@platform/contracts';
 import type { ProcessStream } from '@platform/contracts';
 import { TerminalGateway } from '../../src/interface/gateway/terminal.gateway';
 
@@ -56,7 +58,16 @@ function gatewayWithAttachment(stream: ProcessStream): {
   gw: TerminalGateway;
   attachments: Map<string, unknown>;
 } {
-  const gw = new TerminalGateway(...([{}, {}, {}] as never[]));
+  // ⛔ 原写法 `...([{}, {}, {}] as never[])` 连**参数个数都是错的**（构造只要 2 个），
+  //    而 spread 一个 never[] 把这件事完全遮住了 —— 这正是「测试代码没人 typecheck」
+  //    能藏住的那类东西（2026-09-05 补）。
+  const gw = new TerminalGateway(
+    // ⚠️ `TerminalSessionService` 是**类**（带私有字段），`as` 过不去 ——
+    //    ⇒ 用 `Pick` 标注公开面，再由 `unused` 补齐类的其余部分。
+    unusedSessions(),
+    // ⚠️ 契约方法叫 `authorize` 且**同步返回 boolean**（不是 async authenticate）。
+    { authorize: () => true } satisfies TerminalAuthenticator,
+  );
   // 私有字段用 Reflect.get 取（仓规禁止 `as unknown as` 双重断言）。这里刻意不给
   // 生产代码开测试专用出口——为一条用例放宽可见性，代价比一行 Reflect.get 大。
   const attachments = Reflect.get(gw, 'attachments') as Map<string, unknown>;
