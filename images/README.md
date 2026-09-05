@@ -172,6 +172,13 @@ WARN [ImageSeeder] built-in image platform/sandbox:dev could not be seeded
      (registry registry-1.docker.io answered 401 for 'platform/sandbox:dev')
 ```
 
+⛔ **但「过不了第 1 关」不等于「该由用户去 push」**（2026-09-05 订正）。上面这一格里
+字节**就在本机**，只是不在 registry —— 平台完全能自己把它推上去。让用户去敲
+`docker build && docker push`（其中 build 那条还是重建一遍已经有的东西）是**把平台
+自己的活派给用户**。⇒ P21-8 §2 已改判据：**先问「字节够不够得着」，够得着就自己搬，
+只有非 build 不可时才指路**；落点是 `POST /api/system/preset-image/provision`（10 §6）。
+本节下面那张表描述的仍是「镜像要过两道关」这个**机制事实**，那部分没变。
+
 ⚠️ **为什么这条错了这么久没被发现**：唯一会走 `registerImage` 的那批 e2e
 （`terminal-container.e2e-spec.ts` 等）都用
 `.overrideProvider(IMAGE_SPEC_REGISTRY).useValue(makeFakeImageSpecRegistry())`

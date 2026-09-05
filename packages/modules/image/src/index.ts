@@ -21,3 +21,8 @@ export {
   ImageConfigUpdated,
   ImageDeleted,
 } from './domain/events/image-events';
+
+// 开机播种器 —— 平台层的「预制镜像搬运」推完之后要就地再播一次种。
+// ⚠️ **导出它而不是在平台层另写一份注册逻辑**：两份「怎么算注册好了」迟早对不上，
+//    而其中一份正是诊断第 4 步的判据。
+export { ImageSeeder } from './application/image-seeder';

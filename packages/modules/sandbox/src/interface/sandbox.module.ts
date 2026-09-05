@@ -113,6 +113,10 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     SANDBOX_EXEC_PORT,
     SANDBOX_FACADE,
     AUTOMATION_TASK_LAUNCHER,
+    // ⚠️ 导给平台层的「预制镜像搬运」用（`DockerodeProvisionAdapter`）。
+    //    ⛔ **导 token 而不是让对面自己 new 一个客户端**：两个客户端 = 两份 env 解读，
+    //    于是「沙箱连得上 docker、搬运连不上」这种谁都没错的组合迟早出现。
+    DOCKER_CLIENT,
   ],
 })
 export class SandboxModule {}

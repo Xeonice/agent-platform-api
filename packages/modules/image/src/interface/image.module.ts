@@ -40,6 +40,8 @@ import { ImageController } from './http/image.controller';
     { provide: ENV_SECRET_CIPHER, useClass: AesGcmEnvSecretCipher },
     { provide: IMAGE_FACADE, useExisting: ImageFacadeAdapter },
   ],
-  exports: [ImageApplicationService, IMAGE_FACADE, IMAGE_SPEC_REGISTRY],
+  // ⚠️ `ImageSeeder` 导出给平台层的「预制镜像搬运」：推完之后要就地再播一次种，
+  //    否则链条只是从第 2 步挪到第 4 步（`PresetImageProvisioner.ImageSeedPort`）。
+  exports: [ImageApplicationService, IMAGE_FACADE, IMAGE_SPEC_REGISTRY, ImageSeeder],
 })
 export class ImageModule {}

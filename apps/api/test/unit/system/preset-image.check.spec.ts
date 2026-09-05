@@ -17,6 +17,8 @@ import type {
   SandboxProvider,
 } from '@platform/contracts';
 import { PresetImageCheck } from '../../../src/platform/system/diagnostics/checks/preset-image.check';
+import type { ProvisionPlanner } from '../../../src/platform/system/preset-image/preset-image-provisioner';
+import type { ProvisionPlan } from '../../../src/platform/system/preset-image/provision-plan';
 import type { DiagnoseCheckResult } from '../../../src/platform/system/diagnostics/checks/check.types';
 
 const REF = 'registry.internal/platform/sandbox:v3';
@@ -61,7 +63,13 @@ interface Opts {
   resolve?: () => Promise<ResolvedImage>;
   registered?: RegisteredImageSummary | null;
   imageStaged?: SandboxProvider['imageStaged'];
+  /** 搬运器说「这台机器上搬得了吗」。缺省 false ⇒ 既有用例仍验**指路**那条分支。 */
+  provisionable?: boolean;
 }
+
+/** 第 2 步的触发条件：registry 解析不到。 */
+const rejects = (): Promise<ResolvedImage> =>
+  Promise.reject(new Error("image 'x' not found in registry"));
 
 function build(opts: Opts = {}): PresetImageCheck {
   const spec: ImageSpecProvider = {
@@ -112,7 +120,39 @@ function build(opts: Opts = {}): PresetImageCheck {
     has: () => true,
     list: () => [provider],
   };
-  return new PresetImageCheck(specs, images, providers);
+  // 搬运器：默认「搬不了」，于是既有用例仍然验的是**指路**那条分支。
+  // ⚠️ 要验「够得着就自己搬」的用例自己传 `provisionable: true`（见文件末尾那一组）。
+  const provisioner = fakeProvisioner(opts.provisionable ?? false);
+  return new PresetImageCheck(specs, images, providers, provisioner);
+}
+
+/**
+ * 搬运器替身。
+ *
+ * ⚠️ **只扮演 `plan()` 这一个读**，因为检查项用到的就只有它 —— 与 `ProxySource` 同一条：
+ * 替身扮演得越窄，将来被测类改了别的签名时它越不会**假绿**。
+ */
+function fakeProvisioner(provisionable: boolean): ProvisionPlanner {
+  const plan: ProvisionPlan = provisionable
+    ? {
+        source: 'local-docker',
+        provisionable: true,
+        sizeBytes: null,
+        from: '本机 docker 镜像库',
+        to: 'localhost:5001',
+        why: '字节已经在本机 docker 镜像库里，只是没推到 registry —— 平台自己推上去即可，不出网、不重建',
+        asset: null,
+      }
+    : {
+        source: 'build-only',
+        provisionable: false,
+        sizeBytes: null,
+        from: '（无）',
+        to: 'localhost:5001',
+        why: '字节在这台机器上够不着：本机 docker 镜像库里没有，发布资产清单也没有匹配这台机器的那一份',
+        asset: null,
+      };
+  return { plan: () => Promise.resolve(plan) };
 }
 
 const run = (c: PresetImageCheck): Promise<DiagnoseCheckResult> => c.run();
@@ -262,5 +302,41 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     expect(r.status).toBe('ok');
     expect(r.detail?.staged).toBeNull();
     expect(r.summary).toContain('store unreadable');
+  });
+});
+
+describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令（2026-09-05 订正）', () => {
+  it('⛔ 本机 docker 库已有 ⇒ hint 指向 [准备镜像]，**不出现 docker build**', async () => {
+    const r = await run(build({ resolve: rejects, provisionable: true }));
+    expect(r.step).toBe('registry');
+    // 本次事故的形态：字节就在本机，而 hint 让用户重新 build 一遍已经有的东西。
+    expect(r.hint).not.toContain('docker build');
+    expect(r.hint).toContain('[准备镜像]');
+  });
+
+  it('搬不了时**保留**原来的指路（那一格的原决定是对的）', async () => {
+    const r = await run(build({ resolve: rejects, provisionable: false }));
+    expect(r.hint).toContain('docker build');
+    expect(r.hint).toContain('docker push');
+  });
+
+  it('两条分支的 hint 必须不同 —— 合成一条就等于没做这次订正', async () => {
+    const a = await run(build({ resolve: rejects, provisionable: true }));
+    const b = await run(build({ resolve: rejects, provisionable: false }));
+    expect(a.hint).not.toBe(b.hint);
+  });
+
+  it('detail 里带出计划，前端据它画按钮（没有它按钮就得自己再问一次）', async () => {
+    const r = await run(build({ resolve: rejects, provisionable: true }));
+    expect((r.detail as { provision?: { provisionable?: boolean } }).provision?.provisionable).toBe(
+      true,
+    );
+  });
+
+  it('⛔ 错误码不因为「能搬」而改变 —— 它说的是「registry 里没有」这个事实', async () => {
+    const a = await run(build({ resolve: rejects, provisionable: true }));
+    const b = await run(build({ resolve: rejects, provisionable: false }));
+    expect(a.errorCode).toBe(b.errorCode);
+    expect(a.status).toBe('fail');
   });
 });

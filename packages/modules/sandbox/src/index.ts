@@ -27,3 +27,9 @@ export {
   SandboxReconciledAsOrphan,
 } from './domain/events/sandbox-events';
 export { AgentTaskStarted, AgentTaskFinished } from './domain/events/agent-task-events';
+
+// 共享的 dockerode 客户端 token —— 平台层的「预制镜像搬运」要用同一个客户端。
+// ⚠️ **导出的是 token 不是实现**：让 platform 复用 SandboxModule 已经绑好的那一个，
+//    而不是自己再 new 一个 —— 两个客户端 = 两份 env 解读，迟早出现「沙箱连得上 docker、
+//    搬运连不上」这种谁都没错的组合。
+export { DOCKER_CLIENT } from './infrastructure/providers/docker/docker.token';
