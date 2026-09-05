@@ -18,7 +18,8 @@ import { WsLoopbackCheck } from './diagnostics/checks/ws-loopback.check';
 import { DataRootFsCheck } from './diagnostics/checks/data-root-fs.check';
 import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
 import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
-import { ImageSeeder } from '@platform/image';
+import { ImageSeeder, OciRegistryClient } from '@platform/image';
+import { copyImage } from './preset-image/registry-copy';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
 import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.adapter';
 
@@ -64,7 +65,10 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
       ): PresetImageProvisioner =>
         new PresetImageProvisioner(
           docker,
-          { assetsDir: (): string | undefined => process.env['SANDBOX_IMAGE_ASSETS_DIR'] },
+          {
+            assetsDir: (): string | undefined => process.env['SANDBOX_IMAGE_ASSETS_DIR'],
+            upstreamRef: (): string | undefined => process.env['SANDBOX_PRESET_IMAGE_SOURCE'],
+          },
           {
             // ⚠️ **权威是 registry 的 `defaultProvider`，不是 `process.platform`**
             //    —— 与 `substrate.ts` 同一条：第三方 provider 用
@@ -80,6 +84,12 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
           // ⚠️ 复用开机播种那条路，不另写一份注册逻辑 —— 两份「怎么算注册好了」
           //    迟早会对不上，而其中一份还是诊断第 4 步的判据。
           { seed: (): Promise<void> => seeder.onApplicationBootstrap() },
+          // ⚠️ 用 image 模块的 `OciRegistryClient` —— 认证握手只此一份。
+          //    平台层再造一个客户端 = 两份「怎么算认证过了」，而其中一份还管着注册路径。
+          {
+            copy: (from, to, onProgress): Promise<unknown> =>
+              copyImage(new OciRegistryClient(), from, to, process.arch, onProgress),
+          },
         ),
     },
     {

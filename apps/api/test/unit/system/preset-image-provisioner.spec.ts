@@ -8,6 +8,7 @@ import {
   type PresetImageDockerPort,
   type ImageSeedPort,
   type ProvisionEvent,
+  type UpstreamCopyPort,
 } from '../../../src/platform/system/preset-image/preset-image-provisioner';
 
 const REF = 'localhost:5001/platform/sandbox:v2';
@@ -22,15 +23,21 @@ function dockerStub(over: Partial<PresetImageDockerPort> = {}): PresetImageDocke
     ...over,
   };
 }
-const noAssets: AssetsDirSource = { assetsDir: () => undefined };
+const noAssets: AssetsDirSource = { assetsDir: () => undefined, upstreamRef: () => undefined };
+const withUpstream: AssetsDirSource = {
+  assetsDir: () => undefined,
+  upstreamRef: () => 'ghcr.io/x/cap-boxlite-sandbox:v0.26.0',
+};
+const noCopy: UpstreamCopyPort = { copy: () => Promise.resolve(undefined) };
 const host: HostFacts = { defaultProvider: () => 'boxlite', platform: () => 'linux/arm64' };
 
 function make(
   docker: PresetImageDockerPort = dockerStub(),
   assets: AssetsDirSource = noAssets,
   seeder: ImageSeedPort = { seed: () => Promise.resolve() },
+  copier: UpstreamCopyPort = noCopy,
 ): PresetImageProvisioner {
-  return new PresetImageProvisioner(docker, assets, host, seeder);
+  return new PresetImageProvisioner(docker, assets, host, seeder, copier);
 }
 
 async function collect(p: PresetImageProvisioner): Promise<ProvisionEvent[]> {
@@ -58,7 +65,7 @@ describe('plan —— 查事实失败一律降级成「这条路没有」', () =
 
   it('资产目录没配 ⇒ 不去读文件系统', async () => {
     const spy = vi.fn(() => undefined);
-    await make(dockerStub(), { assetsDir: spy }).plan();
+    await make(dockerStub(), { assetsDir: spy, upstreamRef: () => undefined }).plan();
     expect(spy).toHaveBeenCalled();
   });
 
@@ -180,5 +187,57 @@ describe('⛔ 推完必须注册 —— 否则只是把「你自己动手」挪�
       seed: () => Promise.reject(new Error('registry 401')),
     });
     await expect(collect(p)).rejects.toThrow('registry 401');
+  });
+});
+
+describe('upstream-copy —— 没有 docker 也搬得动', () => {
+  it('配了上游、本机什么都没有 ⇒ 走纯 HTTP 拷贝', async () => {
+    const copy = vi.fn(() => Promise.resolve(undefined));
+    const evs = await collect(make(dockerStub(), withUpstream, undefined, { copy }));
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(evs.at(-1)).toMatchObject({ stage: 'register', status: 'ok' });
+  });
+
+  it('⛔ 这条路**不经过 docker push** —— 字节直接落进目标 registry', async () => {
+    const push = vi.fn(() => Promise.resolve());
+    await collect(make(dockerStub({ push }), withUpstream, undefined, noCopy));
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('拆坐标时端口冒号不能当成 tag 冒号', async () => {
+    let seen: { from: unknown; to: unknown } | null = null;
+    await collect(
+      make(dockerStub(), withUpstream, undefined, {
+        copy: (from, to) => {
+          seen = { from, to };
+          return Promise.resolve(undefined);
+        },
+      }),
+    );
+    expect(seen).toEqual({
+      from: { name: 'ghcr.io/x/cap-boxlite-sandbox', reference: 'v0.26.0' },
+      to: { name: 'localhost:5001/platform/sandbox', reference: 'v2' },
+    });
+  });
+
+  it('⛔ fetch/verify/load 如实报 skipped，不画成「瞬间完成的 ✅」', async () => {
+    const evs = await collect(make(dockerStub(), withUpstream, undefined, noCopy));
+    for (const stage of ['fetch', 'verify', 'load']) {
+      expect(evs.find((e) => e.stage === stage)?.status).toBe('skipped');
+    }
+  });
+
+  it('拷贝失败要冒出来，且推完仍然要注册', async () => {
+    await expect(
+      collect(
+        make(dockerStub(), withUpstream, undefined, {
+          copy: () => Promise.reject(new Error('上游 401')),
+        }),
+      ),
+    ).rejects.toThrow('上游 401');
+
+    const seed = vi.fn(() => Promise.resolve());
+    await collect(make(dockerStub(), withUpstream, { seed }, noCopy));
+    expect(seed).toHaveBeenCalledTimes(1);
   });
 });

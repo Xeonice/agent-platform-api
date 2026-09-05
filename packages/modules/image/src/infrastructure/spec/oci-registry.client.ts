@@ -188,6 +188,161 @@ export class OciRegistryClient {
     return { digest, config };
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // 写侧 —— 跨 registry 拷贝（平台层的「预制镜像搬运」，P21-8 §2 ⇒ 新判据）
+  //
+  // ⚠️ **写在这个类里而不是平台层另起一个客户端**：跨 registry 拷贝要的认证握手与读侧
+  // 一模一样（401 挑战 → token 端点 → 重试）。两份实现意味着两份「怎么算认证过了」，
+  // 而其中一份还管着注册那条关键路径。⇒ 读路径一个字不改，只往上加方法。
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** 原样取一份 manifest（连同它的 mediaType 与 digest）—— 拷贝要按字节推过去。 */
+  async fetchRawManifest(
+    name: string,
+    reference: string,
+  ): Promise<{ raw: Buffer; mediaType: string; digest: string }> {
+    const { host, repository } = splitRegistry(name);
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
+    const res = await this.authed(
+      host,
+      repository,
+      `${base}/v2/${repository}/manifests/${reference}`,
+      MANIFEST_ACCEPT,
+    );
+    if (res.status === 404) {
+      throw new ImageSpecError(REF_NOT_FOUND, `image '${name}:${reference}' not found in registry`);
+    }
+    if (!res.ok) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} answered ${String(res.status)} for manifest '${repository}:${reference}'`,
+      );
+    }
+    const raw = Buffer.from(await res.arrayBuffer());
+    const doc = parseJson<OciManifestDoc>(raw, `manifest of ${name}:${reference}`);
+    return {
+      raw,
+      mediaType: doc.mediaType ?? res.headers.get('content-type') ?? MANIFEST_ACCEPT.split(',')[0],
+      digest: this.digestOf(res, raw, host),
+    };
+  }
+
+  /** 目标 registry 里有没有这个 blob —— 有就不必再推一遍几百 MB。 */
+  async hasBlob(name: string, digest: string): Promise<boolean> {
+    const { host, repository } = splitRegistry(name);
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
+    const res = await this.authed(
+      host,
+      repository,
+      `${base}/v2/${repository}/blobs/${digest}`,
+      '*/*',
+      {
+        method: 'HEAD',
+      },
+    );
+    return res.ok;
+  }
+
+  /** 取一个 blob 的字节。 */
+  async fetchBlob(name: string, digest: string): Promise<Buffer> {
+    const { host, repository } = splitRegistry(name);
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
+    const res = await this.authed(
+      host,
+      repository,
+      `${base}/v2/${repository}/blobs/${digest}`,
+      '*/*',
+    );
+    if (!res.ok) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} answered ${String(res.status)} for blob ${digest}`,
+      );
+    }
+    const raw = Buffer.from(await res.arrayBuffer());
+    // ⛔ **校验，不是信任。** 这些字节将以「平台预制镜像」的身份跑每一个 Task；
+    //    一个改写响应体的中间层能让整条链在毫不知情的情况下换掉内容。
+    const got = `sha256:${createHash('sha256').update(raw).digest('hex')}`;
+    if (got !== digest) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `blob ${digest} from ${host} hashes to ${got} —— 内容与坐标对不上，已中止`,
+      );
+    }
+    return raw;
+  }
+
+  /**
+   * 推一个 blob（整体上传）。
+   *
+   * ⚠️ 用**整体上传**（POST 拿 location → PUT 带 digest）而不是分块 PATCH：分块的唯一
+   * 好处是断点续传，而这条路径要么在同一台机器的回环上、要么是一次可重跑的搬运 ——
+   * 为一个用不上的能力多写一套状态机，代价是它出错时更难看懂。
+   */
+  async putBlob(name: string, digest: string, bytes: Buffer): Promise<void> {
+    const { host, repository } = splitRegistry(name);
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
+    const started = await this.authed(
+      host,
+      repository,
+      `${base}/v2/${repository}/blobs/uploads/`,
+      '*/*',
+      { method: 'POST', scope: 'pull,push' },
+    );
+    if (started.status !== 202) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} 拒绝开始上传（${String(started.status)}）—— 多半是没有 push 权限`,
+      );
+    }
+    const location = started.headers.get('location');
+    if (location === null || location === '') {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} 回了 202 但没给 Location —— 这不像一个 OCI registry`,
+      );
+    }
+    // Location 可能是相对路径（规范允许），也可能已带查询串。
+    const url = new URL(location, base);
+    url.searchParams.set('digest', digest);
+    const done = await this.authed(host, repository, url.toString(), '*/*', {
+      method: 'PUT',
+      body: bytes,
+      contentType: 'application/octet-stream',
+      scope: 'pull,push',
+    });
+    if (done.status !== 201) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} 拒绝了 blob ${digest}（${String(done.status)}）`,
+      );
+    }
+  }
+
+  /** 推一份 manifest，按 tag 落位。 */
+  async putManifest(
+    name: string,
+    reference: string,
+    raw: Buffer,
+    mediaType: string,
+  ): Promise<void> {
+    const { host, repository } = splitRegistry(name);
+    const base = `${schemeFor(host, this.insecureHosts)}://${host}`;
+    const res = await this.authed(
+      host,
+      repository,
+      `${base}/v2/${repository}/manifests/${reference}`,
+      '*/*',
+      { method: 'PUT', body: raw, contentType: mediaType, scope: 'pull,push' },
+    );
+    if (res.status !== 201 && res.status !== 200) {
+      throw new ImageSpecError(
+        REGISTRY_UNREACHABLE,
+        `registry ${host} 拒绝了 manifest '${repository}:${reference}'（${String(res.status)}）`,
+      );
+    }
+  }
+
   /**
    * Trust, then verify: the registry's `Docker-Content-Digest` is what a runtime will
    * use, but a proxy that rewrites the body and forgets the header would hand us a
@@ -279,28 +434,39 @@ export class OciRegistryClient {
    * replays the request with the returned `token` / `access_token`. Tokens are cached
    * per host+repository because resolve() makes up to three calls per image.
    */
+  /**
+   * ⚠️ **`scope` 默认 `pull` —— 读路径的行为一字不变。** 写侧（跨 registry 拷贝，
+   * platform 层的预制镜像搬运）要的是 `pull,push`，于是这个参数存在。
+   *
+   * ⛔ **token 缓存键必须带上 scope。** 此前是 `${host}/${repository}`：一个 pull-only 的
+   * token 会被复用到 push 请求上，registry 回 401，而重试拿到的还是缓存里那个 —— 表现是
+   * 「pull 好好的，push 永远 401」，且只在同一进程先 pull 过的那条路径上出现。
+   */
   private async authed(
     host: string,
     repository: string,
     url: string,
     accept: string,
+    opts: { scope?: string; method?: string; body?: Buffer; contentType?: string } = {},
   ): Promise<Response> {
-    const key = `${host}/${repository}`;
-    const first = await this.send(url, accept, this.tokens.get(key));
+    const scope = opts.scope ?? 'pull';
+    const key = `${host}/${repository}/${scope}`;
+    const first = await this.send(url, accept, this.tokens.get(key), headersOf(opts), opts);
     if (first.status !== 401) return first;
 
     const challenge = first.headers.get('www-authenticate');
     if (challenge === null || !/^Bearer/i.test(challenge)) return first;
-    const token = await this.exchange(challenge, host, repository);
+    const token = await this.exchange(challenge, host, repository, scope);
     if (token === null) return first;
     this.tokens.set(key, token);
-    return this.send(url, accept, token);
+    return this.send(url, accept, token, headersOf(opts), opts);
   }
 
   private async exchange(
     challenge: string,
     host: string,
     repository: string,
+    scope = 'pull',
   ): Promise<string | null> {
     const params = parseChallenge(challenge);
     const realm = params.realm;
@@ -309,7 +475,12 @@ export class OciRegistryClient {
     if (params.service !== undefined) url.searchParams.set('service', params.service);
     // Fall back to the scope we know we need rather than dropping it: some registries
     // (ghcr) answer a scope-less token request with a token that then 401s again.
-    url.searchParams.set('scope', params.scope ?? `repository:${repository}:pull`);
+    // ⚠️ **不能无条件用挑战里的 `params.scope`**：401 挑战通常只回它**这一次**请求需要的
+    //    scope。写侧要的是 `pull,push`，用挑战里那个 `pull` 会拿到一个推不动的 token。
+    //    ⇒ 需要写权限时以我们要的为准；只读时仍优先挑战给的（ghcr 对 scope-less 请求
+    //    会回一个随后仍 401 的 token，所以两条都不能省）。
+    const want = `repository:${repository}:${scope}`;
+    url.searchParams.set('scope', scope === 'pull' ? (params.scope ?? want) : want);
 
     const headers: Record<string, string> = { accept: 'application/json' };
     const user = process.env.IMAGE_REGISTRY_USERNAME;
@@ -337,17 +508,24 @@ export class OciRegistryClient {
     accept: string,
     bearer?: string,
     extra: Record<string, string> = {},
+    opts: { method?: string; body?: Buffer } = {},
   ): Promise<Response> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // ⚠️ **写侧不套这个超时**：一层 blob 可能是几百 MB，按「一次请求 8 秒」的读侧预算
+    //    去卡它，表现是每次推到一半 AbortError —— 而那看起来像 registry 挂了。
+    //    ⇒ 有 body 的请求交给底层 socket 超时管，我们只管读侧那条。
+    const streaming = opts.body !== undefined;
+    const timer = streaming ? null : setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       return await fetch(url, {
+        method: opts.method ?? 'GET',
         headers: {
           accept,
           ...(bearer !== undefined ? { authorization: `Bearer ${bearer}` } : {}),
           ...extra,
         },
-        signal: controller.signal,
+        ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(streaming ? {} : { signal: controller.signal }),
         redirect: 'follow',
       });
     } catch (e) {
@@ -355,9 +533,14 @@ export class OciRegistryClient {
       // retryable code in this group. Never let it surface as a bare 500.
       throw new ImageSpecError(REGISTRY_UNREACHABLE, describeNetworkError(url, e), e);
     } finally {
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
     }
   }
+}
+
+/** `authed` 的 opts → 额外请求头。`Content-Type` 只在有 body 时才发。 */
+function headersOf(opts: { contentType?: string }): Record<string, string> {
+  return opts.contentType === undefined ? {} : { 'content-type': opts.contentType };
 }
 
 /** `Bearer realm="https://…",service="x",scope="repository:y:pull"` → a record. */

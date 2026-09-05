@@ -52,6 +52,12 @@ export interface PresetImageDockerPort {
 /** 搬运源目录（`SANDBOX_IMAGE_ASSETS_DIR`）。留空 ⇒ 没有资产这条路。 */
 export interface AssetsDirSource {
   assetsDir(): string | undefined;
+  /**
+   * 上游预制镜像坐标（`SANDBOX_PRESET_IMAGE_SOURCE`）。
+   * ⛔ **没配就是没有这条路，不猜一个**：猜错会去拉一张不是平台自建的镜像，
+   * 搬完照样过不了血统检查，而那时几百 MB 已经白搬了。
+   */
+  upstreamRef(): string | undefined;
 }
 
 /**
@@ -93,6 +99,20 @@ export interface ProvisionPlanner {
   plan(): Promise<ProvisionPlan>;
 }
 
+/**
+ * 跨 registry 拷贝这一步 —— 收窄成一个动作。
+ *
+ * ⚠️ 与其它三个端口同一条：搬运器不认识 OCI 协议，也不该认识。协议住在
+ * `registry-copy.ts` 与 `OciRegistryClient` 里，这里只知道「让它搬，报进度」。
+ */
+export interface UpstreamCopyPort {
+  copy(
+    from: { name: string; reference: string },
+    to: { name: string; reference: string },
+    onProgress: (done: number, total: number, what: string) => void,
+  ): Promise<unknown>;
+}
+
 export class ProvisionNotPossibleError extends Error {}
 export class ProvisionInFlightError extends Error {}
 
@@ -107,6 +127,7 @@ export class PresetImageProvisioner {
     private readonly assets: AssetsDirSource,
     private readonly host: HostFacts,
     private readonly seeder: ImageSeedPort,
+    private readonly copier: UpstreamCopyPort,
   ) {}
 
   /**
@@ -120,7 +141,8 @@ export class PresetImageProvisioner {
     const ref = builtinImageRef();
     const inLocalDocker = await this.safeHasLocalImage(ref);
     const asset = await this.safePickAsset();
-    return planProvision({ ref, inLocalDocker, asset });
+    const upstream = this.assets.upstreamRef() ?? null;
+    return planProvision({ ref, inLocalDocker, asset, upstream });
   }
 
   private async safeHasLocalImage(ref: string): Promise<boolean> {
@@ -177,7 +199,9 @@ export class PresetImageProvisioner {
     }
     yield ev('plan', 'ok', `${plan.why}（${plan.from} → ${plan.to}）`);
 
-    if (plan.source === 'local-docker') {
+    if (plan.source === 'upstream-copy') {
+      yield* this.copyFromUpstream(plan.from, ref);
+    } else if (plan.source === 'local-docker') {
       // 字节已经在本机，`fetch`/`verify`/`load` 三步都不发生 —— ⛔ 如实报 skipped，
       // 不把它们画成"瞬间完成的 ✅"：那会让用户以为下载校验都做过了。
       yield ev('fetch', 'skipped', '字节已在本机 docker 镜像库，无需下载');
@@ -199,18 +223,59 @@ export class PresetImageProvisioner {
       yield* this.loadAsset(dir, asset, ref);
     }
 
-    yield ev('register', 'running', `正在推送到 ${plan.to}…`);
-    // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
-    yield* streamed<ProvisionEvent>((emit) =>
-      this.docker.push(ref, (p, msg) => {
-        emit(ev('register', 'running', msg, p));
-      }),
-    );
+    // ⛔ **`upstream-copy` 不能再 push 一次**：它的字节是**直接**落进目标 registry 的，
+    //    本机 docker 库里压根没有这张镜像 —— 再 push 会以一个「本地没有该镜像」的错误
+    //    结束一次**其实已经成功**的搬运。三个分支之后无条件 push 是第一版的写法，
+    //    被「这条路不经过 docker push」那条用例当场逮住（2026-09-05）。
+    if (plan.source !== 'upstream-copy') {
+      yield ev('register', 'running', `正在推送到 ${plan.to}…`);
+      // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
+      yield* streamed<ProvisionEvent>((emit) =>
+        this.docker.push(ref, (p, msg) => {
+          emit(ev('register', 'running', msg, p));
+        }),
+      );
+    }
 
-    // ⛔ **推完还要注册**，否则链条只是从第 2 步挪到第 4 步（见 `ImageSeedPort` 注释）。
-    yield ev('register', 'running', '已推送，正在注册进平台（解析 digest + 血统）…');
+    // ⛔ **推完/搬完都还要注册**，否则链条只是从第 2 步挪到第 4 步（见 `ImageSeedPort`）。
+    //    这一步三条源共享 —— 「已就绪」的判据只有一个。
+    yield ev('register', 'running', '已就位，正在注册进平台（解析 digest + 血统）…');
     await this.seeder.seed();
-    yield ev('register', 'ok', `已推送到 ${plan.to} 并注册进平台 —— 重新诊断即可看到第 ⑧ 项转 ✅`);
+    yield ev('register', 'ok', `已就位于 ${plan.to} 并注册进平台 —— 重新诊断即可看到第 ⑧ 项转 ✅`);
+  }
+
+  /**
+   * 纯 HTTP 从上游搬。
+   *
+   * ⚠️ **这条路走完 `register` 阶段就结束了 —— 它不经过 docker push**，因为字节是直接
+   * 落进目标 registry 的。⇒ `fetch`/`verify`/`load` 三步如实报 `skipped`，与 `local-docker`
+   * 同一条纪律：⛔ 不把没发生的步骤画成「瞬间完成的 ✅」。
+   */
+  private async *copyFromUpstream(
+    upstream: string,
+    targetRef: string,
+  ): AsyncGenerator<ProvisionEvent> {
+    yield ev('fetch', 'skipped', '纯 HTTP 拷贝：字节直接在两个 registry 之间搬，不落本机');
+    yield ev('verify', 'skipped', '每个 blob 取回时逐个验 sha256（在拷贝里做，不是单独一步）');
+    yield ev('load', 'skipped', '不经过 docker，无需装载');
+
+    const from = splitRef(upstream);
+    const to = splitRef(targetRef);
+    yield ev('register', 'running', `正在从 ${from.name}:${from.reference} 纯 HTTP 拷贝…`);
+    yield* streamed<ProvisionEvent>((emit) =>
+      this.copier
+        .copy(from, to, (done, total, what) => {
+          emit(
+            ev(
+              'register',
+              'running',
+              `${what}（第 ${String(done)} / 共 ${String(total)} 层）`,
+              total === 0 ? null : done / total,
+            ),
+          );
+        })
+        .then(() => undefined),
+    );
   }
 
   private async *loadAsset(
@@ -251,6 +316,21 @@ function ev(
   progress: number | null = null,
 ): ProvisionEvent {
   return { stage, status, message, progress };
+}
+
+/**
+ * `registry/name:tag` → `{ name, reference }`。
+ *
+ * ⚠️ **只有最后一段里的冒号才是 tag 分隔符** —— `localhost:5001/x/y` 的那个是端口。
+ * 与 `splitRefForTag` 同一条判据（本仓在这个坑上栽过，见 `dockerode-provision.adapter.ts`）。
+ */
+export function splitRef(ref: string): { name: string; reference: string } {
+  const slash = ref.lastIndexOf('/');
+  const last = slash === -1 ? ref : ref.slice(slash + 1);
+  const colon = last.lastIndexOf(':');
+  if (colon === -1) return { name: ref, reference: 'latest' };
+  const cut = (slash === -1 ? 0 : slash + 1) + colon;
+  return { name: ref.slice(0, cut), reference: ref.slice(cut + 1) };
 }
 
 function mib(bytes: number): string {

@@ -10,7 +10,7 @@ import {
 const REF = 'localhost:5001/platform/sandbox:v2';
 
 function facts(over: Partial<ProvisionFacts> = {}): ProvisionFacts {
-  return { ref: REF, inLocalDocker: false, asset: null, ...over };
+  return { ref: REF, inLocalDocker: false, asset: null, upstream: null, ...over };
 }
 
 const BOXLITE_ARM: ReleaseAsset = {
@@ -54,11 +54,33 @@ describe('planProvision —— 先问「字节够不够得着」', () => {
     expect(p.source).toBe('local-docker');
   });
 
-  it('两条都没有 ⇒ build-only，且 provisionable 必须是 false（**不许假装能搬**）', () => {
+  it('前两条都没有、但配了上游 ⇒ upstream-copy（纯 HTTP，不碰 docker）', () => {
+    const p = planProvision(facts({ upstream: 'ghcr.io/x/cap-boxlite-sandbox:v0.26.0' }));
+    expect(p.source).toBe('upstream-copy');
+    expect(p.provisionable).toBe(true);
+    expect(p.from).toBe('ghcr.io/x/cap-boxlite-sandbox:v0.26.0');
+  });
+
+  it('⛔ 上游排最后不是因为最差，是因为最贵 —— 本机有就不走它', () => {
+    expect(planProvision(facts({ inLocalDocker: true, upstream: 'ghcr.io/x/y:1' })).source).toBe(
+      'local-docker',
+    );
+    expect(planProvision(facts({ asset: BOXLITE_ARM, upstream: 'ghcr.io/x/y:1' })).source).toBe(
+      'release-asset',
+    );
+  });
+
+  it('⛔ 上游坐标是空串 ⇒ 当成没配（不许拿空串去拉）', () => {
+    expect(planProvision(facts({ upstream: '   ' })).source).toBe('build-only');
+  });
+
+  it('三条都没有 ⇒ build-only，且 provisionable 必须是 false（**不许假装能搬**）', () => {
     const p = planProvision(facts());
     expect(p.source).toBe('build-only');
     expect(p.provisionable).toBe(false);
     expect(p.why).toContain('够不着');
+    // 说得出**第三条**为什么也不通 —— 否则用户不知道还有配上游这个选项。
+    expect(p.why).toContain('SANDBOX_PRESET_IMAGE_SOURCE');
   });
 
   it('⛔ local-docker 的 sizeBytes 是 null，不许编一个数', () => {
@@ -66,15 +88,23 @@ describe('planProvision —— 先问「字节够不够得着」', () => {
     expect(planProvision(facts({ inLocalDocker: true })).sizeBytes).toBeNull();
   });
 
-  it('三条分支两两不同（把任意两格并成一格会在这里红）', () => {
-    const a = planProvision(facts({ inLocalDocker: true })).source;
-    const b = planProvision(facts({ asset: BOXLITE_ARM })).source;
-    const c = planProvision(facts()).source;
-    expect(new Set([a, b, c]).size).toBe(3);
+  it('四条分支两两不同（把任意两格并成一格会在这里红）', () => {
+    const s = [
+      planProvision(facts({ inLocalDocker: true })).source,
+      planProvision(facts({ asset: BOXLITE_ARM })).source,
+      planProvision(facts({ upstream: 'ghcr.io/x/y:1' })).source,
+      planProvision(facts()).source,
+    ];
+    expect(new Set(s).size).toBe(4);
   });
 
   it('每一格都说得出「搬到哪」—— 没有下一步的结论等于没有结论', () => {
-    for (const f of [facts({ inLocalDocker: true }), facts({ asset: BOXLITE_ARM }), facts()]) {
+    for (const f of [
+      facts({ inLocalDocker: true }),
+      facts({ asset: BOXLITE_ARM }),
+      facts({ upstream: 'ghcr.io/x/y:1' }),
+      facts(),
+    ]) {
       expect(planProvision(f).to).toBe('localhost:5001');
       expect(planProvision(f).why.length).toBeGreaterThan(10);
     }

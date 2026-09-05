@@ -16,22 +16,22 @@ import { parseImageRef } from '@platform/contracts';
  * |---|---|---|
  * | `local-docker`  | 本机 docker 镜像库有，registry 没有 | 自己 push（回环，不出网） |
  * | `release-asset` | 发布资产清单列了它               | 自己校验 + 装载 + push |
- * | `upstream-copy` | 只有上游 registry 有             | ⏳ 见下「为什么先不做」 |
+ * | `upstream-copy` | 只有上游 registry 有             | 纯 HTTP 搬（不碰 docker） |
  * | `build-only`    | 哪儿都没有，只有 Dockerfile      | **才轮到指路** |
  *
  * ⚠️ **顺序不是偏好，是代价排序**：`local-docker` 不出网；`release-asset` 出网但有 sha256
  * 兜底且体积小一个数量级（boxlite 档 431MB vs 本地 build 产物 13GB）。先问便宜的那个。
  *
- * ⚠️ **`upstream-copy` 先不做，且这不是偷懒**：纯 HTTP 跨 registry 拷贝要新写 blob 上传
- * （`POST /v2/<name>/blobs/uploads/` → `PATCH` → `PUT` + manifest `PUT`），而它**唯一**
- * 独占的场景是「没有 docker **且** 没有资产清单 **且** 上游可达」。有 docker 时
- * `local-docker` 覆盖它（pull 下来就落进本机库），有资产时 `release-asset` 覆盖它。
- * ⇒ 留座不留谎：`plan()` 对这种情形如实返回 `build-only` 并在 `why` 里说清，
- * **不假装能搬**。少报是降级，多报是撒谎。
+ * ⚠️ **`upstream-copy` 补上了那一格**（2026-09-05）。它独占的场景是「没有 docker **且**
+ * 没有资产清单 **且** 上游可达」—— 而那不是边角：**boxlite 档的宿主上可以根本没有 docker**
+ * （P21-5 §9F）。此前这种机器会被判成 `build-only`「搬不了」，而它其实只需要在两个 HTTP
+ * 端点之间搬一次字节。实现见 `registry-copy.ts`（纯 HTTP，不碰 docker）。
+ *
+ * ⚠️ **它排在最后不是因为最差，是因为最贵**：另外两条要么不出网、要么本机已有字节。
  */
 
 /** 搬运源。`build-only` 是「搬不了」的那一格，留在同一个联合里是为了让 `plan()` 总有话说。 */
-export type ProvisionSource = 'local-docker' | 'release-asset' | 'build-only';
+export type ProvisionSource = 'local-docker' | 'release-asset' | 'upstream-copy' | 'build-only';
 
 /** 发布资产清单里的一条（`cap-image-assets.json`，`schemaVersion: 1`）。 */
 export interface ReleaseAsset {
@@ -68,6 +68,12 @@ export interface ProvisionFacts {
   readonly inLocalDocker: boolean;
   /** 资产清单里按 provider × platform 命中的那条；没命中 / 没配清单 ⇒ null。 */
   readonly asset: ReleaseAsset | null;
+  /**
+   * 上游坐标（`SANDBOX_PRESET_IMAGE_SOURCE`）。配了才有这条路 —— ⛔ **不猜一个上游**：
+   * 猜错会去拉一张不是平台自建的镜像，搬完了照样过不了血统检查（04 §7 ★），
+   * 而那时几百 MB 已经白搬了。
+   */
+  readonly upstream: string | null;
 }
 
 /**
@@ -106,6 +112,22 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
     };
   }
 
+  if (f.upstream !== null && f.upstream.trim() !== '') {
+    return {
+      source: 'upstream-copy',
+      provisionable: true,
+      // ⚠️ 体积要等读到 manifest 才知道（层的 size 在里面）。定计划时如实 null，
+      //    由拷贝的进度事件按「第 n / 共 m 层」报 —— ⛔ 不编一个数。
+      sizeBytes: null,
+      from: f.upstream,
+      to: registryAuthorityOf(f.ref),
+      why:
+        `本机 docker 镜像库与发布资产清单都没有，但配了上游坐标 '${f.upstream}' —— ` +
+        '平台纯 HTTP 把它搬过来（不碰 docker，boxlite 档的宿主本来就可以没有 docker）',
+      asset: null,
+    };
+  }
+
   return {
     source: 'build-only',
     provisionable: false,
@@ -113,7 +135,7 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
     from: '（无）',
     to: registryAuthorityOf(f.ref),
     why:
-      `'${f.ref}' 的字节在这台机器上够不着：本机 docker 镜像库里没有，发布资产清单也没有匹配这台机器的那一份。` +
+      `'${f.ref}' 的字节在这台机器上够不着：本机 docker 镜像库里没有、发布资产清单没有匹配这台机器的那一份、也没有配上游坐标（SANDBOX_PRESET_IMAGE_SOURCE）。` +
       '⇒ 这一格确实只能构建，平台代劳不了',
     asset: null,
   };
