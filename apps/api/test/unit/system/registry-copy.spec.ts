@@ -53,14 +53,14 @@ const TO = { name: 'localhost:5001/platform/sandbox', reference: 'v2' };
 
 describe('copyImage —— config 与 layers 一起搬', () => {
   it('⛔ config 也是 blob，漏了它 manifest 推上去也拉不动', async () => {
-    const putBlob = vi.fn(() => Promise.resolve());
+    const putBlob = vi.fn((_name: string, _digest: string, _bytes: Buffer) => Promise.resolve());
     const r = await copyImage(port({ putBlob }), FROM, TO, 'arm64');
     expect(r.layers).toBe(3); // config + 2 层
     expect(putBlob.mock.calls.map((c) => c[1])).toEqual([CONFIG, L1, L2]);
   });
 
   it('⛔ 目标已有的 blob 跳过 —— 一层几百 MB，重推是纯浪费', async () => {
-    const fetchBlob = vi.fn(() => Promise.resolve(Buffer.from('b')));
+    const fetchBlob = vi.fn((_name: string, _digest: string) => Promise.resolve(Buffer.from('b')));
     const r = await copyImage(
       port({ hasBlob: (_n, d) => Promise.resolve(d === L1), fetchBlob }),
       FROM,
@@ -94,7 +94,9 @@ describe('copyImage —— config 与 layers 一起搬', () => {
   });
 
   it('⛔ 某一层推失败 ⇒ manifest 一个字都不推（宁可没有，不要半张）', async () => {
-    const putManifest = vi.fn(() => Promise.resolve());
+    const putManifest = vi.fn((_name: string, _ref: string, _raw: Buffer, _mediaType: string) =>
+      Promise.resolve(),
+    );
     await expect(
       copyImage(
         port({ putBlob: () => Promise.reject(new Error('registry 满了')), putManifest }),
@@ -107,9 +109,13 @@ describe('copyImage —— config 与 layers 一起搬', () => {
   });
 
   it('推的是**原样字节**与原 mediaType（重新序列化会改 digest）', async () => {
-    const putManifest = vi.fn(() => Promise.resolve());
+    const putManifest = vi.fn((_name: string, _ref: string, _raw: Buffer, _mediaType: string) =>
+      Promise.resolve(),
+    );
     await copyImage(port({ putManifest }), FROM, TO, 'arm64');
-    const [name, ref, raw, mt] = putManifest.mock.calls[0]!;
+    const call = putManifest.mock.calls[0];
+    expect(call).toBeDefined();
+    const [name, ref, raw, mt] = call!;
     expect(name).toBe(TO.name);
     expect(ref).toBe(TO.reference);
     expect(raw.equals(manifest())).toBe(true);

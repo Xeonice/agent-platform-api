@@ -29,7 +29,7 @@ interface Harness {
 }
 
 function harness(opts: {
-  bound: Binding[];
+  bound: CredentialSandboxBinding[];
   statusOf?: (sandboxId: string) => string | null; // null ⇒ sandbox not found
   destroy?: (id: string, force: boolean) => Promise<void>;
 }): Harness {

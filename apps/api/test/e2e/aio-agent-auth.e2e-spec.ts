@@ -164,7 +164,14 @@ describe.skipIf(!runnable)('aio in-sandbox agent — loopback port is authentica
     // exchange works against the REAL agent and not just a fake.
     // ⚠️ 实测 `?api_key=` 也能开 101，但我们不用它：query 会进沙箱自己的 nginx
     // access log，而这把钥匙的寿命是整个沙箱（ticket 30 秒过期）。
-    const pty = await provider.spawn(handle!, { tty: true, cols: 80, rows: 24 });
+    // ⚠️ `cmd` 是 `ProcessSpec` 的必填项 —— 这里一直漏着（测试代码此前没被 typecheck
+    //    看过）。给一个 login shell：aio 的 pty 通道本就以它为默认形态。
+    const pty = await provider.spawn(handle!, {
+      cmd: ['/bin/bash', '-l'],
+      tty: true,
+      cols: 80,
+      rows: 24,
+    });
     const seen = await new Promise<string>((resolveP) => {
       let buf = '';
       const timer = setTimeout(() => resolveP(buf), 20_000);

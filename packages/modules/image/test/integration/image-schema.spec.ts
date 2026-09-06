@@ -38,24 +38,27 @@ function makeHarness() {
 }
 
 function manifest(over: Partial<Parameters<typeof ImageManifest.create>[0]> = {}) {
-  return ImageManifest.create({
-    id: 'imf-1',
-    imageId: 'img-1',
-    version: 'latest',
-    baseImage: 'debian',
-    digest: digest('a'),
-    entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
-    supportedRuntimes: ['codex'],
-    resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
-    labelsRequired: ['platform.tmux'],
-    diffIds: ['sha256:layer-1', 'sha256:layer-2'],
-    derivedFromDigest: null,
-    validation: ValidationOutcome.from([], []),
-    config: null,
-    isActive: true,
-    registeredAt: NOW,
-    ...over,
-  });
+  return ImageManifest.create(
+    {
+      id: 'imf-1',
+      imageId: 'img-1',
+      version: 'latest',
+      baseImage: 'debian',
+      digest: digest('a'),
+      entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
+      supportedRuntimes: ['codex'],
+      resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
+      labelsRequired: ['platform.tmux'],
+      diffIds: ['sha256:layer-1', 'sha256:layer-2'],
+      derivedFromDigest: null,
+      validation: ValidationOutcome.from([], []),
+      config: null,
+      isActive: true,
+      registeredAt: NOW,
+      ...over,
+    },
+    'localhost:5001/platform/sandbox:v2',
+  );
 }
 
 let h: ReturnType<typeof makeHarness>;
@@ -309,7 +312,8 @@ describe('activate swaps the pointer inside ONE transaction (I-IMG-8)', () => {
     h.uow.run((tx) => h.manifests.saveSync(tx, old));
     h.uow.run((tx) => h.manifests.saveSync(tx, next));
 
-    next.activate(NOW);
+    // ⚠️ `activate` 的第一参是 ref（后加的），此前只传了时间。
+    next.activate('localhost:5001/platform/sandbox:v2', NOW);
     h.uow.run((tx) => {
       h.manifests.deactivateOthersSync(tx, 'img-1', 'latest', next.id);
       h.manifests.saveSync(tx, next);

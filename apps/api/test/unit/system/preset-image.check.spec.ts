@@ -75,7 +75,7 @@ function build(opts: Opts = {}): PresetImageCheck {
   const spec: ImageSpecProvider = {
     name: 'oci',
     resolve: opts.resolve ?? (() => Promise.resolve(resolvedImage())),
-    validate: () => ({ errors: [], warnings: [] }),
+    validate: () => ({ valid: true, errors: [], warnings: [] }),
   };
   const specs: ImageSpecRegistry = {
     defaultProvider: 'oci',
@@ -338,5 +338,31 @@ describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令
     const b = await run(build({ resolve: rejects, provisionable: false }));
     expect(a.errorCode).toBe(b.errorCode);
     expect(a.status).toBe('fail');
+  });
+});
+
+describe('⑥ 第 ⑧ 项与第 ⑤ 项不是同一个问题，界面上要说出来（2026-09-05 修）', () => {
+  it('⛔ 已 staged ⇒ 明说「此刻不需要 registry」', async () => {
+    // 同一屏上第 ⑤ 项可能正报 registry ❌。两个结论**都对**（字节早在本机，registry 只在
+    // 拉取时需要），但不说清就会被读成「诊断自相矛盾」，进而两条都不信。
+    const r = await run(build({ imageStaged: () => Promise.resolve(true) }));
+    expect(r.status).toBe('ok');
+    expect(r.summary).toContain('此刻不需要 registry');
+    expect((r.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow).toBe(false);
+  });
+
+  it('⛔ 未 staged ⇒ 反过来，明说这一步**要** registry 在', async () => {
+    const r = await run(build({ imageStaged: () => Promise.resolve(false) }));
+    expect(r.status).toBe('info');
+    expect(r.hint).toContain('要 registry 在');
+    expect((r.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow).toBe(true);
+  });
+
+  it('两格的 dependsOnRegistryNow 必须相反 —— 合成一个值就等于没做这次区分', async () => {
+    const staged = await run(build({ imageStaged: () => Promise.resolve(true) }));
+    const notYet = await run(build({ imageStaged: () => Promise.resolve(false) }));
+    expect((staged.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow).not.toBe(
+      (notYet.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow,
+    );
   });
 });

@@ -414,25 +414,36 @@ describe('boxlite 文件面 —— exec + base64（不是 copyIn/copyOut）', ()
    * `AgentTaskDto.artifacts[].modifiedAt`）出线的是**空串**。aio 那条路径同一行代码，
    * `agent-task.repository` 的 JSON 回读还有第三处同样的 `?? ''` 兜底。
    *
-   * ⇒ 这就是 `TaskArtifactSchema.modifiedAt` **必须**留成裸 `z.string()`、不能跟着
-   * 其它时刻字段收成 `IsoInstantSchema` 的全部理由（那边的注释指向这里）。
-   * 契约声称「必是 ISO 瞬时」而实现随时能发 `''`，是把已知缺口伪装成保证。
+   * ⭐ **这条用例完成过一次使命（2026-09-05）。** 它此前断言 `modifiedAt === ''`，
+   * 并解释「这就是契约必须留成裸 `z.string()` 的理由」。产出侧改成**缺席**之后它红了 ——
+   * 那正是它当初被写下来的意义：**把一个缺口的可达性钉住，缺口一旦被填就当场喊出来**。
    *
-   * ⭐ **要真正修掉它，动的是产出侧而不是契约**：决定 `''` 该换成「该条目缺席」还是
-   * 「`modifiedAt` 变 optional」——那是实现决策。改完之后这条用例会红，那时它就完成了
-   * 使命：把 `expect('')` 换成新的期望，再去把契约收成 `IsoInstantSchema`。
+   * 现在它守的是反过来的那件事：缺席合法、空串**不合法**、出现即必是合法瞬时。
+   * 谁把产出侧改回 `?? ''`，这条会立刻红。
    */
-  it('⛔ mtime 不可解析时 modifiedAt 是空串 —— 契约里那个裸 string 的原因', async () => {
+  it('⭐ mtime 不可解析时 modifiedAt **缺席** —— 2026-09-05 已修（此前是空串）', async () => {
     // `%T@` 那一列是 `-`（find 在某些 fs 上对特殊文件就这么打），Number('-') = NaN。
     const rows = ['f', '12', '-', '/w/odd.txt'].join('\t') + '\0';
     const box = new FakeBox(() => ({ stdout: rows, code: 0 }));
     const entries = await files(box).listFiles(HANDLE, '/w');
 
     expect(entries).toHaveLength(1);
-    expect(entries[0].modifiedAt).toBe('');
-    // 而这个值今天是**合法出线值**：契约收紧的那一刻，出线的东西就违约了。
+    // ⛔ 缺席，不是空串：空串是一个伪装成数据的谎（前端渲染成一片空白，
+    //    `new Date('')` 是 Invalid Date）。这条此前断言的正是那个空串。
+    expect(entries[0]).not.toHaveProperty('modifiedAt');
+
+    // ⇒ 契约随之收紧成 `IsoInstantSchema.optional()`：缺席合法，空串**不再**合法。
+    expect(TaskArtifactSchema.safeParse({ name: 'odd.txt', size: 12 }).success).toBe(true);
     expect(
       TaskArtifactSchema.safeParse({ name: 'odd.txt', size: 12, modifiedAt: '' }).success,
+    ).toBe(false);
+    // 出现即必是合法瞬时。
+    expect(
+      TaskArtifactSchema.safeParse({
+        name: 'odd.txt',
+        size: 12,
+        modifiedAt: '2026-09-05T00:00:00.000Z',
+      }).success,
     ).toBe(true);
   });
 

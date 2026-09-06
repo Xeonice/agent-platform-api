@@ -54,7 +54,9 @@ class StubAdapter implements RuntimeAdapter {
   async isInstalled(): Promise<boolean> {
     return this.probeResults.shift() ?? false;
   }
-  async install(): Promise<void> {
+  // ⚠️ 参数要照契约声明出来（`SandboxExecFn`）：子类 `InstallingAdapter` 覆盖它时
+  //    要用到，而父类不声明就成了「重写签名不兼容」（TS2416）。
+  async install(_exec: SandboxExecFn): Promise<void> {
     this.installCalls += 1;
   }
   buildStartCommand(): SandboxCommand {

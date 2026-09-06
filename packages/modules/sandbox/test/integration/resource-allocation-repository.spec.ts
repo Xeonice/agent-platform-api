@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { seedImageManifest } from './_seed-image';
 import { beforeEach, describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -32,11 +33,15 @@ function makeHarness() {
   const repo = new SqliteResourceAllocationRepository(db);
   const sandboxes = new SqliteSandboxRepository(db);
   const uow = new SqliteUnitOfWork(sqlite);
+  // ⚠️ `image_ref` 自 0010 起是**真外键**，存的是 manifestId 不是镜像坐标。
+  //    ⇒ 种**一次**复用：每个 sandbox 各种一条会撞 `images.name` 的唯一约束。
+  const manifestId = seedImageManifest(sqlite);
   const seedSandbox = (id: string): void => {
     uow.run((tx) =>
       sandboxes.saveSync(
         tx,
         Sandbox.create({
+          imageRef: manifestId,
           id: asSandboxId(id),
           projectId: asProjectId('prj-1'),
           runtime: 'codex',

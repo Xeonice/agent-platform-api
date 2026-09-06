@@ -128,21 +128,25 @@ export const TaskArtifactSchema = z.object({
   name: z.string(),
   size: z.number().int().nonnegative(),
   /**
-   * ⛔ **刻意留成裸 `z.string()`，不许改成 `IsoInstantSchema`。**
+   * 文件 mtime。**给不出就缺席，⛔ 不发空串**（2026-09-05 修）。
    *
-   * 它不是平台自己 `toISOString()` 出来的，而是**沙箱内 agent 报的文件 mtime 经归一**：
+   * ── 它此前是什么样 ────────────────────────────────────────────────────────
+   * 原本是裸 `z.string()`，并配着一段注释解释「为什么不能标 `format: date-time`」：
+   * 它不是平台自己 `toISOString()` 出来的，而是沙箱内 agent 报的 mtime 经归一，
    * `aio-files.ts` / `boxlite-files.ts` 都写着 `epochSecondsToIso(...) ?? ''` ——
-   * provider 给不出可解析的 mtime 时，这里发出去的是**空串**（`agent-task.repository`
-   * 的 JSON 回读也有同一条 `?? ''` 兜底）。写上 `format: date-time` 就是把一个已知缺口
-   * 伪装成保证：契约会声称「必是 ISO 瞬时」，而实现随时能发 `''`。
+   * provider 给不出可解析的 mtime 时发的是**空串**。那段注释是诚实的，但它诚实地
+   * 描述了一个不该存在的取值。
    *
-   * 机械钉子：`sandbox/test/unit/boxlite-native-data-plane.spec.ts` 里那条「⛔ mtime
-   * 不可解析时 modifiedAt 是空串」——它把这个缺口的可达性钉住了，产出侧一改它就红。
+   * ⛔ **空串是一个伪装成数据的谎**：前端拿它直接渲染（`TaskOutcome.view` 那一格），
+   * 界面上是一片空白 —— 用户分不清「这个文件没有时间戳」与「这一格渲染坏了」；
+   * 谁要是 `new Date(a.modifiedAt)`，拿到的是 `Invalid Date`。
    *
-   * 想让它配得上 `IsoInstantSchema`，要先改的是**产出侧**（决定 `''` 该换成缺席，
-   * 还是该让 `TaskArtifact` 的 `modifiedAt` 变 optional）——那是实现决策，不是契约装饰。
+   * ⇒ 按本仓一贯的那条（`sizeBytes: null` 不是 0、`hvSupport: null` 不是 false、
+   * reflink 三态）：**给不出就缺席**。缺席时前端显式渲染「时间未知」，类型系统逼它处理。
+   *
+   * ⚠️ 于是它现在**配得上** `IsoInstantSchema`：出现即必是合法瞬时，不出现即是没有。
    */
-  modifiedAt: z.string(),
+  modifiedAt: IsoInstantSchema.optional(),
 });
 export type TaskArtifactDto = z.infer<typeof TaskArtifactSchema>;
 

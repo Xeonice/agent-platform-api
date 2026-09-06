@@ -136,16 +136,21 @@ describe('darwinMicroVmVerdict —— macOS 分支', () => {
   });
 });
 
-describe('linuxKvmVerdict —— Linux 分支（口径与上一版一致，别改回去）', () => {
+describe('linuxKvmVerdict —— Linux 分支', () => {
   it('可读写 ⇒ ok', () => {
-    const r = linuxKvmVerdict(null);
+    const r = linuxKvmVerdict(null, false);
     expect(r.status).toBe('ok');
     expect(r.summary).toContain('/dev/kvm');
   });
 
+  it('是默认档时要说出来（与 darwin 那支同一句口径）', () => {
+    expect(linuxKvmVerdict(null, true).summary).toContain('默认档');
+    expect(linuxKvmVerdict(null, false).summary).not.toContain('默认档');
+  });
+
   it('⛔ ENOENT 与 EACCES 的下一步不同，不许合成一条', () => {
-    const missing = linuxKvmVerdict('ENOENT');
-    const denied = linuxKvmVerdict('EACCES');
+    const missing = linuxKvmVerdict('ENOENT', true);
+    const denied = linuxKvmVerdict('EACCES', true);
     expect(missing.status).toBe('warn');
     expect(denied.status).toBe('warn');
     // 设备不在 ⇒ 宿主机没开虚拟化；在但没权限 ⇒ 加用户组。
@@ -155,7 +160,38 @@ describe('linuxKvmVerdict —— Linux 分支（口径与上一版一致，别�
   });
 
   it('errno 要原样带进 detail（排障的下一个问题就是「为什么」）', () => {
-    expect(linuxKvmVerdict('EPERM').detail?.errno).toBe('EPERM');
+    expect(linuxKvmVerdict('EPERM', true).detail?.errno).toBe('EPERM');
+  });
+
+  // ── ⛔ 严重程度按「谁需要它」分岔（2026-09-05 补齐 §9F）────────────────────
+  it('⛔ 默认档**不是**微 VM ⇒ ℹ️ 而不是 ⚠️ —— 一台跑 aio 的 Linux 机器完全健康', () => {
+    // 上一版无条件 warn：那台机器常年顶着一个黄灯，而它根本不走这条路。
+    // 无条件要求某个依赖在，与恒 ⚠️ 的噪音项是同一种失败（P21-5 §9D/§9F）。
+    const r = linuxKvmVerdict('ENOENT', false);
+    expect(r.status).toBe('info');
+    expect(r.summary).toContain('当前默认档不需要它');
+  });
+
+  it('⛔ 不需要它的时候**不给 hint** —— 没有要做的事，就别给一条要做的事', () => {
+    expect(linuxKvmVerdict('ENOENT', false).hint).toBeUndefined();
+    expect(linuxKvmVerdict('ENOENT', true).hint).toBeDefined();
+  });
+
+  it('默认档是微 VM ⇒ ⚠️，且说清它正是这台机器要走的路', () => {
+    const r = linuxKvmVerdict('ENOENT', true);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('正是这台机器的默认档');
+  });
+
+  it('两种默认档下的结论必须不同（合成一条就等于没做这次分岔）', () => {
+    expect(linuxKvmVerdict('ENOENT', true).status).not.toBe(
+      linuxKvmVerdict('ENOENT', false).status,
+    );
+  });
+
+  it('isDefaultProvider 要进 detail —— 排障时要能回答「它当时算的是哪一档」', () => {
+    expect(linuxKvmVerdict('ENOENT', true).detail?.isDefaultProvider).toBe(true);
+    expect(linuxKvmVerdict(null, false).detail?.isDefaultProvider).toBe(false);
   });
 });
 

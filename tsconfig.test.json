@@ -1,0 +1,45 @@
+{
+  // 测试代码的 typecheck —— **只检查，不产出**（`noEmit`）。
+  //
+  // ── 它修的是什么：207 个测试文件从来没被 tsc 看过一眼 ──────────────────────
+  // 每个包的 `tsconfig.json` 都是 `include: ["src/**/*.ts"]`，`apps/api` 也是。于是
+  // `pnpm typecheck`（`tsc -b`）**一个测试文件都不检查**：39k 行代码，靠 vitest 跑到
+  // 那一行才发现类型错，而没跑到的分支永远发现不了。
+  //
+  // ⚠️ **为什么不直接把 test 加进各包的 include**：那些配置带 `outDir`/`rootDir`，
+  // 测试会被一起编进 `dist/` 进产物。⇒ 单开一份 `noEmit` 的，检查与产出彻底分开。
+  //
+  // ⚠️ **`composite: false` + 不用 project references**：references 要求被引项目
+  // `composite: true` 且有产物；这里只想要"把所有 .ts 一起看一遍"，用一次全量检查最直接。
+  // 代价是它比 `tsc -b` 慢（没有增量），所以它是**独立的一步**，不塞进 build。
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // ⚠️ 测试文件用 top-level await 与 import.meta（vitest 是 ESM）——沿用 build 的
+    //    `module` 设置会报 32 条 TS1378 + 7 条 TS1343，那是**配置噪音不是代码问题**。
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "composite": false,
+    "incremental": false,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@platform/contracts": ["packages/contracts/src/index.ts"],
+      "@platform/shared-kernel": ["packages/shared-kernel/src/index.ts"],
+      "@platform/project": ["packages/modules/project/src/index.ts"],
+      "@platform/sandbox": ["packages/modules/sandbox/src/index.ts"],
+      "@platform/terminal": ["packages/modules/terminal/src/index.ts"],
+      "@platform/credential": ["packages/modules/credential/src/index.ts"],
+      "@platform/runtime": ["packages/modules/runtime/src/index.ts"],
+      "@platform/image": ["packages/modules/image/src/index.ts"],
+      "@platform/automation": ["packages/modules/automation/src/index.ts"],
+      // ⚠️ pnpm workspace：这两个依赖装在**子包**的 node_modules 里，从仓库根解析不到。
+      //    ⛔ 不是「类型缺失」，是解析路径的事 —— 指过去即可，别去装 @types 或写 d.ts。
+      //    ⚠️ `drizzle.config.ts` 不在本配置的 include 里：它是**构建配置**不是测试代码，
+      //    而它的 `drizzle-kit` 入口只在 `apps/api` 的解析上下文里成立。
+      "dockerode": ["packages/modules/sandbox/node_modules/@types/dockerode/index.d.ts"],
+      "dockerode": ["packages/modules/sandbox/node_modules/@types/dockerode/index.d.ts"]
+    }
+  },
+  "include": ["apps/api/test/**/*.ts", "packages/**/test/**/*.ts", "scripts/**/*.ts"]
+}

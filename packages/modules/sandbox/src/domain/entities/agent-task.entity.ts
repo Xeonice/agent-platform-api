@@ -21,7 +21,8 @@ export interface PersistedJobHandle {
 export interface TaskArtifact {
   readonly name: string;
   readonly size: number;
-  readonly modifiedAt: string;
+  /** ⛔ **缺席 = provider 报不出可解析的 mtime**，不是空串（2026-09-05，见 task.schema）。 */
+  readonly modifiedAt?: string;
 }
 
 export interface AgentTaskProps {

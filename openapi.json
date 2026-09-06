@@ -3062,13 +3062,13 @@
                   "exclusiveMinimum": false
                 },
                 "modifiedAt": {
-                  "type": "string"
+                  "type": "string",
+                  "format": "date-time"
                 }
               },
               "required": [
                 "name",
-                "size",
-                "modifiedAt"
+                "size"
               ]
             }
           },

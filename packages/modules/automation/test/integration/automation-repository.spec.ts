@@ -249,6 +249,43 @@ describe('SqliteAutomationRunRepository（真 sqlite + 真 migration）', () => 
     return r;
   };
 
+  /**
+   * ⭐⭐ **run 侧的「一行坏数据」与规则侧不是同一个危险**（2026-09-05 补）。
+   *
+   * 规则侧 `Automation.rehydrate` 会跑值对象校验，裸 `.map` 的症状是**抛出来整批全没**。
+   * 而 `AutomationRun.rehydrate` 只是纯赋值 —— 它**根本不会抛**。它原本的毛病是反过来的：
+   * 三个闭集列靠 `as` 断言，**坏数据静默流进领域层**。
+   *
+   * ⛔ 而且 DB 侧只兜住了两列：`status` 与 `webhook_status` 有 CHECK，**`error_code` 没有**。
+   * ⇒ 这条用例走的正是那个没人兜的列：绕过聚合塞一个非法 `error_code`。
+   */
+  it('⭐⭐ 非法 error_code（DB 无 CHECK 的那一列）⇒ 只跳这一行，其余照常返回', async () => {
+    const ok = seedRun('run-ok', at('2026-06-01T00:00:00Z'));
+    expect(ok.id).toBe('run-ok');
+    // 绕过聚合直接写一行：error_code 不在闭集里（'PREVIOUS_RUNNING' | 'AUTH_EXPIRED' |
+    // 'RESOURCE_EXHAUSTED'）。⚠️ status 用合法值，否则会被 DB 的 CHECK 先拦下——
+    // 那样测的就是 DB 而不是这一层。
+    h.sqlite
+      .prepare(
+        `INSERT INTO automation_runs (id, automation_id, triggered_at, status, error_code,
+           retry_count, outcome_applied)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run(
+        'run-broken',
+        'aut-1',
+        at('2026-06-01T00:01:00Z').getTime(),
+        'failed',
+        'NOT_A_CODE',
+        0,
+        0,
+      );
+
+    const page = await h.runs.listByAutomation(asAutomationId('aut-1'), { limit: 10 });
+    // ⛔ 坏行被跳过，好行照常回 —— 不是整批失败，也不是让非法值进领域。
+    expect(page.items.map((r) => r.id)).toEqual(['run-ok']);
+  });
+
   it('saveSync 往返：17 列都读得回来（含 outcome_applied）', async () => {
     const run = seedRun('run-1', at('2026-06-01T00:00:00Z'));
     run.markRunning('sbx-1', at('2026-06-01T00:00:30Z'));

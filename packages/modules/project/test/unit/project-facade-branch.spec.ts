@@ -3,6 +3,8 @@ import { asProjectId } from '@platform/shared-kernel';
 import type { ProjectId } from '@platform/shared-kernel';
 import { ProjectAccessError } from '@platform/contracts';
 import { ProjectFacadeAdapter } from '../../src/application/project-facade.adapter';
+import type { RetainedVolumeService } from '../../src/application/retained-volume.service';
+import { unused } from '../../../../../test-support/unused';
 import { Project } from '../../src/domain/entities/project.entity';
 import type { ProjectRepository } from '../../src/domain/repositories/project.repository';
 import type { BaselineGit, FetchRequest } from '../../src/domain/ports/baseline-git.port';
@@ -66,10 +68,22 @@ function readyGitProject(id = 'prj-1'): Project {
  * `ProjectAccessError` through a seam, so it stays green against a facade that
  * validates nothing.
  */
+/**
+ * ⛔ **本组用例一次都不碰保留卷** —— 它验的是分支校验（03 §7.2★）。构造要求它在，
+ * ⇒ 给一个**被调用就抛**的替身（`test-support/unused`）。这个参数是后来加的，
+ * 而测试代码此前从未被 typecheck 看过，所以这四处一直漏着（2026-09-05 补）。
+ */
+const unusedRetainedVolumes = (): RetainedVolumeService =>
+  unused<RetainedVolumeService>('RetainedVolumeService');
+
 describe('the project facade validates the requested branch (03 §7.2★)', () => {
   it('a branch the baseline does not have ⇒ BRANCH_NOT_FOUND', async () => {
     const git = new FakeBaselineGit(['main', 'develop']);
-    const facade = new ProjectFacadeAdapter(new OneProjectRepo(readyGitProject()), git);
+    const facade = new ProjectFacadeAdapter(
+      new OneProjectRepo(readyGitProject()),
+      git,
+      unusedRetainedVolumes(),
+    );
 
     const e = await facade
       .getRuntimeContextForTask('prj-1', 'feature/x')
@@ -86,7 +100,11 @@ describe('the project facade validates the requested branch (03 §7.2★)', () =
 
   it('a branch the baseline HAS is accepted and echoed into the runtime context', async () => {
     const git = new FakeBaselineGit(['main', 'develop']);
-    const facade = new ProjectFacadeAdapter(new OneProjectRepo(readyGitProject()), git);
+    const facade = new ProjectFacadeAdapter(
+      new OneProjectRepo(readyGitProject()),
+      git,
+      unusedRetainedVolumes(),
+    );
 
     const ctx = await facade.getRuntimeContextForTask('prj-1', 'develop');
     // echoed, not merely accepted: the workspace preparer downstream has no other way
@@ -97,7 +115,11 @@ describe('the project facade validates the requested branch (03 §7.2★)', () =
 
   it('no branch requested ⇒ the baseline is never even read', async () => {
     const git = new FakeBaselineGit(['main']);
-    const facade = new ProjectFacadeAdapter(new OneProjectRepo(readyGitProject()), git);
+    const facade = new ProjectFacadeAdapter(
+      new OneProjectRepo(readyGitProject()),
+      git,
+      unusedRetainedVolumes(),
+    );
 
     const ctx = await facade.getRuntimeContextForTask('prj-1');
     expect(ctx.branch).toBeUndefined();
@@ -118,7 +140,11 @@ describe('the project facade validates the requested branch (03 §7.2★)', () =
     // is no repository in an empty project's baseline dir, so a `git branch -r` there
     // is an error, not an empty list.
     const git = new FakeBaselineGit(['main']);
-    const facade = new ProjectFacadeAdapter(new OneProjectRepo(empty), git);
+    const facade = new ProjectFacadeAdapter(
+      new OneProjectRepo(empty),
+      git,
+      unusedRetainedVolumes(),
+    );
 
     const e = await facade
       .getRuntimeContextForTask('prj-empty', 'main')

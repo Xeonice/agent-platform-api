@@ -389,7 +389,8 @@ describe('锚点的取用口径', () => {
   it('停用（is_active=false）的预制镜像仍然是有效锚点 —— 血统是历史事实', async () => {
     await seedRoot();
     const rootRow = h.rows()[0];
-    rootRow.deactivate(NOW);
+    // ⚠️ `deactivate` 的第一参是 ref（后加的）。
+    rootRow.deactivate('localhost:5001/platform/sandbox:v1', NOW);
     // 运维方把预制镜像换代（v1 停用、v2 上线）不该让所有基于 v1 构建的镜像
     // 突然注册不了：它们**当初确实**是基于平台镜像构建的，那件事不会因为
     // 指针移动而变假。

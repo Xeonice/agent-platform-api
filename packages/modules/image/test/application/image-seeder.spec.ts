@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { ImageManifestDto } from '@platform/contracts';
+import type { RegisterImageResult } from '../../src/application/image-application.service';
 import { Logger } from '@nestjs/common';
 import { ImageSeeder, seedFailureNextStep } from '../../src/application/image-seeder';
 import { Image } from '../../src/domain/entities/image.entity';
@@ -27,7 +29,22 @@ import { ValidationOutcome } from '../../src/domain/value-objects/validation-out
  * 静默通过。与 `apps/api/test/unit/error-envelope.filter.spec.ts` 同一手法。
  */
 type MinimalRepo = Pick<ImageRepository, 'findByName'>;
-type MinimalService = Pick<ImageApplicationService, 'registerImage'>;
+
+/**
+ * `registerImage` 的返回值 —— **只把 `ImageSeeder` 真读到的那两格钉死**。
+ *
+ * ⚠️ 它读的就一行：``seeded … → ${result.manifest.digest} (${...validationStatus})``。
+ * ⇒ `manifest` 收成 `Pick`，其余部分照真类型。⛔ 原来是
+ * `as Awaited<ReturnType<...>>` —— 那个断言把「这份替身与真返回值差多远」整个遮住了，
+ * 而它差得很远（真 `ImageManifestDto` 有十几个字段）。
+ */
+type MinimalService = {
+  registerImage: (...args: Parameters<ImageApplicationService['registerImage']>) => Promise<{
+    manifest: Pick<ImageManifestDto, 'id' | 'digest' | 'validationStatus'>;
+    validation: RegisterImageResult['validation'];
+    created: boolean;
+  }>;
+};
 
 function fakeRepo(existing: string | null): MinimalRepo {
   return {
@@ -75,11 +92,13 @@ function fakeService(behaviour: 'ok' | 'throws' | 'hangs' | 'invalid'): MinimalS
         manifest: {
           id: 'm-1',
           digest: `sha256:${'a'.repeat(64)}`,
-          validationStatus: 'valid',
+          validationStatus: 'valid' as const,
         },
-        validation: { status: 'valid', errors: [], warnings: [] },
+        validation: { status: 'valid' as const, errors: [], warnings: [] },
         created: true,
-      } as Awaited<ReturnType<ImageApplicationService['registerImage']>>);
+        // ⚠️ `ImageSeeder` 只读 `manifest.digest` 与 `manifest.validationStatus`（那一行日志）。
+        //    ⇒ 用 `Pick` 把替身的义务收窄到它**真正被读到**的那部分，⛔ 不打断言把差距遮住。
+      });
     }),
   };
 }

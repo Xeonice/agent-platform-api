@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { eventField } from '../../../../../test-support/unused';
 import { ImageManifest } from '../../src/domain/entities/image-manifest.entity';
 import type { ImageManifestProps } from '../../src/domain/entities/image-manifest.entity';
 import { ValidationOutcome } from '../../src/domain/value-objects/validation-outcome.vo';
@@ -156,10 +157,10 @@ describe('镜像事件带的是用户认得的 ref，不是 manifestId', () => {
       'image.deleted',
     ]);
     for (const e of events) {
-      expect((e as { ref: string }).ref).toBe(REF);
+      expect(eventField<string>(e, 'ref')).toBe(REF);
       // ⚠️ 否定断言是重点：光断言「有 ref 字段」的话，把 `manifestId` 也拼进去的
       // 写法照样绿，而那正是 summary 上重新长出 UUID 的路径。
-      expect((e as { ref: string }).ref).not.toContain('imf-1');
+      expect(eventField<string>(e, 'ref')).not.toContain('imf-1');
     }
   });
 

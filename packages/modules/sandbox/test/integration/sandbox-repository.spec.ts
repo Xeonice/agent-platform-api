@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { seedImageManifest } from './_seed-image';
 import { beforeEach, describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -34,6 +35,9 @@ describe('SqliteSandboxRepository saveSync roundtrip', () => {
 
   it('persists a new sandbox synchronously and reads it back', async () => {
     const sandbox = Sandbox.create({
+      // ⚠️ `image_ref` 自 0010 起是**真外键**，存的是 manifestId 不是镜像坐标 ——
+      //    先种一条 manifest（与 agent-task-repository.spec 同一手法）。
+      imageRef: seedImageManifest(harness.sqlite),
       id: asSandboxId('sbx-int-1'),
       projectId: asProjectId('prj-int-1'),
       runtime: 'codex',
@@ -59,6 +63,9 @@ describe('SqliteSandboxRepository saveSync roundtrip', () => {
 
   it('persists a subsequent legal transition and appends history', async () => {
     const sandbox = Sandbox.create({
+      // ⚠️ `image_ref` 自 0010 起是**真外键**，存的是 manifestId 不是镜像坐标 ——
+      //    先种一条 manifest（与 agent-task-repository.spec 同一手法）。
+      imageRef: seedImageManifest(harness.sqlite),
       id: asSandboxId('sbx-int-2'),
       projectId: asProjectId('prj-int-1'),
       runtime: 'codex',

@@ -142,7 +142,9 @@ describe('/tasks channel — the hash and the frame shapes it stands for (14 §2
         type: 'event',
         taskId: 't',
         seq: 1,
-        event: { type: 'agent-message', timestamp: '', data: {} },
+        // ⚠️ `agent-message` 的 data 是 `{ text: string }`（契约 runtime-adapter §RuntimeEvent），
+        //    不是空对象 —— 这个替身此前与契约对不上（2026-09-05 补）。
+        event: { type: 'agent-message', timestamp: '', data: { text: '' } },
       },
       { type: 'caught_up', taskId: 't', firstSeq: 1, seq: 0 },
       { type: 'exit', taskId: 't', status: 'killed' },
