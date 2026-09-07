@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { ImageApplicationService } from '@platform/image';
 import { formatImageRef, parseImageRef } from '@platform/contracts';
+import { builtinImageRefs } from '@platform/shared-kernel';
 import { OciRegistryClient } from '@platform/image';
 import type {
   FileEntry,
@@ -426,14 +427,20 @@ const FAKE_ROOT_LAYER = `sha256:${'r'.repeat(64)}`;
  * tests for `assertAdmissible`.
  */
 function fakeDiffIds(canonicalRef: string): string[] {
-  const parsed = parseImageRef(seededRootRef());
-  const canonicalRoot = formatImageRef(parsed.name, parsed.digest ?? parsed.tag ?? 'latest');
-  if (canonicalRef === canonicalRoot) return [FAKE_ROOT_LAYER];
+  // ⚠️ **锚点可能不止一个**（2026-09-07）：`SANDBOX_DEFAULT_IMAGE` 留空时播种的是
+  //    **两张**（两档各自的发布镜像），于是 `isBuiltin` 的行有两行、血统锚点也有两个。
+  //    此前这里只认一个根，另一张（以及所有基于它的镜像）就会被判成血统不合，
+  //    8 个 e2e 文件在 `registerDefaultImage` 那一步整片加载失败。
+  const roots = seededRootRefs().map((ref) => {
+    const parsed = parseImageRef(ref);
+    return formatImageRef(parsed.name, parsed.digest ?? parsed.tag ?? 'latest');
+  });
+  if (roots.includes(canonicalRef)) return [FAKE_ROOT_LAYER];
   return [FAKE_ROOT_LAYER, `sha256:${createHash('sha256').update(canonicalRef).digest('hex')}`];
 }
 
 /**
- * The ref `ImageSeeder` will actually seed — it MUST match `ImageSeeder#builtinImageRef`.
+ * The refs `ImageSeeder` will actually seed — it MUST match the seeder's own choice.
  *
  * ⚠️ THIS FALLBACK IS NOT THE SAME AS `registerDefaultImage`'s, AND THAT IS A REAL
  * PRODUCT-SIDE DRIFT, NOT A TEST DETAIL. With `SANDBOX_DEFAULT_IMAGE` unset there are
@@ -445,8 +452,16 @@ function fakeDiffIds(canonicalRef: string): string[] {
  * to follow the SEEDER, because the seeder is what决定s which row is `isBuiltin` and
  * therefore which row is the lineage anchor.
  */
-function seededRootRef(): string {
-  return process.env.SANDBOX_DEFAULT_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest';
+function seededRootRefs(): string[] {
+  // ⛔ **直接问产品，别在这里再写一遍兜底**。此前这里是
+  //    `process.env.SANDBOX_DEFAULT_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest'` ——
+  //    一份**手抄的**兜底。2026-09-07 产品侧改成「留空 ⇒ 按档自动选两张发布镜像」之后，
+  //    这份手抄立刻过时，替身认的根与播种的根对不上，8 个 e2e 文件整片红。
+  //    上面那段注释早就写着「the double has to follow the SEEDER」—— 那就**真的跟着它**。
+  //
+  // ⚠️ 两个内置档的名字与 `SandboxProviderRegistry` 的内置注册一致；第三方 provider
+  //    不参与播种默认（04 §8：平台不替一个外部 provider 猜镜像）。
+  return builtinImageRefs(['aio', 'boxlite']);
 }
 
 /**
