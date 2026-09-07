@@ -29,6 +29,7 @@
     "db:generate": "apps/api/node_modules/.bin/drizzle-kit generate",
     "db:migrate": "node --env-file-if-exists=.env apps/api/dist/platform/persistence/migrate.js",
     "prepare": "husky || true",
+    "check:default-image": "node scripts/check-default-image-consistency.mjs",
     "check:openapi": "pnpm openapi:emit && git diff --exit-code openapi.json",
     "openapi:emit": "node apps/api/dist/tooling/emit-openapi.js",
     "test:mutation": "stryker run stryker.conf.mjs"

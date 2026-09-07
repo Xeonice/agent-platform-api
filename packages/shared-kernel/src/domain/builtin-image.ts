@@ -57,13 +57,54 @@ export function builtinImageRef(): string {
  */
 export function builtinImageRefFor(provider: string): string {
   const override = (process.env[`SANDBOX_${provider.toUpperCase()}_IMAGE`] ?? '').trim();
-  return override !== '' ? override : builtinImageRef();
+  if (override !== '') return override;
+  // ⚠️ **没配按档覆盖时，先看这一档有没有平台发布的那一张**（2026-09-07，P21-8 §2.2）。
+  //    ⛔ 此前直接回落到共用的 `SANDBOX_DEFAULT_IMAGE` —— 而**两档的镜像不可互换**
+  //    （ADR 决策 C：aio 那张容器里有 :8080 的 agent，boxlite 那张没有）。于是在一台
+  //    mac 上（`hostPreferredProvider()` = boxlite）配一个 aio 坐标当默认，平台会
+  //    拉得到、播得下去，**在建任务门口才撞 `IMAGE_PROVIDER_MISMATCH`** —— 又一次
+  //    「起得来但用不了」。
+  //
+  //    ⇒ 平台按机器选对那一张，用户不必知道自己该用 aio 还是 boxlite。
+  const published = PUBLISHED_IMAGE_BY_PROVIDER[provider];
+  if (published !== undefined && !isBuiltinImageConfigured()) return published;
+  return builtinImageRef();
+}
+
+/**
+ * 平台 CI 发布的**按档**预制镜像（`.github/workflows/publish-sandbox-image.yml`）。
+ *
+ * ⚠️ **只在运维方什么都没配时才用**：显式配了 `SANDBOX_DEFAULT_IMAGE` 或按档覆盖的，
+ * 一律以他配的为准 —— 平台不该替他改主意。
+ *
+ * ⛔ **两档不共用一张。** aio 那张 `FROM agent-infra/sandbox`（容器内自带 :8080 的
+ * agent HTTP 面），boxlite 那张 `FROM node:22-slim`（微 VM 里跑，没有那个 agent）。
+ * 拿错了不会在拉取时失败，会在**建任务门口**撞 `IMAGE_PROVIDER_MISMATCH`（10 §6.8）。
+ *
+ * ⚠️ 第三方 provider 不在这张表里 ⇒ 回落到 `builtinImageRef()`，与改动前一字不差：
+ * 平台不知道一个外部 provider 该用哪张镜像，**猜一个比让它响亮失败更糟**。
+ */
+const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Record<string, string>> = {
+  aio: 'ghcr.io/xeonice/agent-platform-sandbox:latest',
+  boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:latest',
+};
+
+/** 平台发布的按档镜像坐标（只读视图，给诊断与错误消息用）。 */
+export function publishedImageFor(provider: string): string | undefined {
+  return PUBLISHED_IMAGE_BY_PROVIDER[provider];
 }
 
 /**
  * 全部**血统锚点**坐标（去重）—— 播种要种的就是这些。
  *
- * ⚠️ **单档部署这里恒为 1 个元素**，与搬家前一模一样；只有真的配了按档覆盖才会变成 2 个。
+ * ⚠️ **2026-09-07 起，什么都不配时这里是 2 个**（此前恒为 1 个）：两档各自回落到平台
+ * 发布的那一张，而那是两张不同的镜像。显式配了 `SANDBOX_DEFAULT_IMAGE` 的部署仍然是
+ * 1 个 —— 运维方说两档共用一张，平台就照办。
+ *
+ * ⚠️ **多出来的那一张不是一次 13GB 的下载**：播种走 `spec.resolve()`，只抓 manifest +
+ * config blob（`oci-image-spec.provider.ts`：「no extra request, no layer pulled」）。
+ * 代价是一次几 KB 的 HTTP。⛔ 若哪天播种改成真拉层，**这里要重新算账**：在 mac 上
+ * 顺带拉一张 13GB 的 aio 镜像，正是 ADR 决策 C 花力气避开的那件事。
  */
 export function builtinImageRefs(providers: readonly string[]): string[] {
   return [...new Set(providers.map((p) => builtinImageRefFor(p)))];
@@ -161,6 +202,19 @@ const KNOWN_TMUX_REPOSITORIES = [
   'agent-infra/sandbox',
   'platform/sandbox',
   'platform/boxlite',
+  // ⚠️ **平台 CI 发布的那一张**（2026-09-07，P21-8 §2.2 /
+  //    `.github/workflows/publish-sandbox-image.yml`）。它 `FROM agent-infra/sandbox`，
+  //    所以 tmux 与上游同源。⚠️ 出厂 `SANDBOX_DEFAULT_IMAGE` **留空**，由
+  //    `builtinImageRefFor()` 按宿主档位在两张发布镜像里自动挑 —— 填死任何一张都会让
+  //    按档自动选永不生效（`pnpm check:default-image` 守着这条）。
+  //
+  // ⛔ **漏了这一行，新出厂默认会被平台自己拒掉** —— 血统检查（04 §7 ★③）认的是这张表，
+  //    而不是「谁发布的」。那会把「找不到镜像」换成「拉到了但注册被拒」，对用户更难懂。
+  //    ⚠️ 改出厂坐标与改这张表**必须同时做**，只改一处就是一个必然踩到的坑。
+  'agent-platform-sandbox',
+  // boxlite 档那张（`images/platform-boxlite`，FROM node:22-slim + 装两个 CLI）。
+  // ⚠️ 它与上面那张**不可互换**，但「有没有 tmux」这一问上两者同样是 true。
+  'agent-platform-boxlite',
 ] as const;
 
 /**

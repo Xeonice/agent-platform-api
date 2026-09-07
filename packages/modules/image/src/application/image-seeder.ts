@@ -75,7 +75,10 @@ export class ImageSeeder implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    // ⚠️ **去重后逐张种**：单档部署（两档指向同一张）这里恒为 1 张，与搬家前一字不差。
+    // ⚠️ **去重后逐张种**：单档部署（显式配了 `SANDBOX_DEFAULT_IMAGE`，两档指向同一张）
+    // 恒为 1 张；什么都不配时是 2 张 —— 两档各自回落到平台发布的那一张（2026-09-07）。
+    // ⚠️ 播种只抓 manifest + config blob，不拉层，所以第二张的代价是一次几 KB 的 HTTP；
+    //    但**串行 + 每张 10s 预算**意味着最坏就绪延迟从 10s 变成 20s（两张都超时）。
     // 逐张各自 try/catch，因为一张种不上不该让另一张也不种——两档是独立的部署形态，
     // 一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉。
     for (const ref of builtinImageRefs(this.providers.list().map((p) => p.name))) {

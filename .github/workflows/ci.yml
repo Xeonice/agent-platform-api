@@ -23,6 +23,11 @@ jobs:
       - name: prettier
         run: pnpm format:check
 
+      # ⛔ 一个变量、三处默认值、两两不同 —— compose 那条不报错就起来了，但预制镜像
+      #    没装 claude-code，每个 Task 现装 753 秒（脚本顶部有完整案情）。
+      - name: 出厂镜像坐标一致性
+        run: pnpm check:default-image
+
       # ── unit (domain, zero-mock; 25 L0) ──
       - name: unit
         run: pnpm test:unit
