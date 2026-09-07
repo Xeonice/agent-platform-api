@@ -138,6 +138,16 @@ export class RuntimeApplicationService {
       // drive completion in the background so `pollAuthStatus` can report success.
       if (challenge.kind === 'device-code') {
         void this.awaitDeviceCompletion(runtimeId, challengeRef);
+      } else if (adapter.awaitSelfCompletion !== undefined) {
+        // ⭐ **CLI 自己就能完成时，也要有人接着**（2026-09-07 真机补）。
+        //    `claude setup-token` 起了一个本地监听，浏览器授权后回调页把码**直接送进
+        //    那个端口**，页面显示「成功，可以关闭此窗口」—— 同机流程下根本不显示码。
+        //    此前平台只等 `completeAuth(pastedText)`：码送到了、CLI 拿到 token 了，
+        //    而平台在等一个永远不会有的粘贴，用户看着浏览器说成功、这边一直转圈。
+        //
+        // ⚠️ 粘贴那条路照留 —— 浏览器与 helper 不在同一台机器时（真远端部署），回调页
+        //    够不到本地端口，才会退化成显示码。**两条路谁先到算谁**（见 finishChallenge）。
+        void this.awaitSelfCompletion(runtimeId, challengeRef);
       }
       return challenge.toDto();
     } catch (e) {
@@ -192,20 +202,112 @@ export class RuntimeApplicationService {
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
       );
-      const masked = await this.storeCredential(adapter, cred);
-      entry.status = 'success';
-      entry.maskedIdentifier = masked;
-      return { maskedIdentifier: masked };
+      // ⚠️ **走同一个出口**：后台可能有一条「CLI 自完成」也在等同一个 PTY 上的 token，
+      //    两条都会成功。`finishChallenge` 用「live entry 还在不在」当锁，保证只落库一次。
+      const masked = await this.finishChallenge(runtimeId, challengeRef, cred);
+      if (masked !== null) return { maskedIdentifier: masked };
+      // 自完成先到了 —— 凭证已经存好，把它的结果原样报回去，⛔ 不要再存一遍。
+      const settled = this.sessions.outcome(challengeRef, this.clock.now());
+      if (settled?.maskedIdentifier !== undefined) {
+        return { maskedIdentifier: settled.maskedIdentifier };
+      }
+      throw new NotFoundException(`challenge ${challengeRef} expired or unknown`);
     } catch (e) {
-      entry.status = 'error';
+      const live = this.sessions.get(challengeRef);
+      if (live) {
+        live.status = 'error';
+        await live.session.dispose();
+        this.sessions.delete(challengeRef);
+      }
       throw this.mapAdapterError(e);
-    } finally {
-      await entry.session.dispose();
-      this.sessions.delete(challengeRef);
     }
   }
 
   /** Background completion for device-code logins. */
+  /**
+   * 正在结算中的挑战 —— 两条完成路径撞车时，输的那条 await 赢家这一份。
+   *
+   * ⚠️ 只在「已占锁、尚未 settle」那段窗口里有值；settle 之后墓碑就是权威。
+   */
+  private readonly settling = new Map<string, Promise<string>>();
+
+  /**
+   * 后台守着「CLI 自己完成」那条路 —— 成功就直接落库，用户什么都不用做。
+   *
+   * ⚠️ **失败不打扰用户**：走不到这条路是**正常**的（远端部署下回调页够不到本机监听，
+   * 那时正确的做法就是显示码让人粘贴）。所以超时/出错只留一条 debug，⛔ 不 settle、
+   * 不报错 —— settle 会把粘贴那条路一起掐掉，而那条路此刻可能正等着用户操作。
+   */
+  private async awaitSelfCompletion(runtimeId: string, challengeRef: string): Promise<void> {
+    const entry = this.sessions.get(challengeRef);
+    if (!entry) return;
+    const adapter = this.adapter(runtimeId);
+    if (adapter.awaitSelfCompletion === undefined) return;
+    try {
+      const cred = await adapter.awaitSelfCompletion(entry.challenge.toDto(), {
+        pty: entry.session.pty,
+        homeDir: entry.session.homeDir,
+        challengeRef,
+        deviceCodeExpiresAt: entry.challenge.expiresAt,
+      });
+      await this.finishChallenge(runtimeId, challengeRef, cred);
+    } catch (e) {
+      this.logger.debug?.(
+        `self-completion for ${challengeRef} did not happen (${(e as Error).message}) —— ` +
+          '正常情况：浏览器与 helper 不在同一台机器时，用户会走粘贴那条路',
+      );
+    }
+  }
+
+  /**
+   * 把一次成功的登录**落库并结算** —— 两条完成路径（用户粘贴 / CLI 自完成）的**唯一出口**。
+   *
+   * ⛔ 必须只发生一次：两条路同时在等同一个 PTY 上的 token，都会成功。这里用「live entry
+   * 还在不在」当那把锁 —— `settle` 会把它换成墓碑，于是后到的那条自然什么也不做。
+   */
+  private async finishChallenge(
+    runtimeId: string,
+    challengeRef: string,
+    cred: RuntimeCredential,
+  ): Promise<string | null> {
+    // ⛔ **锁要在第一个 `await` 之前同步拿到**。只查「entry 还在不在」不够：
+    //    `storeCredential` 是异步的，两条路会在任何一方 settle 之前**双双通过检查**，
+    //    同一个 token 被存两遍（本仓用例实测到过）。
+    //
+    // ⚠️ 而且**输的那条不能只拿到 null**：赢家「已占锁、尚未 settle」的那段窗口里，
+    //    墓碑还不存在，输家会查不到结果而报 404 —— 用户明明成功了却看到失败（同样实测到）。
+    //    ⇒ 赢家把自己那次 settle 挂出来，输家 await 它，两条路报同一个结果。
+    const inflight = this.settling.get(challengeRef);
+    if (inflight !== undefined) {
+      cred.zeroize(); // 输的这份也必须擦（P1-4a：`storeCredential` 的 finally 是唯一擦它的地方）
+      return await inflight;
+    }
+    const entry = this.sessions.get(challengeRef);
+    if (!entry || entry.status !== 'pending') {
+      cred.zeroize();
+      return null;
+    }
+    entry.status = 'success'; // ← 同步翻位，这就是那把锁
+    const work = (async (): Promise<string> => {
+      const maskedIdentifier = await this.storeCredential(this.adapter(runtimeId), cred);
+      await entry.session.dispose();
+      this.sessions.settle(challengeRef, {
+        runtimeId,
+        status: 'success',
+        maskedIdentifier,
+        evictAt: entry.expiresAt,
+      });
+      return maskedIdentifier;
+    })();
+    this.settling.set(challengeRef, work);
+    try {
+      return await work;
+    } finally {
+      // settle 已经留下墓碑，之后来的走 `sessions.outcome()` 那条，不必再留着这份 promise。
+      this.settling.delete(challengeRef);
+    }
+  }
+
   private async awaitDeviceCompletion(runtimeId: string, challengeRef: string): Promise<void> {
     const entry = this.sessions.get(challengeRef);
     if (!entry) return;

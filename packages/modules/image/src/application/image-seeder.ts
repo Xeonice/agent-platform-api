@@ -1,7 +1,11 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { IMAGE_REPOSITORY } from '../domain/repositories/image.repository';
 import type { ImageRepository } from '../domain/repositories/image.repository';
-import { builtinImageRefs, configuredSandboxNetwork } from '@platform/shared-kernel';
+import {
+  builtinImageRefs,
+  configuredSandboxNetwork,
+  isPublishedImageRef,
+} from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
 import { ImageApplicationService, ManifestInvalidError } from './image-application.service';
 
@@ -75,18 +79,32 @@ export class ImageSeeder implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    // ⚠️ **去重后逐张种**：单档部署（两档指向同一张）这里恒为 1 张，与搬家前一字不差。
-    // 逐张各自 try/catch，因为一张种不上不该让另一张也不种——两档是独立的部署形态，
-    // 一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉。
-    for (const ref of builtinImageRefs(this.providers.list().map((p) => p.name))) {
-      await this.seedOne(ref);
-    }
+    // ⚠️ **去重后并行种**：单档部署（显式配了 `SANDBOX_DEFAULT_IMAGE`，两档指向同一张）
+    // 恒为 1 张；什么都不配时是 2 张 —— 两档各自回落到平台发布的那一张（2026-09-07）。
+    //
+    // ⛔ **此前是串行 `for … await`，那让启动延迟随档数线性增长**：两张各 10s 预算
+    //    ⇒ 最坏 20s，**越过本文件用例自己划下的 15s 耐心线**（「预算必须明显小于调用方
+    //    的耐心」）。那条用例没红，只因为它的假注册表里只有一档 —— 一条按 1 张镜像写死
+    //    的断言，量不到「2 张时会怎样」。
+    //
+    // ⚠️ 并行不牺牲任何东西：两档本来就**互相独立**（一张种不上不该让另一张也不种 ——
+    //    一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉），而播种只抓
+    //    manifest + config blob、不拉层，几 KB 的 HTTP 并发毫无压力。
+    //    ⇒ 启动延迟从 O(档数 × 预算) 变回 O(预算)。
+    await Promise.all(
+      builtinImageRefs(this.providers.list().map((p) => p.name)).map((ref) => this.seedOne(ref)),
+    );
   }
 
   private async seedOne(ref: string): Promise<void> {
-    try {
-      await withBudget(this.seed(ref), ref);
-    } catch (e) {
+    // ⚠️ **结局由 work 自己报**：成功日志在 `seed()` 里，失败日志在下面这个 catch 里。
+    //    这样即使启动预算先到期、我们不再等它，它的**真实**结局仍然会被打出来。
+    //
+    // ⛔ 此前不是这样：预算一到期就打一条 warn 说「平台现在一张预制镜像都没有」——
+    //    而 2026-09-07 实测，那条 warn 之后**紧接着就是播种成功**（出厂默认换成
+    //    ghcr.io 上的发布镜像后，冷启动要 4 次跨洋往返、实测 10.87s，刚好越过 10s 预算）。
+    //    **一条断言了还没发生的失败的警告**，比不打日志更贵：它让人去改一个没坏的配置。
+    const work = this.seed(ref).catch((e: unknown) => {
       // 刻意不 rethrow —— 见类注释纪律②。
       //
       // ⚠️ 这条日志的下一步在 2026-08「血统验证制」之后**变了**（04 §7 ★血统 ③）。
@@ -99,6 +117,18 @@ export class ImageSeeder implements OnApplicationBootstrap {
           '平台已正常启动，但**建不了 Task，也注册不了自定义镜像**——' +
           '自定义镜像必须基于平台预制镜像，而平台现在一张预制镜像都没有。' +
           `下一步是修好这一张：${seedFailureNextStep(ref, configuredSandboxNetwork())}`,
+      );
+    });
+
+    try {
+      await withBudget(work, ref);
+    } catch {
+      // ⚠️ **只说「还没等到」，不说「失败了」** —— 这是超时与失败的全部区别。
+      //    `work` 上面已经接了 catch，所以能走到这里的只有预算那一支。
+      this.logger.log(
+        `built-in image ${ref} 解析还没回来（已超过 ${String(SEED_BUDGET_MS)}ms 启动预算）。` +
+          '**先不阻塞启动**，它仍在后台跑 —— 成功或失败都会打在这条日志之后。' +
+          '⚠️ 在那之前建 Task 会报「平台还没有可用的预制镜像」，等一下再试。',
       );
     }
   }
@@ -194,6 +224,27 @@ function stripTag(ref: string): string {
  * 所以这里读到它 = 本进程**确实**在一个容器网络里，不是一个猜测。
  */
 export function seedFailureNextStep(ref: string, containerNetwork: string | null): string {
+  // ⛔ **出厂发布镜像那一档最先分岔，且给的是相反的建议。**
+  //    下面两支都建立在「这张镜像是运维方自己指定/自建的」之上；而按机器自动选之后，
+  //    绝大多数部署用的是平台发布的那两张 —— 对它们，「把 SANDBOX_DEFAULT_IMAGE 指向
+  //    预制镜像」不只是没用，而是**有害**：填了就让自动选永远失效（`builtinImageRefFor`
+  //    判的正是「配了没有」），mac 用户于是拿到 aio 那张，在建任务门口撞
+  //    `IMAGE_PROVIDER_MISMATCH`。⇒ 这一档的根因几乎总是**够不到 registry**，不是配错。
+  if (isPublishedImageRef(ref)) {
+    const host = registryHostOf(ref) ?? 'ghcr.io';
+    return (
+      `⛔ **别去填 SANDBOX_DEFAULT_IMAGE** —— ${ref} 是平台**按你这台机器自动选**的出厂` +
+      `镜像，填了反而会让自动选失效（另一档的宿主会因此拿到不能互换的那张）。` +
+      `这一档的根因几乎总是**这台机器够不到 ${host}**：` +
+      `① 外网 / 代理（试 \`curl -sSf https://${host}/v2/\`）；` +
+      `② 企业网关或防火墙是否拦了 ${host}；` +
+      (containerNetwork === null
+        ? '③ 离线内网部署：把镜像镜到内网 registry，再用**按档覆盖**' +
+          '（SANDBOX_AIO_IMAGE / SANDBOX_BOXLITE_IMAGE）指过去 —— 按档配才不会让另一档拿错。'
+        : `③ 本进程在容器网络 '${containerNetwork}' 里（SANDBOX_DOCKER_NETWORK），` +
+          '容器有没有出网（DNS / 代理环境变量要传进容器，宿主能连不代表容器能连）。')
+    );
+  }
   if (containerNetwork === null) {
     return (
       '把 SANDBOX_DEFAULT_IMAGE 指向平台预制镜像（构建脚本在 api/images/platform-sandbox），' +

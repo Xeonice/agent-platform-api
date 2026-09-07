@@ -169,6 +169,39 @@ describe('buildStartCommand turns OFF each CLI’s inner sandbox (04 §3 ★2)',
     expect(cmd.cmd).not.toContain('danger-full-access');
   });
 
+  it('⭐ claude 必须声明 IS_SANDBOX=1 —— 否则沙箱里 root 起不来（2026-09-07 真机）', () => {
+    // ⛔ 沙箱里是 root（两档镜像都没有 `USER`），而 claude 拒绝 root +
+    //    `--dangerously-skip-permissions`，真机上直接：
+    //      --dangerously-skip-permissions cannot be used with root/sudo privileges
+    //      [platform] agent session ended (exit 1); you now have a shell
+    //    2.1.261 的二进制里判据一字不差：
+    //      getuid()===0 && process.env.IS_SANDBOX!=='1' && !CLAUDE_CODE_BUBBLEWRAP
+    //    ⇒ 它拒的是「root 而且**不在刻意的沙箱里**」，而我们确实在 —— 如实声明即可。
+    //
+    // MUTATION: 去掉 `env: {...DELIBERATE_SANDBOX_ENV}` ⇒ 本条红。
+    const start = new ClaudeCodeAdapter().buildStartCommand({
+      prompt: 'x',
+      headless: true,
+      workdir: '/workspace',
+    });
+    expect(start.env?.['IS_SANDBOX']).toBe('1');
+
+    // ⚠️ 交互会话与任务走同一条命令行,那道闸门一样拦 —— 两处都要声明。
+    const attach = new ClaudeCodeAdapter().buildAttachCommand();
+    expect(attach.env?.['IS_SANDBOX']).toBe('1');
+  });
+
+  it('⛔ 声明的是「在沙箱里」,不是往 env 里塞凭证', () => {
+    // env 会被 `agentScript` materialise 成 `K=V` 前缀,而 argv/env 在沙箱里能被 `ps`
+    // 读到（04 §2.3★ 第 2 条）。⇒ 这里只允许出现那一个声明位。
+    const start = new ClaudeCodeAdapter().buildStartCommand({
+      prompt: 'x',
+      headless: true,
+      workdir: '/workspace',
+    });
+    expect(Object.keys(start.env ?? {})).toEqual(['IS_SANDBOX']);
+  });
+
   it('claude headless prints and can stream json', () => {
     const cmd = new ClaudeCodeAdapter().buildStartCommand({
       prompt: 'summarise the diff',

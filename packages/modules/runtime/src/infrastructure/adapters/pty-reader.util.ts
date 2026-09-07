@@ -16,11 +16,35 @@ export function readUntil<T>(
   pty: ProcessStream,
   tryParse: (accumulated: string) => T | null,
   timeoutMs: number,
+  /**
+   * 在等什么 —— **超时消息里唯一有用的那一半**。
+   *
+   * ⛔ 此前这里恒为 `new Error('timeout')`，于是用户拿到的是
+   *    `POST /api/runtimes/claude-code/auth/begin → 500 INTERNAL  Error: timeout`
+   *    —— 等了两分钟，然后一个不说明**在等什么**、也不说明**下一步做什么**的 500。
+   *    2026-09-07 实测就是这条（根因是宿主 helper 不是真 PTY，claude CLI 一字不出）。
+   */
+  what = 'CLI output',
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let settled = false;
-    const timer = setTimeout(() => finish(null, new Error('timeout')), timeoutMs);
+    /** 收到过任何字节吗 —— 「一字未出」与「出了但没解析出想要的」是两种病，下一步不同。 */
+    let sawAnyBytes = false;
+    const timer = setTimeout(
+      () =>
+        finish(
+          null,
+          new Error(
+            `等待 ${what} 超时（${String(timeoutMs)}ms）` +
+              (sawAnyBytes
+                ? '：CLI 有输出但没有出现期望的内容 —— 多半是 CLI 版本变了、输出格式与解析器对不上。'
+                : '：CLI **一个字节都没输出** —— 登录 CLI 会检测 TTY，' +
+                  '最常见的原因是没有给它伪终端；其次是这台机器够不到对应的授权服务。'),
+          ),
+        ),
+      timeoutMs,
+    );
 
     const finish = (value: T | null, err?: Error): void => {
       if (settled) return;
@@ -41,6 +65,7 @@ export function readUntil<T>(
 
     pty.onData((chunk) => {
       if (settled) return; // do not retain bytes after the read has settled + wiped
+      if (chunk.length > 0) sawAnyBytes = true;
       chunks.push(chunk);
       attempt();
     });

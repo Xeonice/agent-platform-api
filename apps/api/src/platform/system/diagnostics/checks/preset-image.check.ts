@@ -1,8 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
 import {
   builtinImageDeclaresTmux,
-  builtinImageRef,
+  builtinImageRefFor,
   isBuiltinImageConfigured,
+  isPublishedImageRef,
+  publishedImageFor,
 } from '@platform/shared-kernel';
 import {
   IMAGE_FACADE,
@@ -28,7 +30,16 @@ import {
   type ProvisionPlanner,
 } from '../../preset-image/preset-image-provisioner';
 
-const BUILD_SCRIPT = 'api/images/platform-sandbox';
+/**
+ * 构建脚本目录 —— **按档，不是一个常量**。
+ *
+ * ⛔ 此前恒为 `api/images/platform-sandbox`（aio 那档）。而 macOS 的默认档是 boxlite，
+ *    它的构建目录是 `api/images/platform-boxlite` —— 指错目录，用户 build 出来的
+ *    是**另一档的镜像**，拉得到、播得下去，在建任务门口才撞 `IMAGE_PROVIDER_MISMATCH`。
+ */
+function buildScriptFor(tier: string): string {
+  return tier === 'boxlite' ? 'api/images/platform-boxlite' : 'api/images/platform-sandbox';
+}
 
 /**
  * 诊断第 ⑧ 项：**预制镜像就绪**（P21-5 §9A，2026-08-28 实测补）。
@@ -72,25 +83,58 @@ export class PresetImageCheck implements DiagnoseCheck {
   ) {}
 
   async run(): Promise<DiagnoseCheckResult> {
-    // ── 第 1 步：配了没有 ────────────────────────────────────────────────────
-    const ref = builtinImageRef();
-    if (!isBuiltinImageConfigured()) {
+    // ── 第 1 步：**这台机器该用哪一张** ──────────────────────────────────────
+    //
+    // ⛔ 本步此前问的是「`SANDBOX_DEFAULT_IMAGE` 配了没有」，没配就判 fail。
+    //    2026-09-07 起**没配才是正确的出厂状态**：平台按宿主档位在两张发布镜像里自动挑
+    //    （darwin ⇒ boxlite，linux ⇒ aio）。照旧判据，一台两张预制镜像都已播种、都
+    //    `valid` 的机器会被诊断告知「建任务必失败」——**实测就是这样**（2026-09-07
+    //    全新部署跑通后，本项仍报 fail）。
+    //
+    // ⛔ 而它给的下一步更贵：「SANDBOX_DEFAULT_IMAGE=<registry>/platform/sandbox:<tag>」
+    //    —— 照着填就让按机器自动选**永远失效**，另一档的宿主从此拿错镜像。
+    //    **一条把人指向亲手关掉这条路的提示，比不给提示更贵。**
+    //
+    // ⇒ 现在问的是「这一档有没有一张可用的坐标」：配了就用配的，没配就用这一档的发布
+    //   镜像。真正的「没有」只剩一种 —— **第三方 provider 当默认档，而它不在发布表里**，
+    //   那时平台确实不知道该用哪张，猜一个比响亮失败更糟（04 §8）。
+    const tier = this.providers.defaultProvider;
+    const ref = builtinImageRefFor(tier);
+    if (ref === '' || (!isBuiltinImageConfigured() && publishedImageFor(tier) === undefined)) {
       return {
         status: 'fail',
         step: 'config',
         errorCode: PRESET_IMAGE_NOT_CONFIGURED,
-        // ⚠️ 要说清兜底那张**为什么必炸**，否则「没配也有个默认值」听起来像可以先不管。
         summary:
-          `SANDBOX_DEFAULT_IMAGE 没有配置，平台回落到内置兜底坐标 '${ref}' —— ` +
-          '那是上游镜像，没有平台的沙箱 API、没有 tmux、没有常驻进程，容器一退端口就空，建任务必失败',
+          `默认档位是 '${tier}'，而平台既没有为它发布预制镜像，也没有配置 ` +
+          'SANDBOX_DEFAULT_IMAGE —— 平台不知道该用哪张镜像，建任务必失败',
         hint:
-          `在平台的环境变量里指向自建预制镜像：SANDBOX_DEFAULT_IMAGE=<registry>/platform/sandbox:<tag>` +
-          `（构建脚本在 ${BUILD_SCRIPT}），改完重启平台，开机会自动播种`,
-        detail: { fallbackRef: ref, configured: false },
+          `为这一档指定镜像：SANDBOX_${tier.toUpperCase()}_IMAGE=<registry>/<repo>:<tag>` +
+          `（按档配，不会影响其它档；构建脚本在 ${buildScriptFor(tier)}），改完重启平台，开机会自动播种`,
+        detail: { tier, fallbackRef: ref, configured: false },
       };
     }
 
-    // ── 第 2 步：registry 里存不存在 ────────────────────────────────────────
+    // ── 第 2 步：**平台目录里就绪了吗**（本地读，不触网）────────────────────
+    //
+    // ⛔ 此前这一步直接去 registry 解析。出厂默认还是本地 registry 时那是亚秒级的；
+    //    2026-09-07 换成 ghcr.io 上的发布镜像之后，它变成 **4 次跨洋往返、实测 10.87s**，
+    //    而诊断给每一项的预算是 `DIAGNOSE_TIMEOUT_MS = 5s` ⇒ **本项从此永远只有一个
+    //    「5 秒内没有结果」**，连一台完全健康的机器也是。实测就是这样。
+    //
+    // ⚠️ 而那次往返**问不出新东西**：这一项要回答的是「现在能不能建出 Task」，
+    //    那是平台自己目录里的事实 —— 而目录里的每一行都是**在注册期走过 registry 解析
+    //    与血统准入之后**才写下的（`registerImage` 的准入门）。目录里有它，
+    //    就意味着那两关当时都过了。⇒ 目录能回答的，别再去问网络。
+    //
+    // ⇒ 只有**目录里没有**时才去问 registry —— 那时我们确实需要它说出「为什么没有」
+    //   （拉不到？血统不认？还是播种没跑完？），而那也正是值得等的时候。
+    const catalogued = await this.images.findRegisteredByRef(ref);
+    if (catalogued !== null) {
+      return this.notSeededVerdict(ref, catalogued) ?? this.stagedVerdict(ref, catalogued);
+    }
+
+    // ── 第 3 步：registry 里存不存在 ────────────────────────────────────────
     let resolved: ResolvedImage;
     try {
       resolved = await this.specs.get(this.specs.defaultProvider).resolve(ref);
@@ -109,13 +153,21 @@ export class PresetImageCheck implements DiagnoseCheck {
         summary: `镜像 '${ref}' 在 registry 里解析不到：${reason}`,
         hint: plan.provisionable
           ? `${plan.why}。⇒ 在初始化向导或系统状态页点 [准备镜像]，平台会自己把它搬到位（${plan.from} → ${plan.to}${plan.sizeBytes === null ? '' : `，约 ${String(Math.round(plan.sizeBytes / 1024 / 1024))} MB`}）`
-          : `${plan.why}。⇒ 用平台的构建脚本构建再推：docker build -t ${ref} ${BUILD_SCRIPT} && docker push ${ref}。` +
-            '内网 registry 需要凭证或走代理时，先在系统设置里配好代理再重新诊断',
+          : // ⛔ **出厂发布镜像不能让用户去 build+push** —— 那是平台自己的 registry，
+            //    他推不上去；而且这句话会把他引向「改 SANDBOX_DEFAULT_IMAGE」，
+            //    那正好关掉按机器自动选。这一档的根因是**够不到 registry**。
+            isPublishedImageRef(ref)
+            ? `${plan.why}。⇒ 这是平台**按你这台机器自动选**的出厂镜像，不用你构建：` +
+              `先确认这台机器够得到它的 registry（试 \`curl -sSf https://${registryHostOf(ref)}/v2/\`），` +
+              '企业网关 / 离线内网会拦掉它。离线部署请把镜像镜到内网 registry，' +
+              `再用**按档覆盖** SANDBOX_${tier.toUpperCase()}_IMAGE 指过去 —— 按档配才不会让另一档拿错`
+            : `${plan.why}。⇒ 用平台的构建脚本构建再推：docker build -t ${ref} ${buildScriptFor(tier)} && docker push ${ref}。` +
+              '内网 registry 需要凭证或走代理时，先在系统设置里配好代理再重新诊断',
         detail: { ref, reason, provision: plan },
       };
     }
 
-    // ── 第 3 步：它是不是平台认可的那一张 ───────────────────────────────────
+    // ── 第 4 步：它是不是平台认可的那一张 ───────────────────────────────────
     //
     // ⚠️ 判据与**注册期对根镜像的判据是同一条**（`assertRootDeclaresTmux`，04 §7 ★血统 ③）：
     //    根镜像豁免血统比对（它就是锚点），取而代之的是「运维方声明过这张镜像有 tmux 吗」。
@@ -137,20 +189,19 @@ export class PresetImageCheck implements DiagnoseCheck {
           'agent 会话由沙箱内的 tmux 持有，根镜像又是所有自定义镜像的血统起点，' +
           '**手动注册同样会被准入检查拒**，不是少做了一步注册',
         hint:
-          `用平台的构建脚本重新构建再推：docker build -t <registry>/platform/sandbox:<tag> ${BUILD_SCRIPT} ` +
+          `用平台的构建脚本重新构建再推：docker build -t <registry>/platform/sandbox:<tag> ${buildScriptFor(tier)} ` +
           '&& docker push <registry>/platform/sandbox:<tag>，然后把 SANDBOX_DEFAULT_IMAGE 指过去并重启平台；' +
           '若这张镜像确实装了 tmux（自建 / 内网 mirror / 改过名），设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 并重启',
         detail: { ref, digest: resolved.digest, declaredTmux: false },
       };
     }
 
-    // ── 第 4 步：注册进平台且 validationStatus = valid ──────────────────────
-    const registered = await this.images.findRegisteredByRef(ref);
-    const notSeeded = this.notSeededVerdict(ref, registered);
-    if (notSeeded !== null) return notSeeded;
-
-    // ── 第 5 步：本机 staged 没有（**不是失败**） ────────────────────────────
-    return this.stagedVerdict(ref, registered!);
+    // ── 第 5 步：镜像在、血统也认，却不在目录里 ⇒ 开机播种没跑成 ─────────────
+    //
+    // ⚠️ 走到这里 `catalogued` 必然是 null（有它就在上面返回了），所以这里问的**只剩
+    //    一件事**：字节都对，为什么平台没记下来。`notSeededVerdict(ref, null)` 说的
+    //    正是这件事，且它永远返回非 null。
+    return this.notSeededVerdict(ref, null) ?? this.stagedVerdict(ref, catalogued!);
   }
 
   /** 第 4 步的三种「没就绪」—— 它们的下一步各不相同，所以文案也各不相同。 */
@@ -240,7 +291,13 @@ export class PresetImageCheck implements DiagnoseCheck {
         //    把 rootfs 铺开。渲染成 ⚠️ 会让用户去修一个不需要修的东西。
         status: 'info',
         step: 'staged',
-        summary: `预制镜像已就绪，但尚未在本机铺开 —— **首个任务需要数分钟准备镜像**（13GB 镜像实测冷启动约 190 秒），之后每次 3–4 秒`,
+        // ⛔ **代价按档说，别拿另一档的数字吓人**（2026-09-07 实测）。这句话曾恒为
+        //    「13GB 镜像实测冷启动约 190 秒」—— 那是 aio 档的数字。而 macOS 的默认档是
+        //    boxlite，它的镜像**压缩后 0.31GB**（实测），差了一个数量级还多。
+        //    ⚠️ 一个大 40 倍的估计不是「保守」：它让人以为要去泡杯咖啡，或者反过来，
+        //    在真该等的那一档上以为几秒就好。`provision-plan.ts` 早就记着两档的真实
+        //    量级差（「boxlite 档 431MB vs 本地 build 产物 13GB」），这里照着说。
+        summary: `预制镜像已就绪，但尚未在本机铺开 —— **首个任务要先把镜像铺开**（${firstRunCost(provider.name)}），之后每次 3–4 秒`,
         hint:
           '不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ' +
           ref +
@@ -273,4 +330,25 @@ function summaryDetail(r: RegisteredImageSummary): Record<string, unknown> {
     isActive: r.isActive,
     isBuiltin: r.isBuiltin,
   };
+}
+
+/** 从镜像 ref 里取 registry host（`host[:port]/repo:tag` 的第一段），判据照抄 docker。 */
+function registryHostOf(ref: string): string {
+  const [first = ''] = ref.split('/');
+  if (first === ref) return 'docker.io';
+  if (!(first.includes('.') || first.includes(':') || first === 'localhost')) return 'docker.io';
+  const colon = first.lastIndexOf(':');
+  return colon > 0 ? first.slice(0, colon) : first;
+}
+
+/**
+ * 首个任务铺开镜像的**量级** —— 按档，实测值。
+ *
+ * ⚠️ 说的是「量级」不是精确秒数：它取决于带宽与磁盘。给一个数量级正确的预期，
+ * 好过给一个精确但属于另一档的数字。
+ */
+function firstRunCost(tier: string): string {
+  return tier === 'boxlite'
+    ? 'boxlite 档镜像压缩后约 0.3GB，通常十几秒到一分钟'
+    : 'aio 档镜像 13GB，实测冷启动约 190 秒';
 }

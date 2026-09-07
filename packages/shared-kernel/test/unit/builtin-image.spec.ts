@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   builtinImageDeclaresTmux,
   builtinImageRef,
+  builtinImageRefFor,
+  builtinImageRefs,
   explainKnownTmuxRepositories,
   isBuiltinImageConfigured,
   knownTmuxRepositories,
+  publishedImageFor,
 } from '../../src/domain/builtin-image';
 
 /**
@@ -19,20 +22,34 @@ import {
  */
 const REF = 'SANDBOX_DEFAULT_IMAGE';
 const TMUX = 'SANDBOX_DEFAULT_IMAGE_TMUX';
+/**
+ * ⚠️ 按档覆盖也必须进隔离名单。它们**不在**改动前的这份名单里，而按档自动选正是被
+ * 它们压过去的一层 —— 跑测试的那台机器（或 `.env`）里只要有一个 `SANDBOX_AIO_IMAGE`，
+ * 「没配时应该拿到发布镜像」那几条就会拿到别的值：**门禁的红绿由环境决定，不由代码决定**。
+ */
+const TIER = ['SANDBOX_AIO_IMAGE', 'SANDBOX_BOXLITE_IMAGE'] as const;
 
 let savedRef: string | undefined;
 let savedTmux: string | undefined;
+let savedTier: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   savedRef = process.env[REF];
   savedTmux = process.env[TMUX];
+  savedTier = Object.fromEntries(TIER.map((k) => [k, process.env[k]]));
   delete process.env[TMUX];
+  for (const k of TIER) delete process.env[k];
 });
 afterEach(() => {
   if (savedRef === undefined) delete process.env[REF];
   else process.env[REF] = savedRef;
   if (savedTmux === undefined) delete process.env[TMUX];
   else process.env[TMUX] = savedTmux;
+  for (const k of TIER) {
+    const v = savedTier[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 describe('平台内置的已知镜像表', () => {
@@ -107,6 +124,28 @@ describe('兜底坐标与「配了没有」（既有行为，别在搬家时弄�
     expect(isBuiltinImageConfigured()).toBe(false);
   });
 
+  it('⭐ 空串 = 没配,**两个函数必须同口径** —— 它们住在同一个文件里', () => {
+    // ⛔ 2026-09-07 实测：`SANDBOX_DEFAULT_IMAGE=`（新的出厂写法）下,
+    //    `isBuiltinImageConfigured()` 说「没配」,而 `builtinImageRef()` 用 `??`
+    //    只挡得住 undefined,于是回了一个**空坐标**。后果在诊断第 ⑧ 项上看得见：
+    //    「平台回落到内置兜底坐标 ''」—— 一个没有名字的镜像。
+    //
+    // ⚠️ 这正是本文件顶部记着的那个病：同一个 env 的判据有两份,它们迟早分叉。
+    //    上一次分叉在三个文件之间,这一次在**两个相邻函数之间**。
+    //
+    // MUTATION: `builtinImageRef` 改回 `process.env.X ?? '兜底'` ⇒ 本条红。
+    process.env[REF] = '';
+    expect(isBuiltinImageConfigured()).toBe(false);
+    expect(builtinImageRef(), '说了「没配」就必须回兜底坐标,不能回空串').not.toBe('');
+    expect(builtinImageRef()).toBe('ghcr.io/agent-infra/sandbox:latest');
+  });
+
+  it('⭐ 只有空白也算没配（`SANDBOX_DEFAULT_IMAGE=   ` 是手滑,不是坐标）', () => {
+    process.env[REF] = '   ';
+    expect(isBuiltinImageConfigured()).toBe(false);
+    expect(builtinImageRef()).toBe('ghcr.io/agent-infra/sandbox:latest');
+  });
+
   it('空串算没配', () => {
     process.env[REF] = '   ';
     expect(isBuiltinImageConfigured()).toBe(false);
@@ -156,5 +195,107 @@ describe('错误信息自己说得出正确的镜像名形态', () => {
       process.env[REF] = `registry.example/${repo}:v1`;
       expect(builtinImageDeclaresTmux()).toBe(true);
     }
+  });
+});
+
+describe('平台 CI 发布的那一张镜像（2026-09-07，P21-8 §2.2）', () => {
+  it('⛔ 出厂默认坐标必须过血统检查 —— 漏进已知表就会「拉到了但注册被拒」', () => {
+    // 这条与 `.env.example` 的出厂值是**一对**：改一处不改另一处，新部署会撞上一个
+    // 比「找不到镜像」更难懂的失败。
+    expect(builtinImageDeclaresTmux('ghcr.io/xeonice/agent-platform-sandbox:latest')).toBe(true);
+  });
+
+  it('自建坐标仍然认得（本地开发那条路没被这次改动动到）', () => {
+    expect(builtinImageDeclaresTmux('localhost:5001/platform/sandbox:v2')).toBe(true);
+  });
+
+  it('⛔ 冒充的仓库名认不出 —— 匹配必须落在 `/` 边界上', () => {
+    expect(builtinImageDeclaresTmux('evil.io/notagent-platform-sandbox:v1')).toBe(false);
+    expect(builtinImageDeclaresTmux('evil.io/agent-platform-sandbox-fake:v1')).toBe(false);
+  });
+
+  it('内网 mirror 形态照样认得（后缀匹配的用意）', () => {
+    expect(builtinImageDeclaresTmux('registry.corp/mirror/agent-platform-sandbox:v1')).toBe(true);
+  });
+
+  it('⛔ 上游基础镜像**不是**可直接用的预制镜像这件事，不归这张表管', () => {
+    // ⚠️ `agent-infra/sandbox` 在表里（它确实自带 tmux），但它没装 claude-code。
+    //    「有没有 tmux」与「能不能当预制镜像用」是两个问题 —— 后者由 §2.2 的出厂配置
+    //    与注册期的其余检查回答，别指望这张表拦住它。
+    expect(builtinImageDeclaresTmux('ghcr.io/agent-infra/sandbox:latest')).toBe(true);
+  });
+});
+
+/**
+ * ── 按机器自动选那一张（2026-09-07，P21-8 §2.2）─────────────────────────────
+ *
+ * 用户初始化部署时**什么都没配**，平台也得拿得出一张能用的镜像；而「能用」是**按档**
+ * 的：`hostPreferredProvider()` = darwin ? boxlite : aio，两档的镜像不可互换。
+ *
+ * ⚠️ 这一组钉的是**优先级**，不是某个字面量：显式配置 > 按档自动选 > 共用兜底。
+ * 顺序反了不会有任何人报错 —— 平台会安静地把运维方配的那张换成自己挑的那张。
+ */
+describe('没配任何东西时，平台按档挑对那一张', () => {
+  it('⭐ 两档各拿各的 —— **两张必须不同**，这是这条改动存在的全部理由', () => {
+    // ⛔ 不写成「aio === 某字面量」：那种断言在两档被写成同一个值时照样绿，
+    //    而两档相同正是 `IMAGE_PROVIDER_MISMATCH` 的来源。
+    const aio = builtinImageRefFor('aio');
+    const boxlite = builtinImageRefFor('boxlite');
+    expect(aio).not.toBe(boxlite);
+    expect(aio).toBe(publishedImageFor('aio'));
+    expect(boxlite).toBe(publishedImageFor('boxlite'));
+  });
+
+  it('⛔ 自动挑出来的每一张都必须过血统检查 —— 否则「找不到镜像」变成「拉到了但注册被拒」', () => {
+    // 这条把两张表焊在一起：`PUBLISHED_IMAGE_BY_PROVIDER` 加一档而
+    // `KNOWN_TMUX_REPOSITORIES` 忘了跟，开机播种会被平台自己拒掉。
+    for (const provider of ['aio', 'boxlite']) {
+      expect(builtinImageDeclaresTmux(builtinImageRefFor(provider))).toBe(true);
+    }
+  });
+
+  it('⛔ 自动挑的不是那张上游基础镜像 —— 它拉得到、过得了血统检查，但没装 claude-code', () => {
+    // ⚠️ 实测：现装 claude-code 要 753 秒，落在**每一个** claude-code Task 上。
+    //    这比「第一次启动报找不到」更糟：它不报错，只是慢。
+    for (const provider of ['aio', 'boxlite']) {
+      expect(builtinImageRefFor(provider)).not.toBe('ghcr.io/agent-infra/sandbox:latest');
+    }
+  });
+
+  it('第三方 provider 不在表里 ⇒ 回落到共用兜底，与改动前一字不差', () => {
+    // ⚠️ 平台不知道一个外部 provider 该用哪张镜像。**猜一个比让它响亮失败更糟**。
+    expect(builtinImageRefFor('acme-vm')).toBe(builtinImageRef());
+  });
+});
+
+describe('运维方配了什么，就用什么（自动选只在「他没说话」时开口）', () => {
+  it('⭐ 显式 `SANDBOX_DEFAULT_IMAGE` 压得过按档自动选 —— 两档都听他的', () => {
+    process.env[REF] = 'registry.corp/mirror/platform/sandbox:v9';
+    expect(builtinImageRefFor('aio')).toBe('registry.corp/mirror/platform/sandbox:v9');
+    expect(builtinImageRefFor('boxlite')).toBe('registry.corp/mirror/platform/sandbox:v9');
+  });
+
+  it('按档覆盖压得过一切，且只影响它自己那一档', () => {
+    process.env.SANDBOX_BOXLITE_IMAGE = 'localhost:5001/platform/boxlite:v3';
+    expect(builtinImageRefFor('boxlite')).toBe('localhost:5001/platform/boxlite:v3');
+    // aio 那档没被动到，仍然走自动选
+    expect(builtinImageRefFor('aio')).toBe(publishedImageFor('aio'));
+  });
+
+  it('⚠️ 空串算「没填」，照样回到自动选 —— compose 里 `X=` 是很常见的写法', () => {
+    process.env[REF] = '';
+    process.env.SANDBOX_AIO_IMAGE = '   ';
+    expect(builtinImageRefFor('aio')).toBe(publishedImageFor('aio'));
+  });
+});
+
+describe('播种要种几张（`builtinImageRefs` 的去重语义变了）', () => {
+  it('⭐ 什么都不配 ⇒ 2 张（此前恒为 1 张）', () => {
+    expect(builtinImageRefs(['aio', 'boxlite'])).toHaveLength(2);
+  });
+
+  it('显式配了共用坐标 ⇒ 回到 1 张，运维方说共用就共用', () => {
+    process.env[REF] = 'registry.corp/platform/sandbox:v9';
+    expect(builtinImageRefs(['aio', 'boxlite'])).toEqual(['registry.corp/platform/sandbox:v9']);
   });
 });

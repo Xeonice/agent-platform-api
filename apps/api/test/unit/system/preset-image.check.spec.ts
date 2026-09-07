@@ -65,6 +65,11 @@ interface Opts {
   imageStaged?: SandboxProvider['imageStaged'];
   /** 搬运器说「这台机器上搬得了吗」。缺省 false ⇒ 既有用例仍验**指路**那条分支。 */
   provisionable?: boolean;
+  /**
+   * 默认档位。缺省 `aio` —— 它在**平台发布表**里，所以「没配 SANDBOX_DEFAULT_IMAGE」
+   * 对它不是失败（平台按机器自动选）。要驱动真正的「没配」，传一个第三方 provider。
+   */
+  defaultProvider?: string;
 }
 
 /** 第 2 步的触发条件：registry 解析不到。 */
@@ -95,7 +100,7 @@ function build(opts: Opts = {}): PresetImageCheck {
   // `SandboxProvider` 的六个必需方法本检查一个都不调（它只问 `name` 与 `imageStaged`），
   // 但仍然照形状实现出来 —— 契约变了这里要跟着红，这正是 double 的价值。
   const provider: SandboxProvider = {
-    name: 'aio',
+    name: opts.defaultProvider ?? 'aio',
     capabilities: {
       spawnTty: true,
       volumeMount: true,
@@ -114,7 +119,7 @@ function build(opts: Opts = {}): PresetImageCheck {
     ...(opts.imageStaged === undefined ? {} : { imageStaged: opts.imageStaged }),
   };
   const providers: ProviderRegistry = {
-    defaultProvider: 'aio',
+    defaultProvider: opts.defaultProvider ?? 'aio',
     register: () => undefined,
     get: () => provider,
     has: () => true,
@@ -181,20 +186,40 @@ afterEach(() => {
  * 的用例在五步合成一条之后照样全绿 —— 那恰恰是这一项要防的缺陷。
  */
 describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
-  it('第 1 步：没配 ⇒ 指向改配置，并说清兜底那张为什么必炸', async () => {
+  it('⭐ 第 1 步：**内置档没配不是失败** —— 没配才是 2026-09-07 起的出厂状态', async () => {
+    // ⛔ 本条此前断言的正相反（没配 ⇒ fail）。那条判据在出厂默认还要运维方自己填坐标时
+    //    是对的；平台按机器自动选之后它变成了**假警报**：实测一台两张预制镜像都已播种、
+    //    都 valid 的机器，本项仍报「建任务必失败」。
+    // ⛔ 而它给的下一步更贵 —— 「SANDBOX_DEFAULT_IMAGE=…」照着填就让自动选永远失效。
+    //
+    // MUTATION: 把第 1 步改回 `if (!isBuiltinImageConfigured()) fail` ⇒ 本条红。
     delete process.env.SANDBOX_DEFAULT_IMAGE;
-    const r = await run(build());
+    const r = await run(build({ imageStaged: () => Promise.resolve(true) }));
+    expect(r.status, '没配 = 让平台按机器自动选,这是正常状态').toBe('ok');
+    expect(r.step).toBe('staged');
+  });
+
+  it('第 1 步：**真正的没配** = 默认档是第三方 provider,平台没有它的发布镜像', async () => {
+    // ⚠️ 这才是「平台不知道该用哪张」的唯一情形。第三方 provider 不在发布表里,
+    //    而 04 §8 的纪律是**猜一个比响亮失败更糟**。
+    delete process.env.SANDBOX_DEFAULT_IMAGE;
+    const r = await run(build({ defaultProvider: 'acme-vm' }));
     expect(r.status).toBe('fail');
     expect(r.step).toBe('config');
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_CONFIGURED);
-    expect(r.hint).toContain('SANDBOX_DEFAULT_IMAGE=');
-    // 「没配也有个默认值」听起来像可以先不管 —— 必须说清它建不出任务。
+    // ⛔ 提示必须是**按档配**,不是 SANDBOX_DEFAULT_IMAGE —— 后者会波及另一档。
+    expect(r.hint).toContain('SANDBOX_ACME-VM_IMAGE=');
     expect(r.summary).toContain('必失败');
   });
 
   it('第 2 步：registry 里没有 ⇒ 指向推镜像，不是指向改配置', async () => {
+    // ⚠️ `registered: null` 是**新设计下走到这一步的前提**：目录里有它就说明注册期
+    //    早已过了 registry 这一关,不必再问一次网络（诊断只有 5s 预算,而跨洋往返 10s+）。
     const r = await run(
-      build({ resolve: () => Promise.reject(new ImageSpecError(REF_NOT_FOUND, 'manifest 404')) }),
+      build({
+        registered: null,
+        resolve: () => Promise.reject(new ImageSpecError(REF_NOT_FOUND, 'manifest 404')),
+      }),
     );
     expect(r.status).toBe('fail');
     expect(r.step).toBe('registry');
@@ -206,7 +231,7 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
 
   it('第 3 步：平台不认识又没人声明 ⇒ **必须说清「注册也会被拒」**', async () => {
     process.env.SANDBOX_DEFAULT_IMAGE = UNKNOWN_REF;
-    const r = await run(build());
+    const r = await run(build({ registered: null }));
     expect(r.status).toBe('fail');
     expect(r.step).toBe('lineage');
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_PLATFORM_BUILT);
@@ -250,13 +275,16 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
 
   it('⛔ 四步的码互不相同 —— 「合成一条镜像不可用」在这里就通不过', async () => {
     delete process.env.SANDBOX_DEFAULT_IMAGE;
-    const step1 = await run(build());
+    const step1 = await run(build({ defaultProvider: 'acme-vm' }));
     process.env.SANDBOX_DEFAULT_IMAGE = REF;
     const step2 = await run(
-      build({ resolve: () => Promise.reject(new ImageSpecError(REF_NOT_FOUND, 'x')) }),
+      build({
+        registered: null,
+        resolve: () => Promise.reject(new ImageSpecError(REF_NOT_FOUND, 'x')),
+      }),
     );
     process.env.SANDBOX_DEFAULT_IMAGE = UNKNOWN_REF;
-    const step3 = await run(build());
+    const step3 = await run(build({ registered: null }));
     process.env.SANDBOX_DEFAULT_IMAGE = REF;
     const step4 = await run(build({ registered: null }));
     const codes = [step1, step2, step3, step4].map((r) => r.errorCode);
@@ -282,8 +310,11 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     expect(r.step).toBe('staged');
     // 它不是错误，所以**没有错误码**。
     expect(r.errorCode).toBeUndefined();
-    // 告知的是「要等多久」，实测数字要在（190 秒 / 数分钟）。
-    expect(r.summary).toContain('数分钟');
+    // 告知的是「要等多久」，**实测数字必须在**（否则「稍等」等于没说）。
+    // ⚠️ 2026-09-07：这个数字改成了**按档**，所以别再断言某一句固定文案 ——
+    //    断言的是「有一个量化的等待」。默认档 aio ⇒ 190 秒那一份。
+    expect(r.summary).toMatch(/\d+\s*秒/);
+    expect(r.summary).toContain('190 秒');
   });
 
   it('provider 没实现 imageStaged ⇒ 说「不报告」，不假装 false', async () => {
@@ -307,7 +338,7 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
 
 describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令（2026-09-05 订正）', () => {
   it('⛔ 本机 docker 库已有 ⇒ hint 指向 [准备镜像]，**不出现 docker build**', async () => {
-    const r = await run(build({ resolve: rejects, provisionable: true }));
+    const r = await run(build({ registered: null, resolve: rejects, provisionable: true }));
     expect(r.step).toBe('registry');
     // 本次事故的形态：字节就在本机，而 hint 让用户重新 build 一遍已经有的东西。
     expect(r.hint).not.toContain('docker build');
@@ -315,27 +346,27 @@ describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令
   });
 
   it('搬不了时**保留**原来的指路（那一格的原决定是对的）', async () => {
-    const r = await run(build({ resolve: rejects, provisionable: false }));
+    const r = await run(build({ registered: null, resolve: rejects, provisionable: false }));
     expect(r.hint).toContain('docker build');
     expect(r.hint).toContain('docker push');
   });
 
   it('两条分支的 hint 必须不同 —— 合成一条就等于没做这次订正', async () => {
-    const a = await run(build({ resolve: rejects, provisionable: true }));
-    const b = await run(build({ resolve: rejects, provisionable: false }));
+    const a = await run(build({ registered: null, resolve: rejects, provisionable: true }));
+    const b = await run(build({ registered: null, resolve: rejects, provisionable: false }));
     expect(a.hint).not.toBe(b.hint);
   });
 
   it('detail 里带出计划，前端据它画按钮（没有它按钮就得自己再问一次）', async () => {
-    const r = await run(build({ resolve: rejects, provisionable: true }));
+    const r = await run(build({ registered: null, resolve: rejects, provisionable: true }));
     expect((r.detail as { provision?: { provisionable?: boolean } }).provision?.provisionable).toBe(
       true,
     );
   });
 
   it('⛔ 错误码不因为「能搬」而改变 —— 它说的是「registry 里没有」这个事实', async () => {
-    const a = await run(build({ resolve: rejects, provisionable: true }));
-    const b = await run(build({ resolve: rejects, provisionable: false }));
+    const a = await run(build({ registered: null, resolve: rejects, provisionable: true }));
+    const b = await run(build({ registered: null, resolve: rejects, provisionable: false }));
     expect(a.errorCode).toBe(b.errorCode);
     expect(a.status).toBe('fail');
   });
@@ -365,4 +396,84 @@ describe('⑥ 第 ⑧ 项与第 ⑤ 项不是同一个问题，界面上要说�
       (notYet.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow,
     );
   });
+});
+
+/**
+ * ── 目录能回答的，别再去问网络（2026-09-07 实测缺陷）─────────────────────────
+ *
+ * 出厂默认换成 ghcr.io 上的发布镜像之后，第 2 步那次解析变成 **4 次跨洋往返、实测
+ * 10.87s**，而诊断给每一项的预算是 `DIAGNOSE_TIMEOUT_MS = 5s` ⇒ 本项从此**永远**只有
+ * 一句「5 秒内没有结果」，一台完全健康的机器也不例外。实测就是这样。
+ *
+ * ⚠️ 而那次往返问不出新东西：目录里的每一行都是**在注册期走过 registry 解析与血统准入
+ * 之后**才写下的。⇒ 目录里有它，那两关当时就过了。
+ */
+describe('目录里已有 ⇒ 本地作答，一次网络都不发', () => {
+  it('⭐ 已注册且可用 ⇒ 不调 resolve（否则 5s 预算下本项永远超时）', async () => {
+    // MUTATION: 去掉本地快路径（让第 2 步照旧先去 registry）⇒ 本条红。
+    let resolveCalls = 0;
+    const r = await run(
+      build({
+        resolve: () => {
+          resolveCalls += 1;
+          return Promise.resolve(resolvedImage());
+        },
+        imageStaged: () => Promise.resolve(true),
+      }),
+    );
+    expect(r.status).toBe('ok');
+    expect(resolveCalls, '目录已经回答了这个问题,不该再打一次跨洋往返').toBe(0);
+  });
+
+  it('⭐ 目录里**没有** ⇒ 才去问 registry「为什么没有」', async () => {
+    // ⚠️ 反面同样要钉：一个「永远不触网」的实现会让第 2/3 步整个失效,
+    //    而那两步正是镜像真的拉不到时唯一说得出原因的地方。
+    let resolveCalls = 0;
+    await run(
+      build({
+        registered: null,
+        resolve: () => {
+          resolveCalls += 1;
+          return Promise.resolve(resolvedImage());
+        },
+      }),
+    );
+    expect(resolveCalls, '目录里没有时,必须由 registry 说出原因').toBe(1);
+  });
+
+  it('注册了但 invalid ⇒ 也在本地作答（那同样是目录里的事实）', async () => {
+    let resolveCalls = 0;
+    const r = await run(
+      build({
+        registered: { ...registered, validationStatus: 'invalid' },
+        resolve: () => {
+          resolveCalls += 1;
+          return Promise.resolve(resolvedImage());
+        },
+      }),
+    );
+    expect(r.step).toBe('registration');
+    expect(resolveCalls).toBe(0);
+  });
+});
+
+describe('首个任务的代价按档说（2026-09-07 实测）', () => {
+  it('⭐ boxlite 档不许拿 aio 的 13GB / 190 秒吓人', () => {
+    // ⛔ 这句话曾恒为「13GB 镜像实测冷启动约 190 秒」。macOS 默认档是 boxlite，
+    //    其镜像压缩后 **0.31GB**（实测）—— 差了一个数量级还多。
+    // MUTATION: 把 `firstRunCost(...)` 改回写死的 13GB 那句 ⇒ 本条红。
+    return run(
+      build({ defaultProvider: 'boxlite', imageStaged: () => Promise.resolve(false) }),
+    ).then((r) => {
+      expect(r.status).toBe('info');
+      expect(r.summary).not.toContain('13GB');
+      expect(r.summary).toContain('0.3GB');
+    });
+  });
+
+  it('aio 档仍然说 13GB / 190 秒（那一档这个数字是对的）', () =>
+    run(build({ defaultProvider: 'aio', imageStaged: () => Promise.resolve(false) })).then((r) => {
+      expect(r.summary).toContain('13GB');
+      expect(r.summary).toContain('190 秒');
+    }));
 });

@@ -64,6 +64,49 @@ function fakeRepo(existing: string | null): MinimalRepo {
   };
 }
 
+/**
+ * 一个**结局由测试说了算**的替身：先挂住，测试想让它成功/失败时再兑现。
+ *
+ * ⚠️ 它钉的是 `'hangs'` 钉不到的那一半：`'hangs'` 永远不结束，于是「超时之后**还会发生
+ * 什么**」在它下面完全不可见 —— 而 2026-09-07 实测的缺陷正好长在那里：预算到期打了一条
+ * 「一张预制镜像都没有」的警告，**紧接着播种就成功了**。
+ */
+function deferredService(): MinimalService & {
+  succeed: () => void;
+  fail: (e: Error) => void;
+} {
+  let settle: { ok: () => void; no: (e: Error) => void } | undefined;
+  const service: MinimalService = {
+    registerImage: vi.fn(
+      async () =>
+        await new Promise<{
+          manifest: Pick<ImageManifestDto, 'id' | 'digest' | 'validationStatus'>;
+          validation: RegisterImageResult['validation'];
+          created: boolean;
+        }>((resolve, reject) => {
+          settle = {
+            ok: () =>
+              resolve({
+                manifest: {
+                  id: 'm-1',
+                  digest: `sha256:${'b'.repeat(64)}`,
+                  validationStatus: 'valid' as const,
+                },
+                validation: { status: 'valid' as const, errors: [], warnings: [] },
+                created: true,
+              }),
+            no: reject,
+          };
+        }),
+    ),
+  };
+  return {
+    ...service,
+    succeed: () => settle?.ok(),
+    fail: (e: Error) => settle?.no(e),
+  };
+}
+
 function fakeService(behaviour: 'ok' | 'throws' | 'hangs' | 'invalid'): MinimalService {
   return {
     registerImage: vi.fn(async () => {
@@ -300,5 +343,114 @@ describe('播种失败的下一步：两种形态下不是同一件事', () => {
     const step = seedFailureNextStep('platform/sandbox:v2', 'net-x');
     expect(step).toContain('platform/sandbox:v2');
     expect(step).not.toContain('`platform`');
+  });
+});
+
+/**
+ * ── 超时 ≠ 失败（2026-09-07 实测缺陷）─────────────────────────────────────────
+ *
+ * 出厂默认从本地 registry 换成 ghcr.io 上的发布镜像之后，冷启动要 4 次跨洋往返
+ * （实测 token 2.89s + index 2.82s + 子 manifest 2.60s + config 2.56s = **10.87s**），
+ * 刚好越过 10s 启动预算。于是每次冷启动都会打出一条
+ * 「平台现在一张预制镜像都没有 …… 把 SANDBOX_DEFAULT_IMAGE 指向预制镜像」——
+ * **而下一行就是播种成功**。
+ *
+ * ⚠️ 这条警告有两处错，而第二处更贵：① 它断言了一个还没发生的失败；② 它给的下一步
+ * （去填 `SANDBOX_DEFAULT_IMAGE`）**会让按机器自动选永远失效** —— 照着做的人，
+ * 亲手关掉了刚为他修好的那条路。
+ */
+describe('超时不是失败：预算到期只说「还没等到」', () => {
+  it('⭐ 超时后**成功** ⇒ 一句「失败」都不许打', async () => {
+    // MUTATION: 把预算那一支的 `logger.log` 改回 `logger.warn(…一张预制镜像都没有…)`
+    //           ⇒ 本条红。
+    vi.useFakeTimers();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const log = vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      const svc = deferredService();
+      const done = seederWith(fakeRepo(null), svc).onApplicationBootstrap();
+
+      await vi.advanceTimersByTimeAsync(11_000); // 预算过了
+      await done; // 启动没被挡住
+      expect(warn, '预算到期时不该断言失败 —— 那时候结局还没发生').not.toHaveBeenCalled();
+      expect(String(log.mock.calls.at(-1)?.[0] ?? '')).toContain('还没回来');
+
+      svc.succeed(); // 迟到的成功
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn, '成功之后更不该有失败警告').not.toHaveBeenCalled();
+      expect(
+        log.mock.calls.some((c) => String(c[0]).includes('seeded built-in image')),
+        '迟到的成功必须自己把结局打出来',
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('⭐ 超时后**真失败** ⇒ 那条警告仍然要打（别把问题一起吞了）', async () => {
+    // ⚠️ 上一条单独看有个退化解：把警告整个删掉它也绿。这条钉住反面。
+    // MUTATION: 删掉 `work` 上的 catch ⇒ 本条红（失败静默，还会变成 unhandled rejection）。
+    vi.useFakeTimers();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const svc = deferredService();
+      // ⚠️ **先起、再推时钟、最后 await**：假时钟下直接 await 会卡死 —— 预算靠推进时钟
+      //    才会到期，而 await 挡住了推进。
+      const done = seederWith(fakeRepo(null), svc).onApplicationBootstrap();
+      await vi.advanceTimersByTimeAsync(11_000);
+      await done;
+      expect(warn).not.toHaveBeenCalled();
+
+      svc.fail(new Error('registry unreachable: getaddrinfo ENOTFOUND'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(String(warn.mock.calls[0]?.[0] ?? '')).toContain('ENOTFOUND');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('⭐ 两张镜像**并行**种：启动延迟是 1 个预算，不是 2 个', async () => {
+    // ⚠️ 这条量的正是上面「预算必须明显小于调用方的耐心」量不到的东西：那条用的假注册表
+    //    只有一档，于是「档数×预算」这个乘法在它下面根本不出现。什么都不配时是 2 张
+    //    （两档各自回落到平台发布的那一张）⇒ 串行就是 20s，**越过它自己划的 15s 耐心线**。
+    //
+    // MUTATION: 把 `Promise.all(...)` 改回 `for … await` ⇒ 本条红。
+    delete process.env.SANDBOX_DEFAULT_IMAGE; // 留空 = 按档自动选,两档两张
+    vi.useFakeTimers();
+    try {
+      const settled = vi.fn();
+      seederWith(fakeRepo(null), fakeService('hangs'), ['aio', 'boxlite'])
+        .onApplicationBootstrap()
+        .then(settled);
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(settled, '两张镜像是独立的,不该一张等完再等另一张').toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('出厂发布镜像的下一步是相反的：别去填 SANDBOX_DEFAULT_IMAGE', () => {
+  it('⭐ 发布镜像失败 ⇒ 明确叫人**别填**,并指向「够不到 registry」', () => {
+    // ⛔ 照旧那句去填 SANDBOX_DEFAULT_IMAGE,恰好让按机器自动选永远失效
+    //    （`builtinImageRefFor` 判的正是「配了没有」）,mac 用户于是拿到 aio 那张,
+    //    在建任务门口撞 IMAGE_PROVIDER_MISMATCH。
+    // MUTATION: 删掉 `isPublishedImageRef` 那一支 ⇒ 本条红。
+    const step = seedFailureNextStep('ghcr.io/xeonice/agent-platform-boxlite:latest', null);
+    expect(step).toContain('别去填 SANDBOX_DEFAULT_IMAGE');
+    expect(step).toContain('ghcr.io');
+    expect(step).not.toContain('那台 registry 真的起着');
+  });
+
+  it('自建坐标仍然走原来那句（这条改动没动到本地开发那条路）', () => {
+    const step = seedFailureNextStep('localhost:5001/platform/sandbox:v2', null);
+    expect(step).toContain('那台 registry 真的起着');
+    expect(step).not.toContain('别去填 SANDBOX_DEFAULT_IMAGE');
+  });
+
+  it('⭐ 容器网络里的发布镜像 ⇒ 问的是**容器出不出得去网**,不是坐标解析', () => {
+    const step = seedFailureNextStep('ghcr.io/xeonice/agent-platform-sandbox:v1', 'platform-net');
+    expect(step).toContain('别去填 SANDBOX_DEFAULT_IMAGE');
+    expect(step).toContain('容器有没有出网');
   });
 });

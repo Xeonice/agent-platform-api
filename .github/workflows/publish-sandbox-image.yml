@@ -1,0 +1,160 @@
+# 发布平台自己的预制沙箱镜像（P21-8 §2.2）
+#
+# ── 它修的是什么：一个每个新部署都会撞到的坑 ──────────────────────────────────
+# 出厂 `.env.example` 曾指向 `localhost:5001/platform/sandbox:v2` —— 一个**只存在于开发者
+# 机器上**的坐标。新部署照抄这份模板，第一次启动必然报「找不到沙箱镜像」，因为那张镜像
+# **本项目从未发布过任何一份**（2026-09-07 查证：三仓没有任何一条 CI 做 `docker push`）。
+#
+# ⇒ 本 workflow 补上那一环：把两档 `images/*` 构建并推到 `ghcr.io/<owner>/agent-platform-*`。
+#   出厂侧对应的改动是**把 `SANDBOX_DEFAULT_IMAGE` 留空**（compose 与 .env.example 都是），
+#   由 `builtinImageRefFor(provider)` 按宿主档位在这两张里自动挑一张 —— 出厂填死任何一张，
+#   都会让 `isBuiltinImageConfigured()` 为真、按档自动选**永不生效**，另一半宿主直接撞
+#   `IMAGE_PROVIDER_MISMATCH`。这条约束由 `pnpm check:default-image` 守着。
+#
+# ⛔ **发布的是平台自己的坐标，不复用 `cap-*`** —— 那是另一个服务的镜像，04 §2.3★ 有一条
+# 标题就叫「别把镜像认错」的警告，把 `cap-aio-sandbox` 列为反例（34 个端点、没有
+# `/v1/bash` 家族）。判据只有一条：**在本项目的源码/CI 里找它的产出方**。
+name: publish-sandbox-image
+
+# ⚠️ **不在每次 push 上跑。** aio 那档是一次 3.31GB（压缩后）的多架构构建 —— 每次提交都跑
+# 既烧配额又毫无意义：这两张镜像只在 `images/*/Dockerfile` 真的改了、或者要发一个版本时
+# 才需要重出。⇒ 打 tag 或手动触发。
+on:
+  push:
+    tags: ['sandbox-image-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '镜像 tag（如 v1）。留空 = 用 Dockerfile 里钉的两个版本号拼一个'
+        required: false
+        type: string
+
+concurrency:
+  group: publish-sandbox-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    # ⛔ **两档各发一张，不共用。** `hostPreferredProvider()` = darwin ? boxlite : aio，
+    #    而两档的镜像**不可互换**（ADR 决策 C：aio 那张容器里自带 :8080 的 agent，
+    #    boxlite 那张没有）。只发一张的话，另一半宿主会拉得到、播得下去，
+    #    **在建任务门口才撞 `IMAGE_PROVIDER_MISMATCH`** —— 又一次「起得来但用不了」。
+    name: 发布 ${{ matrix.tier }} 档预制镜像
+    strategy:
+      # ⚠️ 一档失败不连累另一档：它们是两条独立的部署形态。
+      fail-fast: false
+      matrix:
+        include:
+          - tier: aio
+            context: images/platform-sandbox
+            image: agent-platform-sandbox
+          - tier: boxlite
+            context: images/platform-boxlite
+            image: agent-platform-boxlite
+    runs-on: ubuntu-latest
+    # 实测 aio 档的上游基础镜像压缩后 3.31GB / 77 层，双架构 ⇒ 两倍（boxlite 档基于
+    # node:22-bookworm-slim，小得多）。90 分钟是按大的那档定的**保护性上限**。
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️ **必须先腾磁盘。** 上游镜像解压后 12.2GB、平台派生层 13GB，双架构同时在盘上
+      # ⇒ 远超 ubuntu-latest 根盘的 ~14GB 可用。runner 预装的 Android SDK / .NET /
+      # Haskell 工具链加起来 20GB+，这里全都用不上。
+      # ⛔ 不删就会在构建到一半时 `no space left on device` —— 那种失败发生在 40 分钟之后，
+      #    而且报错指向 docker 而不是磁盘，很难一眼看出根因。
+      - name: 腾出磁盘空间
+        run: |
+          set -eux
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ⛔ **GHCR 的仓库名必须全小写，而 `github.repository_owner` 保留原始大小写。**
+      #    本仓库的 owner 是 `Xeonice` ⇒ 直接拼进 tag 会让 buildx 在推送前就拒掉：
+      #    `invalid tag ...: repository name must be lowercase`。而代码里的
+      #    `PUBLISHED_IMAGE_BY_PROVIDER` 写的是小写坐标 —— 两边对不上，**第一次跑必炸**。
+      - name: 定 owner（GHCR 要求全小写）
+        id: owner
+        run: |
+          set -euo pipefail
+          OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "GHCR owner: $OWNER"
+
+      # ⛔ **推之前先确认「要推的坐标」正是「代码里出厂默认会用的那个」。**
+      #    `pnpm check:default-image` 在 CI 里对账的是仓库名与 tag，**对不到 owner**
+      #    （owner 只有在这里才知道）。少了这一步，一个 owner 拼错的发布会「成功」，
+      #    而新部署照样拉不到 —— 与这次要修的原始 bug 是同一个病。
+      - name: 确认推的坐标就是出厂默认那个
+        run: |
+          set -euo pipefail
+          WANT="ghcr.io/${{ steps.owner.outputs.owner }}/${{ matrix.image }}:latest"
+          if ! grep -qF "$WANT" packages/shared-kernel/src/domain/builtin-image.ts; then
+            echo "::error title=坐标对不上::要推 $WANT，但 PUBLISHED_IMAGE_BY_PROVIDER 里没有这一行。推上去也没人用。"
+            grep -nE "^\\s*(aio|boxlite):" packages/shared-kernel/src/domain/builtin-image.ts || true
+            exit 1
+          fi
+          echo "✅ 出厂默认确实指向 $WANT"
+
+      # tag 的来源有两条，都**可从 git 历史回答「这份 bits 里装的是哪个版本」**（Dockerfile
+      # 顶部那条「钉版本不用 @latest」的纪律，在发布这一侧的延续）：
+      #   · push tag ⇒ 用 tag 名去掉前缀；
+      #   · 手动触发且没填 ⇒ 用 Dockerfile 里钉的两个版本号拼出来。
+      - name: 定 tag
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#sandbox-image-}"
+          else
+            CC=$(grep -oE 'ARG CLAUDE_CODE_VERSION=([0-9.]+)' ${{ matrix.context }}/Dockerfile | cut -d= -f2)
+            CX=$(grep -oE 'ARG CODEX_VERSION=([0-9.]+)' ${{ matrix.context }}/Dockerfile | cut -d= -f2)
+            TAG="cc${CC}-cx${CX}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag: $TAG"
+
+      # ⚠️ **双架构一起出**：两档的上游基础镜像（`agent-infra/sandbox:latest` 与
+      # `node:22-bookworm-slim`）都有 linux/amd64 与 linux/arm64 两份（实测 manifest list）。
+      # 只出一份会让另一半宿主在 `provider.create()` 时才发现架构不对 —— 那是运行期失败，
+      # 比构建期晚得多。而 Apple Silicon 恰恰是 boxlite 档的主力宿主。
+      - name: 构建并推送（amd64 + arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ steps.owner.outputs.owner }}/${{ matrix.image }}:latest
+          provenance: false
+
+      # ⛔ **推完要验它真的能被匿名拉到**。发布镜像的全部意义就是「新部署拿得到」，
+      # 而 GHCR 的包默认是 private —— 推成功 ≠ 别人拿得到。
+      #
+      # ⚠️ 逻辑在 `scripts/verify-anonymous-pull.sh` 而不是这里的几行 curl，理由是**这一步
+      #    只在 40 分钟构建之后才跑得到**：写在 workflow 里就没法在改完之后验证它。
+      #    第一版正是那样写的，`Accept` 头漏了 OCI image index（双架构 buildx 的默认产物），
+      #    于是在镜像已经 public、双架构齐全的情况下判 404，还打出「去把包设为 public」——
+      #    **把人指向了一件根本不用做的事**。抽成脚本后它能拿任意一张真实镜像本地跑。
+      - name: 验证匿名可拉取
+        run: ./scripts/verify-anonymous-pull.sh '${{ steps.owner.outputs.owner }}' '${{ matrix.image }}' '${{ steps.meta.outputs.tag }}' latest

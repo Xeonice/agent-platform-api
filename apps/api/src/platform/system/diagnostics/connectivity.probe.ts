@@ -175,6 +175,13 @@ function splitHostPort(authority: string): { host: string; port: number | null }
  * 而且让单测的结论取决于跑它的那台机器有没有网。这个 seam 让回环那几条用例
  * 完全跑在 127.0.0.1 上。
  */
+/**
+ * 探测**超时** —— 与「连接被拒 / 解析不了」区分开的那一类。
+ *
+ * ⚠️ 用类型而不是匹配错误文案：文案会被改写、会被本地化，而这个区分要一直成立。
+ */
+export class ProbeTimeoutError extends Error {}
+
 export async function probeOne(
   target: Target,
   proxy: ProxyConfig | undefined,
@@ -205,6 +212,7 @@ export async function probeOne(
       ok: false,
       modelApi: target.modelApi,
       hint: hintFor(e as Error, target, proxyUrl !== null),
+      ...(e instanceof ProbeTimeoutError ? { timedOut: true } : {}),
     };
   }
 }
@@ -235,7 +243,9 @@ function registryV2Probe(target: Target, timeoutMs: number, signal: AbortSignal)
           );
       },
     );
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`${String(timeoutMs)}ms 内无应答`)));
+    req.setTimeout(timeoutMs, () =>
+      req.destroy(new ProbeTimeoutError(`${String(timeoutMs)}ms 内无应答`)),
+    );
     signal.addEventListener('abort', () => req.destroy(new Error('已取消')), { once: true });
     req.on('error', reject);
     req.end();
@@ -344,7 +354,9 @@ function tlsHandshake(
       socket.destroy();
       reject(e);
     };
-    socket.setTimeout(timeoutMs, () => fail(new Error(`${String(timeoutMs)}ms 内未完成 TLS 握手`)));
+    socket.setTimeout(timeoutMs, () =>
+      fail(new ProbeTimeoutError(`${String(timeoutMs)}ms 内未完成 TLS 握手`)),
+    );
     socket.on('error', fail);
     signal.addEventListener('abort', () => fail(new Error('已取消')), { once: true });
   });
@@ -369,7 +381,9 @@ function connectThroughProxy(
       path: `${target.host}:${String(target.port)}`,
       headers,
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`${String(timeoutMs)}ms 内代理未应答`)));
+    req.setTimeout(timeoutMs, () =>
+      req.destroy(new ProbeTimeoutError(`${String(timeoutMs)}ms 内代理未应答`)),
+    );
     signal.addEventListener('abort', () => req.destroy(new Error('已取消')), { once: true });
     req.on('error', reject);
     req.on('connect', (res, socket) => {

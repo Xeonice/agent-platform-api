@@ -199,7 +199,9 @@ describe('E2E-1-bootstrap — the agent session starts in provision, with no ter
     //    the codex start command carrying the instruction.
     expect(provider.execs.some((c) => c.join(' ') === 'sh -c command -v tmux')).toBe(true);
     const start = provider.execs.find((c) => c.includes('new-session'))!;
-    expect(start.slice(0, 3)).toEqual(['tmux', 'new-session', '-d']);
+    // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把 agent 界面里的
+    //    非 ASCII 逐个换成 `_`（Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`）。
+    expect(start.slice(0, 4)).toEqual(['tmux', '-u', 'new-session', '-d']);
     expect(start).toContain(PLATFORM_AGENT_TMUX_SESSION);
     // ★ `-x/-y` 不能省：detached tmux 会话默认 **80x24**（容器内实测），agent 一启动就按
     // 80 列画欢迎横幅，而终端协议没有"回流" ⇒ 之后 attach 撑宽也救不回第一屏。
@@ -353,7 +355,14 @@ describe('E2E-8-attachOnly — the terminal gateway attaches, it never starts th
     term.close();
 
     // the pty joined the EXISTING platform session…
-    expect(provider.ttySpawns[0]).toEqual(['tmux', 'attach', '-t', PLATFORM_AGENT_TMUX_SESSION]);
+    // ⚠️ client 端也要 `-u` —— server 端决定怎么存，client 端决定怎么渲染。
+    expect(provider.ttySpawns[0]).toEqual([
+      'tmux',
+      '-u',
+      'attach',
+      '-t',
+      PLATFORM_AGENT_TMUX_SESSION,
+    ]);
     // …and the gateway did not start a second one, nor re-issue the instruction
     // (that decision moved into provision — 26 §8 / 裁决 D-15).
     const afterConnect = provider.execs.slice(execsBefore);

@@ -13,7 +13,14 @@ import type {
   OpenPtyOptions,
 } from '@platform/contracts';
 import { TerminalSessionService } from '../../src/application/terminal-session.service';
-import { agentScript, shellQuote } from '../../src/domain/services/tmux-command.policy';
+import {
+  agentScript,
+  attachSessionCmd,
+  attachOrCreateCmd,
+  hasSessionCmd,
+  newSessionCmd,
+  shellQuote,
+} from '../../src/domain/services/tmux-command.policy';
 
 /**
  * 03 §4.3 ⑤ + 26 §8: provision STARTS the agent session, the gateway only ATTACHES it.
@@ -194,8 +201,10 @@ describe('bootstrapAgentSession — which command the session runs', () => {
     expect(h.adapter.startCalls[0]).toMatchObject({ headless: false, workdir: '/workspace' });
 
     const start = h.execCalls.find((c) => c.includes('new-session'))!;
-    expect(start.slice(0, 9)).toEqual([
+    expect(start.slice(0, 10)).toEqual([
       'tmux',
+      // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把非 ASCII 逐个换成 `_`。
+      '-u',
       'new-session',
       '-d',
       // ★ `-x/-y` 不能省：detached 会话默认 **80x24**（实测），agent 一启动就按 80 列
@@ -208,9 +217,10 @@ describe('bootstrapAgentSession — which command the session runs', () => {
       PLATFORM_AGENT_TMUX_SESSION,
     ]);
     // the whole payload is ONE tmux argument (tmux joins several with spaces)
-    expect(start).toHaveLength(10);
-    expect(start[9]).toContain('把 README 翻译成英文');
-    expect(start[9]).toContain('danger-full-access');
+    // ⚠️ 长度与下标随 `-u` 各 +1（整段 payload 仍是**一个** tmux 参数）。
+    expect(start).toHaveLength(11);
+    expect(start[10]).toContain('把 README 翻译成英文');
+    expect(start[10]).toContain('danger-full-access');
     // 默认值必须**明显大于** 80x24，否则这条改动等于没做。
     expect(DEFAULT_AGENT_TMUX_SIZE.cols).toBeGreaterThan(80);
     expect(DEFAULT_AGENT_TMUX_SIZE.rows).toBeGreaterThan(24);
@@ -248,7 +258,7 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     const h = harness([{ match: /has-session/, exitCode: 0 }]);
     await h.service.openSession('s1', { cols: 80, rows: 24 });
 
-    expect(h.ptyCalls[0].cmd).toEqual(['tmux', 'attach', '-t', PLATFORM_AGENT_TMUX_SESSION]);
+    expect(h.ptyCalls[0].cmd).toEqual(['tmux', '-u', 'attach', '-t', PLATFORM_AGENT_TMUX_SESSION]);
     expect(h.adapter.startCalls).toHaveLength(0);
   });
 
@@ -257,8 +267,10 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     await h.service.openSession('s1', { cols: 80, rows: 24 });
 
     const cmd = h.ptyCalls[0].cmd!;
-    expect(cmd.slice(0, 5)).toEqual([
+    expect(cmd.slice(0, 6)).toEqual([
       'tmux',
+      // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把非 ASCII 逐个换成 `_`。
+      '-u',
       'new-session',
       '-A',
       '-s',
@@ -266,7 +278,8 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     ]);
     expect(h.adapter.attachCalls).toBe(1);
     expect(h.adapter.startCalls).toHaveLength(0);
-    expect(cmd[5]).toContain('/workspace');
+    // ⚠️ 下标随 `-u` +1：脚本仍是最后那**一个**参数。
+    expect(cmd[6]).toContain('/workspace');
   });
 });
 
@@ -288,5 +301,36 @@ describe('the tmux script is quoted safely and survives the agent', () => {
 
   it('materialises env as K=V prefixes (documented as NON-secret, 04 §2.3★)', () => {
     expect(agentScript({ cmd: ['codex'], env: { FOO: 'bar' } })).toContain("FOO='bar' 'codex'");
+  });
+});
+
+/**
+ * ── 每一个 tmux 调用都要 `-u`（2026-09-07 镜像内实测）─────────────────────────
+ *
+ * 沙箱镜像里 `LC_CTYPE=POSIX`（两档 Dockerfile 都没设 locale），tmux 于是按非 UTF-8
+ * 渲染，把它认为客户端表示不了的字符**逐个换成 `_`**。同一段输出、同一个 tmux 3.3a：
+ *
+ *   attach 无 -u :  BLOCK ___ STAR _ ELL _ MID (0~
+ *   attach 加 -u :  BLOCK ▐▛█ STAR ✻ ELL … MID ·
+ *
+ * ⚠️ 真机上就是这个：Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`、spinner `✻` 变成 `_`。
+ * **一眼像字体坏了**，而字体是好的。
+ *
+ * ⛔ server 端（new-session）与 client 端（attach）**各管一半** —— 只加一处，
+ *    另一处照样把字符吃掉。所以这里逐条枚举，而不是只测其中一条。
+ */
+describe('每一个 tmux 命令都必须强制 UTF-8', () => {
+  it('⭐ 四个入口一个都不能漏', () => {
+    // MUTATION: 任意一处去掉 `UTF8` ⇒ 本条红。
+    const cmds = [
+      hasSessionCmd('s'),
+      attachSessionCmd('s'),
+      newSessionCmd('s', { cmd: ['x'] }),
+      attachOrCreateCmd('s', { cmd: ['x'] }),
+    ];
+    for (const cmd of cmds) {
+      expect(cmd[0], `第一个词必须是 tmux：${cmd.join(' ')}`).toBe('tmux');
+      expect(cmd[1], `⛔ 缺 -u：${cmd.join(' ')}`).toBe('-u');
+    }
   });
 });

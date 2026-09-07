@@ -15,6 +15,39 @@ node:22-bookworm-slim
   └─ platform/boxlite                     (+ tmux/git + 两个 CLI)
 ```
 
+## 两张镜像现在都由 CI 发布（2026-09-07）
+
+⛔ **在此之前，本项目从未发布过任何一份预制镜像** —— 三仓没有任何一条 CI 做 `docker push`，
+而 `.env.example` 出厂指向 `localhost:5001/platform/sandbox:v2`，一个只存在于开发者机器上
+的坐标。**结果是每一个新部署第一次启动都报「找不到沙箱镜像」，一个不漏。**
+
+⇒ `.github/workflows/publish-sandbox-image.yml` 把**两档各构建一张**（矩阵），推到
+`ghcr.io/<owner>/agent-platform-sandbox`（aio 档）与 `…/agent-platform-boxlite`（boxlite 档），
+双架构、匿名可拉。
+
+⛔ **两档必须各发一张，不能共用。** `hostPreferredProvider()` = darwin ? boxlite : aio，
+而两档镜像不可互换（aio 那张容器里自带 :8080 的 agent，boxlite 那张没有）。只发一张的话，
+另一半宿主拉得到、播得下去，**在建任务门口才撞 `IMAGE_PROVIDER_MISMATCH`**。
+
+|                         | 发布部署                                 | 本地开发                                     |
+| ----------------------- | ---------------------------------------- | -------------------------------------------- |
+| `SANDBOX_DEFAULT_IMAGE` | **留空** —— 平台按机器选上面两张里的一张 | `localhost:5001/platform/sandbox:v2`         |
+| 镜像哪来                | CI 发布，部署侧**拉**即可                | ⚠️ **自己 build + push**（本节下面那套命令） |
+
+⛔ **发布部署不要填 `SANDBOX_DEFAULT_IMAGE`**：一填，按机器自动选就永远不生效
+（`builtinImageRefFor` 判的正是「配了没有」），mac 用户会拿到 aio 那张。`pnpm check:default-image` 守着。
+
+⚠️ **本地开发反过来，必须填**：本地改的往往正是下面 Dockerfile 里那两个版本号，而留空会拉
+一张固定的发布镜像 ⇒ **改了 Dockerfile 却跑着旧 bits**，那种「改了没生效」最难查。
+
+⚠️ **改出厂坐标必须同时改 `KNOWN_TMUX_REPOSITORIES`**（`shared-kernel/domain/builtin-image.ts`）。
+血统检查认的是那张表而不是「谁发布的」；只改一处会把「找不到镜像」换成「拉到了但注册被拒」
+—— 对用户更难懂。有用例钉着这一对。
+
+⛔ **`cap-*` 不是本项目的镜像。** `ghcr.io/xeonice/cap-aio-sandbox` / `cap-boxlite-sandbox`
+来自另一个服务；04 §2.3★ 有一条标题就叫「别把镜像认错」的警告，把前者列为反例
+（34 个端点、没有 `/v1/bash` 家族）。判据只有一条：**在本项目的源码/CI 里找它的产出方**。
+
 ## 为什么两档不共用一张
 
 决策 A 修订把**数据面**拆成了两套，但**镜像没跟着拆**。留下的中间态谁都没得益：

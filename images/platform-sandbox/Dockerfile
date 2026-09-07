@@ -33,6 +33,35 @@
 ARG BASE=ghcr.io/agent-infra/sandbox:latest
 FROM ${BASE}
 
+# ── UTF-8 locale：**不设它，agent 界面里所有非 ASCII 都会变成 `_`** ─────────────
+#
+# ⛔ 2026-09-07 真机 + 镜像内实测：基础镜像里 `LC_CTYPE=POSIX`，而 agent 会话跑在 tmux 里，
+#    tmux 按**客户端 locale** 决定要不要按 UTF-8 渲染 —— 非 UTF-8 时它把认为客户端表示
+#    不了的字符**逐个替换成 `_`**。同一段输出、同一个 tmux 3.3a：
+#
+#      LC_CTYPE=POSIX :  BLOCK ___ STAR _ ELL _ MID (0~
+#      LANG=C.UTF-8   :  BLOCK ▐▛█ STAR ✻ ELL … MID ·
+#
+#    用户看到的是 Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`、spinner `✻` 变成 `_`
+#    —— **一眼像字体坏了**，而字体是好的。
+#
+# ⚠️ 平台侧已经用 `tmux -u` 强制 UTF-8（那条与镜像无关，用户自带镜像也管用）。
+#    **这里是另一半**：`ls` / `grep` / `sort` 这些工具按 locale 处理多字节，
+#    POSIX 下它们会把中文文件名、含非 ASCII 的 diff 切错。两处各修各的一半。
+#
+# ⚠️ 只设 `LANG`，**不设 `LC_ALL`**：`LC_ALL` 会盖掉沙箱里用户自己的任何设置，
+#    而 tmux 的判定顺序是 LC_ALL → LC_CTYPE → LANG，设 `LANG` 就够。
+ENV LANG=C.UTF-8
+
+# ⛔ **构建期自证**：基础镜像哪天不带 C.UTF-8 了，要在**这里**响亮失败，
+#    而不是发一张「跑起来但字符是 `_`」的镜像出去 —— 后者只有用户会发现。
+RUN set -eux; \
+    locale -a | grep -qiE '^C\.utf-?8$' || { \
+        echo "FATAL: 基础镜像里没有 C.UTF-8 locale —— agent 终端里的非 ASCII 会被 tmux 换成 _"; \
+        exit 1; \
+    }; \
+    [ "$(LANG=C.UTF-8 locale charmap)" = "UTF-8" ]
+
 # ⚠️ **钉版本，不用 `@latest`。** 04 §7 整节的主张是「不可变坐标」：平台把 digest 冻进
 # 库里，好让同一个 Task 每次跑的是同一份 bits。如果 Dockerfile 写 `@latest`，那么**同一
 # 份源码在不同的日子会产出不同的镜像**——digest 还是不可变的，但你再也无法从仓库回答
