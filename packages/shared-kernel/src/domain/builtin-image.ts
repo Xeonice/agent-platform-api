@@ -30,7 +30,17 @@
  * 又把用户指向了错误的方向。
  */
 export function builtinImageRef(): string {
-  return process.env.SANDBOX_DEFAULT_IMAGE ?? 'ghcr.io/agent-infra/sandbox:latest';
+  // ⛔ **空串必须与「没设」同义** —— `SANDBOX_DEFAULT_IMAGE=` 在 compose / .env 里是
+  //    最常见的写法，而 2026-09-07 起它就是**出厂默认**。用 `??` 只挡得住 `undefined`：
+  //    于是同一个文件里 `isBuiltinImageConfigured()` 说「没配」、本函数却回一个**空坐标**。
+  //    实测后果：诊断第 ⑧ 项打出「平台回落到内置兜底坐标 ''」，第三方 provider 也拿到
+  //    空串当镜像名。
+  //
+  // ⚠️ 这正是本文件顶部记着的那个病 —— 「同一个 `SANDBOX_DEFAULT_IMAGE` 被两处各自读取，
+  //    答案却不一样」。上一次它发生在三个不同文件之间，这一次发生在**同一个文件的两个
+  //    相邻函数之间**：判据只要有两份，它们迟早会分叉。
+  const configured = (process.env.SANDBOX_DEFAULT_IMAGE ?? '').trim();
+  return configured === '' ? 'ghcr.io/agent-infra/sandbox:latest' : configured;
 }
 
 /**
@@ -92,6 +102,28 @@ const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Record<string, string>> = {
 /** 平台发布的按档镜像坐标（只读视图，给诊断与错误消息用）。 */
 export function publishedImageFor(provider: string): string | undefined {
   return PUBLISHED_IMAGE_BY_PROVIDER[provider];
+}
+
+/**
+ * 这个坐标**是不是平台自己发布的那两张之一** —— 失败提示要据此分岔。
+ *
+ * ⚠️ 它存在的理由是一条**指反了方向**的提示（2026-09-07 实测）：播种失败时日志恒说
+ * 「把 `SANDBOX_DEFAULT_IMAGE` 指向平台预制镜像，并确认那台 registry 真的起着」。
+ * 那句话是为**自建 registry**写的，而出厂默认换成平台发布镜像之后它变成了**有害的**：
+ * 照着做去填 `SANDBOX_DEFAULT_IMAGE`，恰好让按机器自动选**永远失效**（本文件
+ * `builtinImageRefFor` 判的正是「配了没有」），mac 用户于是拿到 aio 那张，
+ * 在建任务门口撞 `IMAGE_PROVIDER_MISMATCH`。**说错下一步比不说更贵**，这次尤其贵：
+ * 它让人亲手关掉刚为他修好的那条路。
+ *
+ * ⚠️ 比的是**仓库路径**而不是完整 ref：`:v1` 与 `:latest` 是同一张镜像的两个 tag，
+ * 而内网 mirror 会换掉 registry 段。
+ */
+export function isPublishedImageRef(ref: string): boolean {
+  const path = repositoryPathOf(ref);
+  return Object.values(PUBLISHED_IMAGE_BY_PROVIDER).some((published) => {
+    const repo = repositoryPathOf(published);
+    return path === repo || path.endsWith(`/${repo.split('/').pop() ?? repo}`);
+  });
 }
 
 /**

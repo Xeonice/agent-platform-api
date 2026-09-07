@@ -234,6 +234,7 @@ export class CodexAdapter implements RuntimeAdapter {
       ctx.pty,
       (s) => parseCodexDeviceChallenge(s),
       BEGIN_TIMEOUT_MS,
+      'codex login --device-auth 打印设备码与验证地址',
     );
     return {
       challengeRef: ctx.challengeRef,

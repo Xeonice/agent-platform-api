@@ -148,20 +148,13 @@ jobs:
             ghcr.io/${{ steps.owner.outputs.owner }}/${{ matrix.image }}:latest
           provenance: false
 
-      # ⛔ **推完要验它真的能被匿名拉到**。发布镜像的全部意义就是「新部署拉得到」，
-      # 而 GHCR 的包默认是 private —— 推成功 ≠ 别人拿得到。这一步失败时要响亮地说出
-      # 「去把 package 设为 public」，而不是让第一个新用户去撞。
+      # ⛔ **推完要验它真的能被匿名拉到**。发布镜像的全部意义就是「新部署拿得到」，
+      # 而 GHCR 的包默认是 private —— 推成功 ≠ 别人拿得到。
+      #
+      # ⚠️ 逻辑在 `scripts/verify-anonymous-pull.sh` 而不是这里的几行 curl，理由是**这一步
+      #    只在 40 分钟构建之后才跑得到**：写在 workflow 里就没法在改完之后验证它。
+      #    第一版正是那样写的，`Accept` 头漏了 OCI image index（双架构 buildx 的默认产物），
+      #    于是在镜像已经 public、双架构齐全的情况下判 404，还打出「去把包设为 public」——
+      #    **把人指向了一件根本不用做的事**。抽成脚本后它能拿任意一张真实镜像本地跑。
       - name: 验证匿名可拉取
-        run: |
-          set -euo pipefail
-          IMG="ghcr.io/${{ steps.owner.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}"
-          TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:${{ steps.owner.outputs.owner }}/${{ matrix.image }}:pull&service=ghcr.io" | jq -r .token)
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $TOKEN" \
-            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
-            "https://ghcr.io/v2/${{ steps.owner.outputs.owner }}/${{ matrix.image }}/manifests/${{ steps.meta.outputs.tag }}")
-          if [ "$code" != "200" ]; then
-            echo "::error title=镜像匿名拉不到::HTTP $code —— 推上去了但新部署仍然拿不到它。去 GitHub Packages 把 ${{ matrix.image }} 设为 public。"
-            exit 1
-          fi
-          echo "✅ 匿名可拉取：$IMG"
+        run: ./scripts/verify-anonymous-pull.sh '${{ steps.owner.outputs.owner }}' '${{ matrix.image }}' '${{ steps.meta.outputs.tag }}' latest

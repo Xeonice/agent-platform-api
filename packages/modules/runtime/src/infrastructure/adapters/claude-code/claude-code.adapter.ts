@@ -56,6 +56,28 @@ const CLAUDE_BINARY = 'claude';
  */
 const PERMISSIONS_OFF_ARGS = ['--dangerously-skip-permissions'];
 /**
+ * **「这确实是一个刻意的沙箱」的声明** —— 少了它，agent 在我们的沙箱里根本起不来。
+ *
+ * ── 它修的是什么（2026-09-07 真机）────────────────────────────────────────────
+ * 沙箱里是 root（两档镜像都没有 `USER`，boxlite 的提示符就是 `root@boxlite:/workspace#`），
+ * 而 claude 拒绝 root + `--dangerously-skip-permissions`：
+ *
+ *     --dangerously-skip-permissions cannot be used with root/sudo privileges
+ *     [platform] agent session ended (exit 1); you now have a shell
+ *
+ * ⚠️ **它拒的不是 root，是「root 而且不在刻意的沙箱里」** —— 从 2.1.261 的二进制里挖出的
+ * 判据一字不差（那个函数干脆就叫 `isRootOutsideDeliberateSandbox`）：
+ *
+ *     process.getuid() === 0 && process.env.IS_SANDBOX !== '1' && !CLAUDE_CODE_BUBBLEWRAP
+ *
+ * ⇒ `IS_SANDBOX=1` 是官方留的那个声明口，而我们**确实**满足它：agent 跑在 boxlite 微 VM
+ * 或 aio 容器里，与宿主隔离。这是**如实声明，不是绕过检查**。
+ *
+ * ⛔ 别改用「在镜像里造个非 root 用户」来躲开：那会连带动到工作区属主、凭证文件权限、
+ * 以及两档镜像的构建 —— 为了一个环境变量能表达清楚的事实，去改整条运行形态。
+ */
+const DELIBERATE_SANDBOX_ENV = { IS_SANDBOX: '1' } as const;
+/**
  * claude 的交互路径上有**四道**需要按键的闸门(实测 claude-code 2.1.241),平台一道
  * 都没处理 —— agent 会停在第一道上,界面上只是一个不动的终端:
  *
@@ -177,13 +199,28 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (method !== 'setup-token') {
       throw new AdapterAuthError('UNSUPPORTED_METHOD', `claude beginAuth: ${method}`);
     }
-    const url = await readUntil(ctx.pty, (s) => parseClaudeAuthUrl(s), BEGIN_TIMEOUT_MS);
+    const url = await readUntil(
+      ctx.pty,
+      (s) => parseClaudeAuthUrl(s),
+      BEGIN_TIMEOUT_MS,
+      'claude setup-token 打印授权链接（OSC-8 超链接）',
+    );
     return {
       challengeRef: ctx.challengeRef,
       method: 'setup-token',
       kind: 'paste-prompt',
       verificationUrl: url,
-      instructions: '在浏览器打开链接完成 claude.ai 授权，然后把页面给出的授权码粘贴回来提交。',
+      // ⛔ **两条路都要说**（2026-09-07 真机改）。这句话原本是
+      //    「打开链接完成授权，然后把页面给出的授权码粘贴回来提交」—— 只对**远端部署**
+      //    成立。`claude setup-token` 会起一个本地监听，浏览器与平台在同一台机器时，
+      //    回调页把码**直接送进那个端口**，页面只显示「成功，可以关闭此窗口」，
+      //    **根本不给码**。用户照着这句话去找码，就会以为自己漏了一步（真机复现）。
+      instructions:
+        '在浏览器打开链接完成授权。' +
+        '**多数情况下不需要做别的**：页面显示「可以关闭此窗口」就说明授权已经自动送回，' +
+        '这里会自己变成已配置。' +
+        '只有当页面**显示了一串授权码**时（浏览器与平台不在同一台机器时才会这样），' +
+        '才需要把它粘贴到下面提交。',
     };
   }
 
@@ -198,7 +235,39 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
     // Feed the pasted authorization code into the CLI's stdin (never argv).
     ctx.pty.write(`${input.pastedText.trim()}\n`);
-    const token = await readUntil(ctx.pty, (s) => parseClaudeSetupToken(s), COMPLETE_TIMEOUT_MS);
+    return await this.readSetupToken(ctx);
+  }
+
+  /**
+   * ⭐ **CLI 自己完成**那条路：什么都不写，只等 token 自己出现在 PTY 上。
+   *
+   * 浏览器把授权码送进 CLI 的本地监听之后，CLI 会直接把 token 打出来 —— 那时既没有码
+   * 可粘，也不需要粘。契约上那段注释记着这条路此前完全没被接住。
+   *
+   * ⚠️ 预算与 `completeAuth` 同为 `COMPLETE_TIMEOUT_MS`：两条路等的是同一件事
+   * （token 出现），只是触发方式不同，**耐心没有理由不一样**。
+   */
+  async awaitSelfCompletion(
+    _challenge: AuthChallenge,
+    ctx: AuthSessionContext,
+  ): Promise<RuntimeCredential> {
+    return await this.readSetupToken(ctx);
+  }
+
+  /**
+   * 从 PTY 上读出 setup-token 并做成凭证 —— **两条完成路径共用的那一半**。
+   *
+   * ⛔ 抽出来是因为它们**必须一字不差**：入库前的 PREFIX+LENGTH+CHARSET 校验、掩码形态、
+   * `env` 注入位、`zeroize` —— 任何一处只在其中一条路上做对，就等于那条路存在一个
+   * 静默的凭证缺陷。两份实现迟早分叉，这一份不会。
+   */
+  private async readSetupToken(ctx: AuthSessionContext): Promise<RuntimeCredential> {
+    const token = await readUntil(
+      ctx.pty,
+      (s) => parseClaudeSetupToken(s),
+      COMPLETE_TIMEOUT_MS,
+      'claude setup-token 打印 token',
+    );
     // 入库前 PREFIX+LENGTH+CHARSET 校验 (P1-4c): a fold-mangled token is rejected here,
     // never silently stored.
     const verdict = validateClaudeOauthToken(token);
@@ -294,7 +363,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // is a complete bypass of the `extraArgs` whitelist that exists precisely because
     // "anything appended to argv executes". Everything after `--` is data.
     if (task.prompt !== undefined && task.prompt !== '') cmd.push('--', task.prompt);
-    return { cmd, cwd: task.workdir };
+    return { cmd, cwd: task.workdir, env: { ...DELIBERATE_SANDBOX_ENV } };
   }
 
   /**
@@ -310,7 +379,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   /** A plain interactive claude session — same permission switch, no instruction. */
   buildAttachCommand(): SandboxCommand {
-    return { cmd: [CLAUDE_BINARY, ...PERMISSIONS_OFF_ARGS] };
+    // ⚠️ 交互会话与任务**走同一条命令行**，那道 root 闸门自然也一样拦 —— 两处都要声明。
+    return { cmd: [CLAUDE_BINARY, ...PERMISSIONS_OFF_ARGS], env: { ...DELIBERATE_SANDBOX_ENV } };
   }
 
   /**

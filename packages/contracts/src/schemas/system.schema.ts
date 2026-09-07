@@ -213,6 +213,18 @@ export const ConnectivityResultSchema = z.object({
    * 只是内网镜像站没配好的部署被告知「Agent 将不可用」。
    */
   modelApi: z.boolean(),
+  /**
+   * 这次失败**是超时，还是够不着**。
+   *
+   * ⚠️ 与上面那条「`ok:false` 与离线不是一回事」是同一条纪律再走一层：
+   * **「3.5 秒内没完成 TLS 握手」不等于「连不上」**。真机实测（2026-09-07）同一个
+   * `api.openai.com`，同一分钟内握手耗时在 1.0s / 1.8s / 6.1s 之间跳 —— 一条抖动的链路
+   * 会周期性地越过探测预算，而 agent 的长连接在这种链路上其实工作正常。
+   *
+   * ⛔ 把超时判成「不可达」，进而宣布「离线环境，Agent 将不可用」，是**用一个 3.5 秒的
+   * 预算去断言一件它证明不了的事** —— 用户看着能正常干活的机器被告知不可用。
+   */
+  timedOut: z.boolean().optional(),
 });
 export type ConnectivityResult = z.infer<typeof ConnectivityResultSchema>;
 

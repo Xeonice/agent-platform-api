@@ -493,6 +493,29 @@ export interface RuntimeAdapter {
     ctx: AuthSessionContext,
   ): Promise<RuntimeCredential>;
   /**
+   * **CLI 自己就完成了登录时**，把凭证读出来 —— 不需要用户粘贴任何东西。
+   *
+   * ── 它修的是什么：一条平台完全没接住的主路（2026-09-07 真机）──────────────
+   * `claude setup-token` 会**起一个本地监听**（实测 `127.0.0.1:51321`）。浏览器授权后，
+   * `platform.claude.com` 的回调页把授权码**直接转交给那个端口**，页面于是显示
+   * 「成功，可以关闭此窗口」—— **同机流程下页面根本不显示码**。CLI 自己的措辞就很准确：
+   * `Paste code here **if prompted**`。
+   *
+   * ⛔ 而平台的 `completeAuth` **强制要求 `pastedText`**：于是浏览器把码送到了、CLI 拿到
+   * token 打在 PTY 上了，而平台还在等一个**永远不会有的粘贴**。用户看到的是浏览器说
+   * 成功、这边一直转圈 —— 两个都"没错"，合起来是死等。
+   *
+   * ⚠️ 手动粘贴那条路仍然要留着：浏览器与 helper **不在同一台机器**时（真正的远端部署），
+   * 回调页够不到那个本地端口，才会退化成显示码让人粘。⇒ **两条路都要接**，谁先到算谁。
+   *
+   * 不实现 = 这个 runtime 没有自完成这条路（例如 codex 的设备码，它由
+   * `completeAuth` 轮询驱动）。
+   */
+  awaitSelfCompletion?(
+    challenge: AuthChallenge,
+    ctx: AuthSessionContext,
+  ): Promise<RuntimeCredential>;
+  /**
    * api-key FORMAT check (prefix/length/charset) for THIS runtime, run BEFORE the
    * secret enters the Vault (05 §3.1). Absent when the runtime has no api-key method;
    * the application layer treats an absent check as "no format constraint".

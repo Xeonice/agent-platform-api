@@ -167,6 +167,18 @@ for (const [provider, ref] of published) {
       `${provider} 档的构建上下文 ${entry.context}/Dockerfile 不存在 —— 那条 workflow 跑不起来。`,
     );
   }
+
+  // ⛔ **镜像必须设 UTF-8 locale**（2026-09-07 真机 + 镜像内实测）。
+  //    基础镜像里 `LC_CTYPE=POSIX`，而 agent 会话跑在 tmux 里；tmux 按客户端 locale
+  //    决定要不要按 UTF-8 渲染，非 UTF-8 时把非 ASCII **逐个换成 `_`** ——
+  //    Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`，一眼像字体坏了。
+  //    ⚠️ 平台侧的 `tmux -u` 修的是另一半；这一半（`ls`/`grep` 的多字节处理）只能在镜像里修。
+  if (!/^ENV\s+LANG=C\.UTF-8\b/m.test(read(`${entry.context}/Dockerfile`))) {
+    problems.push(
+      `${entry.context}/Dockerfile 没有 \`ENV LANG=C.UTF-8\`。\n` +
+        '  ⇒ 沙箱里 locale 会是 POSIX，tmux 会把 agent 界面里的非 ASCII 逐个换成 `_`。',
+    );
+  }
 }
 // 反向：workflow 推了一张没人当出厂默认用的镜像（不致命，但同样是两处不同步）
 for (const m of matrix) {

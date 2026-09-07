@@ -21,12 +21,12 @@ export const TMUX_PROBE_CMD = ['sh', '-c', 'command -v tmux'];
 
 /** Ask whether the platform's agent session already exists inside the sandbox. */
 export function hasSessionCmd(session: string): string[] {
-  return ['tmux', 'has-session', '-t', session];
+  return ['tmux', UTF8, 'has-session', '-t', session];
 }
 
 /** What a terminal client runs to join the already-running agent session. */
 export function attachSessionCmd(session: string): string[] {
-  return ['tmux', 'attach', '-t', session];
+  return ['tmux', UTF8, 'attach', '-t', session];
 }
 
 /**
@@ -59,6 +59,30 @@ export function attachSessionCmd(session: string): string[] {
  */
 export const DEFAULT_AGENT_TMUX_SIZE = { cols: 200, rows: 50 } as const;
 
+/**
+ * **强制 UTF-8** —— 少了它，agent 界面里所有非 ASCII 字符都会变成 `_`。
+ *
+ * ── 它修的是什么（2026-09-07 真机 + 镜像内实测）──────────────────────────────
+ * tmux 按**客户端的 locale** 决定要不要按 UTF-8 渲染，而我们的沙箱镜像里
+ * `LC_CTYPE=POSIX`（两档 Dockerfile 都没设 locale）。于是 tmux 把它认为客户端表示不了的
+ * 字符**逐个替换成 `_`**。镜像内对照实测（同一段输出、同一个 tmux 3.3a）：
+ *
+ *   attach 无 -u :  BLOCK ___ STAR _ ELL _ MID (0~     ← 3 字节字符全成 `_`
+ *   attach 加 -u :  BLOCK ▐▛█ STAR ✻ ELL … MID ·        ← 正确
+ *
+ * ⚠️ 用户看到的就是这个：Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`、
+ * spinner `✻` 变成 `_`、`⏵⏵ bypass permissions` 变成 `__`。**一眼像字体坏了**，
+ * 而字体是好的 —— 同一套字体栈在浏览器里渲染这些字符完全正常（已单独验证）。
+ *
+ * ⛔ **不靠「在镜像里设 LANG」来解决**：那只覆盖我们自己那两档镜像，而用户可以注册
+ * 自己的镜像（04 §7 血统只保证有 tmux，不保证有 locale）。`-u` 与镜像无关，
+ * 是**这一侧**能给出的保证。⇒ 镜像里补 locale 是另一件事（它还能顺带修 ls/grep）。
+ *
+ * ⚠️ **每一个 tmux 调用都要带**：server 端（new-session）决定怎么存，client 端
+ * （attach）决定怎么渲染 —— 只加一半，另一半照样把字符吃掉。
+ */
+const UTF8 = '-u';
+
 export function newSessionCmd(
   session: string,
   command: AgentCommand,
@@ -66,6 +90,7 @@ export function newSessionCmd(
 ): string[] {
   return [
     'tmux',
+    UTF8,
     'new-session',
     '-d',
     '-x',
@@ -86,7 +111,7 @@ export function newSessionCmd(
  * destructive task (I-SBX-10).
  */
 export function attachOrCreateCmd(session: string, command: AgentCommand): string[] {
-  return ['tmux', 'new-session', '-A', '-s', session, agentScript(command)];
+  return ['tmux', UTF8, 'new-session', '-A', '-s', session, agentScript(command)];
 }
 
 /**

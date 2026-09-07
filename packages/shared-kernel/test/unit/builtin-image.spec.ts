@@ -124,6 +124,28 @@ describe('兜底坐标与「配了没有」（既有行为，别在搬家时弄�
     expect(isBuiltinImageConfigured()).toBe(false);
   });
 
+  it('⭐ 空串 = 没配,**两个函数必须同口径** —— 它们住在同一个文件里', () => {
+    // ⛔ 2026-09-07 实测：`SANDBOX_DEFAULT_IMAGE=`（新的出厂写法）下,
+    //    `isBuiltinImageConfigured()` 说「没配」,而 `builtinImageRef()` 用 `??`
+    //    只挡得住 undefined,于是回了一个**空坐标**。后果在诊断第 ⑧ 项上看得见：
+    //    「平台回落到内置兜底坐标 ''」—— 一个没有名字的镜像。
+    //
+    // ⚠️ 这正是本文件顶部记着的那个病：同一个 env 的判据有两份,它们迟早分叉。
+    //    上一次分叉在三个文件之间,这一次在**两个相邻函数之间**。
+    //
+    // MUTATION: `builtinImageRef` 改回 `process.env.X ?? '兜底'` ⇒ 本条红。
+    process.env[REF] = '';
+    expect(isBuiltinImageConfigured()).toBe(false);
+    expect(builtinImageRef(), '说了「没配」就必须回兜底坐标,不能回空串').not.toBe('');
+    expect(builtinImageRef()).toBe('ghcr.io/agent-infra/sandbox:latest');
+  });
+
+  it('⭐ 只有空白也算没配（`SANDBOX_DEFAULT_IMAGE=   ` 是手滑,不是坐标）', () => {
+    process.env[REF] = '   ';
+    expect(isBuiltinImageConfigured()).toBe(false);
+    expect(builtinImageRef()).toBe('ghcr.io/agent-infra/sandbox:latest');
+  });
+
   it('空串算没配', () => {
     process.env[REF] = '   ';
     expect(isBuiltinImageConfigured()).toBe(false);
