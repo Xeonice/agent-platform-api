@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Injectable, Logger } from '@nestjs/common';
 import type { ProcessStream } from '@platform/contracts';
 import type { IPty } from '@lydell/node-pty';
@@ -51,7 +51,11 @@ import type {
 export class HostAuthHelper implements AuthHelper {
   private readonly logger = new Logger('HostAuthHelper');
 
-  async openSession(cmd: string[], seed: HelperSeedFile[] = []): Promise<AuthHelperSession> {
+  async openSession(
+    cmd: string[],
+    seed: HelperSeedFile[] = [],
+    configDirEnvNames: readonly string[] = [],
+  ): Promise<AuthHelperSession> {
     // ⛔ **必须绝对路径。** `DATA_ROOT` 通常是相对的（`.env.example` 出厂 `./data`），
     //    于是 homeDir 也是相对的 —— 而它会被当作 `HOME` / `CODEX_HOME` /
     //    `CLAUDE_CONFIG_DIR` 交给子进程。**任何改变 cwd 的一方都会让它指向别处**：
@@ -63,12 +67,25 @@ export class HostAuthHelper implements AuthHelper {
     await mkdir(base, { recursive: true, mode: 0o700 });
     const homeDir = await mkdtemp(join(base, 'h-'));
     for (const f of seed) {
-      await writeFile(join(homeDir, f.relPath), f.content, { mode: f.mode ?? 0o600 });
+      // ⚠️ `relPath` may be nested (`.config/acme/auth.json`) — the adapter declares it,
+      // so the helper cannot assume a flat name. Without the mkdir the write throws
+      // ENOENT and the refresh dies with a message about a path nobody chose by hand.
+      const target = join(homeDir, f.relPath);
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await writeFile(target, f.content, { mode: f.mode ?? 0o600 });
     }
     // node-pty 只接受 `string` 值；`process.env` 的值是 `string | undefined`。
     const env: Record<string, string> = { TERM: 'xterm-256color' };
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-    Object.assign(env, { HOME: homeDir, CLAUDE_CONFIG_DIR: homeDir, CODEX_HOME: homeDir });
+    // ⚠️ **每个名字都指向这个一次性 HOME，而名字来自 adapter 申报**（04 §3 ★3z）。
+    //    这里原来是写死的 `{ HOME, CLAUDE_CONFIG_DIR, CODEX_HOME }` —— 两个内置 CLI 的
+    //    变量名躺在平台代码里。第三方 CLI 认自己的 `$ACME_CONFIG_DIR`，于是登录凭证落进
+    //    **后端进程的真 HOME**：`dispose()` 的 `rm -rf` 清不到，且并发登录互相串。
+    // ⛔ `HOME` 永远设 —— 它不是某个 runtime 的事实，而是这条隔离纪律本身（P1-3）。
+    //    ⚠️ 顺带收紧了一件事：现在只设**这个 runtime 用得上的**变量，不再无差别地把
+    //    两个内置名一起塞给每一条会话。
+    env.HOME = homeDir;
+    for (const name of configDirEnvNames) env[name] = homeDir;
 
     let child: IPty;
     try {

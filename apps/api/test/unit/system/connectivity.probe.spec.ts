@@ -3,7 +3,13 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { Clock } from '@platform/shared-kernel';
-import type { ConnectivityResult, ProxyConfig } from '@platform/contracts';
+import type {
+  ConnectivityResult,
+  ProxyConfig,
+  RuntimeAdapter,
+  RuntimeAdapterRegistry,
+} from '@platform/contracts';
+import { runHalfStub } from '../../../../../packages/modules/runtime/test/_run-half';
 import {
   ConnectivityProbe,
   matchesNoProxy,
@@ -97,10 +103,106 @@ afterEach(() => {
  */
 function probeRegistry(proxy?: ProxyConfig): Promise<ConnectivityResult> {
   const settings: ProxySource = { proxyConfig: () => proxy };
-  const probe = new ConnectivityProbe(settings, clock);
+  const probe = new ConnectivityProbe(settings, clock, emptyRuntimeRegistry());
   const target = probe.targets().find((t) => !t.modelApi)!;
   return probeOne(target, proxy, 3000, new AbortController().signal, clock);
 }
+
+/** 没有 runtime 注册 ⇒ 一条模型 API 目标都没有（这些用例只关心 registry 那一条）。 */
+function emptyRuntimeRegistry(): RuntimeAdapterRegistry {
+  return runtimeRegistryWith([]);
+}
+
+function runtimeRegistryWith(adapters: RuntimeAdapter[]): RuntimeAdapterRegistry {
+  const map = new Map(adapters.map((a) => [a.id, a]));
+  return {
+    register(a) {
+      map.set(a.id, a);
+    },
+    get(id) {
+      const a = map.get(id);
+      if (!a) throw new Error(`unknown runtime '${id}'`);
+      return a;
+    },
+    has: (id) => map.has(id),
+    list: () => [...map.values()],
+  };
+}
+
+/** 只申报 `connectivityTargets` 的最小 adapter —— 本组只走 `targets()`，不碰别的方法。 */
+function adapterDeclaring(
+  id: string,
+  displayName: string,
+  connectivityTargets: readonly string[],
+): RuntimeAdapter {
+  return {
+    ...runHalfStub,
+    id,
+    displayName,
+    vendor: 'test',
+    connectivityTargets,
+    loginCommand: () => [id, 'login'],
+    getAuthMethods: () => ['api-key'],
+    beginAuth: () => Promise.reject(new Error('unused')),
+    completeAuth: () => Promise.reject(new Error('unused')),
+    injectCredential: () => Promise.resolve(),
+  };
+}
+
+/**
+ * 模型 API 清单来自 adapter 申报，不是硬编码的两家域名（04 §3 ★3z）。
+ *
+ * ⛔ 这条盯的是一个**静默**失效：`offline` 的判据是「模型 API 全部不可达」，所以在写死
+ * 两家域名的年代，一台只装了第三方 runtime 的机器会被两个它根本不用的端点判成离线，
+ * 而它自己的端点一次都没被探过。
+ */
+describe('模型 API 探测清单由注册的 RuntimeAdapter 申报', () => {
+  const settings: ProxySource = { proxyConfig: () => undefined };
+
+  it('第三方 runtime 的端点进清单，且带上它自己的名字', () => {
+    const probe = new ConnectivityProbe(
+      settings,
+      clock,
+      runtimeRegistryWith([adapterDeclaring('acme-agent', 'Acme Agent', ['api.acme.test'])]),
+    );
+    const modelApis = probe.targets().filter((t) => t.modelApi);
+    expect(modelApis.map((t) => t.host)).toEqual(['api.acme.test']);
+    expect(modelApis[0].port).toBe(443);
+    expect(modelApis[0].why).toContain('Acme Agent');
+  });
+
+  it('两个 adapter 申报同一个域名 ⇒ 只探一次，理由合并', () => {
+    const probe = new ConnectivityProbe(
+      settings,
+      clock,
+      runtimeRegistryWith([
+        adapterDeclaring('a', 'A', ['api.shared.test']),
+        adapterDeclaring('b', 'B', ['api.shared.test']),
+      ]),
+    );
+    const modelApis = probe.targets().filter((t) => t.modelApi);
+    expect(modelApis).toHaveLength(1);
+    expect(modelApis[0].why).toBe('A 的模型 API / B 的模型 API');
+  });
+
+  it('⛔ 零 runtime 注册 ⇒ 模型 API 清单为空，而不是继承两家内置域名', () => {
+    const probe = new ConnectivityProbe(settings, clock, emptyRuntimeRegistry());
+    expect(probe.targets().filter((t) => t.modelApi)).toEqual([]);
+    // 镜像仓库那一条不受影响 —— 它从 SANDBOX_DEFAULT_IMAGE 推导，与 runtime 无关。
+    expect(probe.targets().filter((t) => !t.modelApi)).toHaveLength(1);
+  });
+
+  it('申报里带端口时按端口探（`host:port`）', () => {
+    const probe = new ConnectivityProbe(
+      settings,
+      clock,
+      runtimeRegistryWith([adapterDeclaring('p', 'P', ['api.acme.test:8443'])]),
+    );
+    const [target] = probe.targets().filter((t) => t.modelApi);
+    expect(target.host).toBe('api.acme.test');
+    expect(target.port).toBe(8443);
+  });
+});
 
 describe('TLS 探测真的用坐标里的端口（不是硬编码 443）', () => {
   let tcp: net.Server | undefined;

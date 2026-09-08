@@ -369,9 +369,94 @@ export function runRuntimeAdapterContractTests(
           expect(token.trim(), 'probeCommand token must be non-empty').not.toBe('');
         }
         expect(typeof capability.parseRefreshedAuth).toBe('function');
+        // The two slots that used to be Codex constants living in platform code
+        // (05 §5.1 ★5.1a ① ②). Both are REQUIRED by the contract; assert them here so
+        // a JS-only adapter (no typecheck) is held to the same bar.
+        expect(
+          typeof capability.authFileRelPath === 'string' &&
+            capability.authFileRelPath.trim() !== '',
+          'authFileRelPath must name the auth file, relative to the helper HOME',
+        ).toBe(true);
+        expect(
+          capability.authFileRelPath.startsWith('/'),
+          'authFileRelPath is RELATIVE to the isolated HOME — an absolute path would escape it',
+        ).toBe(false);
+        expect(
+          Array.isArray(capability.eligibleMethods) && capability.eligibleMethods.length > 0,
+          'eligibleMethods must name at least one refreshable auth method',
+        ).toBe(true);
+        const offered = factory().getAuthMethods();
+        for (const method of capability.eligibleMethods) {
+          expect(RUNTIME_AUTH_METHODS, `'${method}' is not a contract auth method`).toContain(
+            method,
+          );
+          expect(
+            offered,
+            `'${method}' is refreshable but getAuthMethods() never offers it — dead config`,
+          ).toContain(method);
+        }
+      });
+
+      it('RA-18 (MUST, declared refreshCapability): parseRefreshedAuth() THROWS on foreign content', () => {
+        const capability = factory().refreshCapability;
+        expect(capability).toBeDefined();
+        if (!capability) return;
+        // ⛔ THIS IS THE CLAUSE THAT CATCHES THE SILENT REFRESH LOOP (05 §5.1 ★5.1a ②).
+        // When the seeded auth file lands where the CLI never looks, the probe runs
+        // UNAUTHENTICATED and the platform reads back THE FILE IT JUST WROTE. A lenient
+        // parser answers "fine" and the platform stores a brand-new credential row
+        // carrying the same expired token — forever. Refusing content that is not this
+        // runtime's format is what turns that infinite silence into one loud failure.
+        const foreign = [
+          ['empty', ''],
+          ['blank', '   \n  '],
+          ['empty JSON object', '{}'],
+          ['JSON null', 'null'],
+          ['not JSON at all', 'not an auth file'],
+          // Another runtime's auth file: well-formed JSON, plausible keys, WRONG shape.
+          [
+            "another runtime's auth file",
+            JSON.stringify({ apiKey: 'sk-ant-oat01-xxxx', account: { id: 'acct_1' } }),
+          ],
+        ] as const;
+        for (const [what, raw] of foreign) {
+          let returned: unknown;
+          let threw = false;
+          try {
+            returned = capability.parseRefreshedAuth(raw);
+          } catch {
+            threw = true;
+          }
+          expect(
+            threw,
+            `parseRefreshedAuth(${what}) returned ${JSON.stringify(returned)} instead of throwing — ` +
+              'a parser that accepts foreign content makes every refresh "succeed" with a stale token',
+          ).toBe(true);
+        }
+      });
+
+      it('RA-19 (MUST, declared refreshCapability): credentialTtlMs covers an eligible method', () => {
+        const adapter = factory();
+        const capability = adapter.refreshCapability;
+        expect(capability).toBeDefined();
+        if (!capability) return;
+        const ttl = adapter.credentialTtlMs;
+        // ⛔ Without a TTL the refresh path has nothing to stamp the new expiry from and
+        // falls back to the platform's Codex-shaped hourly default (★5.1a ③) — the very
+        // mistake `credentialTtlMs`'s own contract comment argues against, on the OTHER
+        // code path. One runtime's hour silently becomes every runtime's hour.
+        expect(
+          ttl,
+          'refreshCapability without credentialTtlMs ⇒ the refreshed token inherits the built-in hourly default',
+        ).toBeDefined();
+        const covered = capability.eligibleMethods.filter((m) => ttl?.[m] !== undefined);
+        expect(
+          covered.length,
+          `credentialTtlMs must give a lifetime for at least one of [${capability.eligibleMethods.join(', ')}]`,
+        ).toBeGreaterThan(0);
       });
     } else {
-      it.skip('RA-13 (MUST when declared) SKIPPED — adapter declares no refreshCapability', () =>
+      it.skip('RA-13 / RA-18 / RA-19 (MUST when declared) SKIPPED — adapter declares no refreshCapability', () =>
         undefined);
     }
 

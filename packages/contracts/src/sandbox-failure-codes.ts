@@ -2,6 +2,7 @@ import { SandboxProviderErrorCode } from './sandbox-provider.contract';
 import { INSTALL_FAILED } from './runtime-install.port';
 import { IMAGE_CONTRACT_VIOLATION } from './agent-session.port';
 import { UNKNOWN_RUNTIME } from './runtime-adapter.contract';
+import { AUTH_REJECTED } from './adapter-auth.error';
 import { WORKSPACE_PREPARE_FAILED, DISK_INSUFFICIENT } from './workspace-preparer.port';
 import { INTERNAL_ERROR_CODE } from './errors';
 
@@ -31,6 +32,12 @@ import { INTERNAL_ERROR_CODE } from './errors';
 export const SANDBOX_FAILURE_CODES: ReadonlySet<string> = new Set<string>([
   ...Object.values(SandboxProviderErrorCode),
   INSTALL_FAILED,
+  // ⚠️ **`AUTH_REJECTED` 曾经不在这里，而它有一条真实的产出路径**：codex 的
+  // `injectCredential` 写 0600 auth.json 失败时抛的就是它，而那一步跑在 provision 的
+  // `starting` 段里（03 §4.3 ④）——正是 `failureOf` 分类的地方。不在集合里 ⇒ 被降级成
+  // `INTERNAL` ⇒ 前端按码查 P22 §1 文案，拿到通用兜底，用户看到「内部错误」而不是
+  // 「凭证注入被拒」。**这条内置也一样发作**，不是扩展性问题。
+  AUTH_REJECTED,
   IMAGE_CONTRACT_VIOLATION,
   UNKNOWN_RUNTIME,
   WORKSPACE_PREPARE_FAILED,

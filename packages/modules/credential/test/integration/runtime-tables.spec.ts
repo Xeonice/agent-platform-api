@@ -129,3 +129,69 @@ describe('refreshSync atomicity (P2-2)', () => {
     expect(reread!.refreshFailures).toBe(0);
   });
 });
+
+/**
+ * `listRefreshDue` — CANDIDATES, not a verdict (05 §5.1 ★5.1a ①).
+ *
+ * ⛔ THE FILTER THAT USED TO LIVE HERE WAS ONE BUILT-IN'S LOGIN SHAPE. The repository
+ * ended with `c.obtainedVia === 'oauth-device'`, so a third-party runtime that declared
+ * `refreshCapability` and obtained its credential via `setup-token` /
+ * `access-token-paste` was vetoed by a SQL-layer predicate its adapter could neither see
+ * nor override — silently: no error, no log, just a row that never reached the scanner.
+ * The judgement moved to `CredentialRefreshScanner`, which holds the adapter and reads
+ * `refreshCapability.eligibleMethods`.
+ */
+describe("listRefreshDue hands over CANDIDATES, not one runtime's method (★5.1a ①)", () => {
+  // ⚠️ 每条用不同的 runtimeId：`uq_cred_runtime_active` 建在 (runtime_id, mode) 上，
+  //    而 `oauth-device` 与 `setup-token` 同属 account 模式 —— 同一个 runtime 放两条会撞
+  //    唯一索引（I-CRD-5），那与本组要验的候选集无关。
+  function dueCredential(id: string, obtainedVia: 'oauth-device' | 'setup-token' | 'api-key') {
+    return Credential.createRuntime({
+      id: id as CredentialId,
+      runtimeId: `rt-${id}`,
+      obtainedVia,
+      masked: MaskedIdentifier.rehydrate('m'),
+      secret: new EncryptedBlob('b', 'iv', 'tag', 'k'),
+      now: new Date(0),
+      expiresAt: new Date(1000),
+    });
+  }
+
+  it('a setup-token / access-token-paste credential is no longer dropped in SQL', async () => {
+    const { db } = freshDb();
+    const repo = new SqliteCredentialRepository(db);
+    const tx = {} as Tx;
+    repo.saveSync(tx, dueCredential('device', 'oauth-device'));
+    repo.saveSync(tx, dueCredential('pasted', 'setup-token'));
+
+    const due = await repo.listRefreshDue(new Date(5000));
+    expect(due.map((c) => c.id as string).sort()).toEqual(['device', 'pasted']);
+  });
+
+  it('the PLATFORM rules it still applies: not revoked, has an expiry, <3 failures', async () => {
+    const { db } = freshDb();
+    const repo = new SqliteCredentialRepository(db);
+    const tx = {} as Tx;
+    repo.saveSync(tx, dueCredential('ok', 'oauth-device'));
+    repo.saveSync(tx, dueCredential('burned', 'oauth-device'));
+    // ⚠️ the retry budget is a PLATFORM fact (how many times we try), not a vendor one —
+    //    so unlike the method filter it correctly stayed in the repository.
+    repo.recordRefreshFailureSync(tx, 'burned' as CredentialId);
+    repo.recordRefreshFailureSync(tx, 'burned' as CredentialId);
+    repo.recordRefreshFailureSync(tx, 'burned' as CredentialId);
+
+    const noExpiry = Credential.createRuntime({
+      id: 'forever' as CredentialId,
+      runtimeId: 'rt-forever',
+      obtainedVia: 'api-key',
+      masked: MaskedIdentifier.rehydrate('m'),
+      secret: new EncryptedBlob('b', 'iv', 'tag', 'k'),
+      now: new Date(0),
+      expiresAt: null,
+    });
+    repo.saveSync(tx, noExpiry);
+
+    const due = await repo.listRefreshDue(new Date(5000));
+    expect(due.map((c) => c.id as string)).toEqual(['ok']);
+  });
+});

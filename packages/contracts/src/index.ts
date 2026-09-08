@@ -14,6 +14,7 @@ export * from './registry.tokens';
 export * from './reserved-env';
 export * from './sandbox-provider.contract';
 export * from './runtime-adapter.contract';
+export * from './adapter-auth.error';
 export * from './image-spec.contract';
 export * from './sandbox-pty.port';
 export * from './sandbox-exec.port';

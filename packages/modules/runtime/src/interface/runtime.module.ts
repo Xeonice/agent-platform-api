@@ -18,6 +18,7 @@ import { AUTH_HELPER } from '../domain/ports/auth-helper.port';
 import { CodexAdapter } from '../infrastructure/adapters/codex/codex.adapter';
 import { ClaudeCodeAdapter } from '../infrastructure/adapters/claude-code/claude-code.adapter';
 import { DefaultRuntimeAdapterRegistry } from '../infrastructure/registry/runtime-adapter.registry';
+import { ReservedEnvNameRegistrar } from '../infrastructure/registry/reserved-env.registrar';
 import { HostAuthHelper } from '../infrastructure/helper/host-auth-helper';
 import { SqliteRuntimeSettingsRepository } from '../infrastructure/persistence/sqlite/runtime-settings.repository.impl';
 import { RuntimeSettingsReaderWriter } from '../infrastructure/settings/runtime-settings.reader';
@@ -30,7 +31,9 @@ import { RuntimeController } from './http/runtime.controller';
  * (which reads the effective mode + writes `runtime_settings` in the store tx) with
  * NO package cycle — the coupling is via contracts tokens only. Registers the two
  * built-in adapters against the open `RUNTIME_ADAPTER_REGISTRY`, the auth helper
- * (host form default), the settings repo, and the codex refresh scanner.
+ * (host form default), the settings repo, the codex refresh scanner, and the
+ * `ReservedEnvNameRegistrar` that folds every registered adapter's declared env
+ * names into the platform blacklist once ALL modules have registered (05 §4.1).
  */
 @Global()
 @Module({
@@ -43,6 +46,7 @@ import { RuntimeController } from './http/runtime.controller';
     CodexAdapter,
     ClaudeCodeAdapter,
     CredentialRefreshScanner,
+    ReservedEnvNameRegistrar,
     RuntimeSettingsReaderWriter,
     DefaultRuntimeCredentialStateReader,
     { provide: RUNTIME_ADAPTER_REGISTRY, useClass: DefaultRuntimeAdapterRegistry },

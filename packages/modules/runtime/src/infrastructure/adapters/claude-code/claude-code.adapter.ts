@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { AdapterAuthError } from '@platform/contracts';
 import type {
   ApiKeyFormatVerdict,
   AuthChallenge,
@@ -26,7 +27,6 @@ import {
   validateAnthropicApiKey,
   validateClaudeOauthToken,
 } from '../../../domain/services/token-format.validator';
-import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
 import { readUntil } from '../pty-reader.util';
 import {
   parseClaudeAuthUrl,
@@ -177,6 +177,36 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly credentialTtlMs: Readonly<Partial<Record<RuntimeAuthMethod, number>>> = {
     'setup-token': 365 * 24 * 60 * 60_000,
   };
+
+  // ⛔ NO `refreshCapability`, AND THAT IS A DELIBERATE DECLARATION, NOT AN OMISSION.
+  // A `setup-token` is a ~1yr credential with NO refresh semantics: there is nothing
+  // for a probe to renew and nothing for a parser to read back. Adding one to "look
+  // complete" would enrol claude in the refresh scanner, where every pass would run a
+  // CLI, read a file the CLI never rewrote, and store a duplicate row — the exact
+  // silent loop RA-18 exists to forbid. Its expiry backstop is the 7-day warning
+  // (05 §5.1), not a refresh.
+
+  /**
+   * claude locates its config through `$CLAUDE_CONFIG_DIR` — pointed at the auth
+   * helper's per-session `mkdtemp` HOME so a login never lands in the backend
+   * process's real home (04 §3 ★3z / 05 §5.1 P1-3).
+   */
+  readonly configDirEnvNames: readonly string[] = ['CLAUDE_CONFIG_DIR'];
+
+  /**
+   * Credential names: the OAuth token env and the Anthropic api-key env. Redirect
+   * class: `CLAUDE_CONFIG_DIR` — the P1-2 case in person (05 §4.1).
+   */
+  readonly reservedEnvNames = {
+    credential: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'] as const,
+    redirect: ['CLAUDE_CONFIG_DIR'] as const,
+  };
+
+  /** Anthropic keys start `sk-ant-` (the format authority is `validateApiKey`). */
+  readonly apiKeyPrefix = 'sk-ant-';
+
+  /** claude talks to this endpoint; the outbound diagnostic collects it (04 §3 ★3z). */
+  readonly connectivityTargets: readonly string[] = ['api.anthropic.com'];
 
   getAuthMethods(): RuntimeAuthMethod[] {
     return ['setup-token', 'api-key'];

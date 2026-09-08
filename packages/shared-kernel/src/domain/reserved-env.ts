@@ -51,8 +51,53 @@ export const CREDENTIAL_REDIRECT_ENV_NAMES: readonly string[] = [
   'HOME',
 ] as const;
 
-/** True when `name` is reserved (exact or prefix). Case-sensitive (05 §4.1). */
+/**
+ * Names contributed by REGISTERED RuntimeAdapters (`RuntimeAdapter.reservedEnvNames`,
+ * 04 §3 ★3z), unioned into the blacklist at boot by the runtime context.
+ *
+ * ── WHY A REGISTRATION AND NOT A PARAMETER ───────────────────────────────────
+ * The one consumer that matters is `EnvVarSet` — an image-context DOMAIN value object
+ * whose whole design point is 「存在即合法」: three call sites (image / project / task
+ * env) construct it, and none of them can be trusted to remember an extra argument.
+ * `domain` may not reach a registry either (boundaries: domain → shared-kernel only).
+ * So the composition happens where the fact arrives — at registration — and the
+ * predicate keeps its one-argument shape.
+ *
+ * ⚠️ ADDITIVE AND IDEMPOTENT BY CONSTRUCTION. Registering the same adapter twice, or a
+ * second app instance in one test process, can only re-add names that were already
+ * declared. `reset` exists for tests that must observe the base table alone.
+ *
+ * ⛔ RUNTIME IDS ARE AN OPEN REGISTRY, so this list cannot be a static table — that is
+ * exactly the defect it repairs: the reconcile test used to assert 「hard-coded table A
+ * ⊆ hard-coded table B」, which cannot go red when a NEW adapter shows up with names
+ * nobody listed (05 §4.1 ★4.1a ①).
+ */
+const REGISTERED_RESERVED_ENV_NAMES = new Set<string>();
+
+/** Union `names` into the blacklist. Called once per boot from the runtime context. */
+export function registerReservedEnvNames(names: Iterable<string>): void {
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (trimmed !== '') REGISTERED_RESERVED_ENV_NAMES.add(trimmed);
+  }
+}
+
+/** What adapters have contributed so far (diagnostics + the reconcile test). */
+export function registeredReservedEnvNames(): readonly string[] {
+  return [...REGISTERED_RESERVED_ENV_NAMES];
+}
+
+/** TEST ONLY: drop adapter-contributed names so a case can observe the base table. */
+export function resetRegisteredReservedEnvNames(): void {
+  REGISTERED_RESERVED_ENV_NAMES.clear();
+}
+
+/**
+ * True when `name` is reserved (base exact table ∪ adapter-declared names ∪ prefixes).
+ * Case-sensitive (05 §4.1).
+ */
 export function isReservedEnvName(name: string): boolean {
   if (RESERVED_ENV_EXACT.includes(name)) return true;
+  if (REGISTERED_RESERVED_ENV_NAMES.has(name)) return true;
   return RESERVED_ENV_PREFIXES.some((p) => name.startsWith(p));
 }

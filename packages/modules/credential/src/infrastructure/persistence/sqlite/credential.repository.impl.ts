@@ -51,11 +51,35 @@ export class SqliteCredentialRepository implements CredentialRepository {
       .map((r) => this.toDomain(r));
   }
 
+  /**
+   * CANDIDATES for refresh — runtime credentials expiring before `at` (= now + lead)
+   * that have not exhausted the retry budget.
+   *
+   * ⛔ IT DELIBERATELY DOES **NOT** FILTER BY AUTH METHOD ANY MORE (05 §5.1 ★5.1a ①).
+   * This used to end with `c.obtainedVia === 'oauth-device'`, i.e. Codex's login shape
+   * hard-coded inside a REPOSITORY — a place no adapter can see and no adapter can
+   * override. A third-party runtime that declared `refreshCapability` and obtained its
+   * credential via `setup-token` / `access-token-paste` had its declaration silently
+   * vetoed here: `listRefreshDue` simply never handed the row to the scanner, with no
+   * error and no log.
+   *
+   * ⚠️ WHERE THE DECISION MOVED TO, AND WHY THERE: the scanner already resolves the
+   * runtime's adapter, so it can ask `refreshCapability.eligibleMethods` — the adapter's
+   * OWN declaration — and skip anything else gracefully. Claude's `setup-token` (~1yr,
+   * no refresh semantics) and every api-key stay out of the refresh flow exactly as
+   * before, but now because their adapters SAY SO rather than because a SQL file
+   * happened to spell one built-in's method name.
+   *
+   * ⚠️ WHY THE SCAN VOLUME IS FINE: the SQL predicate does all the real narrowing —
+   * `kind='runtime'` AND not revoked AND a non-null `expires_at` inside the 30-minute
+   * lead window. Credentials with no platform expiry (api-key with no declared TTL)
+   * never appear at all, and what does appear is bounded by "runtime credentials
+   * expiring in the next half hour", which on a single-tenant platform is 0–2 rows. The
+   * predicate that was dropped removed no rows the SQL had not already removed at any
+   * realistic scale, and the JS-side `refreshFailures` cap stays (that is a PLATFORM
+   * retry budget, not a vendor fact, so it does belong here).
+   */
   async listRefreshDue(at: Date): Promise<Credential[]> {
-    // Runtime credentials whose access token expires before `at` (= now + lead).
-    // Codex subscription (mode=account, oauth-device) is the ONLY participant:
-    // Claude setup-token (~1yr, no refresh) and api-key (no expiry) are excluded;
-    // refresh_failures ≥ 3 has stopped (05 §5.1). Narrow in SQL, refine in JS.
     return this.db
       .select()
       .from(credentials)
@@ -69,9 +93,7 @@ export class SqliteCredentialRepository implements CredentialRepository {
       )
       .all()
       .map((r) => this.toDomain(r))
-      .filter(
-        (c) => c.mode === 'account' && c.obtainedVia === 'oauth-device' && c.refreshFailures < 3,
-      );
+      .filter((c) => c.refreshFailures < 3);
   }
 
   async listExpiringBefore(at: Date): Promise<Credential[]> {

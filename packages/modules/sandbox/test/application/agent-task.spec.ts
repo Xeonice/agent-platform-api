@@ -128,6 +128,61 @@ describe('run a headless Task end to end (in-memory planes)', () => {
     expect(stored!.lastSeq).toBe(3);
   });
 
+  it("⛔ a runtime with NO parseOutput still produces events — the contract's stdout-chunk (★3y)", async () => {
+    // ⛔ THIS BRANCH USED TO RETURN `[]`. The contract has always described
+    //    `'stdout-chunk'` as 「RAW bytes from a runtime with no structured mode」 and the
+    //    frontend has always rendered it, but the platform produced ZERO of them. The
+    //    symptom reads like a UI bug rather than a missing producer: the raw log is
+    //    complete (that path does not go through `parseOutput`), while the task output
+    //    panel is entirely empty.
+    const h = harness({
+      adapters: [new FakeAdapter('claude-code', 'Claude Code', [], false)],
+    });
+    expect(h.adapter.parseOutput, 'the fixture must really lack a parser').toBeUndefined();
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+    const job = [...h.provider.jobs!.jobs.values()][0];
+
+    job.emit('plain line one\nplain line two\n');
+    job.finish(0);
+    await until(() => h.provider.jobs!.released.length === 1, 'completion');
+
+    const events = frames(h).filter(
+      (f): f is Extract<TaskServerFrame, { type: 'event' }> => f.type === 'event',
+    );
+    expect(events.map((e) => e.event.type)).toEqual(['stdout-chunk', 'stdout-chunk']);
+    expect(events.map((e) => (e.event.data as { text: string }).text)).toEqual([
+      'plain line one',
+      'plain line two',
+    ]);
+    // seq stays dense and the application stamps the time the adapter cannot.
+    expect(events.map((e) => e.seq)).toEqual([1, 2]);
+    expect(events.every((e) => e.event.timestamp !== '')).toBe(true);
+    expect((await h.taskRepo.findById(dto.id))!.lastSeq).toBe(2);
+  });
+
+  it('⛔ …and replay off the stored log yields the SAME events, one per line', async () => {
+    // ⚠️ THE REASON THE FALLBACK IS PER LINE. `parse()` is called with whatever the job
+    //    plane hands over when live, and ONE LINE AT A TIME on replay. One event per
+    //    CHUNK would make the same bytes produce different `seq` values depending on
+    //    which path a subscriber arrived through — the one thing replay must never do.
+    const h = harness({
+      adapters: [new FakeAdapter('claude-code', 'Claude Code', [], false)],
+    });
+    const sandboxId = await runningSandbox(h);
+    const dto = await h.taskService.run(sandboxId, RUNTIME, { prompt: 'go' });
+    const job = [...h.provider.jobs!.jobs.values()][0];
+
+    // three lines in ONE chunk — the live path sees them together
+    job.emit('a\nb\nc\n');
+    job.finish(0);
+    await until(() => h.provider.jobs!.released.length === 1, 'completion');
+
+    const replayed = await h.taskService.replay(dto.id, 0);
+    expect(replayed.map((r) => r.seq)).toEqual([1, 2, 3]);
+    expect(replayed.map((r) => (r.event.data as { text: string }).text)).toEqual(['a', 'b', 'c']);
+  });
+
   it('a non-zero exit is a FAILURE with a code, never a sentence (P22 §1)', async () => {
     const h = harness();
     const sandboxId = await runningSandbox(h);

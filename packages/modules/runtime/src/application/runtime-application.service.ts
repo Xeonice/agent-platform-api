@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK, shiftMs } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
-import { RUNTIME_ADAPTER_REGISTRY } from '@platform/contracts';
+import { RUNTIME_ADAPTER_REGISTRY, adapterAuthErrorCodeOf } from '@platform/contracts';
 import type {
   AuthChallengeDto,
   RuntimeAdapter,
@@ -20,6 +20,7 @@ import type {
   RuntimeAuthMode,
   RuntimeCredential,
   RuntimeDto,
+  RuntimeSecretMethod,
   RuntimeSettingsDto,
 } from '@platform/contracts';
 import { RuntimeCredentialService } from '@platform/credential';
@@ -36,7 +37,6 @@ import {
 } from '../domain/services/auth-method.policy';
 import { RUNTIME_SETTINGS_REPOSITORY } from '../domain/repositories/runtime-settings.repository';
 import type { RuntimeSettingsRepository } from '../domain/repositories/runtime-settings.repository';
-import { AdapterAuthError } from '../domain/errors/adapter-auth.error';
 
 /**
  * Device-code challenge lifetime (05 §1 ★2: 15min). This one IS a platform constant —
@@ -81,12 +81,20 @@ export class RuntimeApplicationService {
       this.credentials.view(adapter.id, mode),
       this.credentials.listSummaries(adapter.id),
     ]);
-    const authMethods = adapter.getAuthMethods().filter((m) => m !== 'access-token-paste');
+    // ⛔ NO FILTER. This line used to be
+    //    `.filter((m) => m !== 'access-token-paste')` — the application layer deleting a
+    //    method the adapter had just declared, because the DTO schema could not express
+    //    it. An adapter offering only that method reached the UI as `authMethods: []`
+    //    and rendered as 「没有可用的配置方式」 for a runtime that is fully configurable
+    //    (04 §8 ★8a 末). The wire type is now the whole closed set, so the platform
+    //    simply reports what was declared.
     return {
       id: adapter.id,
       displayName: adapter.displayName,
       vendor: adapter.vendor,
-      authMethods,
+      authMethods: adapter.getAuthMethods(),
+      // Advisory only — the authoritative format check is `validateApiKey`, server-side.
+      apiKeyPrefix: adapter.apiKeyPrefix,
       credentialStatus: view.credentialStatus,
       maskedIdentifier: view.maskedIdentifier,
       expiresAt: view.expiresAt,
@@ -110,7 +118,14 @@ export class RuntimeApplicationService {
 
     let session: AuthHelperSession;
     try {
-      session = await this.helper.openSession(adapter.loginCommand(method));
+      // The helper points HOME **and every name this runtime declares** at the fresh
+      // throw-away directory (04 §3 ★3z). Declaring none = "this CLI honours HOME
+      // alone", which is a valid answer, not an omission.
+      session = await this.helper.openSession(
+        adapter.loginCommand(method),
+        undefined,
+        adapter.configDirEnvNames,
+      );
     } catch (e) {
       throw new ServiceUnavailableException(
         `auth helper unavailable: ${(e as Error).message} (PROVIDER_UNAVAILABLE)`,
@@ -330,8 +345,10 @@ export class RuntimeApplicationService {
     } catch (e) {
       // an expired challenge surfaces as a distinct `expired` terminal (vs generic error)
       // so the frontend can guide "code expired → restart" rather than "login failed".
-      status =
-        e instanceof AdapterAuthError && e.code === 'AUTH_CHALLENGE_EXPIRED' ? 'expired' : 'error';
+      // structural, for the same reason `mapAdapterError` is (04 §4 ★4z): a third-party
+      // adapter's plain Error carrying this code must produce the same 「码过期，请重来」
+      // terminal a built-in's does, not a generic failure.
+      status = adapterAuthErrorCodeOf(e) === 'AUTH_CHALLENGE_EXPIRED' ? 'expired' : 'error';
       this.logger.warn(`device login ${challengeRef} failed: ${(e as Error).message}`);
     } finally {
       await entry.session.dispose();
@@ -348,20 +365,51 @@ export class RuntimeApplicationService {
     }
   }
 
-  /** POST .../credentials/secret — api-key short-circuit (05 §3.1). NO helper/pty. */
-  async submitSecret(runtimeId: string, secret: string): Promise<{ maskedIdentifier: string }> {
+  /**
+   * POST .../credentials/secret — the NON-interactive short-circuit (05 §3.1). No
+   * helper, no pty: the user already holds the secret.
+   *
+   * ⚠️ `method` IS NOW CARRIED THROUGH INSTEAD OF ASSUMED. The contract has always
+   * declared `createCredentialFromSecret(method: 'api-key' | 'access-token-paste', …)`,
+   * but every gate on the way here was welded to `api-key`: the wire schema was
+   * `z.literal('api-key')`, the controller dropped `dto.method`, and this line passed a
+   * hard-coded `'api-key'`. So an adapter whose account credential is a pasted access
+   * token had a declared, contract-supported path that could not be reached from
+   * outside — and nothing failed; the method simply vanished.
+   */
+  async submitSecret(
+    runtimeId: string,
+    method: RuntimeSecretMethod,
+    secret: string,
+  ): Promise<{ maskedIdentifier: string }> {
     const adapter = this.adapter(runtimeId);
     if (!adapter.createCredentialFromSecret) {
-      throw new BadRequestException(`${runtimeId} does not support api-key`);
+      throw new BadRequestException(`${runtimeId} does not support ${method}`);
+    }
+    // The door is「the adapter offers this method」, asked of the adapter — same policy
+    // object `beginAuth` uses, so the two entrances cannot drift apart.
+    try {
+      AuthMethodPolicy.assertSupported(method, adapter.getAuthMethods());
+    } catch (e) {
+      if (e instanceof UnsupportedAuthMethodError) throw new BadRequestException(e.message);
+      throw e;
     }
     // The adapter owns its provider's key FORMAT (05 §3.1) — no `runtimeId === 'codex'`
     // branch here; an adapter without a check imposes no format constraint.
-    const verdict = adapter.validateApiKey?.(secret) ?? { ok: true };
-    if (!verdict.ok) {
-      // never echo the value (P2-3) — only the reason.
-      throw new UnauthorizedException(`invalid api key: ${verdict.reason} (AUTH_REJECTED)`);
+    //
+    // ⚠️ ONLY FOR `api-key`. `validateApiKey` is, by its own contract wording, an
+    // 「api-key FORMAT check (prefix/length/charset)」 — running it over a pasted ACCESS
+    // TOKEN would reject a perfectly good credential for failing to look like a
+    // different kind of secret. An adapter that wants to validate a pasted token does
+    // it inside `createCredentialFromSecret`, where it knows which of the two it got.
+    if (method === 'api-key') {
+      const verdict = adapter.validateApiKey?.(secret) ?? { ok: true };
+      if (!verdict.ok) {
+        // never echo the value (P2-3) — only the reason.
+        throw new UnauthorizedException(`invalid api key: ${verdict.reason} (AUTH_REJECTED)`);
+      }
     }
-    const cred = await adapter.createCredentialFromSecret('api-key', secret);
+    const cred = await adapter.createCredentialFromSecret(method, secret);
     const masked = await this.storeCredential(adapter, cred);
     return { maskedIdentifier: masked };
   }
@@ -440,24 +488,55 @@ export class RuntimeApplicationService {
     return this.registry.get(runtimeId);
   }
 
+  /**
+   * Adapter error → HTTP (04 §4), dispatched STRUCTURALLY on `code`.
+   *
+   * ⛔ IT USED TO BE `e instanceof AdapterAuthError`, AND THAT CLOSED A TRAP ON EVERY
+   * OUT-OF-TREE ADAPTER (04 §4 ★4z). `AdapterAuthError` lived in this module's `domain`
+   * folder, exported from neither `@platform/contracts` nor `@platform/runtime` — so a
+   * third party could not construct one. Meanwhile testkit RA-03 explicitly tells them
+   * 「a plain Error is tolerated; but an error that DOES carry a code must carry the
+   * right one」 and asserts it by reading `code` structurally. Follow the testkit, get a
+   * green suite and a **500**, where a built-in throwing the same thing gets a 401 —
+   * one question, two criteria. Both halves are fixed: the class now lives in contracts
+   * (so `instanceof` also works out of tree), and this dispatch matches the testkit's,
+   * so a bare `Error` carrying a valid code is honoured.
+   *
+   * ⚠️ `adapterAuthErrorCodeOf` only recognises the 04 §4 closed set, so an unrelated
+   * `.code` (a Node fs `ENOENT`, `UNKNOWN_RUNTIME`) falls through untouched rather than
+   * being coerced into an auth verdict.
+   */
   private mapAdapterError(e: unknown): unknown {
-    if (e instanceof AdapterAuthError) {
-      switch (e.code) {
-        case 'UNSUPPORTED_METHOD':
-          return new BadRequestException(e.message);
-        case 'AUTH_CHALLENGE_EXPIRED':
-          return new NotFoundException(e.message); // 410-ish; mapped to 404 for MVP
-        case 'AUTH_REJECTED':
-          return new UnauthorizedException(e.message);
-        case 'INSTALL_FAILED':
-          // 04 §4: 500. Its real exposure is `starting → failed` inside provision
-          // (there is no synchronous response there); this row exists so a future
-          // sync entry point has a rule and 02 §6.2 is satisfied.
-          return new InternalServerErrorException(e.message);
-        default:
-          return e;
-      }
+    switch (adapterAuthErrorCodeOf(e)) {
+      case 'UNSUPPORTED_METHOD':
+        return new BadRequestException(messageOf(e));
+      case 'AUTH_CHALLENGE_EXPIRED':
+        return new NotFoundException(messageOf(e)); // 410-ish; mapped to 404 for MVP
+      case 'AUTH_REJECTED':
+        return new UnauthorizedException(messageOf(e));
+      case 'INSTALL_FAILED':
+        // 04 §4: 500. Its real exposure is `starting → failed` inside provision
+        // (there is no synchronous response there); this row exists so a future
+        // sync entry point has a rule and 02 §6.2 is satisfied.
+        return new InternalServerErrorException(messageOf(e));
+      default:
+        return e;
     }
-    return e;
   }
+}
+
+/**
+ * The message of whatever was thrown, without assuming it is an `Error`.
+ *
+ * ⚠️ A third-party adapter may throw a plain object carrying `{ code, message }` — the
+ * testkit's structural criterion admits it, so the mapping must not lose the text and
+ * hand the user an empty 401.
+ */
+function messageOf(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'object' && e !== null && 'message' in e) {
+    const m: unknown = (e as { message: unknown }).message;
+    if (typeof m === 'string') return m;
+  }
+  return String(e);
 }

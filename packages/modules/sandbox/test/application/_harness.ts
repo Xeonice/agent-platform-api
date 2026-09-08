@@ -533,8 +533,18 @@ export class FakeAdapter implements RuntimeAdapter {
     displayName?: string,
     // ⚠️ 同上：用例要从外面读它（provision.spec 的四处断言）。
     readonly log: string[] = [],
+    /**
+     * `false` ⇒ this runtime has NO structured output mode, i.e. it declines to
+     * implement `parseOutput` — a legal declaration, not a gap (04 §3). The platform
+     * must then fall back to `stdout-chunk`; it used to emit nothing at all (★3y).
+     */
+    structuredOutput = true,
   ) {
     this.displayName = displayName ?? id;
+    if (structuredOutput) {
+      this.parseOutput = (chunk: Buffer): RuntimeEvent[] =>
+        parseClaudeTaskEvents(chunk.toString('utf8'));
+    }
   }
 
   loginCommand(): string[] {
@@ -582,16 +592,16 @@ export class FakeAdapter implements RuntimeAdapter {
   }
 
   /**
-   * The REAL claude stream-json parser, on purpose.
+   * The REAL claude stream-json parser, on purpose — a FIELD rather than a method so a
+   * case can construct an adapter that genuinely lacks it (the contract makes
+   * `parseOutput` optional, and "absent" is the branch ★3y is about).
    *
-   * Stubbing it would make every orchestration assertion below a test of the stub:
+   * Stubbing the parser would make every orchestration assertion a test of the stub:
    * the platform's `seq` numbering, its `session-started` absorption and its replay
    * equality are all downstream of what a genuine `parseOutput` produces from genuine
    * CLI lines. The parser's own golden coverage lives in the runtime module.
    */
-  parseOutput(chunk: Buffer): RuntimeEvent[] {
-    return parseClaudeTaskEvents(chunk.toString('utf8'));
-  }
+  readonly parseOutput?: (chunk: Buffer) => RuntimeEvent[];
 }
 
 export interface HarnessOptions {

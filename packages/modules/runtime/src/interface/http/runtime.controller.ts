@@ -76,13 +76,18 @@ export class RuntimeController {
 
   @Post(':rt/credentials/secret')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Store an api-key directly (short-circuit, no helper/pty)' })
+  @ApiOperation({
+    summary: 'Store a pasted secret directly — api-key or access-token (no helper/pty)',
+  })
   @ApiOkResponse({ type: MaskedCredentialResultResponseDto })
   submitSecret(
     @Param('rt') rt: string,
     @Body() dto: SubmitSecretDto,
   ): Promise<MaskedCredentialResult> {
-    return this.app.submitSecret(rt, dto.secret);
+    // ⚠️ `dto.method` USED TO BE DROPPED HERE. The schema validated it and this line
+    // then threw it away, so the endpoint could only ever mean `api-key` — the last of
+    // the four gates that made `access-token-paste` unreachable end to end (05 §3.1).
+    return this.app.submitSecret(rt, dto.method, dto.secret);
   }
 
   @Put(':rt/auth-mode')
