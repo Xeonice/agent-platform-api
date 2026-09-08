@@ -266,7 +266,19 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     const h = harness([{ match: /has-session/, exitCode: 0 }]);
     await h.service.openSession('s1', { cols: 80, rows: 24 });
 
-    expect(h.ptyCalls[0].cmd).toEqual(['tmux', '-u', 'attach', '-t', PLATFORM_AGENT_TMUX_SESSION]);
+    // ⚠️ attach 也前置 `set -g mouse on`：老会话靠这一次把它补上。
+    expect(h.ptyCalls[0].cmd).toEqual([
+      'tmux',
+      '-u',
+      'set',
+      '-g',
+      'mouse',
+      'on',
+      ';',
+      'attach',
+      '-t',
+      PLATFORM_AGENT_TMUX_SESSION,
+    ]);
     expect(h.adapter.startCalls).toHaveLength(0);
   });
 
@@ -346,21 +358,27 @@ describe('每一个 tmux 命令都必须强制 UTF-8', () => {
     }
   });
 
-  it('⭐ **建会话**的两个入口都要 `set -g mouse on`', () => {
+  it('⭐ 建会话**与 attach** 都要前置 `set -g mouse on`', () => {
     // ⛔ 少了它，备用屏里 xterm 把滚轮翻译成方向键（实测一格 = `ESC[A` × 17）直接灌进
     //    agent：codex 完全没反应，claude 却「碰巧能滚」（它把 Up/Down 当滚动）。
-    // ⚠️ 只有**建会话**那两个要 —— `attach` 是前台阻塞命令，写在它后面的 `set` 要等
+    // ⚠️ **attach 那条不能省**：`mouse` 只在设的那一刻生效，只在建会话时设的话，
+    //    **改动之前就已经起着的会话永远拿不到** —— 真机复现过（三个 running 沙箱
+    //    全是 `mouse off`）。attach 前置一次，等于每次开终端都把它补上。
+    // ⚠️ 必须**前置**：`attach` / `new-session -A` 是前台阻塞命令，写在它后面的 `set` 要等
     //    attach 退出才轮得到执行，等于没设。
     // MUTATION: 任一处去掉 `MOUSE_ON` ⇒ 本条红。
     for (const cmd of [
       newSessionCmd('s', { cmd: ['x'] }),
       attachOrCreateCmd('s', { cmd: ['x'] }),
+      attachSessionCmd('s'),
     ]) {
       const i = cmd.indexOf('mouse');
       expect(i, `⛔ 缺 mouse 设置：${cmd.join(' ')}`).toBeGreaterThan(-1);
       expect(cmd.slice(i - 2, i + 3)).toEqual(['set', '-g', 'mouse', 'on', ';']);
       // ⛔ 必须在 new-session **之前** —— 之后的话 `-A` 那条要等 attach 退出。
-      expect(i).toBeLessThan(cmd.indexOf('new-session'));
+      const action = cmd.findIndex((a) => a === 'new-session' || a === 'attach');
+      expect(action, `找不到动作词：${cmd.join(' ')}`).toBeGreaterThan(-1);
+      expect(i, `⛔ mouse 设置必须前置：${cmd.join(' ')}`).toBeLessThan(action);
     }
   });
 });

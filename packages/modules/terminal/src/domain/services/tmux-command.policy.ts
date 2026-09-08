@@ -26,7 +26,7 @@ export function hasSessionCmd(session: string): string[] {
 
 /** What a terminal client runs to join the already-running agent session. */
 export function attachSessionCmd(session: string): string[] {
-  return ['tmux', UTF8, 'attach', '-t', session];
+  return ['tmux', UTF8, ...MOUSE_ON, 'attach', '-t', session];
 }
 
 /**
@@ -116,8 +116,17 @@ const UTF8 = '-u';
  * ⚠️ 顺带：tmux 3.3a **没有** `alternate-scroll` 这个选项（实测 `invalid option`），
  * 别照着老文章去设它。
  *
- * ⚠️ 放在 `new-session` **之前**：`set -g` 会在没有服务端时自己起一个，而写在
- * `new-session -A`（前台 attach）之后的话，要等 attach 退出才轮得到它执行。
+ * ⚠️ 放在 **每个命令之前**，而不只是建会话那次。`mouse` 是服务端全局项、且**只在设的
+ * 那一刻生效**：只在 `new-session` 上设，**修复前就已经起着的会话永远拿不到**
+ * —— 真机复现过（三个 running 沙箱全是 `mouse off`，用户滚轮照旧变方向键）。
+ * ⇒ `attach` 之前也设一次，于是**每次打开终端都会把它补上**，老会话跟着受益。
+ *
+ * ⚠️ 顺序很关键：写在 `attach` / `new-session -A`（都是前台阻塞）**之后**的话，
+ * 要等它们退出才轮得到执行 —— 等于没设。所以一律前置。
+ *
+ * ⛔ `has-session` 那条**不加**：它的退出码是载荷（1 = 会话不在，调用方据此走新建那条
+ * 路）。虽然实测链式之后退出码仍然是 `has-session` 的，但那是一个不必冒的险 ——
+ * attach 那条已经覆盖了「老会话补设」这件事。
  */
 const MOUSE_ON = ['set', '-g', 'mouse', 'on', ';'];
 

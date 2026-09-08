@@ -367,9 +367,16 @@ describe('E2E-8-attachOnly — the terminal gateway attaches, it never starts th
 
     // the pty joined the EXISTING platform session…
     // ⚠️ client 端也要 `-u` —— server 端决定怎么存，client 端决定怎么渲染。
+    // ⚠️ attach 也前置 `set -g mouse on` —— `mouse` 只在设的那一刻生效，只在建会话时设
+    //    的话，改动之前就已经起着的会话永远拿不到（真机复现过）。
     expect(provider.ttySpawns[0]).toEqual([
       'tmux',
       '-u',
+      'set',
+      '-g',
+      'mouse',
+      'on',
+      ';',
       'attach',
       '-t',
       PLATFORM_AGENT_TMUX_SESSION,
