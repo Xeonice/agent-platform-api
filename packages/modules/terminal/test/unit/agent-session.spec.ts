@@ -201,10 +201,20 @@ describe('bootstrapAgentSession — which command the session runs', () => {
     expect(h.adapter.startCalls[0]).toMatchObject({ headless: false, workdir: '/workspace' });
 
     const start = h.execCalls.find((c) => c.includes('new-session'))!;
-    expect(start.slice(0, 10)).toEqual([
+    // ⚠️ **按「除最后那个脚本参数外全等」比**，不数下标。这串 argv 已经因为 `-u`、
+    //    `set -g mouse on` 变过两次，每次都要回来改 `slice(0,N)` 与 `start[N]` ——
+    //    那种算术是纯噪音，而且改错了会**静默地少比几项**。
+    expect(start.slice(0, -1)).toEqual([
       'tmux',
       // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把非 ASCII 逐个换成 `_`。
       '-u',
+      // ⚠️ `mouse on`：否则备用屏里 xterm 把滚轮翻译成方向键（一格 = 17 个 `ESC[A`）
+      //    直接灌进 agent —— codex 完全没反应，claude 却「碰巧能滚」。
+      'set',
+      '-g',
+      'mouse',
+      'on',
+      ';',
       'new-session',
       '-d',
       // ★ `-x/-y` 不能省：detached 会话默认 **80x24**（实测），agent 一启动就按 80 列
@@ -217,10 +227,8 @@ describe('bootstrapAgentSession — which command the session runs', () => {
       PLATFORM_AGENT_TMUX_SESSION,
     ]);
     // the whole payload is ONE tmux argument (tmux joins several with spaces)
-    // ⚠️ 长度与下标随 `-u` 各 +1（整段 payload 仍是**一个** tmux 参数）。
-    expect(start).toHaveLength(11);
-    expect(start[10]).toContain('把 README 翻译成英文');
-    expect(start[10]).toContain('danger-full-access');
+    expect(start.at(-1)).toContain('把 README 翻译成英文');
+    expect(start.at(-1)).toContain('danger-full-access');
     // 默认值必须**明显大于** 80x24，否则这条改动等于没做。
     expect(DEFAULT_AGENT_TMUX_SIZE.cols).toBeGreaterThan(80);
     expect(DEFAULT_AGENT_TMUX_SIZE.rows).toBeGreaterThan(24);
@@ -267,10 +275,15 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     await h.service.openSession('s1', { cols: 80, rows: 24 });
 
     const cmd = h.ptyCalls[0].cmd!;
-    expect(cmd.slice(0, 6)).toEqual([
+    // ⚠️ 同上：除最后那个脚本参数外全等，不数下标。
+    expect(cmd.slice(0, -1)).toEqual([
       'tmux',
-      // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把非 ASCII 逐个换成 `_`。
       '-u',
+      'set',
+      '-g',
+      'mouse',
+      'on',
+      ';',
       'new-session',
       '-A',
       '-s',
@@ -278,8 +291,7 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
     ]);
     expect(h.adapter.attachCalls).toBe(1);
     expect(h.adapter.startCalls).toHaveLength(0);
-    // ⚠️ 下标随 `-u` +1：脚本仍是最后那**一个**参数。
-    expect(cmd[6]).toContain('/workspace');
+    expect(cmd.at(-1)).toContain('/workspace');
   });
 });
 
@@ -331,6 +343,24 @@ describe('每一个 tmux 命令都必须强制 UTF-8', () => {
     for (const cmd of cmds) {
       expect(cmd[0], `第一个词必须是 tmux：${cmd.join(' ')}`).toBe('tmux');
       expect(cmd[1], `⛔ 缺 -u：${cmd.join(' ')}`).toBe('-u');
+    }
+  });
+
+  it('⭐ **建会话**的两个入口都要 `set -g mouse on`', () => {
+    // ⛔ 少了它，备用屏里 xterm 把滚轮翻译成方向键（实测一格 = `ESC[A` × 17）直接灌进
+    //    agent：codex 完全没反应，claude 却「碰巧能滚」（它把 Up/Down 当滚动）。
+    // ⚠️ 只有**建会话**那两个要 —— `attach` 是前台阻塞命令，写在它后面的 `set` 要等
+    //    attach 退出才轮得到执行，等于没设。
+    // MUTATION: 任一处去掉 `MOUSE_ON` ⇒ 本条红。
+    for (const cmd of [
+      newSessionCmd('s', { cmd: ['x'] }),
+      attachOrCreateCmd('s', { cmd: ['x'] }),
+    ]) {
+      const i = cmd.indexOf('mouse');
+      expect(i, `⛔ 缺 mouse 设置：${cmd.join(' ')}`).toBeGreaterThan(-1);
+      expect(cmd.slice(i - 2, i + 3)).toEqual(['set', '-g', 'mouse', 'on', ';']);
+      // ⛔ 必须在 new-session **之前** —— 之后的话 `-A` 那条要等 attach 退出。
+      expect(i).toBeLessThan(cmd.indexOf('new-session'));
     }
   });
 });

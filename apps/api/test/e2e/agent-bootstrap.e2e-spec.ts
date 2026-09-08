@@ -199,9 +199,20 @@ describe('E2E-1-bootstrap — the agent session starts in provision, with no ter
     //    the codex start command carrying the instruction.
     expect(provider.execs.some((c) => c.join(' ') === 'sh -c command -v tmux')).toBe(true);
     const start = provider.execs.find((c) => c.includes('new-session'))!;
-    // ⚠️ `-u` 强制 UTF-8：镜像里 LC_CTYPE=POSIX，缺了它 tmux 把 agent 界面里的
-    //    非 ASCII 逐个换成 `_`（Claude Code 的横幅 `▐▛███▜▌` 变成 `_______`）。
-    expect(start.slice(0, 4)).toEqual(['tmux', '-u', 'new-session', '-d']);
+    // ⚠️ `-u` 强制 UTF-8（镜像里 LC_CTYPE=POSIX，缺了它非 ASCII 被逐个换成 `_`）；
+    //    `set -g mouse on` 让 tmux 自己接管滚轮（否则 xterm 在备用屏里把滚轮翻译成
+    //    方向键灌进 agent：codex 完全没反应，claude 却「碰巧能滚」）。
+    // ⚠️ 只比**前缀**：后面还有 `-x/-y/-s` 与整段脚本，那些各有专门的断言。
+    expect(start.slice(0, 8)).toEqual([
+      'tmux',
+      '-u',
+      'set',
+      '-g',
+      'mouse',
+      'on',
+      ';',
+      'new-session',
+    ]);
     expect(start).toContain(PLATFORM_AGENT_TMUX_SESSION);
     // ★ `-x/-y` 不能省：detached tmux 会话默认 **80x24**（容器内实测），agent 一启动就按
     // 80 列画欢迎横幅，而终端协议没有"回流" ⇒ 之后 attach 撑宽也救不回第一屏。
