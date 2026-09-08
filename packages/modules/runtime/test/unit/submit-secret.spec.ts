@@ -70,10 +70,12 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
     const { service } = fakeCredentials();
     const svc = makeService(registry, service);
 
-    const ok = await svc.submitSecret('codex', OPENAI_KEY);
+    const ok = await svc.submitSecret('codex', 'api-key', OPENAI_KEY);
     expect(ok.maskedIdentifier.startsWith('sk-')).toBe(true);
 
-    await expect(svc.submitSecret('codex', BAD_KEY)).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(svc.submitSecret('codex', 'api-key', BAD_KEY)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
   });
 
   it('claude validates via ITS adapter (reversed) — accepts sk-ant-, rejects the OpenAI key codex accepts', async () => {
@@ -81,11 +83,11 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
     const { service } = fakeCredentials();
     const svc = makeService(registry, service);
 
-    const ok = await svc.submitSecret('claude-code', ANTHROPIC_KEY);
+    const ok = await svc.submitSecret('claude-code', 'api-key', ANTHROPIC_KEY);
     expect(ok.maskedIdentifier.startsWith('sk-')).toBe(true);
 
     // the SAME OpenAI key codex accepted is rejected by claude's adapter — pure dispatch.
-    await expect(svc.submitSecret('claude-code', OPENAI_KEY)).rejects.toBeInstanceOf(
+    await expect(svc.submitSecret('claude-code', 'api-key', OPENAI_KEY)).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
   });
@@ -131,12 +133,69 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
     const { service, stored } = fakeCredentials();
     const svc = makeService(registry, service);
 
-    const ok = await svc.submitSecret('acme', 'acme-1234567890');
+    const ok = await svc.submitSecret('acme', 'api-key', 'acme-1234567890');
     expect(ok.maskedIdentifier).toBe('acme-…7890');
     expect(stored).toEqual([{ runtimeId: 'acme', maskedIdentifier: 'acme-…7890' }]);
 
-    await expect(svc.submitSecret('acme', 'wrong-key')).rejects.toBeInstanceOf(
+    await expect(svc.submitSecret('acme', 'api-key', 'wrong-key')).rejects.toBeInstanceOf(
       UnauthorizedException,
+    );
+  });
+
+  it("⛔ access-token-paste reaches the adapter — the contract's OTHER secret method", async () => {
+    // ⛔ THE WHOLE PATH WAS WELDED SHUT. `createCredentialFromSecret` has always taken
+    //    `'api-key' | 'access-token-paste'`, but the wire schema was
+    //    `z.literal('api-key')`, `toRuntimeDto` filtered the method out of
+    //    `authMethods`, the controller dropped `dto.method`, and this service passed a
+    //    hard-coded `'api-key'`. Four gates, no error anywhere: the method simply never
+    //    arrived. This case drives the value the adapter really receives.
+    const seen: string[] = [];
+    const paster: RuntimeAdapter = {
+      ...runHalfStub,
+      id: 'paster',
+      displayName: 'Paster',
+      vendor: 'X',
+      loginCommand: () => ['paster', 'login'],
+      getAuthMethods: () => ['access-token-paste'],
+      // ⚠️ NO `validateApiKey` here would make the point weakly; declaring one that
+      //    REJECTS EVERYTHING makes it precisely: an api-key format check must not run
+      //    over a pasted access token, or a perfectly good credential is refused for
+      //    failing to look like a different kind of secret.
+      validateApiKey: (): ApiKeyFormatVerdict => ({ ok: false, reason: 'not an api key' }),
+      createCredentialFromSecret: async (method, secret): Promise<RuntimeCredential> => {
+        seen.push(method);
+        const cred: RuntimeCredential = {
+          runtimeId: 'paster',
+          obtainedVia: method,
+          maskedIdentifier: `paste-…${secret.slice(-4)}`,
+          issuedAt: '',
+          credentialFiles: [],
+          env: { PASTER_TOKEN: secret },
+          zeroize(): void {
+            cred.env = undefined;
+          },
+        };
+        return cred;
+      },
+      beginAuth: async () => {
+        throw new Error('unused');
+      },
+      completeAuth: async () => {
+        throw new Error('unused');
+      },
+      injectCredential: async () => {},
+    };
+    const { service, stored } = fakeCredentials();
+    const svc = makeService(registryWith([paster]), service);
+
+    const ok = await svc.submitSecret('paster', 'access-token-paste', 'tok-abcd1234');
+    expect(ok.maskedIdentifier).toBe('paste-…1234');
+    expect(seen).toEqual(['access-token-paste']); // ← the method really travelled
+    expect(stored).toEqual([{ runtimeId: 'paster', maskedIdentifier: 'paste-…1234' }]);
+
+    // and the door still refuses a method this adapter never offered
+    await expect(svc.submitSecret('paster', 'api-key', 'tok-abcd1234')).rejects.toBeInstanceOf(
+      BadRequestException,
     );
   });
 
@@ -158,7 +217,7 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
       injectCredential: async () => {},
     };
     const svc = makeService(registryWith([noApiKey]), fakeCredentials().service);
-    await expect(svc.submitSecret('noapikey', 'anything')).rejects.toBeInstanceOf(
+    await expect(svc.submitSecret('noapikey', 'api-key', 'anything')).rejects.toBeInstanceOf(
       BadRequestException,
     );
   });

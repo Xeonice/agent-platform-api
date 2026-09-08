@@ -1,5 +1,5 @@
+import { AdapterAuthError } from '@platform/contracts';
 import type { ResolvedImageSpec, RuntimeInstallPlan, SandboxExecFn } from '@platform/contracts';
-import { AdapterAuthError } from '../../domain/errors/adapter-auth.error';
 
 /**
  * Shared install helpers for the two built-in, npm-distributed agent CLIs. This is

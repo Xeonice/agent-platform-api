@@ -37,7 +37,7 @@ import type {
   RuntimeSecretPayload,
 } from '../domain/ports/runtime-credential-materializer.port';
 import { CredentialSelectionService } from '../domain/services/credential-selection.domain-service';
-import { modeForRuntimeMethod } from '../domain/value-objects/obtained-via.vo';
+import { isRuntimeAuthMethod, modeForRuntimeMethod } from '../domain/value-objects/obtained-via.vo';
 import type { RuntimeAuthMethod, RuntimeMode } from '../domain/value-objects/obtained-via.vo';
 import { SecretMaterial } from '../domain/value-objects/secret-material.vo';
 import { MaskedIdentifier } from '../domain/value-objects/masked-identifier.vo';
@@ -79,6 +79,14 @@ export interface RuntimeCredentialSummaryData {
 export interface RuntimeRefreshDue {
   credentialId: string;
   runtimeId: string;
+  /**
+   * HOW this credential was obtained. Carried out to the scanner because BOTH of the
+   * decisions the scanner now makes are keyed on it (05 §5.1 ★5.1a ① ③): whether the
+   * adapter declares this method refreshable at all (`eligibleMethods`), and which
+   * `credentialTtlMs` entry stamps the refreshed expiry. Both used to be answered by
+   * built-in constants living where no adapter could see them.
+   */
+  obtainedVia: RuntimeAuthMethod;
 }
 
 /**
@@ -324,11 +332,34 @@ export class RuntimeCredentialService {
     });
   }
 
-  /** Refresh scanner: runtime credentials whose access token is due (05 §5.1). */
+  /**
+   * Refresh scanner CANDIDATES — runtime credentials whose token is due (05 §5.1).
+   *
+   * ⚠️ 「Candidates」, not 「the ones to refresh」. Whether a given method is refreshable
+   * at all is the ADAPTER's declaration (`refreshCapability.eligibleMethods`), which
+   * this context cannot and must not know: a credential module that resolved runtime
+   * adapters would be reaching across a bounded context to re-decide something the
+   * runtime context already owns. So the row is handed over WITH its `obtained_via` and
+   * the scanner does the last mile.
+   *
+   * ⚠️ The `isRuntimeAuthMethod` guard is a real narrowing, not ceremony: the
+   * `obtained_via` column is the SUPERSET including the two git methods, and the SQL
+   * predicate's `kind='runtime'` is what excludes those. A row that somehow carried a
+   * git method is dropped here rather than travelling on as a lie about its own shape.
+   */
   async listRefreshDue(leadMs: number): Promise<RuntimeRefreshDue[]> {
     const threshold = shiftMs(this.clock.now(), leadMs);
     const due = await this.repo.listRefreshDue(threshold);
-    return due.map((c) => ({ credentialId: c.id as string, runtimeId: c.runtimeId ?? '' }));
+    const out: RuntimeRefreshDue[] = [];
+    for (const c of due) {
+      if (!isRuntimeAuthMethod(c.obtainedVia)) continue;
+      out.push({
+        credentialId: c.id as string,
+        runtimeId: c.runtimeId ?? '',
+        obtainedVia: c.obtainedVia,
+      });
+    }
+    return out;
   }
 
   /** Refresh write-back (05 §5.1): re-encrypt the refreshed payload atomically. */

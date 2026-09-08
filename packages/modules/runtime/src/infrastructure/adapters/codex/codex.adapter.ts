@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Injectable } from '@nestjs/common';
+import { AdapterAuthError } from '@platform/contracts';
 import type {
   ApiKeyFormatVerdict,
   AuthChallenge,
@@ -27,7 +28,6 @@ import {
   probeOnPath,
   runInstallCommands,
 } from '../install-plan.util';
-import { AdapterAuthError } from '../../../domain/errors/adapter-auth.error';
 import { validateOpenAiApiKey } from '../../../domain/services/token-format.validator';
 import { readUntil } from '../pty-reader.util';
 import {
@@ -39,6 +39,7 @@ import {
 } from './codex.output-parser';
 import { assertSessionRef } from '../session-ref.util';
 import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
+import { CREDENTIAL_FILE_MODE, writeCredentialFile } from '../credential-file.util';
 
 /**
  * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 这一步要在 PTY 里
@@ -133,24 +134,6 @@ const ANY_IMAGE: ResolvedImageSpec = { ref: '', digest: '' };
 
 /** Where codex reads its credential — `~/`-relative; `$HOME` is expanded at inject time. */
 const CODEX_AUTH_FILE_PATH = '~/.codex/auth.json';
-/** Credential material is always owner-only. */
-const CREDENTIAL_FILE_MODE = '0600';
-const MODE_RE = /^[0-7]{3,4}$/;
-
-/**
- * Ask the LIVE sandbox for its `$HOME` (05 §4.3 裁决 D-19). `printf` (not `echo`) so
- * there is no trailing newline to guess at, and no shell expansion of the value.
- */
-
-/**
- * Write `$1` with mode `$2`, taking the CONTENT FROM STDIN — the content never appears
- * in argv (`/proc/<pid>/cmdline` is world-readable inside the sandbox; RA-14). `umask
- * 077` closes the window between `cat >` creating the file and `chmod` tightening it,
- * so the file is never briefly group/world-readable. The path is passed as a positional
- * argument rather than interpolated, so no path can be parsed as shell syntax.
- */
-const WRITE_FILE_SCRIPT =
-  'set -e; mkdir -p "$(dirname "$1")"; umask 077; cat > "$1"; chmod "$2" "$1"';
 
 /**
  * Codex RuntimeAdapter (docs/backend/04 §3, 05 §1 ★2 / §1★★). Account login =
@@ -189,12 +172,48 @@ export class CodexAdapter implements RuntimeAdapter {
   };
 
   /**
+   * codex locates everything through `$CODEX_HOME` — the auth helper points it at the
+   * per-session `mkdtemp` HOME, so a login/refresh never touches the backend process's
+   * real home (04 §3 ★3z / 05 §5.1 P1-3).
+   */
+  readonly configDirEnvNames: readonly string[] = ['CODEX_HOME'];
+
+  /**
+   * `OPENAI_API_KEY` is the credential name; `CODEX_HOME` is the redirect-class one —
+   * it carries no secret yet points the CLI at any directory the user names (05 §4.1
+   * P1-2). Declared here so the blacklist derives from the registry rather than from a
+   * static table that cannot know about a runtime it has never heard of.
+   */
+  readonly reservedEnvNames = {
+    credential: ['OPENAI_API_KEY'] as const,
+    redirect: ['CODEX_HOME'] as const,
+  };
+
+  /** OpenAI keys start `sk-` (the format authority is `validateApiKey`). */
+  readonly apiKeyPrefix = 'sk-';
+
+  /** codex talks to this endpoint; the outbound diagnostic collects it (04 §3 ★3z). */
+  readonly connectivityTargets: readonly string[] = ['api.openai.com'];
+
+  /**
    * Codex account credential = an hourly access token the CLI refreshes itself from a
    * seeded `auth.json` (05 §5.1). The scanner reads the probe command + parser here —
    * it no longer hard-codes `['codex','whoami']` / `parseCodexAuthJson`.
    */
   readonly refreshCapability: RuntimeRefreshCapability = {
     probeCommand: ['codex', 'whoami'],
+    /**
+     * `$CODEX_HOME/auth.json` — and the helper points `CODEX_HOME` at the throw-away
+     * HOME it mints, so this is the file the CLI really rewrites. It is declared rather
+     * than assumed because the scanner used to hard-code the name (05 §5.1 ★5.1a ②).
+     */
+    authFileRelPath: 'auth.json',
+    /**
+     * Only the device-auth account credential refreshes. `api-key` never expires and
+     * has no refresh semantics, so listing it would send the scanner into a login-less
+     * probe loop against a credential that cannot be renewed.
+     */
+    eligibleMethods: ['oauth-device'],
     /**
      * A refresh MINTS a credential just as much as a login does, so it produces the
      * SAME split (05 §4.3 ②): the fresh access token, plus the re-sanitized injectable
@@ -453,33 +472,24 @@ export class CodexAdapter implements RuntimeAdapter {
     return { cmd: [CODEX_BINARY, ...SANDBOX_OFF_ARGS, ...NO_UPDATE_CHECK_ARGS] };
   }
 
-  /** Materialize ONE credential file at its `~/`-expanded path, owner-only. */
-  private async writeFile(
-    exec: SandboxExecFn,
-    file: RuntimeCredentialFile,
-    home: string,
-  ): Promise<void> {
-    if (!file.containerPath.startsWith('~/')) {
-      // 裁决 D-19: an absolute path here would mean the path was resolved before a
-      // sandbox existed — i.e. against the wrong HOME, or pinning this credential to
-      // one sandbox. Refuse rather than write to a guessed location.
-      throw new AdapterAuthError(
-        'AUTH_REJECTED',
-        `credential file path must be ~/-relative, got '${file.containerPath}'`,
-      );
-    }
-    const mode = file.mode && MODE_RE.test(file.mode) ? file.mode : CREDENTIAL_FILE_MODE;
-    const absolutePath = `${home}/${file.containerPath.slice(2)}`;
-    const r = await exec(['sh', '-c', WRITE_FILE_SCRIPT, 'codex-inject', absolutePath, mode], {
-      stdin: file.content,
-      timeoutMs: SEED_WRITE_TIMEOUT_MS,
-    });
-    if (r.exitCode !== 0) {
-      throw new AdapterAuthError(
-        'AUTH_REJECTED',
-        `writing ${file.containerPath} failed (exit ${r.exitCode})`,
-      );
-    }
+  /**
+   * Materialize ONE credential file at its `~/`-expanded path, owner-only.
+   *
+   * ⚠️ The body moved to `credential-file.util.ts` and is now EXPORTED from the package
+   * (04 §8 ★8b「可复用件」). Not tidiness: the `umask 077` in that script closes the
+   * window in which `cat >` has created the file but `chmod` has not tightened it yet,
+   * and RA-14/15/16 cannot catch its absence — they inspect the bytes an adapter sends,
+   * which are byte-identical with or without it. A third party re-deriving this shell
+   * one-liner is the likeliest way to reintroduce a world-readable credential.
+   */
+  private writeFile(exec: SandboxExecFn, file: RuntimeCredentialFile, home: string): Promise<void> {
+    return writeCredentialFile(
+      exec,
+      file,
+      home,
+      (m) => new AdapterAuthError('AUTH_REJECTED', m),
+      'codex-inject',
+    );
   }
 }
 

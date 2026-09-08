@@ -618,12 +618,33 @@ export class RunAgentTaskWorkflow {
    * `parseOutput` is infrastructure with no `Clock` (01 §3 bans reading the wall clock
    * outside that port) and none of the CLI events carries a time of its own, so the
    * adapters emit an empty `timestamp` and the application — which does hold the
-   * Clock — fills it in. An adapter that declines to implement `parseOutput` yields
-   * nothing rather than an error: the raw log is still written either way.
+   * Clock — fills it in.
+   *
+   * ── AN ADAPTER WITHOUT `parseOutput` NOW GETS THE CONTRACT'S OWN FALLBACK ────────
+   * ⛔ This used to be `if (!adapter.parseOutput) return [];` — literally zero events.
+   * The contract has always described `'stdout-chunk'` as 「RAW bytes from a runtime
+   * with no structured mode」 and the frontend has always rendered it, but nothing in
+   * the repo ever PRODUCED one (04 §3 ★3y). The symptom is precise and misleading: the
+   * raw log is complete (that path does not go through here), while the task output
+   * panel is entirely empty — so it reads as a UI bug, not a missing producer.
+   *
+   * ⚠️ THE FALLBACK IS PER LINE, NOT PER CHUNK, AND THAT IS LOAD-BEARING. This method
+   * is called from TWO places with DIFFERENT slicing: live, with whatever the job plane
+   * hands over (whole lines, but any number of them); and on `fromSeq` replay, one line
+   * at a time off the stored log. Emitting one event per CHUNK would make the same
+   * bytes produce a different number of events — and therefore different `seq` values —
+   * depending on which path a subscriber came in through, which is the one thing replay
+   * must never do (the same reason adapter parsers are required to be stateless per
+   * line). Splitting on newlines makes the two paths agree exactly.
    */
   private parse(adapter: RuntimeAdapter, chunk: string): RuntimeEvent[] {
-    if (!adapter.parseOutput) return [];
     const at = this.clock.now().toISOString();
+    if (!adapter.parseOutput) {
+      return chunk
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((text) => ({ type: 'stdout-chunk', timestamp: at, data: { text } }));
+    }
     return adapter
       .parseOutput(Buffer.from(chunk, 'utf8'))
       .map((e) => (e.timestamp === '' ? { ...e, timestamp: at } : e));

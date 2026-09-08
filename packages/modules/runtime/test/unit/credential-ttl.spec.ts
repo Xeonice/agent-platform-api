@@ -222,10 +222,10 @@ describe('credential expiry comes from RuntimeAdapter.credentialTtlMs (04 §3)',
       undefined as never,
     );
 
-    await svc.submitSecret('rotating', 'whatever-secret');
+    await svc.submitSecret('rotating', 'api-key', 'whatever-secret');
     expect(stored[0].expiresAt?.toISOString()).toBe(at(week));
 
-    await svc.submitSecret('plainkey', 'whatever-secret');
+    await svc.submitSecret('plainkey', 'api-key', 'whatever-secret');
     expect(stored[1].expiresAt).toBeNull();
   });
 });

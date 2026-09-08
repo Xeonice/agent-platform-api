@@ -1,5 +1,4 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { runHalfStub } from '../../../../packages/modules/runtime/test/_run-half';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterAll, beforeAll, describe, it, expect } from 'vitest';
@@ -37,7 +36,9 @@ import type {
   SandboxRuntimeStatus,
   ValidationResult,
 } from '@platform/contracts';
+import { isReservedEnvName } from '@platform/shared-kernel';
 import { ImageApplicationService } from '@platform/image';
+import { EnvVarSet } from '../../../../packages/modules/image/src/domain/value-objects/env-var-set.vo';
 import { AppModule } from '../../src/app.module';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import { useEnv } from './_env';
@@ -85,6 +86,8 @@ class AcmeSandboxProvider implements SandboxProvider {
   readonly name: string = 'acme';
   readonly capabilities = ACME_CAPS;
   readonly calls: string[] = [];
+  /** Every argv the `starting` 段 pushed through this provider (assertion surface). */
+  readonly execs: string[][] = [];
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
     this.calls.push(`create:${ctx.sandboxId}`);
     return { provider: this.name, providerSandboxId: `acme-${ctx.sandboxId}` };
@@ -103,6 +106,15 @@ class AcmeSandboxProvider implements SandboxProvider {
   }
   async spawn(_h: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
     this.calls.push(spec.tty ? 'spawn:tty' : 'spawn:exec');
+    this.execs.push(spec.cmd);
+    // ⚠️ `tmux has-session` MUST REPORT "no session" ON A FRESH SANDBOX. Answering 0 to
+    //    every command (what this double used to do) makes `bootstrapAgentSession` take
+    //    its re-entrant branch — 「the agent is already running, don't start a second
+    //    one」 — so step ⑤ returns before ever asking the adapter what to run. The
+    //    provision looked complete and `buildAttachCommand` was never called: exactly
+    //    the kind of "the double answered a question it should not have" that hides a
+    //    whole half of the run path.
+    if (spec.cmd.includes('has-session')) return new FakeExecProcessStream('', 1);
     // the `starting` 段 really execs through the third-party provider (install probe,
     // credential injection, tmux self-check), so a one-shot exec must TERMINATE.
     return new FakeExecProcessStream('acme 1.0.0', 0);
@@ -120,15 +132,58 @@ class HeadlessOnlyProvider extends AcmeSandboxProvider {
 
 const ACME_KEY_TTL_MS = 30 * 24 * 60 * 60_000;
 
-/** A third-party runtime adapter, api-key only, with its OWN credential lifetime. */
+/** What the acme adapter was asked to build, so the run half can be asserted on. */
+const acmeRunHalf = { starts: [] as string[][], attaches: 0, installProbes: 0 };
+
+/**
+ * A third-party runtime adapter with a REAL run half — api-key auth, its OWN credential
+ * lifetime, its OWN env names, and (new) a working install / start / attach path.
+ *
+ * ⛔ IT USED TO SHARE `runHalfStub`, WHOSE FIVE RUN-HALF METHODS ALL THROW, and all four
+ * `POST /api/sandboxes` cases below named `runtime: 'claude-code'` — so acme appeared
+ * only in the PROVIDER slot. That left this file, the repo's one living out-of-tree
+ * sample, covering registration / listing / auth / credential storage and NOTHING of
+ * 「装 CLI → 起 agent → 出输出」 — the half where every real-machine defect has been found
+ * (04 §8 ★8b「验不到的那一半」).
+ */
 const acmeAdapter: RuntimeAdapter = {
-  // ⛔ 运行半边本测试不涉及，但**契约要求它在** —— 见 `_run-half.ts`。
-  ...runHalfStub,
   id: 'acme-agent',
   displayName: 'Acme Agent',
   vendor: 'Acme Inc',
   // NOT one of the built-in vendors' lifetimes — the platform must use THIS number.
   credentialTtlMs: { 'api-key': ACME_KEY_TTL_MS },
+  // Its OWN env names — neither is in any hard-coded platform table (05 §4.1 ★4.1a).
+  reservedEnvNames: { credential: ['ACME_API_KEY'], redirect: ['ACME_CONFIG_DIR'] },
+  configDirEnvNames: ['ACME_CONFIG_DIR'],
+  apiKeyPrefix: 'acme-',
+  connectivityTargets: ['api.acme.invalid'],
+  // ── run half: preinstalled, so the orchestrator probes and moves on ────────
+  getInstallPlan: () => ({
+    strategy: 'preinstalled',
+    packageManagerCmds: [],
+    requiredBinaries: ['acme'],
+    envRequirements: [],
+  }),
+  isInstalled: async () => {
+    acmeRunHalf.installProbes += 1;
+    return true;
+  },
+  install: async () => {
+    throw new Error('acme declares preinstalled; install() must never be called');
+  },
+  buildStartCommand: (task) => {
+    const cmd = ['acme', 'run'];
+    if (task.prompt !== undefined && task.prompt !== '') cmd.push('--', task.prompt);
+    acmeRunHalf.starts.push(cmd);
+    return { cmd, cwd: task.workdir };
+  },
+  buildAttachCommand: () => {
+    acmeRunHalf.attaches += 1;
+    return { cmd: ['acme', 'shell'] };
+  },
+  // ⛔ NO `parseOutput` ON PURPOSE — that is a legal declaration ("this runtime has no
+  //    structured mode"), and the platform must then fall back to `stdout-chunk`
+  //    (04 §3 ★3y) rather than dropping every event on the floor.
   loginCommand: () => ['acme', 'login'],
   getAuthMethods: (): RuntimeAuthMethod[] => ['api-key'],
   validateApiKey: (secret: string): ApiKeyFormatVerdict =>
@@ -318,6 +373,41 @@ describe('an out-of-tree module registers a provider + a runtime adapter (04 §8
     expect(acmeProvider.calls).toContain('destroy');
   });
 
+  it("⛔ POST /api/sandboxes with runtime:'acme-agent' drives the THIRD-PARTY RUN HALF", async () => {
+    // ⛔ THE HALF THAT HAD NEVER RUN. Every other create case here names
+    // `runtime: 'claude-code'`, so the out-of-tree adapter's install probe / start
+    // command had zero coverage — and that is the half where the real-machine defects
+    // live (04 §8 ★8b). This case exercises the `starting` 段 end to end THROUGH the
+    // third-party adapter: `getInstallPlan` → `isInstalled` → credential inject →
+    // agent session bootstrap.
+    const probesBefore = acmeRunHalf.installProbes;
+    const attachesBefore = acmeRunHalf.attaches;
+    // ⚠️ Slice from HERE: earlier cases in this file provision through the same provider
+    // with `runtime: 'claude-code'`, so an unscoped search would happily find a BUILT-IN
+    // adapter's argv and call it proof that the third party's ran.
+    const execsBefore = acmeProvider.execs.length;
+    const created = await request(app.getHttpServer())
+      .post('/api/sandboxes')
+      .send({ projectId: 'prj-acme', runtime: 'acme-agent', provider: 'acme' })
+      .expect(201);
+    const id = created.body.id as string;
+    await waitForStatus(id, 'running');
+
+    // the orchestrator really asked THIS adapter whether its CLI is present…
+    expect(acmeRunHalf.installProbes).toBeGreaterThan(probesBefore);
+    // …and the agent session was built from THIS adapter's argv, not a built-in's.
+    expect(acmeRunHalf.attaches).toBeGreaterThan(attachesBefore);
+    // the adapter's argv really reached the sandbox: `tmux new-session … acme shell`
+    const newSession = acmeProvider.execs
+      .slice(execsBefore)
+      .find((cmd) => cmd.includes('new-session'));
+    expect(newSession, 'the agent tmux session was never started').toBeDefined();
+    // the tmux policy shell-quotes each argv token, so match the quoted form
+    expect(newSession?.join(' ')).toContain("'acme' 'shell'");
+
+    await request(app.getHttpServer()).delete(`/api/sandboxes/${id}`).send({}).expect(204);
+  });
+
   it('capability negotiation applies to it: require:{snapshot} → 409 UNSUPPORTED_CAPABILITY', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/sandboxes')
@@ -386,6 +476,31 @@ describe('an out-of-tree module registers a provider + a runtime adapter (04 §8
     expect(acme.credentials).toHaveLength(1);
     const expiresAt = Date.parse(acme.credentials[0].expiresAt!);
     expect(Math.abs(expiresAt - (submittedAt + ACME_KEY_TTL_MS))).toBeLessThan(60_000);
+  });
+
+  it("the third party's OWN env names are blacklisted — registry-derived, not table-derived", () => {
+    // ⛔ THE SECURITY HALF OF 05 §4.1 ★4.1a. `ACME_CONFIG_DIR` appears in NO hard-coded
+    // platform table; it is reserved only because the adapter declared it and the boot
+    // hook folded the registry into the blacklist. The redirect class is the one with no
+    // other backstop: the provision env merge order protects credential NAMES (the
+    // credential is written last and wins), but nothing stops a user-set
+    // `ACME_CONFIG_DIR` from pointing the CLI at an agent-writable directory.
+    expect(isReservedEnvName('ACME_API_KEY')).toBe(true);
+    expect(isReservedEnvName('ACME_CONFIG_DIR')).toBe(true);
+    // and the door really refuses it — not just the predicate
+    expect(() =>
+      EnvVarSet.create([{ key: 'ACME_CONFIG_DIR', value: '/workspace/evil' }]),
+    ).toThrow();
+  });
+
+  it('GET /api/runtimes carries the adapter-declared apiKeyPrefix (04 §3 ★3z)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/runtimes').expect(200);
+    const rows = res.body as RuntimeDto[];
+    // ⛔ The frontend held the product's ONLY `runtimeId === '<id>'` literal to pick a
+    //    prefix, so a valid third-party key was marked malformed. The fact now travels.
+    expect(rows.find((r) => r.id === 'acme-agent')?.apiKeyPrefix).toBe('acme-');
+    expect(rows.find((r) => r.id === 'codex')?.apiKeyPrefix).toBe('sk-');
+    expect(rows.find((r) => r.id === 'claude-code')?.apiKeyPrefix).toBe('sk-ant-');
   });
 
   it('registering the same provider name / runtime id twice FAILS FAST (04 §8)', () => {

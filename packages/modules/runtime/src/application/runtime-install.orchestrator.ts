@@ -82,8 +82,11 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
 
   async ensureInstalled(input: EnsureRuntimeInstalledInput): Promise<void> {
     const adapter = this.adapterFor(input.runtimeId);
-    // PURE — no IO. The same call happens on the create path purely to warn the user
-    // ("claude-code takes ~12.5 min on this image"); only this one drives behaviour.
+    // PURE — no IO. ⚠️ **这是全仓唯一一处驱动行为的 `getInstallPlan` 调用**（契约注释此前
+    // 写着「it is called twice … once in the create-time validation path purely to WARN」
+    // —— 那个调用点不存在；创建期用户真看到的那句警告来自
+    // `oci-image-spec.provider.ts` 读镜像 LABEL 的 `RUNTIME_NOT_PREINSTALLED`，路径完全
+    // 不同。契约那段已照实改写）。
     const plan = adapter.getInstallPlan(input.image);
     // 每一次探测都经审计 exec 包一层（03 §7.8）。⚠️ **只包探测，不包 `install()`**：
     // 一次冷装是十几分钟、上万行 npm 输出，把它逐条记进审计流等于把运行日志灌进
@@ -93,6 +96,28 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     const present = await this.probeInstalled(adapter, probeExec, input.runtimeId);
 
     const installation = await this.openRecord(input, probeExec, present, plan, adapter);
+
+    // ⛔ `sidecar-inject` IS RESERVED IN THE CONTRACT AND HAS NO IMPLEMENTATION PATH —
+    //    SAY SO (04 §3 `RuntimeInstallPlan.strategy`). The branch below tests
+    //    `!== 'install-on-start'`, which silently lumped `sidecar-inject` in with
+    //    `preinstalled`: an adapter returning it got the CLI treated as already
+    //    installed, and when the probe disagreed the message read 「declares X as
+    //    sidecar-inject, but it is not present」 — a sentence about a missing binary for
+    //    a strategy the platform never attempted. ⚠️ THE FIX IS NOT TO IMPLEMENT IT: the
+    //    contract marks it reserved deliberately. The fix is that "not supported yet"
+    //    must not look like "your image is broken".
+    if (plan.strategy === 'sidecar-inject') {
+      const reason =
+        `runtime '${input.runtimeId}' asked for install strategy 'sidecar-inject', ` +
+        'which the platform does not support yet (04 §3 reserves the value but no ' +
+        "install path exists). Use 'preinstalled' or 'install-on-start'.";
+      await this.recordFailure(installation, reason);
+      throw new RuntimeInstallFailedError(reason);
+    }
+
+    // ⚠️ The presence check comes AFTER the strategy check on purpose: a binary that
+    // happens to be on PATH would otherwise make an unsupported declaration look like it
+    // worked, which is the same silence one line up, just luckier.
     if (present) return;
 
     if (plan.strategy !== 'install-on-start') {

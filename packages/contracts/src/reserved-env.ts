@@ -18,4 +18,38 @@ export {
   RUNTIME_CREDENTIAL_ENV_NAMES,
   CREDENTIAL_REDIRECT_ENV_NAMES,
   isReservedEnvName,
+  registerReservedEnvNames,
+  registeredReservedEnvNames,
+  resetRegisteredReservedEnvNames,
 } from '@platform/shared-kernel';
+
+import type { RuntimeAdapter, RuntimeAdapterRegistry } from './runtime-adapter.contract';
+
+/**
+ * Every env name the REGISTERED adapters declare as theirs (04 §3 ★3z
+ * `reservedEnvNames`), both classes flattened — this is what the runtime context feeds
+ * `registerReservedEnvNames` at boot.
+ *
+ * ⚠️ THE TWO CLASSES ARE FLATTENED HERE ON PURPOSE, AND THEY ARE STILL DECLARED
+ * SEPARATELY. The blacklist treats them identically (both are refused), but the split
+ * carries the REASON, which is what 05 §4.1's CI list is about: `credential` names are
+ * additionally protected by the env merge ORDER, `redirect` names are protected by
+ * NOTHING ELSE. Losing the distinction at the declaration site would make it
+ * impossible to state the second, stronger clause at all.
+ */
+export function runtimeReservedEnvNamesOf(
+  registry: Pick<RuntimeAdapterRegistry, 'list'>,
+): string[] {
+  return adapterReservedEnvNames(registry.list());
+}
+
+/** Same, over an explicit adapter list (the reconcile test drives this half). */
+export function adapterReservedEnvNames(adapters: readonly RuntimeAdapter[]): string[] {
+  const names = new Set<string>();
+  for (const adapter of adapters) {
+    const declared = adapter.reservedEnvNames;
+    if (!declared) continue;
+    for (const name of [...declared.credential, ...declared.redirect]) names.add(name);
+  }
+  return [...names];
+}

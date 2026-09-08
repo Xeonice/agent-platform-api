@@ -2,7 +2,13 @@ import http from 'node:http';
 import tls from 'node:tls';
 import { Injectable, Inject } from '@nestjs/common';
 import { builtinImageRef, CLOCK, type Clock } from '@platform/shared-kernel';
-import { parseImageRef, type ConnectivityResult, type ProxyConfig } from '@platform/contracts';
+import {
+  RUNTIME_ADAPTER_REGISTRY,
+  parseImageRef,
+  type ConnectivityResult,
+  type ProxyConfig,
+  type RuntimeAdapterRegistry,
+} from '@platform/contracts';
 import { SystemSettingsService } from '../system-settings.service';
 
 /**
@@ -86,6 +92,7 @@ export class ConnectivityProbe {
   constructor(
     @Inject(SystemSettingsService) private readonly settings: ProxySource,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
   ) {}
 
   /**
@@ -97,20 +104,58 @@ export class ConnectivityProbe {
    */
   targets(): Target[] {
     return [
-      {
-        host: 'api.anthropic.com',
-        port: 443,
-        tls: true,
-        modelApi: true,
-        why: 'claude-code 的模型 API',
-      },
-      { host: 'api.openai.com', port: 443, tls: true, modelApi: true, why: 'codex 的模型 API' },
+      ...this.modelApiTargets(),
       {
         ...registryTargetOf(builtinImageRef()),
         modelApi: false,
         why: '预制镜像所在的镜像仓库（由 SANDBOX_DEFAULT_IMAGE 推出）',
       },
     ];
+  }
+
+  /**
+   * 模型 API 那几条 —— **由注册的 RuntimeAdapter 申报**（`connectivityTargets`，04 §3 ★3z）。
+   *
+   * ⚠️ 这里原本是两行写死的 `api.anthropic.com` / `api.openai.com`。**讽刺的是同一个函数
+   * 上方那段注释花了一整段论证镜像仓库那条「必须从 `SANDBOX_DEFAULT_IMAGE` 推导不能硬编
+   * 码」**，理由一字不差地适用于这两条：探一个与这台机器上跑的 runtime 无关的端点，
+   * 探通了不代表能用、探不通也不代表不能用 —— 两个方向都在撒谎。而 `offline` 的判据是
+   * 「模型 API **全部**不可达」，所以一台只装了第三方 runtime 的机器，会被两个它根本不用的
+   * 端点判成离线，同时**它自己的端点一次都没被探过**。
+   *
+   * ⛔ 「零 runtime 注册」不会被判成离线：`offline` 的两处判据都写着
+   * `modelApis.length > 0 && modelApis.every(!ok)`（`initialization.service.ts` /
+   * `outbound-network.check.ts`），空集合走不到那一步。这一条在这里记一笔，是因为
+   * 「把清单改成动态的」正是让那个 `length > 0` 从冗余变成必需的那个改动。
+   *
+   * 去重按 `host:port`：两个 adapter 申报同一个域名时只探一次，`why` 合并成一句。
+   */
+  private modelApiTargets(): Target[] {
+    const byKey = new Map<string, { host: string; port: number; tls: boolean; whys: string[] }>();
+    for (const adapter of this.runtimes.list()) {
+      for (const raw of adapter.connectivityTargets ?? []) {
+        const authority = raw.trim();
+        if (authority === '') continue;
+        const { host, port } = splitHostPort(authority);
+        if (host === '') continue;
+        const tls = !isLoopback(host);
+        const key = `${host}:${String(port ?? (tls ? 443 : 80))}`;
+        const existing = byKey.get(key);
+        const why = `${adapter.displayName} 的模型 API`;
+        if (existing) {
+          if (!existing.whys.includes(why)) existing.whys.push(why);
+          continue;
+        }
+        byKey.set(key, { host, port: port ?? (tls ? 443 : 80), tls, whys: [why] });
+      }
+    }
+    return [...byKey.values()].map((t) => ({
+      host: t.host,
+      port: t.port,
+      tls: t.tls,
+      modelApi: true,
+      why: t.whys.join(' / '),
+    }));
   }
 
   /**

@@ -1,5 +1,9 @@
 import type { ProcessSpec, ProcessStream, ResolvedImageSpec } from './sandbox-provider.contract';
-import type { AuthChallengeDto, RuntimeAuthMethod } from './schemas/runtime.schema';
+import type {
+  AuthChallengeDto,
+  RuntimeAuthMethod,
+  RuntimeSecretMethod,
+} from './schemas/runtime.schema';
 
 /**
  * RuntimeAdapter contract — S4 AUTH + INJECT subset (docs/backend/04 §3). A
@@ -207,6 +211,30 @@ export interface RuntimeRefreshCapability {
   /** Cheap probe the scanner runs in a seeded HOME to trigger the CLI's own refresh. */
   probeCommand: string[];
   /**
+   * Where this CLI reads its provider auth file, RELATIVE to the isolated helper HOME
+   * (codex: `auth.json`, i.e. `$CODEX_HOME/auth.json`). REQUIRED, not optional.
+   *
+   * ⚠️ IT IS REQUIRED BECAUSE THE DEFAULT WAS A SILENT LIE. The scanner used to write
+   * (and read back) a hard-coded `auth.json`, which for any CLI that names its file
+   * differently means: the seed lands somewhere the CLI never looks → the probe runs
+   * UNAUTHENTICATED → the scanner reads back THE VERY FILE IT JUST WROTE → a lenient
+   * parser says "parsed fine" → a brand-new credential row is stored carrying the SAME
+   * expired token. Forever "refreshed", forever stale, with no error and no log
+   * (05 §5.1 ★5.1a ②). Making it required means a third party cannot inherit codex's
+   * filename by accident; testkit RA-18 covers the other half (the parser must throw).
+   */
+  authFileRelPath: string;
+  /**
+   * Which auth methods this capability actually applies to. REQUIRED.
+   *
+   * ⚠️ THE PLATFORM MUST NOT GUESS THIS EITHER. The refresh candidate query used to
+   * hard-code `obtained_via === 'oauth-device'` inside the credential REPOSITORY — a
+   * filter no adapter can see, which silently overruled its declaration for anything
+   * obtained via `setup-token` / `access-token-paste` (05 §5.1 ★5.1a ①). It is the
+   * same class of fact as `credentialTtlMs`: a vendor fact, so it is declared here.
+   */
+  eligibleMethods: readonly RuntimeAuthMethod[];
+  /**
    * Parse the CLI-rewritten provider auth file into the material a REFRESHED credential
    * is stored from. This is the THIRD birth site of a credential (alongside
    * `completeAuth` / `createCredentialFromSecret`), so it obeys the same split as the
@@ -233,12 +261,19 @@ export interface RefreshedRuntimeAuth {
  * (image, runtime) PAIR, never on the runtime alone — the same `claude-code` is a
  * zero-install on one image and a measured 753s install on another.
  *
- * It is a PURE function: no IO, no network, no side effects. It is called twice for
- * different purposes — once in the create-time validation path purely to WARN the
- * user ("claude-code takes ~12.5 min on this image, consider another one"), and once
- * inside the provision workflow's `starting`段 to decide whether `install()` runs
- * (03 §4.3 ③). Only the second call writes anything, and it writes in its OWN short
- * transaction, never in T1 (13 §2.3.2 / 23 §4.3).
+ * It is a PURE function: no IO, no network, no side effects.
+ *
+ * ⚠️ THIS COMMENT USED TO CLAIM IT IS "called twice — once in the create-time
+ * validation path purely to WARN the user". THAT CALL SITE DOES NOT EXIST. The only
+ * driver in `src/` is `runtime-install.orchestrator.ts` inside the provision
+ * workflow's `starting`段 (03 §4.3 ③); the other two occurrences are adapters calling
+ * their OWN plan to read the command list back. The create-time warning users really
+ * see comes from a different path entirely — `oci-image-spec.provider.ts` reading the
+ * image LABEL (`RUNTIME_NOT_PREINSTALLED`). Documenting a caller that is not there
+ * sends the next reader hunting for it, and makes a real gap look covered.
+ *
+ * The one call that does run writes in its OWN short transaction, never in T1
+ * (13 §2.3.2 / 23 §4.3).
  */
 export interface RuntimeInstallPlan {
   /**
@@ -480,6 +515,71 @@ export interface RuntimeAdapter {
    */
   readonly credentialTtlMs?: Readonly<Partial<Record<RuntimeAuthMethod, number>>>;
 
+  // ── STATIC FACTS THE PLATFORM NEEDS ABOUT THIS RUNTIME (04 §3 ★3z) ──────────
+  //
+  // Every member below is OPTIONAL, and the semantics of omitting one are always the
+  // same: "this runtime HAS NO such fact" — never "the platform will guess". Guessing
+  // is precisely what these slots replace: each of them used to exist in platform code
+  // as a built-in CLI literal (`'auth.json'`, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`,
+  // `api.anthropic.com`/`api.openai.com`, `sk-`/`sk-ant-`), which is invisible to a
+  // third-party adapter and fails SILENTLY for it. `credentialTtlMs` above is the
+  // proven precedent — its own comment argues, verbatim, why a fact of this class
+  // belongs to the adapter and not to the application layer.
+
+  /**
+   * Env var names that redirect this CLI at a config/credential DIRECTORY (codex:
+   * `CODEX_HOME`; claude: `CLAUDE_CONFIG_DIR`). The auth helper points EVERY one of
+   * them at the throw-away HOME it mints per login/refresh, alongside `HOME` itself.
+   *
+   * ⚠️ WHY IT MATTERS FOR A THIRD PARTY: a CLI that locates its credentials through
+   * `$ACME_CONFIG_DIR` rather than `$HOME` writes the freshly-minted login into the
+   * BACKEND PROCESS's real home directory — outside the `mkdtemp` HOME that
+   * `dispose()` deletes, so it survives the session, and two concurrent logins share
+   * one directory. Omitting it is correct only for a CLI that honours `HOME` alone.
+   */
+  readonly configDirEnvNames?: readonly string[];
+
+  /**
+   * Env var names a user must never be able to set on an image/project/task, split by
+   * WHY (05 §4.1 P1-2). `credential` = names this adapter injects a secret through;
+   * `redirect` = names that point the CLI at a different credential directory. The
+   * platform UNIONs these with its own base blacklist, so a third party's names are
+   * refused by `EnvVarSet` exactly like the built-ins'.
+   *
+   * ⛔ THIS ONE IS A SECURITY SLOT, NOT A TIDINESS SLOT. The env merge order
+   * (`{...image.env, ...credential.env}`) already protects the CREDENTIAL class — the
+   * credential is written last and wins. It does NOTHING for the REDIRECT class: a
+   * user-set `ACME_CONFIG_DIR` pointing at an agent-writable directory inside the
+   * workspace is not overwritten by anything, and the CLI reads its credentials from
+   * there. Declaring the names is the only defence that class has.
+   */
+  readonly reservedEnvNames?: {
+    readonly credential: readonly string[];
+    readonly redirect: readonly string[];
+  };
+
+  /**
+   * The prefix a well-formed api-key for this provider starts with (`sk-` / `sk-ant-`),
+   * surfaced on `RuntimeDto` so the UI can hint and pre-validate. Purely advisory —
+   * the authoritative check is `validateApiKey`, which runs server-side.
+   *
+   * ⚠️ It exists because the frontend held the ONLY `runtimeId === '<id>'` literal
+   * comparison left in the product (`web/src/lib/credential/authFlow.ts`), which marks
+   * a perfectly valid third-party key as malformed.
+   */
+  readonly apiKeyPrefix?: string;
+
+  /**
+   * Hostnames (`host` or `host:port`) this runtime's model API lives at, for the
+   * outbound-connectivity diagnostic. Collected from every registered adapter, so the
+   * probe no longer hard-codes `api.anthropic.com` / `api.openai.com`.
+   *
+   * ⚠️ The `offline` verdict is "every model-API target failed", so a third-party
+   * install used to be declared offline by two endpoints it does not use — while its
+   * own endpoint was never probed at all.
+   */
+  readonly connectivityTargets?: readonly string[];
+
   /** The interactive login command for a method (helper starts it in a real pty). */
   loginCommand(method: RuntimeAuthMethod): string[];
   /** Available auth methods; return order = recommended priority (04 §3). */
@@ -521,9 +621,18 @@ export interface RuntimeAdapter {
    * the application layer treats an absent check as "no format constraint".
    */
   validateApiKey?(secret: string): ApiKeyFormatVerdict;
-  /** api-key / access-token-paste short-circuit — pure, no sandbox host (05 §3.1). */
+  /**
+   * api-key / access-token-paste short-circuit — pure, no sandbox host (05 §3.1).
+   *
+   * ⚠️ `RuntimeSecretMethod` IS THE SAME CLOSED SET THE WIRE ACCEPTS. It used to be an
+   * inline `'api-key' | 'access-token-paste'` union while the wire schema only allowed
+   * `'api-key'`, so the second half of this signature had no way to be reached: the
+   * request schema refused it, the application layer filtered it out of `authMethods`,
+   * and the call site hard-coded `'api-key'`. Sharing one enum makes the two halves
+   * fail together instead of drifting silently apart.
+   */
   createCredentialFromSecret?(
-    method: 'api-key' | 'access-token-paste',
+    method: RuntimeSecretMethod,
     secret: string,
   ): Promise<RuntimeCredential>;
   /** Materialize an existing Vault credential into a new sandbox (05 §4). */

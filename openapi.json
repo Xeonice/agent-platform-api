@@ -1408,7 +1408,7 @@
             }
           }
         },
-        "summary": "Store an api-key directly (short-circuit, no helper/pty)",
+        "summary": "Store a pasted secret directly — api-key or access-token (no helper/pty)",
         "tags": [
           "runtime"
         ]
@@ -3410,22 +3410,17 @@
           "authMethods": {
             "type": "array",
             "items": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "oauth-device",
-                    "setup-token"
-                  ]
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "api-key"
-                  ]
-                }
+              "type": "string",
+              "enum": [
+                "oauth-device",
+                "setup-token",
+                "api-key",
+                "access-token-paste"
               ]
             }
+          },
+          "apiKeyPrefix": {
+            "type": "string"
           },
           "credentialStatus": {
             "type": "string",
@@ -3620,7 +3615,8 @@
           "method": {
             "type": "string",
             "enum": [
-              "api-key"
+              "api-key",
+              "access-token-paste"
             ]
           },
           "secret": {

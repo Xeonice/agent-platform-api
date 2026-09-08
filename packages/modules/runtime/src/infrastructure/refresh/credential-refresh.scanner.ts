@@ -6,14 +6,31 @@ import type { Clock } from '@platform/shared-kernel';
 import { RUNTIME_ADAPTER_REGISTRY } from '@platform/contracts';
 import type { RuntimeAdapterRegistry } from '@platform/contracts';
 import { RuntimeCredentialService } from '@platform/credential';
-import type { RuntimeSecretPayload } from '@platform/credential';
+import type { RuntimeRefreshDue, RuntimeSecretPayload } from '@platform/credential';
 import { AUTH_HELPER } from '../../domain/ports/auth-helper.port';
 import type { AuthHelper } from '../../domain/ports/auth-helper.port';
 
 /** Scan cadence + how far ahead of expiry to refresh + the new token TTL (05 §5.1). */
 const SCAN_INTERVAL_MS = 15 * 60_000;
 const REFRESH_LEAD_MS = 30 * 60_000;
-/** TTL of the CLI-refreshed access token (codex-class hourly default, 05 §5.1). */
+/**
+ * LAST-RESORT lifetime for a refreshed access token, used only when the adapter
+ * declares no `credentialTtlMs` for the method the credential was obtained through.
+ *
+ * ⛔ IT USED TO BE THE ONLY ANSWER, AND THAT WAS THE BUG (05 §5.1 ★5.1a ③). Its own
+ * comment said 「codex-class hourly default」 — i.e. one vendor's number, stamped on
+ * every runtime's refreshed token regardless of how long that token really lives. The
+ * contract comment on `credentialTtlMs` argues against exactly this, word for word:
+ * 「keying it off the METHOD alone would hand every third-party runtime that happens to
+ * use `oauth-device` the Codex hour」. The LOGIN path already asked the adapter; this
+ * path did not. Same mistake, two code paths, only one of them fixed.
+ *
+ * ⚠️ IT IS KEPT RATHER THAN DELETED because a lifetime of `null` here would mean 「never
+ * expires」, which is the one answer that is certainly wrong for a token the CLI just
+ * had to refresh — the credential would then never come due again and would silently
+ * rot. testkit RA-19 makes an adapter declare its real number, so a compliant adapter
+ * never reaches this line.
+ */
 const REFRESHED_ACCESS_TTL_MS = 60 * 60_000;
 /**
  * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 刷新要在 PTY 里跑一次
@@ -67,7 +84,7 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
         if (this.inFlight.has(item.credentialId)) continue; // per-cred in-flight dedup
         this.inFlight.add(item.credentialId);
         try {
-          await this.refreshOne(item.credentialId, item.runtimeId);
+          await this.refreshOne(item);
         } catch (e) {
           this.logger.warn(`refresh failed for ${item.credentialId}: ${(e as Error).message}`);
           await this.credentials.recordRefreshFailure(item.credentialId);
@@ -80,15 +97,22 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
     }
   }
 
-  private async refreshOne(credentialId: string, runtimeId: string): Promise<void> {
+  private async refreshOne(item: RuntimeRefreshDue): Promise<void> {
+    const { credentialId, runtimeId, obtainedVia } = item;
     // Dispatch to the runtime's adapter: only a runtime that DECLARED a
     // refreshCapability is refreshed here (05 §5.1). Others (claude setup-token /
     // api-key, or any new runtime without one) are skipped gracefully — no error,
     // no failure recorded, no scanner-side `runtimeId === 'codex'` branch.
-    const cap = this.registry.has(runtimeId)
-      ? this.registry.get(runtimeId).refreshCapability
-      : undefined;
-    if (!cap) return;
+    const adapter = this.registry.has(runtimeId) ? this.registry.get(runtimeId) : undefined;
+    const cap = adapter?.refreshCapability;
+    if (!adapter || !cap) return;
+    // ⚠️ AND ONLY THE METHODS THE ADAPTER SAYS ARE REFRESHABLE (05 §5.1 ★5.1a ①). This
+    // check used to live in the credential REPOSITORY as `obtainedVia === 'oauth-device'`
+    // — Codex's login shape, in a place the adapter cannot see and cannot override. It
+    // belongs here, where the adapter's own declaration is in hand. Skipping is silent
+    // ON PURPOSE and costs nothing: it is not a failure, so it must not burn one of the
+    // three retries that eventually mark a credential expired.
+    if (!cap.eligibleMethods.includes(obtainedVia)) return;
     // The ONE call site of the refresh out-口 (05 §4.3 裁决 D-18): `prepareForRefresh`
     // is the only method that hands out the complete auth file with the real
     // refresh_token, and this scanner — which never touches a sandbox — is its only
@@ -96,22 +120,37 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
     // NO_CREDENTIAL here and is recorded as a refresh failure by `runOnce`.
     const mat = await this.credentials.prepareForRefresh(credentialId);
     try {
-      const session = await this.helper.openSession(cap.probeCommand, [
-        { relPath: 'auth.json', content: mat.authFile, mode: 0o600 },
-      ]);
+      // ⚠️ `cap.authFileRelPath`, NOT a hard-coded `'auth.json'` (05 §5.1 ★5.1a ②). With
+      // the wrong name the seed lands where the CLI never looks, the probe runs
+      // unauthenticated, and the read-back below returns THE FILE WE JUST WROTE — a
+      // lenient parser then reports success and the platform stores the same expired
+      // token as 「refreshed」, forever, without a single log line. `configDirEnvNames`
+      // is handed over too so the helper points THIS runtime's config-dir variables at
+      // the throw-away HOME (04 §3 ★3z); the mkdtemp-per-session + `finally` delete
+      // discipline (P1-3) is unchanged.
+      const session = await this.helper.openSession(
+        cap.probeCommand,
+        [{ relPath: cap.authFileRelPath, content: mat.authFile, mode: 0o600 }],
+        adapter.configDirEnvNames,
+      );
       try {
         await this.waitForExit(session.pty, REFRESH_CMD_TIMEOUT_MS);
-        const raw = await readFile(join(session.homeDir, 'auth.json'), 'utf8');
+        const raw = await readFile(join(session.homeDir, cap.authFileRelPath), 'utf8');
         const { accessToken, credentialFiles } = cap.parseRefreshedAuth(raw);
         if (!accessToken) throw new Error('refreshed auth file missing access token');
         // Re-store BOTH halves: the adapter's freshly SANITIZED injectable files and the
         // platform-only complete file. Dropping `credentialFiles` here would leave the
         // next injection with nothing to write (05 §4.3 ②).
         const payload: RuntimeSecretPayload = { accessToken, credentialFiles, authFile: raw };
+        // The refreshed token's lifetime is a VENDOR fact ⇒ ask the adapter, exactly
+        // as the login path does (04 §3 `credentialTtlMs`). The constant below is the
+        // last resort for an adapter that declares none; RA-19 keeps compliant
+        // adapters off it.
+        const ttlMs = adapter.credentialTtlMs?.[obtainedVia] ?? REFRESHED_ACCESS_TTL_MS;
         await this.credentials.applyRefresh(
           credentialId,
           payload,
-          shiftMs(this.clock.now(), REFRESHED_ACCESS_TTL_MS),
+          shiftMs(this.clock.now(), ttlMs),
         );
       } finally {
         await session.dispose();

@@ -219,6 +219,41 @@ describe('ensureRuntimeInstalled — the three steps (03 §4.3 ③)', () => {
     expect((await h.repo.find('s1', 'stub'))!.status).toBe('failed');
   });
 
+  it("⛔ `sidecar-inject` fails LOUDLY as 'not supported yet', not silently as preinstalled", async () => {
+    // The strategy is RESERVED in the contract with no implementation path (04 §3).
+    // The guard below used to be `plan.strategy !== 'install-on-start'`, which lumped it
+    // in with `preinstalled` — so returning it meant「treated as already installed」, and
+    // when the probe disagreed the user got 「declares X as sidecar-inject, but it is not
+    // present」: a sentence about a missing binary for a strategy nobody attempted.
+    const adapter = new StubAdapter(
+      'stub',
+      plan({ strategy: 'sidecar-inject', packageManagerCmds: [] }),
+    );
+    adapter.probeResults = [false];
+    const h = harness(adapter);
+
+    await expect(
+      h.service.ensureInstalled({ sandboxId: 's1', runtimeId: 'stub', image: IMAGE, exec: h.exec }),
+    ).rejects.toThrow(/does not support yet/);
+    expect(adapter.installCalls).toBe(0);
+    expect((await h.repo.find('s1', 'stub'))!.error).toMatch(/sidecar-inject/);
+  });
+
+  it('⛔ …even when the binary happens to BE present — luck is not support', async () => {
+    // A CLI that is coincidentally on PATH would otherwise make an unsupported
+    // declaration look like it worked: the same silence, one probe result luckier.
+    const adapter = new StubAdapter(
+      'stub',
+      plan({ strategy: 'sidecar-inject', packageManagerCmds: [] }),
+    );
+    adapter.probeResults = [true];
+    const h = harness(adapter);
+
+    await expect(
+      h.service.ensureInstalled({ sandboxId: 's1', runtimeId: 'stub', image: IMAGE, exec: h.exec }),
+    ).rejects.toThrow(/does not support yet/);
+  });
+
   it('an install failure surfaces as INSTALL_FAILED and records the reason', async () => {
     const adapter = new StubAdapter('stub', plan());
     adapter.probeResults = [false];

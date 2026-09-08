@@ -31,6 +31,22 @@ export const RUNTIME_BEGIN_METHODS = ['oauth-device', 'setup-token'] as const;
 export const RuntimeBeginMethodSchema = z.enum(RUNTIME_BEGIN_METHODS);
 export type RuntimeBeginMethod = z.infer<typeof RuntimeBeginMethodSchema>;
 
+/**
+ * The NON-interactive methods: the user already holds the secret and pastes it, so
+ * there is no helper, no pty and no challenge (05 §3.1). Exactly the complement of
+ * `RUNTIME_BEGIN_METHODS` within `RUNTIME_AUTH_METHODS`.
+ *
+ * ⚠️ ONE ENUM, THREE PLACES. `RuntimeAdapter.createCredentialFromSecret`, this wire
+ * schema and the application call site must agree; they did not. The contract took
+ * `'api-key' | 'access-token-paste'`, the wire took only `z.literal('api-key')`, and
+ * the service passed a hard-coded `'api-key'` — so an adapter offering
+ * `access-token-paste` had its declaration accepted, stripped from `authMethods`, and
+ * then refused at the door. Deriving all three from one constant removes the seam.
+ */
+export const RUNTIME_SECRET_METHODS = ['api-key', 'access-token-paste'] as const;
+export const RuntimeSecretMethodSchema = z.enum(RUNTIME_SECRET_METHODS);
+export type RuntimeSecretMethod = z.infer<typeof RuntimeSecretMethodSchema>;
+
 /** 生效【模式】 (05 §4 `active_auth_method`): the two-way global switch. */
 export const RUNTIME_AUTH_MODES = ['account', 'api-key'] as const;
 export const RuntimeAuthModeSchema = z.enum(RUNTIME_AUTH_MODES);
@@ -94,7 +110,22 @@ export const RuntimeDtoSchema = z.object({
   id: z.string(),
   displayName: z.string(),
   vendor: z.string(),
-  authMethods: z.array(RuntimeBeginMethodSchema.or(z.literal('api-key'))),
+  /**
+   * What `getAuthMethods()` declared — the WHOLE closed set (RA-09), not a
+   * hand-maintained subset.
+   *
+   * ⚠️ IT USED TO BE `RuntimeBeginMethodSchema.or(z.literal('api-key'))`, i.e.
+   * structurally unable to carry `access-token-paste`, and the application layer
+   * filtered that value out to fit. An adapter whose only method was
+   * `access-token-paste` therefore reached the UI as `authMethods: []` — rendered as
+   * 「没有可用的配置方式」 for a runtime that is perfectly configurable.
+   */
+  authMethods: z.array(RuntimeAuthMethodSchema),
+  /**
+   * Advisory prefix for this runtime's api-key (`sk-` / `sk-ant-`), declared by the
+   * adapter. Absent ⇒ the runtime states no prefix; the UI must then not judge format.
+   */
+  apiKeyPrefix: z.string().optional(),
   /** Aggregate status of the ACTIVE credential (badge). Per-mode detail is `credentials`. */
   credentialStatus: CredentialStatusSchema,
   maskedIdentifier: z.string().optional(),
@@ -132,7 +163,7 @@ export type CompleteAuthRequest = z.infer<typeof CompleteAuthRequestSchema>;
  * echoes its value, only the field path + rule.
  */
 export const SubmitSecretRequestSchema = z.object({
-  method: z.literal('api-key'),
+  method: RuntimeSecretMethodSchema,
   secret: z.string().min(1).max(8192),
 });
 export type SubmitSecretRequest = z.infer<typeof SubmitSecretRequestSchema>;
