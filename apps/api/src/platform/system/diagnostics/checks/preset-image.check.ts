@@ -298,10 +298,7 @@ export class PresetImageCheck implements DiagnoseCheck {
         //    在真该等的那一档上以为几秒就好。`provision-plan.ts` 早就记着两档的真实
         //    量级差（「boxlite 档 431MB vs 本地 build 产物 13GB」），这里照着说。
         summary: `预制镜像已就绪，但尚未在本机铺开 —— **首个任务要先把镜像铺开**（${firstRunCost(provider.name)}），之后每次 3–4 秒`,
-        hint:
-          '不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ' +
-          ref +
-          '。⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个',
+        hint: stageHint(provider.name, ref),
         // ⚠️ 与上面那格相反：还没铺开 ⇒ 首个任务真的要去 registry 拉。
         detail: { ...detail, staged: false, dependsOnRegistryNow: true },
       };
@@ -347,6 +344,40 @@ function registryHostOf(ref: string): string {
  * ⚠️ 说的是「量级」不是精确秒数：它取决于带宽与磁盘。给一个数量级正确的预期，
  * 好过给一个精确但属于另一档的数字。
  */
+/**
+ * 「想提前铺开怎么办」——**必须按档分岔**（2026-09-09 真机发现）。
+ *
+ * ⛔ 上一版恒为 `docker pull <ref>`。而 macOS 上的默认档是 **boxlite，那台机器上通常
+ * 根本没有 docker**（boxlite 官方卖点就是 "no root, no background service"）——一条
+ * 执行不了的命令，还会让人以为平台依赖 docker。
+ *
+ * ⚠️ 这正是本仓已经踩过并写进 `connectivity.probe.ts#hintFor` 的那个坑的另一半：
+ * 那次的教训原话是「躲过了『支去配代理』，却掉进了同一个坑的另一半：**支去装 docker**」。
+ * 同一份纪律，这里漏了一处。
+ *
+ * ⚠️ **boxlite 档没有「手动提前拉」这条路，就要如实说没有**，别编一个。平台运行期
+ * 独占 `~/.boxlite`，此时跑 boxlite CLI 会直接拿不到锁（实测原文：
+ * `Another BoxliteRuntime is already using directory`）。⇒ 那一档的正确答案是
+ * 「什么都不用做，也别去手动拉」，而不是换一条命令继续指使用户。
+ */
+function stageHint(tier: string, ref: string): string {
+  if (tier === 'boxlite') {
+    return (
+      '不需要做任何事：第一个任务会自动把镜像铺开（耗时见上一行）。' +
+      '⛔ **别用 boxlite CLI 手动提前拉** —— 平台运行期独占 `~/.boxlite`，' +
+      'CLI 会拿不到锁（实测报「Another BoxliteRuntime is already using directory」）。' +
+      '想提前铺开就直接建一个任务，那一次多花的时间就是上面那个数。' +
+      // ⚠️ 这半句两档都要有（2026-09-05 那条纪律）：铺开这件事本身**要 registry 在**，
+      //    换成 boxlite 档也一样 —— 它同样是去 ghcr 拉。⛔ 别因为改了前半句就把它丢掉。
+      '⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个'
+    );
+  }
+  return (
+    `不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ${ref}` +
+    '。⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个'
+  );
+}
+
 function firstRunCost(tier: string): string {
   return tier === 'boxlite'
     ? 'boxlite 档镜像压缩后约 0.3GB，通常十几秒到一分钟'
