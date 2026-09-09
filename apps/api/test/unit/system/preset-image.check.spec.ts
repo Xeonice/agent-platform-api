@@ -372,6 +372,41 @@ describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令
   });
 });
 
+/**
+ * ⭐ **第 5 步的「怎么提前铺开」必须按档分岔**（2026-09-09 真机发现）。
+ *
+ * ⛔ 上一版恒为 `docker pull <ref>`。macOS 的默认档是 **boxlite，那台机器上通常没有
+ * docker** —— 一条执行不了的命令，还让人以为平台依赖 docker。这与本仓已经写进
+ * `connectivity.probe.ts#hintFor` 的教训是同一个坑的另一半：「躲过了『支去配代理』，
+ * 却掉进了『支去装 docker』」。
+ *
+ * MUTATION: 把 `stageHint` 改回恒定的 docker 那句 ⇒ 第一条红。
+ */
+describe('第 5 步的下一步动作按档分岔（⛔ boxlite 档不许提 docker）', () => {
+  const notStaged = { imageStaged: () => Promise.resolve(false) };
+
+  it('⭐ boxlite 档：不提 docker，也不指使去手动拉（平台运行期独占 ~/.boxlite）', async () => {
+    const r = await run(build({ ...notStaged, defaultProvider: 'boxlite' }));
+    expect(r.status).toBe('info');
+    expect(r.hint).not.toContain('docker');
+    expect(r.hint).toContain('第一个任务会自动');
+    // 「没有手动路」要**说出来**，而不是留白让人自己去试那条会失败的路。
+    expect(r.hint).toContain('拿不到锁');
+  });
+
+  it('aio 档：仍然给 docker pull（那一档本来就有 docker）', async () => {
+    const r = await run(build({ ...notStaged, defaultProvider: 'aio' }));
+    expect(r.hint).toContain('docker pull');
+  });
+
+  it('⛔ 两档都要保留「这一步要 registry 在」—— 铺开本身两档都得去拉', async () => {
+    for (const tier of ['boxlite', 'aio']) {
+      const r = await run(build({ ...notStaged, defaultProvider: tier }));
+      expect(r.hint).toContain('要 registry 在');
+    }
+  });
+});
+
 describe('⑥ 第 ⑧ 项与第 ⑤ 项不是同一个问题，界面上要说出来（2026-09-05 修）', () => {
   it('⛔ 已 staged ⇒ 明说「此刻不需要 registry」', async () => {
     // 同一屏上第 ⑤ 项可能正报 registry ❌。两个结论**都对**（字节早在本机，registry 只在

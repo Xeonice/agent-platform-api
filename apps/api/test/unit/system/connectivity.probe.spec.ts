@@ -241,6 +241,45 @@ describe('TLS 探测真的用坐标里的端口（不是硬编码 443）', () =>
   });
 });
 
+/**
+ * ⭐ **超时的 hint 不许说「无法连接」、也不许把「配代理」当成唯一下一步**
+ * （2026-09-09 用户质疑「这个怎么判断的，不太合理吧」之后补的）。
+ *
+ * 实测同一台机器、同一分钟内连 api.openai.com 的 TLS 握手：**2346 / 2460 / 10245ms**，
+ * 而同一轮里判为"可达"的两条是 2430ms 与 3263ms —— 当时的单目标预算 3500ms 只比最慢的
+ * 成功样本高 7%，判定实际上是掷硬币。此时那句「无法连接 …… 出网需代理时填 HTTPS_PROXY」
+ * 是**两重错**：① 把慢说成连不上；② 给的下一步解决不了慢，用户照做后问题还在。
+ *
+ * MUTATION: 删掉 `hintFor` 里的 `ProbeTimeoutError` 分支 ⇒ 本条红。
+ */
+describe('超时的措辞（慢 ≠ 不通）', () => {
+  let tcp: net.Server | undefined;
+  afterEach(() => {
+    tcp?.close();
+    tcp = undefined;
+  });
+
+  it('⭐ 握手超时 ⇒ timedOut=true，且 hint 说「不等于连不上」而不是「无法连接」', async () => {
+    // 接受 TCP 连接但永不应答 ⇒ TLS 握手必然吃满预算（不碰外网）。
+    const port = await new Promise<number>((resolve) => {
+      tcp = net.createServer(() => {});
+      tcp.listen(0, '127.0.0.1', () => resolve((tcp!.address() as AddressInfo).port));
+    });
+    // ⚠️ 用 `0.0.0.0` 而不是 `127.0.0.1`：本机回环有**专属**的 hint 分支（那条要留着），
+    //    这里要验的是普通外部目标那一条。`0.0.0.0` 连的仍是本机监听，一样不出网。
+    const target = { host: '0.0.0.0', port, tls: true, modelApi: true, why: '测试目标' };
+
+    const r = await probeOne(target, undefined, 300, new AbortController().signal, clock);
+
+    expect(r.ok).toBe(false);
+    expect(r.timedOut).toBe(true);
+    // ⛔ 这三条是本条用例的全部要点。
+    expect(r.hint).not.toContain('无法连接');
+    expect(r.hint).toContain('不等于连不上');
+    expect(r.hint).toContain('重跑一次');
+  });
+});
+
 describe('本地 registry 的真实回环探测（本次事故的回归测试）', () => {
   const saved = process.env.SANDBOX_DEFAULT_IMAGE;
   afterEach(() => {

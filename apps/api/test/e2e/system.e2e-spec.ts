@@ -19,6 +19,7 @@ import type {
 import { AppModule } from '../../src/app.module';
 import { configurePlatformApp } from '../../src/bootstrap/configure-app';
 import { ConnectivityProbe } from '../../src/platform/system/diagnostics/connectivity.probe';
+import { DIAGNOSE_TIMEOUT_MS } from '../../src/platform/system/diagnostics/diagnostics.service';
 import { MEMORY_SOURCES, type MemorySources } from '../../src/platform/system/memory.probe';
 import { AuditRepository } from '../../src/platform/audit/audit.repository';
 import {
@@ -310,7 +311,10 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     const start = frames.find((f): f is DiagnoseStartFrame => f.event === 'start')!;
     expect(frames[0]!.event).toBe('start');
     expect(start.checks.map((c) => c.id)).toEqual([...DIAGNOSE_CHECK_IDS]);
-    expect(start.timeoutMs).toBe(5000);
+    // ⚠️ **对着常量断言，别抄一个字面量**（2026-09-09 改：预算 5s→10s 时这里红了）。
+    //    这一条要钉的不变量是「首帧报的预算 = 调度器实际用的预算」——抄一个 5000 进来
+    //    只会把它变成「预算不许改」，而那不是任何人想要的约束（unit spec 早就是这么写的）。
+    expect(start.timeoutMs).toBe(DIAGNOSE_TIMEOUT_MS);
 
     const checks = frames.filter((f): f is DiagnoseCheckFrame => f.event === 'check');
     expect(checks).toHaveLength(8);
@@ -322,7 +326,7 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     expect(done.event).toBe('done');
     expect(done.okCount + done.infoCount + done.warnCount + done.failCount).toBe(8);
     // 并行 ⇒ 整轮 ≈ 最慢那项，绝不是八项累加（02 §5.3 订正的那一条）。
-    expect(done.totalMs).toBeLessThan(8 * 5000);
+    expect(done.totalMs).toBeLessThan(8 * DIAGNOSE_TIMEOUT_MS);
   }, 30_000);
 
   it('第 ⑧ 项走完五步链到 staged（本仓真的备齐了预制镜像时的样子）', async () => {
