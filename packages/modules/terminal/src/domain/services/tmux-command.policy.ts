@@ -26,7 +26,7 @@ export function hasSessionCmd(session: string): string[] {
 
 /** What a terminal client runs to join the already-running agent session. */
 export function attachSessionCmd(session: string): string[] {
-  return ['tmux', UTF8, 'attach', '-t', session];
+  return ['tmux', UTF8, ...MOUSE_ON, 'attach', '-t', session];
 }
 
 /**
@@ -83,6 +83,53 @@ export const DEFAULT_AGENT_TMUX_SIZE = { cols: 200, rows: 50 } as const;
  */
 const UTF8 = '-u';
 
+/**
+ * **让 tmux 自己接管滚轮** —— 少了它，滚轮在 agent 界面里要么没反应、要么乱按方向键。
+ *
+ * ── 它修的是什么（2026-09-08 真机 + 逐层实测）────────────────────────────────
+ * 症状：codex 里滚轮完全滚不动，claude code 却可以。**两个 CLI 的差别只是巧合**，
+ * 真正的原因在这一层：
+ *
+ *   ① `tmux attach` 会把客户端（xterm.js）切进**备用屏**（实测抓到 `ESC[?1049h`）；
+ *   ② 备用屏里没有回滚缓冲，于是 xterm.js 把滚轮**翻译成方向键**
+ *      （实测：一格滚轮 = `ESC[A` × 17 / `ESC[B` × 17）；
+ *   ③ 那串方向键原样送进 pane 里的 agent —— claude code 把 Up/Down 当作滚动自己的
+ *      记录，看起来「能滚」；codex 的 TUI 不这么映射，于是「完全没反应」。
+ *
+ * ⚠️ 所以今天的行为不只是「滚不动」：**每一次滚轮都在往 agent 里灌 17 个方向键**，
+ * 在别的 TUI 上足以移动选中项或翻历史 —— 那比没反应更糟。
+ *
+ * ⇒ `mouse on` 之后 tmux 会向客户端开启鼠标上报，xterm.js 改为转发鼠标事件而不再造
+ * 方向键；tmux 3.3a 的默认绑定是
+ *
+ *     WheelUpPane  if-shell "#{||:#{pane_in_mode},#{mouse_any_flag}}" {send-keys -M} {copy-mode -e}
+ *
+ * 判据是「pane 已在某个 mode **或** 应用自己要了鼠标」，**与备用屏无关**：
+ *   · 应用没要鼠标 ⇒ `copy-mode -e`，滚的是 tmux 自己的回滚缓冲 —— 两个 CLI 都管用；
+ *   · 应用要了鼠标 ⇒ 转发给它，由它自己处理滚轮 —— 也是对的。
+ *
+ * ⚠️ **代价说清楚**：开了鼠标之后，拖拽选择会进 tmux 而不是浏览器原生选区。
+ * xterm.js 的标准出路是**按住 Shift 拖拽**回到原生选择/复制。
+ *
+ * ⛔ **设在平台侧而不是镜像里**：与 `-u` 同一条理由 —— 用户可以注册自己的镜像，
+ * 那边不会有我们的 `~/.tmux.conf`。这一侧是唯一能给出保证的地方。
+ * ⚠️ 顺带：tmux 3.3a **没有** `alternate-scroll` 这个选项（实测 `invalid option`），
+ * 别照着老文章去设它。
+ *
+ * ⚠️ 放在 **每个命令之前**，而不只是建会话那次。`mouse` 是服务端全局项、且**只在设的
+ * 那一刻生效**：只在 `new-session` 上设，**修复前就已经起着的会话永远拿不到**
+ * —— 真机复现过（三个 running 沙箱全是 `mouse off`，用户滚轮照旧变方向键）。
+ * ⇒ `attach` 之前也设一次，于是**每次打开终端都会把它补上**，老会话跟着受益。
+ *
+ * ⚠️ 顺序很关键：写在 `attach` / `new-session -A`（都是前台阻塞）**之后**的话，
+ * 要等它们退出才轮得到执行 —— 等于没设。所以一律前置。
+ *
+ * ⛔ `has-session` 那条**不加**：它的退出码是载荷（1 = 会话不在，调用方据此走新建那条
+ * 路）。虽然实测链式之后退出码仍然是 `has-session` 的，但那是一个不必冒的险 ——
+ * attach 那条已经覆盖了「老会话补设」这件事。
+ */
+const MOUSE_ON = ['set', '-g', 'mouse', 'on', ';'];
+
 export function newSessionCmd(
   session: string,
   command: AgentCommand,
@@ -91,6 +138,7 @@ export function newSessionCmd(
   return [
     'tmux',
     UTF8,
+    ...MOUSE_ON,
     'new-session',
     '-d',
     '-x',
@@ -111,7 +159,7 @@ export function newSessionCmd(
  * destructive task (I-SBX-10).
  */
 export function attachOrCreateCmd(session: string, command: AgentCommand): string[] {
-  return ['tmux', UTF8, 'new-session', '-A', '-s', session, agentScript(command)];
+  return ['tmux', UTF8, ...MOUSE_ON, 'new-session', '-A', '-s', session, agentScript(command)];
 }
 
 /**
