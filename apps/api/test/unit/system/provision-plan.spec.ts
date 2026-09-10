@@ -10,7 +10,16 @@ import {
 const REF = 'localhost:5001/platform/sandbox:v2';
 
 function facts(over: Partial<ProvisionFacts> = {}): ProvisionFacts {
-  return { ref: REF, inLocalDocker: false, asset: null, upstream: null, ...over };
+  // ⚠️ `providerCanStage` 默认 **false**：既有那批用例问的是「registry 里缺字节时怎么搬」，
+  //    而 provider 自己那条路的终点根本不是 registry —— 默认打开会把它们的判据改掉。
+  return {
+    ref: REF,
+    inLocalDocker: false,
+    asset: null,
+    upstream: null,
+    providerCanStage: false,
+    ...over,
+  };
 }
 
 const BOXLITE_ARM: ReleaseAsset = {
@@ -142,5 +151,48 @@ describe('registryAuthorityOf —— 与 registryTargetOf 同一条判据', () =
   it('⛔ Docker Hub 短名不许被当成主机名（`alpine` 去 DNS 解析必然失败）', () => {
     expect(registryAuthorityOf('alpine:3.20')).toBe('docker.io');
     expect(registryAuthorityOf('library/alpine')).toBe('docker.io');
+  });
+});
+
+describe('★ 第五条路：provider 自己铺（2026-09-10 加）', () => {
+  /**
+   * ⚠️ **它和另外三条问的不是同一个问题。** 那三条的终点都是一个 registry，回答的是
+   * 「registry 里没有这张镜像」；这一条回答「registry 有，但 provider 自己的库里没有」——
+   * 而后者是一台出厂机器的常态（`SANDBOX_DEFAULT_IMAGE` 留空 ⇒ 坐标就是公网 registry）。
+   *
+   * ⛔ 没有这一条时，一台健康的 mac（boxlite、无 docker、ghcr 可达）会被判成「搬不了」，
+   * 于是平台把自己能做的事**后置给第一个任务** —— 实测那是 20 分钟，且落在用户写完
+   * 指令点发起之后。2026-09-10 真机复现。
+   *
+   * MUTATION: 删掉 `providerCanStage` 那一段 ⇒ 第一条红。
+   */
+  it('⭐ 三条都不成立但 provider 有这只手 ⇒ provider-stage（⛔ 不是 build-only）', () => {
+    const p = planProvision(facts({ providerCanStage: true }));
+    expect(p.source).toBe('provider-stage');
+    expect(p.provisionable).toBe(true);
+    // 终点不是 registry —— 这一条正是它与另外三条的分界。
+    expect(p.to).not.toContain(registryAuthorityOf(REF));
+  });
+
+  it('⛔ 不许抢占更便宜的三条 —— 它一定出网、一定拉整张镜像', () => {
+    expect(planProvision(facts({ providerCanStage: true, inLocalDocker: true })).source).toBe(
+      'local-docker',
+    );
+    expect(planProvision(facts({ providerCanStage: true, asset: BOXLITE_ARM })).source).toBe(
+      'release-asset',
+    );
+    expect(
+      planProvision(facts({ providerCanStage: true, upstream: 'ghcr.io/x/y:latest' })).source,
+    ).toBe('upstream-copy');
+  });
+
+  it('没有这只手 ⇒ 照旧 build-only（⛔ 不许因为加了这条就凭空说搬得了）', () => {
+    const p = planProvision(facts({ providerCanStage: false }));
+    expect(p.source).toBe('build-only');
+    expect(p.provisionable).toBe(false);
+  });
+
+  it('⛔ 体积如实 null —— 层的 size 要读 manifest 才知道，两个架构还不一样', () => {
+    expect(planProvision(facts({ providerCanStage: true })).sizeBytes).toBeNull();
   });
 });

@@ -197,6 +197,27 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     });
   }
 
+  /**
+   * 把镜像铺进 BoxLite 自己的库 —— **不建 box**（契约 `stageImage`）。
+   *
+   * ⚠️ **这就是 `create()` 里那 190 秒/20 分钟的前半段**，只是提前到向导第 3 步发生。
+   * 后置到第一个任务的代价是实测出来的：这台机器到 ghcr 的带宽 **273 KB/s**，
+   * 而 arm64 那份是 8 层、压缩后 320MB ⇒ 约 20 分钟。那 20 分钟落在
+   * 「用户写完指令点了发起」之后，是整条链路上最差的时机。
+   *
+   * ⚠️ **传给 SDK 的 reference 必须与 `create()` 用的是同一个** —— `pinnedImageRef(image)`。
+   * BoxLite 的 store 按「递给它的那个字符串」逐字记账（见 `boxlite-image-store.ts` 的
+   * 实测），拿一个 tag 去铺、拿 digest 去问，会得到「铺过了但查不到」。
+   *
+   * ⚠️ **幂等**：已经在库里时 `pull` 直接返回，不重下（契约要求可重复调用）。
+   */
+  async stageImage(image: ResolvedImageSpec): Promise<void> {
+    return this.guard(async () => {
+      const runtime = await this.getRuntime();
+      await runtime.images.pull(pinnedImageRef(image));
+    });
+  }
+
   async start(handle: SandboxHandle): Promise<void> {
     return this.guard(async () => {
       const box = await this.findBox(handle);

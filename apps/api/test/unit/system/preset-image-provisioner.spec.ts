@@ -9,6 +9,7 @@ import {
   type ImageSeedPort,
   type ProvisionEvent,
   type UpstreamCopyPort,
+  type ProviderStagePort,
 } from '../../../src/platform/system/preset-image/preset-image-provisioner';
 
 const REF = 'localhost:5001/platform/sandbox:v2';
@@ -29,6 +30,11 @@ const withUpstream: AssetsDirSource = {
   upstreamRef: () => 'ghcr.io/x/cap-boxlite-sandbox:v0.26.0',
 };
 const noCopy: UpstreamCopyPort = { copy: () => Promise.resolve(undefined) };
+/** 默认「没有这只手」—— 既有用例验的是另外几条路，⛔ 别让这条把它们的判据抢走。 */
+const noStage: ProviderStagePort = {
+  canStage: () => false,
+  stage: () => Promise.reject(new Error('本用例不该走到 provider-stage 这条路')),
+};
 const host: HostFacts = { defaultProvider: () => 'boxlite', platform: () => 'linux/arm64' };
 
 function make(
@@ -36,8 +42,9 @@ function make(
   assets: AssetsDirSource = noAssets,
   seeder: ImageSeedPort = { seed: () => Promise.resolve() },
   copier: UpstreamCopyPort = noCopy,
+  providerStage: ProviderStagePort = noStage,
 ): PresetImageProvisioner {
-  return new PresetImageProvisioner(docker, assets, host, seeder, copier);
+  return new PresetImageProvisioner(docker, assets, host, seeder, copier, providerStage);
 }
 
 async function collect(p: PresetImageProvisioner): Promise<ProvisionEvent[]> {
@@ -239,5 +246,65 @@ describe('upstream-copy —— 没有 docker 也搬得动', () => {
     const seed = vi.fn(() => Promise.resolve());
     await collect(make(dockerStub(), withUpstream, { seed }, noCopy));
     expect(seed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('★ provider-stage：平台自己铺，不经 registry（2026-09-10 加）', () => {
+  const canStage = (calls: string[]): ProviderStagePort => ({
+    canStage: () => true,
+    stage: (ref) => {
+      calls.push(ref);
+      return Promise.resolve();
+    },
+  });
+
+  /**
+   * ⭐ **这条路一步到位**：终点是 provider 自己的库，不经过 registry。
+   *
+   * ⛔ 三个 skipped 必须**如实报**而不是画成"瞬间完成的 ✅"（同 `local-docker` 那条纪律）：
+   * 平台这一路一个字节都没经手，说"下载完成/校验通过"是撒谎。
+   *
+   * MUTATION: 把 `provider-stage` 分支删掉 ⇒ 前两条红。
+   */
+  it('⭐ 真的调了 provider.stage，并且**不 push**（这条路不经 docker）', async () => {
+    const calls: string[] = [];
+    const pushed: string[] = [];
+    const docker = dockerStub({
+      push: (ref) => {
+        pushed.push(ref);
+        return Promise.resolve();
+      },
+    });
+    const events = await collect(make(docker, noAssets, undefined, noCopy, canStage(calls)));
+
+    expect(calls).toHaveLength(1);
+    // ⛔ 这条路不经 docker —— push 一次都不该发生（同 `upstream-copy` 那条被用例逮住的错）。
+    expect(pushed).toEqual([]);
+    const reg = events.filter((e) => e.stage === 'register');
+    expect(reg.at(-1)?.status).toBe('ok');
+  });
+
+  it('⛔ fetch/verify/load 如实报 skipped —— 平台这一路没经手字节', async () => {
+    const events = await collect(make(dockerStub(), noAssets, undefined, noCopy, canStage([])));
+    for (const stage of ['fetch', 'verify', 'load'] as const) {
+      expect(events.find((e) => e.stage === stage)?.status).toBe('skipped');
+    }
+  });
+
+  it('⛔ 没有假进度 —— SDK 的 pull 不给回调，就不许画百分比', async () => {
+    const events = await collect(make(dockerStub(), noAssets, undefined, noCopy, canStage([])));
+    for (const e of events.filter((x) => x.stage === 'register')) {
+      expect(e.progress ?? null).toBeNull();
+    }
+  });
+
+  it('铺开失败要冒出来 —— ⛔ 不许吞掉后照样报成功', async () => {
+    const boom: ProviderStagePort = {
+      canStage: () => true,
+      stage: () => Promise.reject(new Error('pull 挂了')),
+    };
+    await expect(collect(make(dockerStub(), noAssets, undefined, noCopy, boom))).rejects.toThrow(
+      'pull 挂了',
+    );
   });
 });

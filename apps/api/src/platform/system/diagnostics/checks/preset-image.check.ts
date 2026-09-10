@@ -264,6 +264,8 @@ export class PresetImageCheck implements DiagnoseCheck {
         detail: { ...detail, staged: null },
       };
     }
+    // ⚠️ **未 staged 那一格要带 provision 计划**，所以这里先问一次「平台自己搬得了吗」。
+    const plan = await this.provisioner.plan();
     try {
       const staged = await provider.imageStaged({
         ref: registered.ref,
@@ -297,10 +299,13 @@ export class PresetImageCheck implements DiagnoseCheck {
         //    ⚠️ 一个大 40 倍的估计不是「保守」：它让人以为要去泡杯咖啡，或者反过来，
         //    在真该等的那一档上以为几秒就好。`provision-plan.ts` 早就记着两档的真实
         //    量级差（「boxlite 档 431MB vs 本地 build 产物 13GB」），这里照着说。
-        summary: `预制镜像已就绪，但尚未在本机铺开 —— **首个任务要先把镜像铺开**（${firstRunCost(provider.name)}），之后每次 3–4 秒`,
-        hint: stageHint(provider.name, ref),
+        summary: `预制镜像已就绪，但尚未在本机铺开（${firstRunCost(provider.name)}）`,
+        hint: stageHint(provider.name, ref, plan.provisionable),
         // ⚠️ 与上面那格相反：还没铺开 ⇒ 首个任务真的要去 registry 拉。
-        detail: { ...detail, staged: false, dependsOnRegistryNow: true },
+        // ⚠️ **`provision` 必须带上**：前端据它给出 [准备镜像] 按钮（`provisionOfferOf`）。
+        //    此前这一格恒不带 ⇒ 向导只能指路，铺开被后置到第一个任务 —— 而那正是
+        //    用户明确否掉的形态（2026-09-10）。
+        detail: { ...detail, staged: false, dependsOnRegistryNow: true, provision: plan },
       };
     } catch (e) {
       // provider 实现了这个方法但**这一次答不上来**（store 读不了 / 运行时不可用）：
@@ -360,7 +365,22 @@ function registryHostOf(ref: string): string {
  * `Another BoxliteRuntime is already using directory`）。⇒ 那一档的正确答案是
  * 「什么都不用做，也别去手动拉」，而不是换一条命令继续指使用户。
  */
-function stageHint(tier: string, ref: string): string {
+function stageHint(tier: string, ref: string, canProvisionNow: boolean): string {
+  // ⛔ **平台自己能做的时候，一个字都不要教用户去做**（`provision-plan.ts` 文件头那条：
+  //    平台明明能做而让用户去敲命令，那不是指路，是把自己的活派给用户）。
+  //
+  // ⚠️ 这一格此前恒为「不需要做任何事，第一个任务会自动铺开」—— 读起来像体贴，实际是
+  //    **把等待挪到了最差的时机**：用户写完指令、点了发起，然后对着一个静默进度条等
+  //    十几到二十分钟（实测这台机器到 ghcr 273 KB/s，boxlite 那张压缩后 320MB ⇒ 约 20 分钟）。
+  //    而且那时它跑在 provision workflow 里，失败就是一个失败的 Task，不是一个可以
+  //    重试的向导步。⇒ 能自己铺就在向导里铺（用户 2026-09-10 明确要求）。
+  if (canProvisionNow) {
+    return (
+      '**现在就可以铺**：点 [准备镜像]，平台自己去拉一次（不必等第一个任务 —— ' +
+      '那时你已经写完指令，等待落在最差的时机）。⚠️ 这一步**要 registry 在**' +
+      '——第 ⑤ 项若报镜像仓库不可达，先解决那个'
+    );
+  }
   if (tier === 'boxlite') {
     return (
       '不需要做任何事：第一个任务会自动把镜像铺开（耗时见上一行）。' +

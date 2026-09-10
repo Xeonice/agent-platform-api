@@ -17,7 +17,12 @@ import { OutboundNetworkCheck } from './diagnostics/checks/outbound-network.chec
 import { WsLoopbackCheck } from './diagnostics/checks/ws-loopback.check';
 import { DataRootFsCheck } from './diagnostics/checks/data-root-fs.check';
 import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
-import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
+import {
+  IMAGE_FACADE,
+  SANDBOX_PROVIDER_REGISTRY,
+  type ImageFacade,
+  type ProviderRegistry,
+} from '@platform/contracts';
 import { ImageSeeder, OciRegistryClient } from '@platform/image';
 import { copyImage } from './preset-image/registry-copy';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
@@ -57,11 +62,12 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
       // ⚠️ 三个依赖都收窄成窄口子（`PresetImageDockerPort` / `AssetsDirSource` /
       //    `HostFacts`），于是搬运的全部判据可以在纯单测里钉住，而不必起一个 docker。
       provide: PresetImageProvisioner,
-      inject: [DockerodeProvisionAdapter, SANDBOX_PROVIDER_REGISTRY, ImageSeeder],
+      inject: [DockerodeProvisionAdapter, SANDBOX_PROVIDER_REGISTRY, ImageSeeder, IMAGE_FACADE],
       useFactory: (
         docker: DockerodeProvisionAdapter,
         providers: ProviderRegistry,
         seeder: ImageSeeder,
+        images: ImageFacade,
       ): PresetImageProvisioner =>
         new PresetImageProvisioner(
           docker,
@@ -89,6 +95,30 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
           {
             copy: (from, to, onProgress): Promise<unknown> =>
               copyImage(new OciRegistryClient(), from, to, process.arch, onProgress),
+          },
+          // ⚠️ 「provider 自己铺」这条路收窄成两个动作（`ProviderStagePort`）：
+          //    有没有这只手 / 铺一次。⛔ 不把整个 registry 递进搬运器。
+          {
+            canStage: (): boolean =>
+              typeof providers.get(providers.defaultProvider).stageImage === 'function',
+            stage: async (ref: string): Promise<void> => {
+              // ⚠️ **digest 必须从库里那条注册记录取，不是拿 tag 硬铺**：provider 的库按
+              //    「递给它的那个字符串」逐字记账（`boxlite-image-store.ts` 实测），
+              //    用 tag 铺、用 pinned ref 问，会得到「铺过了但查不到」。
+              const registered = await images.findRegisteredByRef(ref);
+              if (registered === null) {
+                throw new Error(`'${ref}' 还没注册进平台，铺开之前先让开机播种把它登记上`);
+              }
+              const provider = providers.get(providers.defaultProvider);
+              if (typeof provider.stageImage !== 'function') {
+                throw new Error(`档位 '${provider.name}' 没有「只铺不建」这只手`);
+              }
+              await provider.stageImage({
+                ref: registered.ref,
+                digest: registered.digest,
+                ...(registered.entrypoint ? { entrypoint: registered.entrypoint } : {}),
+              });
+            },
           },
         ),
     },

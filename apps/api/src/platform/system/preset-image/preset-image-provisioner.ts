@@ -113,6 +113,20 @@ export interface UpstreamCopyPort {
   ): Promise<unknown>;
 }
 
+/**
+ * 「让 provider 自己把镜像铺进自己的库」—— 同样收窄成两个动作。
+ *
+ * ⚠️ **刻意不收 `ProviderRegistry`**：搬运器只需要回答两件事（有没有这只手、铺一次），
+ * 收一整个 registry 进来，单测就得扮演一个 provider 的全部方法 —— 而那正是这个文件
+ * 另外四个端口都在避免的事（其中一次绕法当场被 `no-restricted-syntax` 拦下）。
+ */
+export interface ProviderStagePort {
+  /** 当前默认档实现了 `stageImage` 吗。**能力**，不是「铺没铺」。 */
+  canStage(): boolean;
+  /** 把 `ref` 铺进 provider 自己的库。⚠️ 幂等：已经在库里时应当直接返回。 */
+  stage(ref: string): Promise<void>;
+}
+
 export class ProvisionNotPossibleError extends Error {}
 export class ProvisionInFlightError extends Error {}
 
@@ -128,6 +142,7 @@ export class PresetImageProvisioner {
     private readonly host: HostFacts,
     private readonly seeder: ImageSeedPort,
     private readonly copier: UpstreamCopyPort,
+    private readonly providerStage: ProviderStagePort,
   ) {}
 
   /**
@@ -142,7 +157,19 @@ export class PresetImageProvisioner {
     const inLocalDocker = await this.safeHasLocalImage(ref);
     const asset = await this.safePickAsset();
     const upstream = this.assets.upstreamRef() ?? null;
-    return planProvision({ ref, inLocalDocker, asset, upstream });
+    // ⚠️ 这一条是**能力探测**，不触网、不读盘 —— 与另外三个 `safe*` 不同，它不会失败。
+    const providerCanStage = this.safeCanStage();
+    return planProvision({ ref, inLocalDocker, asset, upstream, providerCanStage });
+  }
+
+  /** ⚠️ 与另外三个探查同一条纪律：问不出来 ⇒ 「这条路没有」，⛔ 不让定计划炸掉。 */
+  private safeCanStage(): boolean {
+    try {
+      return this.providerStage.canStage();
+    } catch (e) {
+      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${(e as Error).message}`);
+      return false;
+    }
   }
 
   private async safeHasLocalImage(ref: string): Promise<boolean> {
@@ -198,6 +225,22 @@ export class PresetImageProvisioner {
       throw new ProvisionNotPossibleError(plan.why);
     }
     yield ev('plan', 'ok', `${plan.why}（${plan.from} → ${plan.to}）`);
+
+    if (plan.source === 'provider-stage') {
+      // ⚠️ **这条路一步到位**：终点是 provider 自己的库，不经过 registry，
+      //    所以 fetch/verify/load/register 四步一个都不发生 —— ⛔ 如实报 skipped。
+      yield ev('fetch', 'skipped', '这条路由 provider 自己去拉，平台不经手字节');
+      yield ev('verify', 'skipped', 'provider 自己按 digest 校验（平台不重复一遍）');
+      yield ev('load', 'skipped', '无需装载');
+      // ⚠️ **没有进度可报**：BoxLite 的 `images.pull()` 不给回调（契约 `stageImage` 里
+      //    写明了不发明一个）。⇒ 只报「开始了」与「回来了」，⛔ 不画一个假的百分比。
+      yield ev('register', 'running', `正在把 '${ref}' 铺进${plan.to}（期间没有输出，不是卡死）…`);
+      await this.providerStage.stage(ref);
+      yield ev('register', 'ok', `已铺进${plan.to}`);
+      // ⚠️ **不再播种**：这条路一个字节都没进 registry，镜像的注册信息（第 4 步的判据）
+      //    原样没动。跑一次 `seed()` 只会白白多一次 registry 往返。
+      return;
+    }
 
     if (plan.source === 'upstream-copy') {
       yield* this.copyFromUpstream(plan.from, ref);

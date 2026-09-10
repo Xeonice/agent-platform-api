@@ -499,6 +499,37 @@ export interface SandboxProvider {
    */
   imageStaged?(image: ResolvedImageSpec): Promise<boolean>;
 
+  /**
+   * Put the image into this provider's own local store — WITHOUT creating a sandbox.
+   *
+   * ── Why this exists: the wizard must be able to DO it, not just point at it ──────
+   * ⚠️ `imageStaged` only ASKS. With nothing that can act on a `false`, the platform's
+   * only remaining move is to defer staging to the first task — and 「第一个任务会自动
+   * 铺开」 is exactly the deferral the user rejected: it lands the wait at the worst
+   * possible moment (they wrote a prompt, hit 发起, and now stare at a silent bar for
+   * ~20 minutes on a slow link) and it happens INSIDE provisioning, where a failure is
+   * a failed Task rather than a wizard step that can be retried.
+   *
+   * ⚠️ THE FOUR `provision-plan.ts` PATHS DO NOT COVER THIS. All four end at a REGISTRY
+   * (`local-docker` / `release-asset` / `upstream-copy` all push bytes into one). They
+   * answer 「registry 里没有这张镜像」. This method answers a different question —
+   * 「registry 有，但 PROVIDER 自己的库里没有」 — which is the normal state of a fresh
+   * machine whose `SANDBOX_DEFAULT_IMAGE` is a public registry (the factory default).
+   * MEASURED 2026-09-10: `provision` came back `null` (「搬不了」) on a healthy machine
+   * whose only real need was one `images.pull()`.
+   *
+   * ⚠️ NO CAPABILITY BIT, same reasoning as `imageStaged` above: the branch is
+   * `typeof provider.stageImage === 'function'` at one call site.
+   *
+   * ⚠️ IT MUST BE IDEMPOTENT AND SAFE TO CALL WHEN ALREADY STAGED — the caller may not
+   * have asked `imageStaged` first, and two wizard sessions may overlap.
+   *
+   * ⚠️ NO PROGRESS CALLBACK, ON PURPOSE. BoxLite's `images.pull()` offers none, and
+   * inventing one would force every implementation to fabricate numbers. The caller
+   * reports elapsed time plus the manifest's compressed size, never a fake percentage.
+   */
+  stageImage?(image: ResolvedImageSpec): Promise<void>;
+
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `jobs`. */
