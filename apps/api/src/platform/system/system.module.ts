@@ -19,12 +19,13 @@ import { DataRootFsCheck } from './diagnostics/checks/data-root-fs.check';
 import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
 import {
   IMAGE_FACADE,
+  parseImageRef,
   SANDBOX_PROVIDER_REGISTRY,
   type ImageFacade,
   type ProviderRegistry,
 } from '@platform/contracts';
 import { ImageSeeder, OciRegistryClient } from '@platform/image';
-import { copyImage } from './preset-image/registry-copy';
+import { compressedSizeBytes, copyImage } from './preset-image/registry-copy';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
 import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.adapter';
 
@@ -101,7 +102,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
           {
             canStage: (): boolean =>
               typeof providers.get(providers.defaultProvider).stageImage === 'function',
-            stage: async (ref: string): Promise<void> => {
+            stage: async (ref: string, onProgress): Promise<void> => {
               // ⚠️ **digest 必须从库里那条注册记录取，不是拿 tag 硬铺**：provider 的库按
               //    「递给它的那个字符串」逐字记账（`boxlite-image-store.ts` 实测），
               //    用 tag 铺、用 pinned ref 问，会得到「铺过了但查不到」。
@@ -113,11 +114,30 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
               if (typeof provider.stageImage !== 'function') {
                 throw new Error(`档位 '${provider.name}' 没有「只铺不建」这只手`);
               }
-              await provider.stageImage({
-                ref: registered.ref,
-                digest: registered.digest,
-                ...(registered.entrypoint ? { entrypoint: registered.entrypoint } : {}),
-              });
+              await provider.stageImage(
+                {
+                  ref: registered.ref,
+                  digest: registered.digest,
+                  ...(registered.entrypoint ? { entrypoint: registered.entrypoint } : {}),
+                },
+                onProgress,
+              );
+            },
+          },
+          // ⚠️ 分母：只读 manifest，一个层字节都不拉（`compressedSizeBytes` 的纪律）。
+          {
+            compressedBytes: (ref: string): Promise<number | null> => {
+              // ⚠️ 用契约里那个 `parseImageRef` —— ⛔ 别在这里手写一次 `split(':')`：
+              //    `localhost:5001/img` 的冒号在**主机名**里，手写的那版会把它读成 tag
+              //    （那个坑 `parseImageRef` 的注释里记着，本仓的 boxlite e2e 正踩在上面）。
+              const parsed = parseImageRef(ref);
+              const reference = parsed.digest ?? parsed.tag ?? 'latest';
+              return compressedSizeBytes(
+                new OciRegistryClient(),
+                parsed.name,
+                reference,
+                process.arch,
+              );
             },
           },
         ),

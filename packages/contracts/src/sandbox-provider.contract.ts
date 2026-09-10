@@ -524,11 +524,32 @@ export interface SandboxProvider {
    * ⚠️ IT MUST BE IDEMPOTENT AND SAFE TO CALL WHEN ALREADY STAGED — the caller may not
    * have asked `imageStaged` first, and two wizard sessions may overlap.
    *
-   * ⚠️ NO PROGRESS CALLBACK, ON PURPOSE. BoxLite's `images.pull()` offers none, and
-   * inventing one would force every implementation to fabricate numbers. The caller
-   * reports elapsed time plus the manifest's compressed size, never a fake percentage.
+   * ⚠️ THE PROGRESS CALLBACK IS OPTIONAL ON BOTH SIDES, AND THAT IS THE WHOLE DESIGN.
+   * An earlier version of this comment said 「no progress callback, on purpose —
+   * inventing one would force every implementation to fabricate numbers」. That
+   * reasoning was right about FABRICATION and wrong about the CALLBACK: a provider
+   * that cannot measure simply never calls it, and the caller then falls back to
+   * elapsed time. Nobody is forced to invent anything. What the user actually got
+   * from the strict version was a silent 20-minute bar (MEASURED 2026-09-10).
+   *
+   * ⚠️ WHAT IT REPORTS: `bytesDownloaded` — bytes that landed in this provider's store
+   * SINCE THIS CALL STARTED. Not a percentage, not the store's total.
+   *   · **The provider subtracts its own baseline.** It already has to read its store
+   *     to measure at all, so reading it once more at entry costs nothing — and it
+   *     keeps bytes that were already there from showing up as instant progress.
+   *   · The provider still needs no knowledge of OCI or of which layers belong to
+   *     which image. The CALLER owns the denominator (it reads the manifest).
+   * ⛔ Do NOT report a percentage: the provider does not know the total, and a
+   *    provider-invented total is exactly the fabrication this comment warns about.
+   * ⚠️ It may end BELOW the manifest total when layers were already cached — that is
+   *    honest (less was downloaded), and the call returning is what ends the wait.
+   *
+   * ⚠️ A PROVIDER THAT CANNOT MEASURE MUST STAY SILENT rather than estimate. Same
+   * discipline as `imageStaged`'s 「不知道 is not false」: a wrong number here becomes
+   * a progress bar that stalls at 60% or finishes at 30%, which is worse than a
+   * spinner that honestly says 「no output during this, it is not stuck」.
    */
-  stageImage?(image: ResolvedImageSpec): Promise<void>;
+  stageImage?(image: ResolvedImageSpec, onProgress?: (bytesInStore: number) => void): Promise<void>;
 
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;
