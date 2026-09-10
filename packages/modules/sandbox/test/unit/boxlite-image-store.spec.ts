@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isImageStaged,
   normaliseStoreReference,
+  layerCacheBytes,
 } from '../../src/infrastructure/providers/boxlite/boxlite-image-store';
 
 /**
@@ -121,5 +122,58 @@ describe('normaliseStoreReference —— 只在裸 tag 那条路上动手', () =
     expect(normaliseStoreReference('localhost/platform/sandbox:v2')).toBe(
       'localhost/platform/sandbox:v2',
     );
+  });
+});
+
+const join = (...p: string[]): string => p.join('/');
+
+/**
+ * ⭐ **量 boxlite 的层缓存**（2026-09-10）。
+ *
+ * ⛔ 全部失败路径都必须回 `null`（「测不了」）而不是 0（「什么都没下」）：一个 0 会画成
+ * 一条卡在 0% 的进度条，而字节明明在进来 —— 契约那条「宁可沉默也不要猜」。
+ *
+ * ⚠️ 这里读的是 **BoxLite 的私有目录布局**，SDK 没暴露它。用例把这份耦合钉出来，
+ * 好让哪天升级挪了目录时，红的是它而不是用户屏幕上那条不动的条。
+ */
+describe('layerCacheBytes', () => {
+  const fs = (files: Record<string, number>) => ({
+    readdir: (): Promise<string[]> => Promise.resolve(Object.keys(files)),
+    stat: (p: string): Promise<{ size: number }> => {
+      const name = p.split('/').pop()!;
+      const size = files[name];
+      return size === undefined ? Promise.reject(new Error('ENOENT')) : Promise.resolve({ size });
+    },
+  });
+
+  it('⭐ 累加 stat.size —— ⛔ 不是 du（du 报磁盘块，实测高 4.4%）', async () => {
+    const got = await layerCacheBytes('/home', fs({ 'a.tar.gz': 100, 'b.tar.gz': 250 }), join);
+    expect(got).toBe(350);
+  });
+
+  it('⛔ 目录不存在 ⇒ null，不是 0', async () => {
+    const boom = {
+      readdir: (): Promise<string[]> => Promise.reject(new Error('ENOENT')),
+      stat: (): Promise<{ size: number }> => Promise.reject(new Error('unused')),
+    };
+    expect(await layerCacheBytes('/home', boom, join)).toBeNull();
+  });
+
+  it('⭐ 单个文件读不到 ⇒ 跳过它，⛔ 不让整次测量失败（拉取中改名是正常竞态）', async () => {
+    const files: Record<string, number> = { 'a.tar.gz': 100, 'gone.tar.gz': 0 };
+    const flaky = {
+      readdir: (): Promise<string[]> => Promise.resolve([...Object.keys(files), 'vanished.tar.gz']),
+      stat: (p: string): Promise<{ size: number }> => {
+        const name = p.split('/').pop()!;
+        return name === 'vanished.tar.gz'
+          ? Promise.reject(new Error('ENOENT'))
+          : Promise.resolve({ size: files[name] ?? 0 });
+      },
+    };
+    expect(await layerCacheBytes('/home', flaky, join)).toBe(100);
+  });
+
+  it('空目录 ⇒ 0（那是「确实还没下」，与「测不了」不同）', async () => {
+    expect(await layerCacheBytes('/home', fs({}), join)).toBe(0);
   });
 });

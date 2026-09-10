@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { builtinImageRef } from '@platform/shared-kernel';
+import { builtinImageRefFor } from '@platform/shared-kernel';
 import { pickAsset, planProvision, type ProvisionPlan, type ReleaseAsset } from './provision-plan';
 import { assetPresent, readAssetManifest, verifyAsset } from './release-assets';
 import { streamed } from './callback-stream';
@@ -113,6 +113,30 @@ export interface UpstreamCopyPort {
   ): Promise<unknown>;
 }
 
+/**
+ * 「让 provider 自己把镜像铺进自己的库」—— 同样收窄成两个动作。
+ *
+ * ⚠️ **刻意不收 `ProviderRegistry`**：搬运器只需要回答两件事（有没有这只手、铺一次），
+ * 收一整个 registry 进来，单测就得扮演一个 provider 的全部方法 —— 而那正是这个文件
+ * 另外四个端口都在避免的事（其中一次绕法当场被 `no-restricted-syntax` 拦下）。
+ */
+export interface ProviderStagePort {
+  /** 当前默认档实现了 `stageImage` 吗。**能力**，不是「铺没铺」。 */
+  canStage(): boolean;
+  /**
+   * 把 `ref` 铺进 provider 自己的库。⚠️ 幂等：已经在库里时应当直接返回。
+   *
+   * `onProgress(bytesDownloaded)` 是**本次调用期间新落盘的字节**（契约 `stageImage`）
+   * —— 基线由 provider 自己减掉，⛔ 本搬运器不再做第二次减法。
+   */
+  stage(ref: string, onProgress?: (bytesDownloaded: number) => void): Promise<void>;
+}
+
+/** 「这张镜像压缩后多少字节」—— 进度条的分母。读不到 ⇒ `null`。 */
+export interface ImageSizePort {
+  compressedBytes(ref: string): Promise<number | null>;
+}
+
 export class ProvisionNotPossibleError extends Error {}
 export class ProvisionInFlightError extends Error {}
 
@@ -128,6 +152,8 @@ export class PresetImageProvisioner {
     private readonly host: HostFacts,
     private readonly seeder: ImageSeedPort,
     private readonly copier: UpstreamCopyPort,
+    private readonly providerStage: ProviderStagePort,
+    private readonly imageSize: ImageSizePort,
   ) {}
 
   /**
@@ -138,11 +164,43 @@ export class PresetImageProvisioner {
    * 可降级的问题升级成不可用。
    */
   async plan(): Promise<ProvisionPlan> {
-    const ref = builtinImageRef();
+    const ref = this.targetRef();
     const inLocalDocker = await this.safeHasLocalImage(ref);
     const asset = await this.safePickAsset();
     const upstream = this.assets.upstreamRef() ?? null;
-    return planProvision({ ref, inLocalDocker, asset, upstream });
+    // ⚠️ 这一条是**能力探测**，不触网、不读盘 —— 与另外三个 `safe*` 不同，它不会失败。
+    const providerCanStage = this.safeCanStage();
+    return planProvision({ ref, inLocalDocker, asset, upstream, providerCanStage });
+  }
+
+  /**
+   * 要搬的是**哪一张** —— ⚠️ **必须按档取**（`builtinImageRefFor(defaultProvider)`）。
+   *
+   * ⛔ 此前这里是 `builtinImageRef()`，那是**共用的兜底坐标**。出厂留空时它回的是上游的
+   * `ghcr.io/agent-infra/sandbox:latest`，而这台机器按档该用的是
+   * `ghcr.io/xeonice/agent-platform-boxlite:latest` —— 于是搬运器与诊断链**问的不是同一张
+   * 镜像**：诊断说「boxlite 那张没铺开」，点 [准备镜像] 却去拉 aio 那张。
+   *
+   * ⚠️ **两档的镜像不可互换**（ADR 决策 C：aio 那张容器里有 :8080 的 agent，boxlite 那张
+   * 没有），所以这不是「拉了个差不多的」，是拉了一张**用不了**的 —— 顺利的话在建任务门口
+   * 撞 `IMAGE_PROVIDER_MISMATCH`，不顺利的话它根本没注册进平台，铺到一半才报错。
+   *
+   * ⚠️ 这个病 `builtinImageRefFor` 的注释里点名记过（「同一个 `SANDBOX_DEFAULT_IMAGE`
+   * 被两处各自读取，答案却不一样」）—— **搬运器是漏网的那一处**，2026-09-10 由
+   * `provider-stage` 这条新路捅出来（此前 `provisionable` 恒为 false，根本走不到）。
+   */
+  private targetRef(): string {
+    return builtinImageRefFor(this.host.defaultProvider());
+  }
+
+  /** ⚠️ 与另外三个探查同一条纪律：问不出来 ⇒ 「这条路没有」，⛔ 不让定计划炸掉。 */
+  private safeCanStage(): boolean {
+    try {
+      return this.providerStage.canStage();
+    } catch (e) {
+      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${(e as Error).message}`);
+      return false;
+    }
   }
 
   private async safeHasLocalImage(ref: string): Promise<boolean> {
@@ -190,7 +248,7 @@ export class PresetImageProvisioner {
   }
 
   private async *run(): AsyncGenerator<ProvisionEvent> {
-    const ref = builtinImageRef();
+    const ref = this.targetRef();
     yield ev('plan', 'running', '正在判断这张镜像的字节够不够得着…');
     const plan = await this.plan();
     if (!plan.provisionable) {
@@ -198,6 +256,41 @@ export class PresetImageProvisioner {
       throw new ProvisionNotPossibleError(plan.why);
     }
     yield ev('plan', 'ok', `${plan.why}（${plan.from} → ${plan.to}）`);
+
+    if (plan.source === 'provider-stage') {
+      // ⚠️ **这条路一步到位**：终点是 provider 自己的库，不经过 registry，
+      //    所以 fetch/verify/load/register 四步一个都不发生 —— ⛔ 如实报 skipped。
+      yield ev('fetch', 'skipped', '这条路由 provider 自己去拉，平台不经手字节');
+      yield ev('verify', 'skipped', 'provider 自己按 digest 校验（平台不重复一遍）');
+      yield ev('load', 'skipped', '无需装载');
+      // ── 进度：分母读 manifest（不拉层），分子由 provider 报「本次新落盘字节」──────
+      //
+      // ⚠️ **基线由 provider 自己减**：它本来就要读自己的库才能测，入口多读一次是零成本；
+      //    而库里早就存在的别的镜像的层，因此不会一上来就冒充成进度。
+      // ⚠️ 两个数**各自允许缺席**：分母读不到就不给百分比、只报「已下载 X」；
+      //    分子读不到就连 X 都没有，退回「期间没有输出，不是卡死」。⛔ 任何一个都不许猜。
+      const total = await this.imageSize.compressedBytes(ref);
+      const sizeNote = total === null ? '' : `，共约 ${mib(total)}`;
+      yield ev(
+        'register',
+        'running',
+        `正在把 '${ref}' 铺进${plan.to}${sizeNote}（期间没有输出，不是卡死）…`,
+      );
+      // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
+      yield* streamed<ProvisionEvent>((emit) =>
+        this.providerStage.stage(ref, (done) => {
+          // ⚠️ **clamp 到 1**：分母是 manifest 的压缩总量，而落盘的字节可能略多
+          //    （元数据、并发写的临时文件）。一个 103% 会让人以为读数是坏的。
+          const pct = total === null || total <= 0 ? null : Math.min(1, done / total);
+          const of = total === null ? '' : ` / 约 ${mib(total)}`;
+          emit(ev('register', 'running', `已下载 ${mib(done)}${of}`, pct));
+        }),
+      );
+      yield ev('register', 'ok', `已铺进${plan.to}`);
+      // ⚠️ **不再播种**：这条路一个字节都没进 registry，镜像的注册信息（第 4 步的判据）
+      //    原样没动。跑一次 `seed()` 只会白白多一次 registry 往返。
+      return;
+    }
 
     if (plan.source === 'upstream-copy') {
       yield* this.copyFromUpstream(plan.from, ref);

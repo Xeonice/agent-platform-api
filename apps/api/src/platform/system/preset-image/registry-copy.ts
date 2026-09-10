@@ -72,6 +72,44 @@ export function isIndex(mediaType: string): boolean {
 }
 
 /**
+ * 这张镜像**压缩后一共多少字节** —— 进度条的分母（`provider-stage` 那条路用）。
+ *
+ * ⚠️ **只读 manifest，一个层字节都不拉**（同 `resolve()` 的纪律）：层的 `size` 就写在
+ * manifest 里，两次 HTTP 就够（index 一次 + 平台那份一次）。
+ *
+ * ⚠️ **要先按架构下钻**，⛔ 不能把 index 里所有平台的层加起来 —— 那是这台机器要下的量的
+ * 好几倍，进度条会永远停在 30%。复用 `pickPlatformEntry`（与 `copyImage` 同一条判据）。
+ *
+ * ⚠️ **`size` 缺席的层按 0 计**，并不是失败：分母偏小意味着进度条会提前到 100% 然后
+ * 停在那里等 —— 比一个不动的条好。真读不到 manifest 才返回 `null`（调用方退回「已用时长」）。
+ *
+ * 实测（`ghcr.io/xeonice/agent-platform-boxlite:latest`，arm64）：8 层、320MB，
+ * 与层缓存里 `stat.size` 之和逐字节对得上。
+ */
+export async function compressedSizeBytes(
+  reg: Pick<RegistryCopyPort, 'fetchRawManifest'>,
+  name: string,
+  reference: string,
+  arch: string,
+): Promise<number | null> {
+  try {
+    let { raw, mediaType } = await reg.fetchRawManifest(name, reference);
+    let doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+    if (isIndex(mediaType)) {
+      const entry = pickPlatformEntry(doc, arch);
+      if (entry === null) return null;
+      ({ raw, mediaType } = await reg.fetchRawManifest(name, entry.digest));
+      doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+    }
+    const layers = doc.layers ?? [];
+    if (layers.length === 0) return null;
+    return layers.reduce((sum, l) => sum + (l.size ?? 0), 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 把 `from`（`name:tag`）拷到 `to`（`name:tag`）。
  *
  * ⚠️ **index 会被压平成单平台 manifest**，而不是原样搬整个 index：一个私有化单机部署只跑

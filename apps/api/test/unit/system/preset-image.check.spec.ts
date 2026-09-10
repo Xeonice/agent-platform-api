@@ -382,6 +382,41 @@ describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令
  *
  * MUTATION: 把 `stageHint` 改回恒定的 docker 那句 ⇒ 第一条红。
  */
+/**
+ * ⭐ **平台自己能铺的时候，一个字都不许教用户去做**（2026-09-10，用户明确要求把这件事
+ * 放到向导那一层）。
+ *
+ * ⛔ 这一格此前恒为「不需要做任何事，第一个任务会自动铺开」—— 读起来像体贴，实际是把
+ * 等待挪到了**最差的时机**：用户写完指令、点了发起，然后对着静默进度条等十几到二十分钟
+ * （实测这台机器到 ghcr 273 KB/s，boxlite 那张压缩后 320MB）。而且那时它跑在 provision
+ * workflow 里，失败就是一个失败的 Task，不是一个能重试的向导步。
+ *
+ * MUTATION: 把 `stageHint` 的 `canProvisionNow` 分支删掉 ⇒ 前两条红。
+ */
+describe('★ 未 staged 且平台搬得了 ⇒ 在向导里铺，不再指向第一个任务', () => {
+  const notStaged = { imageStaged: () => Promise.resolve(false) };
+
+  it('⭐ hint 指向 [准备镜像]，⛔ 不再说「第一个任务会自动铺开」', async () => {
+    const r = await run(build({ ...notStaged, provisionable: true }));
+    expect(r.status).toBe('info');
+    expect(r.hint).toContain('准备镜像');
+    expect(r.hint).not.toContain('第一个任务会自动');
+  });
+
+  it('⭐ detail 必须带上 provision 计划 —— 前端据它才给得出那个按钮', async () => {
+    const r = await run(build({ ...notStaged, provisionable: true }));
+    const provision = (r.detail as { provision?: { provisionable?: boolean } }).provision;
+    expect(provision?.provisionable).toBe(true);
+  });
+
+  it('搬不了时才回到按档指路（⛔ 那两条分支不许被这次改动顺手删掉）', async () => {
+    const r = await run(build({ ...notStaged, provisionable: false, defaultProvider: 'boxlite' }));
+    expect(r.hint).not.toContain('准备镜像');
+    expect(r.hint).toContain('第一个任务会自动');
+    expect(r.hint).not.toContain('docker');
+  });
+});
+
 describe('第 5 步的下一步动作按档分岔（⛔ boxlite 档不许提 docker）', () => {
   const notStaged = { imageStaged: () => Promise.resolve(false) };
 

@@ -31,7 +31,24 @@ import { parseImageRef } from '@platform/contracts';
  */
 
 /** 搬运源。`build-only` 是「搬不了」的那一格，留在同一个联合里是为了让 `plan()` 总有话说。 */
-export type ProvisionSource = 'local-docker' | 'release-asset' | 'upstream-copy' | 'build-only';
+export type ProvisionSource =
+  | 'local-docker'
+  | 'release-asset'
+  | 'upstream-copy'
+  /**
+   * **provider 自己把它铺进自己的库**（`SandboxProvider.stageImage`）。
+   *
+   * ⚠️ **它和上面三条问的不是同一个问题。** 那三条的终点都是一个 **registry**
+   * （`registryAuthorityOf(ref)`），回答的是「registry 里没有这张镜像」。这一条回答的是
+   * 「**registry 有，但 provider 自己的库里没有**」—— 而后者才是一台出厂机器的常态：
+   * `SANDBOX_DEFAULT_IMAGE` 留空 ⇒ 坐标就是公网 registry，没什么可往里搬的。
+   *
+   * ⚠️ 2026-09-10 实测：一台健康的 mac（boxlite 档、无 docker、ghcr 可达）跑出来
+   * `provision: null`「搬不了」，而它真正缺的只是一次 `images.pull()`。**四条路全不成立，
+   * 于是平台把自己能做的事后置给了第一个任务** —— 那 20 分钟落在用户写完指令点发起之后。
+   */
+  | 'provider-stage'
+  | 'build-only';
 
 /** 发布资产清单里的一条（`cap-image-assets.json`，`schemaVersion: 1`）。 */
 export interface ReleaseAsset {
@@ -74,6 +91,13 @@ export interface ProvisionFacts {
    * 而那时几百 MB 已经白搬了。
    */
   readonly upstream: string | null;
+  /**
+   * 当前 provider 实现了 `stageImage` 吗（`typeof provider.stageImage === 'function'`）。
+   *
+   * ⚠️ 这是**能力**不是**状态**：它不回答「镜像铺没铺」（那是 `imageStaged`），
+   * 只回答「这台机器上平台有没有一只手能自己去铺」。
+   */
+  readonly providerCanStage: boolean;
 }
 
 /**
@@ -124,6 +148,27 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
       why:
         `本机 docker 镜像库与发布资产清单都没有，但配了上游坐标 '${f.upstream}' —— ` +
         '平台纯 HTTP 把它搬过来（不碰 docker，boxlite 档的宿主本来就可以没有 docker）',
+      asset: null,
+    };
+  }
+
+  // ⚠️ **排在最后一条可搬的位置，不是因为最差，是因为最贵**（同 `upstream-copy` 的理由）：
+  //    它一定出网、一定拉整张镜像。前三条要么不出网、要么有 sha256 兜底。
+  // ⛔ 但它必须排在 `build-only` **之前** —— 「平台自己有一只手能做」永远好过「让用户去敲命令」
+  //    （`provision-plan.ts` 文件头那条：平台明明能做而让用户去敲命令，那不是指路）。
+  if (f.providerCanStage) {
+    return {
+      source: 'provider-stage',
+      provisionable: true,
+      // ⚠️ 体积要读 manifest 才知道（层的 size 在里面），定计划时如实 null。
+      //    ⛔ 不编一个数：实测同一张 boxlite 镜像 arm64 那份是 8 层、压缩后 320MB，
+      //    而 amd64 那份不一样 —— 拿任一个当常量都会在另一半机器上说错。
+      sizeBytes: null,
+      from: f.ref,
+      to: '本机 provider 镜像库',
+      why:
+        `'${f.ref}' 够得着，只是还没铺进本机的 provider 镜像库 —— ` +
+        '平台自己拉一次即可（**不必等到第一个任务**：那时用户已经写完指令，等待落在最差的时机）',
       asset: null,
     };
   }

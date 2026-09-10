@@ -499,6 +499,58 @@ export interface SandboxProvider {
    */
   imageStaged?(image: ResolvedImageSpec): Promise<boolean>;
 
+  /**
+   * Put the image into this provider's own local store — WITHOUT creating a sandbox.
+   *
+   * ── Why this exists: the wizard must be able to DO it, not just point at it ──────
+   * ⚠️ `imageStaged` only ASKS. With nothing that can act on a `false`, the platform's
+   * only remaining move is to defer staging to the first task — and 「第一个任务会自动
+   * 铺开」 is exactly the deferral the user rejected: it lands the wait at the worst
+   * possible moment (they wrote a prompt, hit 发起, and now stare at a silent bar for
+   * ~20 minutes on a slow link) and it happens INSIDE provisioning, where a failure is
+   * a failed Task rather than a wizard step that can be retried.
+   *
+   * ⚠️ THE FOUR `provision-plan.ts` PATHS DO NOT COVER THIS. All four end at a REGISTRY
+   * (`local-docker` / `release-asset` / `upstream-copy` all push bytes into one). They
+   * answer 「registry 里没有这张镜像」. This method answers a different question —
+   * 「registry 有，但 PROVIDER 自己的库里没有」 — which is the normal state of a fresh
+   * machine whose `SANDBOX_DEFAULT_IMAGE` is a public registry (the factory default).
+   * MEASURED 2026-09-10: `provision` came back `null` (「搬不了」) on a healthy machine
+   * whose only real need was one `images.pull()`.
+   *
+   * ⚠️ NO CAPABILITY BIT, same reasoning as `imageStaged` above: the branch is
+   * `typeof provider.stageImage === 'function'` at one call site.
+   *
+   * ⚠️ IT MUST BE IDEMPOTENT AND SAFE TO CALL WHEN ALREADY STAGED — the caller may not
+   * have asked `imageStaged` first, and two wizard sessions may overlap.
+   *
+   * ⚠️ THE PROGRESS CALLBACK IS OPTIONAL ON BOTH SIDES, AND THAT IS THE WHOLE DESIGN.
+   * An earlier version of this comment said 「no progress callback, on purpose —
+   * inventing one would force every implementation to fabricate numbers」. That
+   * reasoning was right about FABRICATION and wrong about the CALLBACK: a provider
+   * that cannot measure simply never calls it, and the caller then falls back to
+   * elapsed time. Nobody is forced to invent anything. What the user actually got
+   * from the strict version was a silent 20-minute bar (MEASURED 2026-09-10).
+   *
+   * ⚠️ WHAT IT REPORTS: `bytesDownloaded` — bytes that landed in this provider's store
+   * SINCE THIS CALL STARTED. Not a percentage, not the store's total.
+   *   · **The provider subtracts its own baseline.** It already has to read its store
+   *     to measure at all, so reading it once more at entry costs nothing — and it
+   *     keeps bytes that were already there from showing up as instant progress.
+   *   · The provider still needs no knowledge of OCI or of which layers belong to
+   *     which image. The CALLER owns the denominator (it reads the manifest).
+   * ⛔ Do NOT report a percentage: the provider does not know the total, and a
+   *    provider-invented total is exactly the fabrication this comment warns about.
+   * ⚠️ It may end BELOW the manifest total when layers were already cached — that is
+   *    honest (less was downloaded), and the call returning is what ends the wait.
+   *
+   * ⚠️ A PROVIDER THAT CANNOT MEASURE MUST STAY SILENT rather than estimate. Same
+   * discipline as `imageStaged`'s 「不知道 is not false」: a wrong number here becomes
+   * a progress bar that stalls at 60% or finishes at 30%, which is worse than a
+   * spinner that honestly says 「no output during this, it is not stuck」.
+   */
+  stageImage?(image: ResolvedImageSpec, onProgress?: (bytesInStore: number) => void): Promise<void>;
+
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `jobs`. */

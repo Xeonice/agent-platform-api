@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 import {
   PresetImageProvisioner,
   ProvisionInFlightError,
@@ -9,6 +9,8 @@ import {
   type ImageSeedPort,
   type ProvisionEvent,
   type UpstreamCopyPort,
+  type ProviderStagePort,
+  type ImageSizePort,
 } from '../../../src/platform/system/preset-image/preset-image-provisioner';
 
 const REF = 'localhost:5001/platform/sandbox:v2';
@@ -29,6 +31,13 @@ const withUpstream: AssetsDirSource = {
   upstreamRef: () => 'ghcr.io/x/cap-boxlite-sandbox:v0.26.0',
 };
 const noCopy: UpstreamCopyPort = { copy: () => Promise.resolve(undefined) };
+/** 默认「没有这只手」—— 既有用例验的是另外几条路，⛔ 别让这条把它们的判据抢走。 */
+const noStage: ProviderStagePort = {
+  canStage: () => false,
+  stage: () => Promise.reject(new Error('本用例不该走到 provider-stage 这条路')),
+};
+/** 分母读不到 ⇒ 只报「已下载 X」不报百分比。既有用例都走这一档。 */
+const noSize: ImageSizePort = { compressedBytes: () => Promise.resolve(null) };
 const host: HostFacts = { defaultProvider: () => 'boxlite', platform: () => 'linux/arm64' };
 
 function make(
@@ -36,8 +45,10 @@ function make(
   assets: AssetsDirSource = noAssets,
   seeder: ImageSeedPort = { seed: () => Promise.resolve() },
   copier: UpstreamCopyPort = noCopy,
+  providerStage: ProviderStagePort = noStage,
+  imageSize: ImageSizePort = noSize,
 ): PresetImageProvisioner {
-  return new PresetImageProvisioner(docker, assets, host, seeder, copier);
+  return new PresetImageProvisioner(docker, assets, host, seeder, copier, providerStage, imageSize);
 }
 
 async function collect(p: PresetImageProvisioner): Promise<ProvisionEvent[]> {
@@ -239,5 +250,193 @@ describe('upstream-copy —— 没有 docker 也搬得动', () => {
     const seed = vi.fn(() => Promise.resolve());
     await collect(make(dockerStub(), withUpstream, { seed }, noCopy));
     expect(seed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('★ provider-stage：平台自己铺，不经 registry（2026-09-10 加）', () => {
+  const canStage = (calls: string[]): ProviderStagePort => ({
+    canStage: () => true,
+    stage: (ref) => {
+      calls.push(ref);
+      return Promise.resolve();
+    },
+  });
+
+  /**
+   * ⭐ **这条路一步到位**：终点是 provider 自己的库，不经过 registry。
+   *
+   * ⛔ 三个 skipped 必须**如实报**而不是画成"瞬间完成的 ✅"（同 `local-docker` 那条纪律）：
+   * 平台这一路一个字节都没经手，说"下载完成/校验通过"是撒谎。
+   *
+   * MUTATION: 把 `provider-stage` 分支删掉 ⇒ 前两条红。
+   */
+  it('⭐ 真的调了 provider.stage，并且**不 push**（这条路不经 docker）', async () => {
+    const calls: string[] = [];
+    const pushed: string[] = [];
+    const docker = dockerStub({
+      push: (ref) => {
+        pushed.push(ref);
+        return Promise.resolve();
+      },
+    });
+    const events = await collect(make(docker, noAssets, undefined, noCopy, canStage(calls)));
+
+    expect(calls).toHaveLength(1);
+    // ⛔ 这条路不经 docker —— push 一次都不该发生（同 `upstream-copy` 那条被用例逮住的错）。
+    expect(pushed).toEqual([]);
+    const reg = events.filter((e) => e.stage === 'register');
+    expect(reg.at(-1)?.status).toBe('ok');
+  });
+
+  it('⛔ fetch/verify/load 如实报 skipped —— 平台这一路没经手字节', async () => {
+    const events = await collect(make(dockerStub(), noAssets, undefined, noCopy, canStage([])));
+    for (const stage of ['fetch', 'verify', 'load'] as const) {
+      expect(events.find((e) => e.stage === stage)?.status).toBe('skipped');
+    }
+  });
+
+  it('⛔ 没有假进度 —— SDK 的 pull 不给回调，就不许画百分比', async () => {
+    const events = await collect(make(dockerStub(), noAssets, undefined, noCopy, canStage([])));
+    for (const e of events.filter((x) => x.stage === 'register')) {
+      expect(e.progress ?? null).toBeNull();
+    }
+  });
+
+  it('铺开失败要冒出来 —— ⛔ 不许吞掉后照样报成功', async () => {
+    const boom: ProviderStagePort = {
+      canStage: () => true,
+      stage: () => Promise.reject(new Error('pull 挂了')),
+    };
+    await expect(collect(make(dockerStub(), noAssets, undefined, noCopy, boom))).rejects.toThrow(
+      'pull 挂了',
+    );
+  });
+});
+
+/**
+ * ⭐ **搬运器要搬的必须是「这一档该用的那张」**（2026-09-10 真机发现）。
+ *
+ * ⛔ 此前它取的是 `builtinImageRef()` —— **共用的兜底坐标**。出厂留空时那是上游的
+ * `ghcr.io/agent-infra/sandbox:latest`，而 mac 上按档该用的是
+ * `ghcr.io/xeonice/agent-platform-boxlite:latest`。于是诊断链说「boxlite 那张没铺开」，
+ * 点 [准备镜像] 却去拉 aio 那张 —— **两档镜像不可互换**（ADR 决策 C）。
+ *
+ * ⚠️ 这个病 `builtinImageRefFor` 的注释里点名记过，搬运器是漏网的那一处；它一直没被
+ * 发现是因为 `provisionable` 恒为 false，这条路根本走不到。
+ *
+ * MUTATION: 把 `targetRef()` 改回 `builtinImageRef()` ⇒ 本条红。
+ */
+describe('★ 搬的是「这一档该用的那张」，不是共用兜底坐标', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it('⭐ 出厂留空 ⇒ 取按档发布的那张，⛔ 不是上游兜底那张', async () => {
+    delete process.env['SANDBOX_DEFAULT_IMAGE'];
+    delete process.env['SANDBOX_BOXLITE_IMAGE'];
+    const staged: string[] = [];
+    await collect(
+      make(dockerStub(), noAssets, undefined, noCopy, {
+        canStage: () => true,
+        stage: (ref) => {
+          staged.push(ref);
+          return Promise.resolve();
+        },
+      }),
+    );
+    // `host.defaultProvider()` 在本文件的夹具里是 boxlite。
+    expect(staged[0]).toContain('boxlite');
+    expect(staged[0]).not.toContain('agent-infra');
+  });
+
+  it('按档覆盖配了就用它（`SANDBOX_BOXLITE_IMAGE` 优先于任何兜底）', async () => {
+    process.env['SANDBOX_BOXLITE_IMAGE'] = 'registry.internal:5000/mine/boxlite:v9';
+    const staged: string[] = [];
+    await collect(
+      make(dockerStub(), noAssets, undefined, noCopy, {
+        canStage: () => true,
+        stage: (ref) => {
+          staged.push(ref);
+          return Promise.resolve();
+        },
+      }),
+    );
+    expect(staged[0]).toBe('registry.internal:5000/mine/boxlite:v9');
+  });
+});
+
+/**
+ * ⭐ **进度**（2026-09-10，用户：「现在看不到下载了多少的进度」）。
+ *
+ * 分子由 provider 报（本次新落盘字节），分母由平台读 manifest。⚠️ **两个数各自允许缺席**，
+ * 缺席时降级而不是编：分母没有 ⇒ 只报「已下载 X」；分子没有 ⇒ 退回「不是卡死」那句。
+ */
+describe('★ provider-stage 的下载进度', () => {
+  const stageWith = (report: readonly number[]): ProviderStagePort => ({
+    canStage: () => true,
+    stage: (_ref, onProgress) => {
+      for (const n of report) onProgress?.(n);
+      return Promise.resolve();
+    },
+  });
+  const sizeOf = (bytes: number | null): ImageSizePort => ({
+    compressedBytes: () => Promise.resolve(bytes),
+  });
+
+  it('⭐ 分子分母都有 ⇒ 报「已下载 X / 约 Y」并给出 0–1 的 progress', async () => {
+    const events = await collect(
+      make(
+        dockerStub(),
+        noAssets,
+        undefined,
+        noCopy,
+        stageWith([50 * 1024 * 1024]),
+        sizeOf(100 * 1024 * 1024),
+      ),
+    );
+    const withPct = events.filter((e) => e.stage === 'register' && e.progress !== null);
+    expect(withPct.length).toBeGreaterThan(0);
+    expect(withPct[0]?.progress).toBeCloseTo(0.5, 2);
+    expect(withPct[0]?.message).toContain('已下载');
+  });
+
+  it('⛔ progress 要 clamp 到 1 —— 落盘字节可能略多于 manifest 总量，103% 看着像坏了', async () => {
+    const events = await collect(
+      make(
+        dockerStub(),
+        noAssets,
+        undefined,
+        noCopy,
+        stageWith([120 * 1024 * 1024]),
+        sizeOf(100 * 1024 * 1024),
+      ),
+    );
+    const last = events.filter((e) => e.stage === 'register' && e.progress !== null).at(-1);
+    expect(last?.progress).toBe(1);
+  });
+
+  it('⛔ 分母读不到 ⇒ 仍报「已下载 X」，但 progress 必须是 null（不许编一个百分比）', async () => {
+    const events = await collect(
+      make(dockerStub(), noAssets, undefined, noCopy, stageWith([7 * 1024 * 1024]), sizeOf(null)),
+    );
+    const running = events.filter((e) => e.stage === 'register' && e.message.includes('已下载'));
+    expect(running.length).toBeGreaterThan(0);
+    for (const e of running) expect(e.progress ?? null).toBeNull();
+  });
+
+  it('⛔ provider 一次都不报 ⇒ 退回「不是卡死」那句，⛔ 不画 0%', async () => {
+    const events = await collect(
+      make(dockerStub(), noAssets, undefined, noCopy, stageWith([]), sizeOf(100)),
+    );
+    expect(events.some((e) => e.message.includes('不是卡死'))).toBe(true);
+    expect(events.some((e) => e.message.includes('已下载'))).toBe(false);
+  });
+
+  it('开跑那句带上总量（用户点之前就知道要下多少）', async () => {
+    const events = await collect(
+      make(dockerStub(), noAssets, undefined, noCopy, stageWith([]), sizeOf(320 * 1024 * 1024)),
+    );
+    expect(events.find((e) => e.message.includes('不是卡死'))?.message).toContain('共约');
   });
 });

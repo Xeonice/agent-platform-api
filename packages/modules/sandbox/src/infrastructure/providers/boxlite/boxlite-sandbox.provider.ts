@@ -1,4 +1,6 @@
 import { createServer } from 'node:net';
+import { promises as fsp } from 'node:fs';
+import { join } from 'node:path';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   pinnedImageRef,
@@ -18,14 +20,19 @@ import {
 } from '@platform/contracts';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
-import { getSharedBoxliteRuntime, type BoxliteBox, type BoxliteRuntime } from './boxlite-runtime';
+import {
+  getSharedBoxliteRuntime,
+  type BoxliteBox,
+  type BoxliteRuntime,
+  boxliteHome,
+} from './boxlite-runtime';
 import { boxliteNamePrefix } from '../../reconcile/instance-id';
 import { spawnNative } from './boxlite-process.stream';
 import { BoxliteSandboxFiles } from './boxlite-files';
 import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
 import { runGuestScript } from './boxlite-guest-shell';
-import { isImageStaged } from './boxlite-image-store';
+import { isImageStaged, layerCacheBytes } from './boxlite-image-store';
 import { readBoxliteHealth } from './boxlite-health';
 
 /**
@@ -194,6 +201,59 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     return this.guard(async () => {
       const runtime = await this.getRuntime();
       return isImageStaged(await runtime.images.list(), image);
+    });
+  }
+
+  /**
+   * 把镜像铺进 BoxLite 自己的库 —— **不建 box**（契约 `stageImage`）。
+   *
+   * ⚠️ **这就是 `create()` 里那 190 秒/20 分钟的前半段**，只是提前到向导第 3 步发生。
+   * 后置到第一个任务的代价是实测出来的：这台机器到 ghcr 的带宽 **273 KB/s**，
+   * 而 arm64 那份是 8 层、压缩后 320MB ⇒ 约 20 分钟。那 20 分钟落在
+   * 「用户写完指令点了发起」之后，是整条链路上最差的时机。
+   *
+   * ⚠️ **传给 SDK 的 reference 必须与 `create()` 用的是同一个** —— `pinnedImageRef(image)`。
+   * BoxLite 的 store 按「递给它的那个字符串」逐字记账（见 `boxlite-image-store.ts` 的
+   * 实测），拿一个 tag 去铺、拿 digest 去问，会得到「铺过了但查不到」。
+   *
+   * ⚠️ **幂等**：已经在库里时 `pull` 直接返回，不重下（契约要求可重复调用）。
+   */
+  async stageImage(
+    image: ResolvedImageSpec,
+    onProgress?: (bytesDownloaded: number) => void,
+  ): Promise<void> {
+    return this.guard(async () => {
+      const runtime = await this.getRuntime();
+      const home = boxliteHome();
+      // ⚠️ **进度靠轮询自己的层缓存**，因为 SDK 的 `pull()` 不给回调（0.9.7 实测：
+      //    `ImageHandle` 就是 `{ pull, list }`）。⛔ 没有它，一次 320MB 的拉取在
+      //    273 KB/s 的链路上就是 20 分钟静默 —— 用户看不到「下载了多少」。
+      //
+      // ⚠️ 1 秒一次：层缓存是**一个扁平目录、8 个文件**，一次 stat 遍历可以忽略；
+      //    更密没有意义（进度条不需要更快），更疏用户会觉得卡住。
+      // ⚠️ 测不出来就**一次都不报**（`layerCacheBytes` 返回 null）—— 契约那条
+      //    「宁可沉默也不要猜」。调用方于是退回「已用时长」。
+      // ⚠️ **基线在这里减掉**（契约：报的是「本次新落盘字节」）。库里本来就有别的镜像的
+      //    层，不减的话进度条一上来就停在某个高位 —— 那比没有进度更让人困惑。
+      //    ⚠️ 测不出基线（目录还不存在 = 头一次拉）就按 0 算，那时它本来就是 0。
+      const base = onProgress === undefined ? 0 : ((await layerCacheBytes(home, fsp, join)) ?? 0);
+      const timer =
+        onProgress === undefined
+          ? undefined
+          : setInterval(() => {
+              void layerCacheBytes(home, fsp, join).then((bytes) => {
+                // ⛔ 测不出来就**不报**（契约那条「宁可沉默也不要猜」）——⚠️ 不是报 0：
+                //    一个 0 会画成「一直卡在 0%」，而字节明明在进来。
+                if (bytes !== null) onProgress(Math.max(0, bytes - base));
+              });
+            }, 1_000);
+      try {
+        await runtime.images.pull(pinnedImageRef(image));
+      } finally {
+        // ⛔ **必须清**：不清会让进程永远醒着，而这是一条只在向导里走一次的路
+        //    —— 泄漏一个定时器不会有人发现。放 finally 里，失败也清。
+        if (timer !== undefined) clearInterval(timer);
+      }
     });
   }
 
