@@ -52,13 +52,17 @@ export class Schedule {
    */
   static create(kind: ScheduleKind, config: ScheduleConfig, timezone: string): Schedule {
     if (timezone.trim() === '') {
-      throw new AutomationInvariantError('timezone is required and must be an IANA name (I-AUT-9)');
+      throw new AutomationInvariantError(
+        'timezone is required and must be an IANA name (I-AUT-9)',
+        'INVALID_TIMEZONE',
+      );
     }
     if (!isIanaTimeZone(timezone)) {
       throw new AutomationInvariantError(
         `timezone '${timezone}' is not an IANA time zone name (I-AUT-9). ` +
           `Fixed-offset spellings like 'UTC+8' are rejected on purpose: they cannot express ` +
           `daylight saving, and this rule must keep firing at the same LOCAL wall clock.`,
+        'INVALID_TIMEZONE',
       );
     }
     const normalized = normalizeConfig(kind, config);
@@ -161,7 +165,11 @@ export class Schedule {
       return { hour: 0, minute: this.config.minute ?? 0 };
     }
     const m = HHMM_RE.exec(raw);
-    if (!m) throw new AutomationInvariantError(`schedule time '${raw}' must be HH:mm`);
+    if (!m)
+      throw new AutomationInvariantError(
+        `schedule time '${raw}' must be HH:mm`,
+        'INVALID_SCHEDULE',
+      );
     return { hour: Number(m[1]), minute: Number(m[2]) };
   }
 
@@ -258,6 +266,7 @@ function normalizeConfig(kind: ScheduleKind, config: ScheduleConfig): ScheduleCo
       if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
         throw new AutomationInvariantError(
           `hourly schedule needs minute ∈ [0,59], got ${String(config.minute)}`,
+          'INVALID_SCHEDULE',
         );
       }
       return { minute };
@@ -272,11 +281,13 @@ function normalizeConfig(kind: ScheduleKind, config: ScheduleConfig): ScheduleCo
       if (days.length === 0) {
         throw new AutomationInvariantError(
           'weekly schedule needs at least one weekday (0=Sun..6=Sat)',
+          'INVALID_SCHEDULE',
         );
       }
       if (days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
         throw new AutomationInvariantError(
           `weekly schedule weekdays must be 0..6, got [${days.join(',')}]`,
+          'INVALID_SCHEDULE',
         );
       }
       return { time, days: [...new Set(days)].sort((a, b) => a - b) };
@@ -286,7 +297,10 @@ function normalizeConfig(kind: ScheduleKind, config: ScheduleConfig): ScheduleCo
 
 function requireTime(time: string | undefined, kind: string): string {
   if (time === undefined || !HHMM_RE.test(time)) {
-    throw new AutomationInvariantError(`${kind} schedule needs time in HH:mm, got ${String(time)}`);
+    throw new AutomationInvariantError(
+      `${kind} schedule needs time in HH:mm, got ${String(time)}`,
+      'INVALID_SCHEDULE',
+    );
   }
   return time;
 }

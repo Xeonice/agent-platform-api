@@ -23,6 +23,8 @@ import type {
   ResolvedImage,
 } from '@platform/contracts';
 import type { DiagnoseCheck, DiagnoseCheckResult } from './check.types';
+import { presetImageSizeText } from './substrate';
+import type { ProvisionPlan } from '../../preset-image/provision-plan';
 
 /** 平台预制镜像的构建脚本位置 —— 每一步的建议都要指向它，所以只写一次。 */
 import {
@@ -105,12 +107,10 @@ export class PresetImageCheck implements DiagnoseCheck {
         status: 'fail',
         step: 'config',
         errorCode: PRESET_IMAGE_NOT_CONFIGURED,
-        summary:
-          `默认档位是 '${tier}'，而平台既没有为它发布预制镜像，也没有配置 ` +
-          'SANDBOX_DEFAULT_IMAGE —— 平台不知道该用哪张镜像，建任务必失败',
-        hint:
-          `为这一档指定镜像：SANDBOX_${tier.toUpperCase()}_IMAGE=<registry>/<repo>:<tag>` +
-          `（按档配，不会影响其它档；构建脚本在 ${buildScriptFor(tier)}），改完重启平台，开机会自动播种`,
+        headline: '不知道该用哪张镜像，建不了任务',
+        detailText: `这台机器的沙箱环境是 '${tier}'，平台既没有为它发布预制镜像，也没有人指定过一张。`,
+        nextStep: `为这台机器的沙箱环境单独指定一张镜像（不会影响别的），改完重启平台，开机会自动装好。构建脚本在 ${buildScriptFor(tier)}。`,
+        command: `SANDBOX_${tier.toUpperCase()}_IMAGE=<镜像仓库>/<仓库名>:<标签>`,
         detail: { tier, fallbackRef: ref, configured: false },
       };
     }
@@ -150,19 +150,9 @@ export class PresetImageCheck implements DiagnoseCheck {
         status: 'fail',
         step: 'registry',
         errorCode: PRESET_IMAGE_NOT_IN_REGISTRY,
-        summary: `镜像 '${ref}' 在 registry 里解析不到：${reason}`,
-        hint: plan.provisionable
-          ? `${plan.why}。⇒ 在初始化向导或系统状态页点 [准备镜像]，平台会自己把它搬到位（${plan.from} → ${plan.to}${plan.sizeBytes === null ? '' : `，约 ${String(Math.round(plan.sizeBytes / 1024 / 1024))} MB`}）`
-          : // ⛔ **出厂发布镜像不能让用户去 build+push** —— 那是平台自己的 registry，
-            //    他推不上去；而且这句话会把他引向「改 SANDBOX_DEFAULT_IMAGE」，
-            //    那正好关掉按机器自动选。这一档的根因是**够不到 registry**。
-            isPublishedImageRef(ref)
-            ? `${plan.why}。⇒ 这是平台**按你这台机器自动选**的出厂镜像，不用你构建：` +
-              `先确认这台机器够得到它的 registry（试 \`curl -sSf https://${registryHostOf(ref)}/v2/\`），` +
-              '企业网关 / 离线内网会拦掉它。离线部署请把镜像镜到内网 registry，' +
-              `再用**按档覆盖** SANDBOX_${tier.toUpperCase()}_IMAGE 指过去 —— 按档配才不会让另一档拿错`
-            : `${plan.why}。⇒ 用平台的构建脚本构建再推：docker build -t ${ref} ${buildScriptFor(tier)} && docker push ${ref}。` +
-              '内网 registry 需要凭证或走代理时，先在系统设置里配好代理再重新诊断',
+        headline: '镜像仓库里找不到这张镜像',
+        detailText: `'${ref}' 解析不到：${reason}。${plan.why}。`,
+        ...registryNextStep(plan, ref, tier),
         detail: { ref, reason, provision: plan },
       };
     }
@@ -182,16 +172,16 @@ export class PresetImageCheck implements DiagnoseCheck {
         status: 'fail',
         step: 'lineage',
         errorCode: PRESET_IMAGE_NOT_PLATFORM_BUILT,
-        // ⚠️ 必须说清「注册也会被拒」。不说的话用户会以为只是少做了一步注册，
-        //    照着去 POST /api/images 再撞一次墙 —— 而那次撞墙看起来像是他做错了。
-        summary:
-          `'${ref}' 平台不认识，也没有人声明过它装了 tmux。` +
-          'agent 会话由沙箱内的 tmux 持有，根镜像又是所有自定义镜像的血统起点，' +
-          '**手动注册同样会被准入检查拒**，不是少做了一步注册',
-        hint:
-          `用平台的构建脚本重新构建再推：docker build -t <registry>/platform/sandbox:<tag> ${buildScriptFor(tier)} ` +
-          '&& docker push <registry>/platform/sandbox:<tag>，然后把 SANDBOX_DEFAULT_IMAGE 指过去并重启平台；' +
-          '若这张镜像确实装了 tmux（自建 / 内网 mirror / 改过名），设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 并重启',
+        headline: '这张镜像来源不对，用不了',
+        // ⚠️ 必须说清「手动注册也会被拒」。不说的话用户会以为只是少做了一步注册，
+        //    照着去做再撞一次墙 —— 而那次撞墙看起来像是他做错了。
+        detailText:
+          `平台不认识 '${ref}'，也没有人声明过它装了 tmux。Agent 的会话由沙箱里的 tmux 持有，` +
+          '而这张镜像又是所有自定义镜像的起点 —— 手动把它加进来同样会被拒，不是少做了一步。',
+        nextStep:
+          `用平台的构建脚本重新构建再推上去，然后把它指为这台机器沙箱环境的镜像并重启平台（构建脚本在 ${buildScriptFor(tier)}）。` +
+          '这张镜像确实装了 tmux（自建 / 内网镜像 / 改过名）的话，设置 SANDBOX_DEFAULT_IMAGE_TMUX=true 再重启。',
+        command: `docker build -t <镜像仓库>/platform/sandbox:<标签> ${buildScriptFor(tier)} && docker push <镜像仓库>/platform/sandbox:<标签>`,
         detail: { ref, digest: resolved.digest, declaredTmux: false },
       };
     }
@@ -214,10 +204,11 @@ export class PresetImageCheck implements DiagnoseCheck {
       return {
         ...common,
         status: 'fail',
-        summary: `'${ref}' 是对的那张镜像，但平台里没有它的注册记录 —— 开机播种没有成功`,
-        hint:
-          '重启平台让它重新播种；仍然失败就看开机日志里 ImageSeeder 的那一行 —— ' +
-          '离线部署 / registry 限流会让播种在 10s 预算内放弃（平台仍会正常启动，只是建不了 Task）',
+        headline: '平台没记下这张镜像，建不了任务',
+        detailText:
+          `'${ref}' 是对的那张，但平台开机时没能把它装好。` +
+          '离线部署或镜像仓库限流会让这一步在时限内放弃 —— 平台仍会正常启动，只是建不了任务。',
+        nextStep: '重启平台让它重新装一次；仍然失败就看开机日志里镜像装载的那几行。',
         detail: { ref, registered: false },
       };
     }
@@ -225,8 +216,9 @@ export class PresetImageCheck implements DiagnoseCheck {
       return {
         ...common,
         status: 'fail',
-        summary: `'${ref}' 已注册，但校验结论是 invalid，不能被任何任务引用（I-IMG-2）`,
-        hint: `在镜像管理里重新校验（POST /api/images/${registered.manifestId}/validate）看逐条结论；多半要换一张构建正确的镜像`,
+        headline: '这张镜像没通过平台检查',
+        detailText: `'${ref}' 平台已经记下了，但检查没过，任何任务都不能用它。`,
+        nextStep: '去镜像管理里重新检查一次，看逐条结论；多半要换一张构建正确的镜像。',
         detail: { ref, ...summaryDetail(registered) },
       };
     }
@@ -234,8 +226,9 @@ export class PresetImageCheck implements DiagnoseCheck {
       return {
         ...common,
         status: 'fail',
-        summary: `'${ref}' 已注册但该版本已停用，不能被新任务选用（I-IMG-3）`,
-        hint: `在镜像管理里启用它：POST /api/images/${registered.manifestId}/activate`,
+        headline: '这张镜像被停用了，新任务选不到',
+        detailText: `'${ref}' 平台已经记下了，但这个版本处于停用状态。`,
+        nextStep: '去镜像管理里把它启用。',
         detail: { ref, ...summaryDetail(registered) },
       };
     }
@@ -260,7 +253,9 @@ export class PresetImageCheck implements DiagnoseCheck {
       return {
         status: 'ok',
         step: 'staged',
-        summary: `预制镜像就绪：'${ref}' 已注册且可选用（${registered.validationStatus}）。当前 provider（${provider.name}）不报告镜像是否已在本机铺开`,
+        headline: '预制镜像就绪',
+        // ⚠️ 「不知道」照实说不知道，⛔ 不许说成「没有下载」。
+        detailText: `'${ref}' 平台检查过、可以选用。这台机器的沙箱环境不报告镜像有没有下载到本机。`,
         detail: { ...detail, staged: null },
       };
     }
@@ -282,9 +277,12 @@ export class PresetImageCheck implements DiagnoseCheck {
           //    ——字节早就在本机了，registry 只在**拉取时**需要——但界面没说它们问的是
           //    两件事，用户只会读成「诊断自相矛盾」，进而两条都不信。
           //    ⇒ 结论不变，把它成立的**前提**说出来。
-          summary:
-            `预制镜像就绪：'${ref}' 已注册、已在本机铺开，可以立即发起任务` +
-            ' —— 字节在本机，此刻不需要 registry（第 ⑤ 项若报镜像仓库不可达，只影响**拉新镜像**）',
+          headline: '预制镜像就绪，可以立即发起任务',
+          // ⛔ 「已下载到本机」必须自带那半句「此刻不需要镜像仓库」：同一屏上外网连通
+          //    那一项可能正报镜像仓库不可达，两个结论**都对**，但不说清就读成自相矛盾。
+          detailText:
+            `'${ref}' 平台检查过，而且已经下载到这台机器上。` +
+            '镜像就在本机，此刻不需要镜像仓库 —— 外网连通那一项若报镜像仓库不可达，只影响拉新镜像。',
           detail: { ...detail, staged: true, dependsOnRegistryNow: false },
         };
       }
@@ -299,8 +297,9 @@ export class PresetImageCheck implements DiagnoseCheck {
         //    ⚠️ 一个大 40 倍的估计不是「保守」：它让人以为要去泡杯咖啡，或者反过来，
         //    在真该等的那一档上以为几秒就好。`provision-plan.ts` 早就记着两档的真实
         //    量级差（「boxlite 档 431MB vs 本地 build 产物 13GB」），这里照着说。
-        summary: `预制镜像已就绪，但尚未在本机铺开（${firstRunCost(provider.name)}）`,
-        hint: stageHint(provider.name, ref, plan.provisionable),
+        headline: '镜像还没下载到本机',
+        detailText: `镜像本身没问题，只是这台机器上还没有它的副本（${firstRunCost(provider.name)}）。`,
+        ...stageNextStep(provider.name, ref, plan.provisionable),
         // ⚠️ 与上面那格相反：还没铺开 ⇒ 首个任务真的要去 registry 拉。
         // ⚠️ **`provision` 必须带上**：前端据它给出 [准备镜像] 按钮（`provisionOfferOf`）。
         //    此前这一格恒不带 ⇒ 向导只能指路，铺开被后置到第一个任务 —— 而那正是
@@ -313,9 +312,11 @@ export class PresetImageCheck implements DiagnoseCheck {
       return {
         status: 'ok',
         step: 'staged',
-        summary:
-          `预制镜像就绪：'${ref}' 已注册且可选用。` +
-          `本机是否已铺开这次问不出来（${(e as Error).message}）—— 首个任务可能需要数分钟`,
+        headline: '预制镜像就绪',
+        // ⚠️ 三态的第三态：「说不出」既不是「有」也不是「没有」，照实转达，⛔ 不替它猜。
+        detailText:
+          `'${ref}' 平台检查过、可以选用。` +
+          `这次问不出它有没有下载到本机（${(e as Error).message}）—— 首个任务可能需要多等一会。`,
         detail: { ...detail, staged: null, reason: (e as Error).message },
       };
     }
@@ -344,62 +345,104 @@ function registryHostOf(ref: string): string {
 }
 
 /**
- * 首个任务铺开镜像的**量级** —— 按档，实测值。
+ * 「想提前下载怎么办」——**必须按这台机器的沙箱环境分岔**（2026-09-09 真机发现）。
  *
- * ⚠️ 说的是「量级」不是精确秒数：它取决于带宽与磁盘。给一个数量级正确的预期，
- * 好过给一个精确但属于另一档的数字。
- */
-/**
- * 「想提前铺开怎么办」——**必须按档分岔**（2026-09-09 真机发现）。
- *
- * ⛔ 上一版恒为 `docker pull <ref>`。而 macOS 上的默认档是 **boxlite，那台机器上通常
- * 根本没有 docker**（boxlite 官方卖点就是 "no root, no background service"）——一条
+ * ⛔ 上一版恒为 `docker pull <ref>`。而 macOS 上默认的沙箱环境是轻量虚拟机，**那台机器
+ * 上通常根本没有 docker**（它的卖点就是 "no root, no background service"）—— 一条
  * 执行不了的命令，还会让人以为平台依赖 docker。
  *
  * ⚠️ 这正是本仓已经踩过并写进 `connectivity.probe.ts#hintFor` 的那个坑的另一半：
- * 那次的教训原话是「躲过了『支去配代理』，却掉进了同一个坑的另一半：**支去装 docker**」。
+ * 那次的教训原话是「躲过了『支去配代理』，却掉进了同一个坑的另一半：支去装 docker」。
  * 同一份纪律，这里漏了一处。
  *
- * ⚠️ **boxlite 档没有「手动提前拉」这条路，就要如实说没有**，别编一个。平台运行期
- * 独占 `~/.boxlite`，此时跑 boxlite CLI 会直接拿不到锁（实测原文：
+ * ⚠️ **轻量虚拟机那一档没有「手动提前拉」这条路，就要如实说没有**，别编一个。平台运行期
+ * 独占它的工作目录，此时跑它的 CLI 会直接拿不到锁（实测原文：
  * `Another BoxliteRuntime is already using directory`）。⇒ 那一档的正确答案是
  * 「什么都不用做，也别去手动拉」，而不是换一条命令继续指使用户。
+ *
+ * ⚠️ **「这一步要镜像仓库在」三条分支都要有**（2026-09-05 那条纪律）：下载这件事本身
+ * 就要去镜像仓库拉。⛔ 别因为改了前半句就把它丢掉。
  */
-function stageHint(tier: string, ref: string, canProvisionNow: boolean): string {
+export function stageNextStep(
+  tier: string,
+  ref: string,
+  canProvisionNow: boolean,
+): { nextStep: string; command?: string } {
+  const needsRegistry = '这一步要镜像仓库在 —— 外网连通那一项若报镜像仓库不可达，先解决那个。';
   // ⛔ **平台自己能做的时候，一个字都不要教用户去做**（`provision-plan.ts` 文件头那条：
   //    平台明明能做而让用户去敲命令，那不是指路，是把自己的活派给用户）。
   //
-  // ⚠️ 这一格此前恒为「不需要做任何事，第一个任务会自动铺开」—— 读起来像体贴，实际是
+  // ⚠️ 这一格此前恒为「不需要做任何事，第一个任务会自动下载」—— 读起来像体贴，实际是
   //    **把等待挪到了最差的时机**：用户写完指令、点了发起，然后对着一个静默进度条等
-  //    十几到二十分钟（实测这台机器到 ghcr 273 KB/s，boxlite 那张压缩后 320MB ⇒ 约 20 分钟）。
-  //    而且那时它跑在 provision workflow 里，失败就是一个失败的 Task，不是一个可以
-  //    重试的向导步。⇒ 能自己铺就在向导里铺（用户 2026-09-10 明确要求）。
+  //    十几到二十分钟。而且那时它跑在搬运流程里，失败就是一个失败的任务，不是一个可以
+  //    重试的向导步。⇒ 能自己下就在向导里下（用户 2026-09-10 明确要求）。
   if (canProvisionNow) {
-    return (
-      '**现在就可以铺**：点 [准备镜像]，平台自己去拉一次（不必等第一个任务 —— ' +
-      '那时你已经写完指令，等待落在最差的时机）。⚠️ 这一步**要 registry 在**' +
-      '——第 ⑤ 项若报镜像仓库不可达，先解决那个'
-    );
+    return {
+      nextStep: `现在就可以下：点 [准备镜像]，平台自己去拉一次，不必等第一个任务 —— 那时你已经写完指令，等待落在最差的时机。${needsRegistry}`,
+    };
   }
   if (tier === 'boxlite') {
-    return (
-      '不需要做任何事：第一个任务会自动把镜像铺开（耗时见上一行）。' +
-      '⛔ **别用 boxlite CLI 手动提前拉** —— 平台运行期独占 `~/.boxlite`，' +
-      'CLI 会拿不到锁（实测报「Another BoxliteRuntime is already using directory」）。' +
-      '想提前铺开就直接建一个任务，那一次多花的时间就是上面那个数。' +
-      // ⚠️ 这半句两档都要有（2026-09-05 那条纪律）：铺开这件事本身**要 registry 在**，
-      //    换成 boxlite 档也一样 —— 它同样是去 ghcr 拉。⛔ 别因为改了前半句就把它丢掉。
-      '⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个'
-    );
+    return {
+      // ⛔ 不给命令：这一档手动拉那条路根本走不通，编一条只会让人白试一次。
+      nextStep:
+        '不需要做任何事，第一个任务会自动下载（耗时见上一行）。' +
+        '别用沙箱自己的命令行工具手动提前拉 —— 平台运行期独占它的工作目录，命令行会拿不到锁。' +
+        `想提前下就直接建一个任务，那一次多花的时间就是上面那个数。${needsRegistry}`,
+    };
   }
-  return (
-    `不需要做任何事，等第一个任务跑完即可；想提前铺开可以先手动拉一次：docker pull ${ref}` +
-    '。⚠️ 这一步**要 registry 在**——第 ⑤ 项若报镜像仓库不可达，先解决那个'
-  );
+  return {
+    nextStep: `不需要做任何事，等第一个任务跑完即可；想提前下也可以手动拉一次。${needsRegistry}`,
+    command: `docker pull ${ref}`,
+  };
 }
 
-function firstRunCost(tier: string): string {
+/**
+ * 首次下载镜像的**量级** —— 按这台机器的沙箱环境取，实测值。
+ *
+ * ⚠️ 说的是「量级」不是精确秒数：它取决于带宽与磁盘。给一个数量级正确的预期，
+ * 好过给一个精确但属于另一档的数字。⛔ 体积必须按档说 —— 两档差 40 倍。
+ *
+ * ⚠️ 认不出的沙箱环境**只说体积说不出、不编耗时**（`presetImageSizeText` 回 `null`）。
+ */
+export function firstRunCost(tier: string): string {
+  const size = presetImageSizeText(tier);
+  if (size === null) return '这次下载多大、多久，平台说不出';
   return tier === 'boxlite'
-    ? 'boxlite 档镜像压缩后约 0.3GB，通常十几秒到一分钟'
-    : 'aio 档镜像 13GB，实测冷启动约 190 秒';
+    ? `镜像${size}，通常十几秒到一分钟`
+    : `镜像${size}，实测冷启动约 190 秒`;
+}
+
+/**
+ * 第 2 步（镜像仓库里找不到）的下一步 —— 三条路，**根因各不相同**。
+ *
+ * ⛔ **出厂发布镜像不能让用户去 build+push**：那是平台自己的镜像仓库，他推不上去；
+ * 而且那句话会把他引向去改那个总开关，正好关掉「按机器自动选」。这一档的根因是
+ * **够不到镜像仓库**。
+ */
+function registryNextStep(
+  plan: ProvisionPlan,
+  ref: string,
+  tier: string,
+): { nextStep: string; command?: string } {
+  if (plan.provisionable) {
+    const size =
+      plan.sizeBytes === null ? '' : `，约 ${String(Math.round(plan.sizeBytes / 1024 / 1024))} MB`;
+    return {
+      nextStep: `在初始化向导或系统状态页点 [准备镜像]，平台自己把它搬到位（${plan.from} → ${plan.to}${size}）。`,
+    };
+  }
+  if (isPublishedImageRef(ref)) {
+    return {
+      nextStep:
+        '这是平台按你这台机器自动选的出厂镜像，不用你构建 —— 先确认这台机器够得到它的下载源，' +
+        '企业网关和离线内网会拦掉它。离线部署请把镜像镜到内网镜像仓库，' +
+        `再用 SANDBOX_${tier.toUpperCase()}_IMAGE 单独指过去（只影响这台机器的沙箱环境，别动那个两档共用的总开关）。`,
+      command: `curl -sSf https://${registryHostOf(ref)}/v2/`,
+    };
+  }
+  return {
+    nextStep:
+      '用平台的构建脚本构建再推上去。内网镜像仓库需要凭证或走代理时，先在系统设置里配好代理再重新诊断。',
+    command: `docker build -t ${ref} ${buildScriptFor(tier)} && docker push ${ref}`,
+  };
 }

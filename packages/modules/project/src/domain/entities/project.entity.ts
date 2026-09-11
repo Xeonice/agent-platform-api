@@ -16,6 +16,8 @@ import {
 export type ProjectSourceType = 'git' | 'empty';
 export type CloneErrorCode =
   | 'CLONE_FAILED_PERMISSION'
+  /** the remote did not open: private-without-credential OR a typo in the URL — see contracts */
+  | 'CLONE_FAILED_NOT_FOUND'
   | 'CLONE_FAILED_NETWORK'
   | 'TIMEOUT'
   | 'INTERRUPTED'

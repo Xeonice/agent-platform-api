@@ -782,7 +782,10 @@ describe('DELETE is hard, and RESTRICT is what makes 「使用中不可删」 tr
     // The message names the alternative, because 「删不掉」 without 「改为禁用」 leaves
     // the user stuck (P21-4 §6).
     expect(String(envelope.message)).toMatch(/禁用/);
-    expect(String(envelope.message)).toMatch(/Task/);
+    // ⚠️ 钉的是「message 说出还有几个在用」，⛔ 不是钉「Task」这个词：面向用户的文案
+    //    已按文案巡检改成「任务」（用户手上没有 Task 这个概念）。措辞会再变，
+    //    「必须点出占用方」不会变 —— 所以断言落在「任务」而不是整句。
+    expect(String(envelope.message)).toMatch(/任务/);
   });
 
   it('I-IMG-4: the seeded ROOT cannot be deleted at all, used or not', async () => {

@@ -66,14 +66,15 @@ export function outboundVerdict(results: readonly ConnectivityResult[]): Diagnos
     const fastest = Math.min(...results.map((r) => r.latencyMs ?? 0));
     return {
       status: 'ok',
-      summary: `${results.map((r) => r.target).join('、')} 均可达（最快 ${String(fastest)}ms）`,
+      headline: '外网都能连上',
+      detailText: `${results.map((r) => r.target).join('、')} 均可达，最快 ${String(fastest)}ms。`,
       detail,
     };
   }
 
   // ⚠️ **超时与够不着分开说** —— 「3.5 秒内没完成握手」证明不了「连不上」。
   const line = failed
-    .map((r) => `${r.target} ${r.timedOut === true ? '未在预算内应答' : '不可达'}`)
+    .map((r) => `${r.target} ${r.timedOut === true ? '未在超时时限内应答' : '不可达'}`)
     .join('、');
 
   if (modelApis.length > 0 && modelApis.every((r) => !r.ok)) {
@@ -88,33 +89,51 @@ export function outboundVerdict(results: readonly ConnectivityResult[]): Diagnos
     if (modelApis.every((r) => r.timedOut === true)) {
       return {
         status: 'warn',
-        summary:
-          `${line} —— 模型 API 都没在探测预算内应答。**这不等于连不上**：` +
-          '一条时快时慢的链路会周期性越过预算，而 agent 的长连接可能照样能用',
-        hint:
-          '重跑一次诊断看它是否稳定：偶发 ⇒ 多半只是慢；每次都这样 ⇒ 按不通处理' +
-          '（企业内网常见形态是「网络通、但要走代理」，在系统设置里填 HTTPS_PROXY 后重试）',
+        // ⚠️ 「慢」与「连不上」的下一步不同，headline 就要把它说成「慢」。
+        headline: '模型 API 应答慢，未必连不上',
+        detailText:
+          `${line}。模型 API 都没在超时时限内应答 —— 这不等于连不上：` +
+          '一条时快时慢的链路会周期性越过时限，而 Agent 用的是长连接，可能照样能用。',
+        nextStep:
+          '重跑一次诊断看它稳不稳定：偶发多半只是慢，可以直接往下走；每次都这样就按不通处理' +
+          '（内网常见形态是「网络通、但要走代理」，在系统设置里填 HTTPS_PROXY 后重试）。',
         detail,
       };
     }
     return {
       status: 'fail',
-      summary: `${line} —— 模型 API 全部不可达，当前为离线环境，Agent 将不可用（P21-8 §1）`,
-      hint: failed.find((r) => r.hint !== undefined)?.hint,
+      headline: '连不上模型 API，Agent 不可用',
+      detailText: `${line}。当前是离线环境。`,
+      ...nextStepOf(failed),
       detail,
     };
   }
   return {
     status: 'warn',
-    summary:
+    headline:
       others.some((r) => !r.ok) && modelApis.every((r) => r.ok)
-        ? `${line} —— 模型 API 正常，Agent 可用；但拉不到新镜像`
-        : // ⚠️ `line` 里每条已经分别写了「不可达」还是「未在预算内应答」,
-          //    这里的收尾句就不要再把它们压回同一个词。
-          `${line} —— 部分目标未通过检查`,
-    hint: failed.find((r) => r.hint !== undefined)?.hint,
+        ? '拉不到新镜像，Agent 仍可用'
+        : '部分目标没通过检查',
+    // ⚠️ `line` 里每条已经分别写了「不可达」还是「未在超时时限内应答」，
+    //    这里的收尾句就不要再把它们压回同一个词。
+    detailText:
+      others.some((r) => !r.ok) && modelApis.every((r) => r.ok)
+        ? `${line}。模型 API 正常，Agent 可用；镜像仓库连不上只影响拉新镜像。`
+        : `${line}。`,
+    ...nextStepOf(failed),
     detail,
   };
+}
+
+/**
+ * 失败目标自带的那句下一步 —— **它是散文，所以进 `nextStep` 而不是 `command`**。
+ *
+ * ⚠️ `hintFor`（`connectivity.probe.ts`）产出的从来就是人话（「重跑一次看稳不稳定」），
+ * 而旧的 `hint` 字段在界面上被渲染成等宽框 + [复制] —— **一段散文顶着一个复制按钮**。
+ */
+function nextStepOf(failed: readonly ConnectivityResult[]): { nextStep?: string } {
+  const hint = failed.find((r) => r.hint !== undefined)?.hint;
+  return hint === undefined ? {} : { nextStep: hint };
 }
 
 /**

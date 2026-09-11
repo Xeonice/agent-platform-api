@@ -12,9 +12,28 @@ export type ProjectSourceType = z.infer<typeof ProjectSourceTypeSchema>;
 export const CloneStatusSchema = z.enum(['cloning', 'ready', 'failed']);
 export type CloneStatus = z.infer<typeof CloneStatusSchema>;
 
-/** clone failure taxonomy (03 §7.5), 5 values; permission matched before network. */
+/**
+ * clone failure taxonomy (03 §7.5), 6 values; NOT_FOUND and PERMISSION are both
+ * matched before network.
+ *
+ * ★ `CLONE_FAILED_NOT_FOUND` is split out from `CLONE_FAILED_PERMISSION` on
+ *   purpose. git says `Repository not found` / `404` for two entirely different
+ *   situations — a private repo with no credential, and a URL with a typo in it —
+ *   and folding them into one code made the UI assert the first one. A user who
+ *   mistyped the remote was told "you do not have access to this repository",
+ *   offered [configure Git credentials] / [convert to empty], and left with no
+ *   way to fix the actual problem (the remote URL is read-only; the only way out
+ *   is delete + recreate, which nothing on screen said).
+ *
+ * ⚠️ We cannot tell the two apart from git's stderr — an unauthenticated request
+ *   for a private repo returns the same 404 by design (GitHub does this so that
+ *   private repo names do not leak). So this code means exactly "the remote did
+ *   not open"; the copy must name BOTH possible causes and give BOTH exits, and
+ *   must not assert either one. Under-claiming is the whole point of the split.
+ */
 export const CloneErrorCodeSchema = z.enum([
   'CLONE_FAILED_PERMISSION',
+  'CLONE_FAILED_NOT_FOUND',
   'CLONE_FAILED_NETWORK',
   'TIMEOUT',
   'INTERRUPTED',

@@ -2595,6 +2595,7 @@
             "type": "string",
             "enum": [
               "CLONE_FAILED_PERMISSION",
+              "CLONE_FAILED_NOT_FOUND",
               "CLONE_FAILED_NETWORK",
               "TIMEOUT",
               "INTERRUPTED",
@@ -2785,6 +2786,12 @@
           "runtime": {
             "type": "string"
           },
+          "availableRuntimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "provider": {
             "type": "string"
           },
@@ -2890,6 +2897,7 @@
           "id",
           "projectId",
           "runtime",
+          "availableRuntimes",
           "provider",
           "name",
           "status",

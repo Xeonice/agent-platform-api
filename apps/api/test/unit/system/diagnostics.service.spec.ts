@@ -41,7 +41,7 @@ function stubCheck(
   };
 }
 
-const OK: DiagnoseCheckResult = { status: 'ok', summary: 'fine' };
+const OK: DiagnoseCheckResult = { status: 'ok', headline: 'fine' };
 
 function allChecks(
   overrides: Partial<
@@ -110,7 +110,9 @@ describe('DiagnosticsService —— 一项坏掉不阻塞整轮（02 §5.3）', 
     expect(checksOf(frames)).toHaveLength(8);
     const kvm = checksOf(frames).find((f) => f.id === 'dev-kvm')!;
     expect(kvm.status).toBe('fail');
-    expect(kvm.summary).toContain('boom');
+    expect(kvm.detailText).toContain('boom');
+    // ⛔ headline 是「这一项好不好」，异常文本属于第二层。
+    expect(kvm.headline).not.toContain('boom');
     expect(checksOf(frames).filter((f) => f.status === 'ok')).toHaveLength(7);
   });
 
@@ -141,9 +143,9 @@ describe('DiagnosticsService —— 一项坏掉不阻塞整轮（02 §5.3）', 
   it('done 的计数把 timeout 计进 failCount —— 「答不上来」不是「好的」', async () => {
     const { service } = harness(
       allChecks({
-        'dev-kvm': { status: 'info', summary: 'n/a' },
-        'disk-space': { status: 'warn', summary: 'tight' },
-        'port-conflict': { status: 'fail', summary: 'taken' },
+        'dev-kvm': { status: 'info', headline: 'n/a' },
+        'disk-space': { status: 'warn', headline: 'tight' },
+        'port-conflict': { status: 'fail', headline: 'taken' },
       }),
     );
     const frames = await collect(service);
@@ -175,7 +177,7 @@ describe('DiagnosticsService —— system.diagnose 审计（13 §2.8.2）', () 
 
   it('只有 info 也不记（第 ⑧ 项第 5 步在新部署上是常态）', async () => {
     const { service, audits } = harness(
-      allChecks({ 'preset-image': { status: 'info', summary: '未 staged' } }),
+      allChecks({ 'preset-image': { status: 'info', headline: '还没下载到本机' } }),
     );
     await collect(service);
     expect(audits).toHaveLength(0);
@@ -183,7 +185,7 @@ describe('DiagnosticsService —— system.diagnose 审计（13 §2.8.2）', () 
 
   it('有 fail ⇒ 记一条 error，summary 点名是哪几项', async () => {
     const { service, audits } = harness(
-      allChecks({ 'port-conflict': { status: 'fail', summary: 'taken' } }),
+      allChecks({ 'port-conflict': { status: 'fail', headline: 'taken' } }),
     );
     await collect(service);
     expect(audits).toHaveLength(1);
@@ -199,7 +201,7 @@ describe('DiagnosticsService —— system.diagnose 审计（13 §2.8.2）', () 
 
   it('有 warn 但无 fail ⇒ 记一条 warn', async () => {
     const { service, audits } = harness(
-      allChecks({ 'disk-space': { status: 'warn', summary: 'tight' } }),
+      allChecks({ 'disk-space': { status: 'warn', headline: 'tight' } }),
     );
     await collect(service);
     expect(audits[0]!.severity).toBe('warn');
@@ -210,7 +212,7 @@ describe('DiagnosticsService —— system.diagnose 审计（13 §2.8.2）', () 
       allChecks({
         'port-conflict': {
           status: 'fail',
-          summary: 'taken',
+          headline: 'taken',
           detail: { holders: [{ pid: 41235, command: 'com.docke' }] },
         },
       }),

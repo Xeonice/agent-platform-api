@@ -59,26 +59,32 @@ const appleSilicon: DarwinMicroVmFacts = {
 describe('darwinMicroVmVerdict —— macOS 分支', () => {
   it('⛔ Apple Silicon + macOS 12+ + 框架在 ⇒ **ok**（此前这里恒报「不适用」）', () => {
     const r = darwinMicroVmVerdict(appleSilicon, true);
+    const text = `${r.headline}${r.detailText ?? ''}`;
     expect(r.status).toBe('ok');
-    expect(r.summary).toContain('Hypervisor.framework');
     // ⛔ 一个字都不许再说「不适用」——那正是被修掉的那句结论。
-    expect(r.summary).not.toContain('不适用');
-    expect(r.summary).not.toContain('/dev/kvm');
+    expect(text).not.toContain('不适用');
+    // ⛔ `/dev/kvm` 是 Linux 的实现细节，mac 上一个字都不该出现（内核参数进 detail）。
+    expect(text).not.toContain('/dev/kvm');
     // 这一项的全部意义就是**别把人推向 docker**，所以这句话必须在。
-    expect(r.summary).toContain('不需要 Docker');
-    expect(r.hint).toBeUndefined();
+    expect(r.detailText).toContain('不需要 Docker');
+    expect(r.nextStep).toBeUndefined();
+    expect(r.command).toBeUndefined();
   });
 
-  it('是默认档时要说出来（用户据此知道「开箱即用」的那条路是通的）', () => {
-    expect(darwinMicroVmVerdict(appleSilicon, true).summary).toContain('默认档');
-    expect(darwinMicroVmVerdict(appleSilicon, false).summary).not.toContain('默认档');
+  it('这台机器正在用它时要说出来（用户据此知道「开箱即用」的那条路是通的）', () => {
+    // ⛔ 上屏不许说「默认档」—— 那个词指向一个界面上不存在的控件。
+    expect(darwinMicroVmVerdict(appleSilicon, true).headline).toContain('正在用它');
+    expect(darwinMicroVmVerdict(appleSilicon, false).headline).not.toContain('正在用它');
+    expect(darwinMicroVmVerdict(appleSilicon, true).headline).not.toContain('档');
   });
 
   it('⚠️ Intel Mac ⇒ warn，且 hint 要给出**能走的那条路**（aio）', () => {
     const r = darwinMicroVmVerdict({ ...appleSilicon, arch: 'x64' }, true);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('Apple Silicon');
-    expect(r.hint).toContain('aio');
+    expect(r.detailText).toContain('Apple Silicon');
+    // ⛔ 上屏不说 `aio` 这个内部名，说「容器沙箱」。
+    expect(r.nextStep).toContain('容器沙箱');
+    expect(r.nextStep).not.toContain('aio');
   });
 
   it('⚠️ macOS 11（Darwin 20）⇒ warn；macOS 12（Darwin 21）是分界线', () => {
@@ -101,7 +107,10 @@ describe('darwinMicroVmVerdict —— macOS 分支', () => {
   it('⚠️ kern.hv_support=0 ⇒ warn（跑在虚拟机里的 macOS 就是这种）', () => {
     const r = darwinMicroVmVerdict({ ...appleSilicon, hvSupport: false }, true);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('kern.hv_support=0');
+    // ⛔ `kern.hv_support` 是内核参数 —— 第三层，只进 detail，不上屏。
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('kern.hv_support');
+    expect(r.detail?.hvSupport).toBe(false);
+    expect(r.detailText).toContain('硬件虚拟化');
   });
 
   it('⛔ hv_support **问不出来（null）不许判坏** —— 「不知道」不是「不支持」', () => {
@@ -112,7 +121,7 @@ describe('darwinMicroVmVerdict —— macOS 分支', () => {
     expect(r.status).toBe('ok');
     expect(r.detail?.hvSupport).toBeNull();
     // 问不出来时就别把它写进结论里冒充证据。
-    expect(r.summary).not.toContain('kern.hv_support');
+    expect(r.detailText).not.toContain('支持硬件虚拟化');
   });
 
   it('⚠️ 框架不在 ⇒ warn（正常 macOS 上不该发生）', () => {
@@ -131,7 +140,10 @@ describe('darwinMicroVmVerdict —— macOS 分支', () => {
     for (const f of blocked) {
       const r = darwinMicroVmVerdict(f, true);
       expect(r.status).toBe('warn');
-      expect(r.hint).toBeTruthy();
+      expect(r.nextStep).toBeTruthy();
+      // ⛔ headline 的两条硬约束，四个拦下分支都要过。
+      expect([...r.headline].length, r.headline).toBeLessThanOrEqual(20);
+      expect(`${r.headline}${r.detailText ?? ''}${r.nextStep ?? ''}`).not.toContain('**');
     }
   });
 });
@@ -140,12 +152,12 @@ describe('linuxKvmVerdict —— Linux 分支', () => {
   it('可读写 ⇒ ok', () => {
     const r = linuxKvmVerdict(null, false);
     expect(r.status).toBe('ok');
-    expect(r.summary).toContain('/dev/kvm');
+    expect(r.detailText).toContain('硬件虚拟化设备');
   });
 
-  it('是默认档时要说出来（与 darwin 那支同一句口径）', () => {
-    expect(linuxKvmVerdict(null, true).summary).toContain('默认档');
-    expect(linuxKvmVerdict(null, false).summary).not.toContain('默认档');
+  it('这台机器正在用它时要说出来（与 darwin 那支同一句口径）', () => {
+    expect(linuxKvmVerdict(null, true).headline).toContain('正在用它');
+    expect(linuxKvmVerdict(null, false).headline).not.toContain('正在用它');
   });
 
   it('⛔ ENOENT 与 EACCES 的下一步不同，不许合成一条', () => {
@@ -154,9 +166,11 @@ describe('linuxKvmVerdict —— Linux 分支', () => {
     expect(missing.status).toBe('warn');
     expect(denied.status).toBe('warn');
     // 设备不在 ⇒ 宿主机没开虚拟化；在但没权限 ⇒ 加用户组。
-    expect(missing.hint).toContain('kvm 模块');
-    expect(denied.hint).toContain('usermod');
-    expect(missing.hint).not.toBe(denied.hint);
+    expect(missing.nextStep).toContain('硬件虚拟化');
+    expect(missing.command).toContain('kvm');
+    expect(denied.command).toContain('usermod');
+    expect(missing.nextStep).not.toBe(denied.nextStep);
+    expect(missing.command).not.toBe(denied.command);
   });
 
   it('errno 要原样带进 detail（排障的下一个问题就是「为什么」）', () => {
@@ -169,18 +183,20 @@ describe('linuxKvmVerdict —— Linux 分支', () => {
     // 无条件要求某个依赖在，与恒 ⚠️ 的噪音项是同一种失败（P21-5 §9D/§9F）。
     const r = linuxKvmVerdict('ENOENT', false);
     expect(r.status).toBe('info');
-    expect(r.summary).toContain('当前默认档不需要它');
+    expect(r.headline).toContain('用不到');
+    expect(r.detailText).toContain('缺它不耽误事');
   });
 
-  it('⛔ 不需要它的时候**不给 hint** —— 没有要做的事，就别给一条要做的事', () => {
-    expect(linuxKvmVerdict('ENOENT', false).hint).toBeUndefined();
-    expect(linuxKvmVerdict('ENOENT', true).hint).toBeDefined();
+  it('⛔ 不需要它的时候**不给下一步** —— 没有要做的事，就别给一条要做的事', () => {
+    expect(linuxKvmVerdict('ENOENT', false).nextStep).toBeUndefined();
+    expect(linuxKvmVerdict('ENOENT', false).command).toBeUndefined();
+    expect(linuxKvmVerdict('ENOENT', true).nextStep).toBeDefined();
   });
 
-  it('默认档是微 VM ⇒ ⚠️，且说清它正是这台机器要走的路', () => {
+  it('这台机器就用它时 ⇒ ⚠️，且说清它正是这台机器要走的路', () => {
     const r = linuxKvmVerdict('ENOENT', true);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('正是这台机器的默认档');
+    expect(r.detailText).toContain('这台机器的沙箱环境正是它');
   });
 
   it('两种默认档下的结论必须不同（合成一条就等于没做这次分岔）', () => {
@@ -215,7 +231,9 @@ describe('DevKvmCheck.run —— 在这台机器上真跑一次', () => {
     // 一个报 ✅ 的 mac 上，标题写「/dev/kvm 可用」而正文写「Hypervisor.framework 就绪」
     // 是自相矛盾的 —— 而用户先读到的是标题。
     expect(check.label).not.toContain('/dev/kvm');
-    expect(check.label).toContain('boxlite');
+    // ⛔ label 上屏，所以内部 provider 名 `boxlite` 也退休了。
+    expect(check.label).not.toContain('boxlite');
+    expect(check.label).toBe('轻量虚拟机沙箱可用');
   });
 
   it('当前平台上跑通，且结论与 microVmPlan 说的那一支一致', async () => {
@@ -226,7 +244,7 @@ describe('DevKvmCheck.run —— 在这台机器上真跑一次', () => {
     expect(['ok', 'info', 'warn']).toContain(r.status);
     if (plan.kind === 'hypervisor-framework') {
       // ⛔ 本次事故的回归断言：mac 上**绝不许**再出现「不适用」。
-      expect(r.summary).not.toContain('不适用');
+      expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('不适用');
       expect(r.detail?.platform).toBe('darwin');
     } else if (plan.kind === 'kvm-device') {
       expect(r.detail?.platform).toBe('linux');

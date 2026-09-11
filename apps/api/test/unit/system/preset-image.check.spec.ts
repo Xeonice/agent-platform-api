@@ -208,8 +208,11 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
     expect(r.step).toBe('config');
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_CONFIGURED);
     // ⛔ 提示必须是**按档配**,不是 SANDBOX_DEFAULT_IMAGE —— 后者会波及另一档。
-    expect(r.hint).toContain('SANDBOX_ACME-VM_IMAGE=');
-    expect(r.summary).toContain('必失败');
+    expect(r.command).toContain('SANDBOX_ACME-VM_IMAGE=');
+    expect(r.headline).toContain('建不了任务');
+    // ⛔ 内部词不许上屏：说「这台机器的沙箱环境」，不说 provider / 档位。
+    expect(r.detailText).toContain('这台机器的沙箱环境');
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('provider');
   });
 
   it('第 2 步：registry 里没有 ⇒ 指向推镜像，不是指向改配置', async () => {
@@ -224,9 +227,10 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
     expect(r.status).toBe('fail');
     expect(r.step).toBe('registry');
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_IN_REGISTRY);
-    expect(r.hint).toContain('docker push');
+    expect(r.command).toContain('docker push');
     // 原始失败原因要带上：401 与 404 与超时的下一步并不相同。
-    expect(r.summary).toContain('manifest 404');
+    expect(r.detailText).toContain('manifest 404');
+    expect(r.headline).toContain('镜像仓库');
   });
 
   it('第 3 步：平台不认识又没人声明 ⇒ **必须说清「注册也会被拒」**', async () => {
@@ -237,8 +241,11 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_PLATFORM_BUILT);
     // ⚠️ 这一句是本步的全部价值：不说的话用户会以为只是少做了一步注册，
     //    照着去 POST /api/images 再撞一次墙，而那次撞墙看起来像是他做错了。
-    expect(r.summary).toContain('注册同样会被准入检查拒');
-    expect(r.hint).toContain('docker build');
+    expect(r.detailText).toContain('手动把它加进来同样会被拒');
+    expect(r.command).toContain('docker build');
+    // ⛔ 「血统」是内部词，上屏说「来源」。
+    expect(r.headline).toContain('来源不对');
+    expect(`${r.headline}${r.detailText ?? ''}${r.nextStep ?? ''}`).not.toContain('血统');
   });
 
   it('⭐ 第 3 步：运维方显式声明 ⇒ 一张平台不认识的镜像也放行（自建 / 内网 mirror）', async () => {
@@ -255,22 +262,31 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
     expect(r.status).toBe('fail');
     expect(r.step).toBe('registration');
     expect(r.errorCode).toBe(PRESET_IMAGE_NOT_SEEDED);
-    expect(r.hint).toContain('重启平台');
-    // ⚠️ 第 3 步刚说过「手动注册会被拒」，这一步再叫他去注册就是自相矛盾。
-    expect(r.hint).not.toContain('POST /api/images');
+    expect(r.nextStep).toContain('重启平台');
+    // ⚠️ 第 3 步刚说过「手动加进来会被拒」，这一步再叫他去注册就是自相矛盾。
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('POST /api/images');
+    // ⛔ 这一档没有可粘贴的命令，就别编一个。
+    expect(r.command).toBeUndefined();
   });
 
   it('第 4 步变体：注册了但 invalid ⇒ 指向重新校验 / 换镜像', async () => {
     const r = await run(build({ registered: { ...registered, validationStatus: 'invalid' } }));
     expect(r.step).toBe('registration');
-    expect(r.summary).toContain('invalid');
-    expect(r.hint).toContain('/validate');
+    // ⛔ `validationStatus: invalid` 是代码字段名，上屏说「没通过平台检查」。
+    expect(r.headline).toContain('没通过平台检查');
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('invalid');
+    expect(r.nextStep).toContain('重新检查');
+    // ⛔ manifestId 是第三层，只进 detail。
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('/validate');
+    expect(r.detail?.manifestId).toBeDefined();
   });
 
   it('第 4 步变体：注册了但停用了 ⇒ 指向 activate', async () => {
     const r = await run(build({ registered: { ...registered, isActive: false } }));
     expect(r.step).toBe('registration');
-    expect(r.hint).toContain('/activate');
+    expect(r.headline).toContain('停用');
+    expect(r.nextStep).toContain('启用');
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('/activate');
   });
 
   it('⛔ 四步的码互不相同 —— 「合成一条镜像不可用」在这里就通不过', async () => {
@@ -292,7 +308,15 @@ describe('第 ⑧ 项五步链 —— 每一步说的是不同的话', () => {
     const steps = [step1, step2, step3, step4].map((r) => r.step);
     expect(steps).toEqual(['config', 'registry', 'lineage', 'registration']);
     // 建议也必须各不相同 —— 码分开了而话一样，用户看到的仍然是同一个红灯。
-    expect(new Set([step1, step2, step3, step4].map((r) => r.hint)).size).toBe(4);
+    expect(new Set([step1, step2, step3, step4].map((r) => r.nextStep)).size).toBe(4);
+    // headline 同样四句不同，且都 ≤ 20 字、不换行、无 markdown。
+    const heads = [step1, step2, step3, step4].map((r) => r.headline);
+    expect(new Set(heads).size).toBe(4);
+    for (const h of heads) {
+      expect([...h].length, h).toBeLessThanOrEqual(20);
+      expect(h).not.toContain('\n');
+      expect(h).not.toContain('**');
+    }
   });
 });
 
@@ -301,7 +325,7 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     const r = await run(build({ imageStaged: () => Promise.resolve(true) }));
     expect(r.status).toBe('ok');
     expect(r.step).toBe('staged');
-    expect(r.summary).toContain('立即');
+    expect(r.headline).toContain('立即');
   });
 
   it('⛔ 未 staged ⇒ **info**，不是 warn —— 渲染成 ⚠️ 会让用户去修一个不需要修的东西', async () => {
@@ -313,8 +337,8 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     // 告知的是「要等多久」，**实测数字必须在**（否则「稍等」等于没说）。
     // ⚠️ 2026-09-07：这个数字改成了**按档**，所以别再断言某一句固定文案 ——
     //    断言的是「有一个量化的等待」。默认档 aio ⇒ 190 秒那一份。
-    expect(r.summary).toMatch(/\d+\s*秒/);
-    expect(r.summary).toContain('190 秒');
+    expect(r.detailText).toMatch(/\d+\s*秒/);
+    expect(r.detailText).toContain('190 秒');
   });
 
   it('provider 没实现 imageStaged ⇒ 说「不报告」，不假装 false', async () => {
@@ -323,7 +347,9 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     const r = await run(build());
     expect(r.status).toBe('ok');
     expect(r.detail?.staged).toBeNull();
-    expect(r.summary).toContain('不报告');
+    // ⛔ 「不知道」不许说成「没有」。
+    expect(r.detailText).toContain('不报告');
+    expect(r.detailText).not.toContain('还没下载');
   });
 
   it('imageStaged 这一次答不上来（reject）⇒ 照实转达，不替它猜', async () => {
@@ -332,7 +358,8 @@ describe('第 5 步 —— 未 staged 不是失败', () => {
     );
     expect(r.status).toBe('ok');
     expect(r.detail?.staged).toBeNull();
-    expect(r.summary).toContain('store unreadable');
+    expect(r.detailText).toContain('store unreadable');
+    expect(r.detailText).toContain('问不出');
   });
 });
 
@@ -340,21 +367,22 @@ describe('第 2 步：⛔ 够得着就自己搬，不许再让用户去敲命令
   it('⛔ 本机 docker 库已有 ⇒ hint 指向 [准备镜像]，**不出现 docker build**', async () => {
     const r = await run(build({ registered: null, resolve: rejects, provisionable: true }));
     expect(r.step).toBe('registry');
-    // 本次事故的形态：字节就在本机，而 hint 让用户重新 build 一遍已经有的东西。
-    expect(r.hint).not.toContain('docker build');
-    expect(r.hint).toContain('[准备镜像]');
+    // 本次事故的形态：字节就在本机，而下一步让用户重新 build 一遍已经有的东西。
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('docker build');
+    expect(r.nextStep).toContain('[准备镜像]');
+    expect(r.command, '⛔ 能点按钮就别给命令').toBeUndefined();
   });
 
   it('搬不了时**保留**原来的指路（那一格的原决定是对的）', async () => {
     const r = await run(build({ registered: null, resolve: rejects, provisionable: false }));
-    expect(r.hint).toContain('docker build');
-    expect(r.hint).toContain('docker push');
+    expect(r.command).toContain('docker build');
+    expect(r.command).toContain('docker push');
   });
 
   it('两条分支的 hint 必须不同 —— 合成一条就等于没做这次订正', async () => {
     const a = await run(build({ registered: null, resolve: rejects, provisionable: true }));
     const b = await run(build({ registered: null, resolve: rejects, provisionable: false }));
-    expect(a.hint).not.toBe(b.hint);
+    expect(a.nextStep).not.toBe(b.nextStep);
   });
 
   it('detail 里带出计划，前端据它画按钮（没有它按钮就得自己再问一次）', async () => {
@@ -399,8 +427,8 @@ describe('★ 未 staged 且平台搬得了 ⇒ 在向导里铺，不再指向�
   it('⭐ hint 指向 [准备镜像]，⛔ 不再说「第一个任务会自动铺开」', async () => {
     const r = await run(build({ ...notStaged, provisionable: true }));
     expect(r.status).toBe('info');
-    expect(r.hint).toContain('准备镜像');
-    expect(r.hint).not.toContain('第一个任务会自动');
+    expect(r.nextStep).toContain('准备镜像');
+    expect(r.nextStep).not.toContain('第一个任务会自动');
   });
 
   it('⭐ detail 必须带上 provision 计划 —— 前端据它才给得出那个按钮', async () => {
@@ -411,9 +439,9 @@ describe('★ 未 staged 且平台搬得了 ⇒ 在向导里铺，不再指向�
 
   it('搬不了时才回到按档指路（⛔ 那两条分支不许被这次改动顺手删掉）', async () => {
     const r = await run(build({ ...notStaged, provisionable: false, defaultProvider: 'boxlite' }));
-    expect(r.hint).not.toContain('准备镜像');
-    expect(r.hint).toContain('第一个任务会自动');
-    expect(r.hint).not.toContain('docker');
+    expect(r.nextStep).not.toContain('准备镜像');
+    expect(r.nextStep).toContain('第一个任务会自动');
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('docker');
   });
 });
 
@@ -423,21 +451,24 @@ describe('第 5 步的下一步动作按档分岔（⛔ boxlite 档不许提 doc
   it('⭐ boxlite 档：不提 docker，也不指使去手动拉（平台运行期独占 ~/.boxlite）', async () => {
     const r = await run(build({ ...notStaged, defaultProvider: 'boxlite' }));
     expect(r.status).toBe('info');
-    expect(r.hint).not.toContain('docker');
-    expect(r.hint).toContain('第一个任务会自动');
+    expect(`${r.nextStep ?? ''}${r.command ?? ''}`).not.toContain('docker');
+    expect(r.nextStep).toContain('第一个任务会自动');
     // 「没有手动路」要**说出来**，而不是留白让人自己去试那条会失败的路。
-    expect(r.hint).toContain('拿不到锁');
+    expect(r.nextStep).toContain('拿不到锁');
+    // ⛔ 那一档根本没有可执行的命令 —— 不许编一条。
+    expect(r.command).toBeUndefined();
   });
 
   it('aio 档：仍然给 docker pull（那一档本来就有 docker）', async () => {
     const r = await run(build({ ...notStaged, defaultProvider: 'aio' }));
-    expect(r.hint).toContain('docker pull');
+    // ⚠️ 命令归 command（等宽 + [复制]）—— 那正是拆 hint 的理由。
+    expect(r.command).toContain('docker pull');
   });
 
   it('⛔ 两档都要保留「这一步要 registry 在」—— 铺开本身两档都得去拉', async () => {
     for (const tier of ['boxlite', 'aio']) {
       const r = await run(build({ ...notStaged, defaultProvider: tier }));
-      expect(r.hint).toContain('要 registry 在');
+      expect(r.nextStep).toContain('要镜像仓库在');
     }
   });
 });
@@ -448,14 +479,14 @@ describe('⑥ 第 ⑧ 项与第 ⑤ 项不是同一个问题，界面上要说�
     // 拉取时需要），但不说清就会被读成「诊断自相矛盾」，进而两条都不信。
     const r = await run(build({ imageStaged: () => Promise.resolve(true) }));
     expect(r.status).toBe('ok');
-    expect(r.summary).toContain('此刻不需要 registry');
+    expect(r.detailText).toContain('此刻不需要镜像仓库');
     expect((r.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow).toBe(false);
   });
 
   it('⛔ 未 staged ⇒ 反过来，明说这一步**要** registry 在', async () => {
     const r = await run(build({ imageStaged: () => Promise.resolve(false) }));
     expect(r.status).toBe('info');
-    expect(r.hint).toContain('要 registry 在');
+    expect(r.nextStep).toContain('要镜像仓库在');
     expect((r.detail as { dependsOnRegistryNow?: boolean }).dependsOnRegistryNow).toBe(true);
   });
 
@@ -536,14 +567,14 @@ describe('首个任务的代价按档说（2026-09-07 实测）', () => {
       build({ defaultProvider: 'boxlite', imageStaged: () => Promise.resolve(false) }),
     ).then((r) => {
       expect(r.status).toBe('info');
-      expect(r.summary).not.toContain('13GB');
-      expect(r.summary).toContain('0.3GB');
+      expect(r.detailText).not.toContain('13GB');
+      expect(r.detailText).toContain('0.3GB');
     });
   });
 
   it('aio 档仍然说 13GB / 190 秒（那一档这个数字是对的）', () =>
     run(build({ defaultProvider: 'aio', imageStaged: () => Promise.resolve(false) })).then((r) => {
-      expect(r.summary).toContain('13GB');
-      expect(r.summary).toContain('190 秒');
+      expect(r.detailText).toContain('13GB');
+      expect(r.detailText).toContain('190 秒');
     }));
 });

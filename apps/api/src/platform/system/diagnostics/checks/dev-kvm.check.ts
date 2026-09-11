@@ -61,7 +61,7 @@ export class DevKvmCheck implements DiagnoseCheck {
    * id 是跨仓契约的闭集（`DIAGNOSE_CHECK_IDS` + `SSE_PROTOCOL_CANONICAL`），**不动**；
    * label 只是展示文案，帧里逐项下发，改它不碰任何契约。
    */
-  readonly label = '微 VM 档位（boxlite）可用';
+  readonly label = '轻量虚拟机沙箱可用';
 
   constructor(@Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry) {}
 
@@ -73,7 +73,8 @@ export class DevKvmCheck implements DiagnoseCheck {
     if (plan.kind === 'unsupported') {
       return {
         status: 'info',
-        summary: `${plan.reason} —— 这台机器用容器档位（aio）`,
+        headline: '这台机器用容器沙箱',
+        detailText: `${plan.reason}。`,
         detail: { platform: os, arch: arch() },
       };
     }
@@ -113,7 +114,7 @@ export function microVmPlan(
   if (os === 'darwin') return { kind: 'hypervisor-framework' };
   return {
     kind: 'unsupported',
-    reason: `boxlite 只支持 Linux（KVM）与 macOS（Hypervisor.framework），当前系统是 ${os}`,
+    reason: `轻量虚拟机沙箱只支持 Linux 与 macOS，当前系统是 ${os}`,
   };
 }
 
@@ -155,48 +156,51 @@ export function darwinMicroVmVerdict(
     hypervisorFramework: f.frameworkPresent ? HV_FRAMEWORK : null,
   };
   const fallback =
-    '要在这台机器上跑任务，改用容器档位（aio）：装 Docker Desktop 后重启平台，' +
-    '并在新建任务时显式选 aio';
+    '要在这台机器上跑任务，改用容器沙箱：装 Docker Desktop 后重启平台，新建任务时显式选它。';
 
   if (f.arch !== 'arm64') {
     return {
       status: 'warn',
-      summary: `这台 Mac 是 ${f.arch}（非 Apple Silicon）—— boxlite 目前只支持 Apple Silicon，Intel 官方标注 coming soon`,
-      hint: fallback,
+      headline: '这台 Mac 用不了轻量虚拟机沙箱',
+      detailText: `机器是 ${f.arch}，不是 Apple Silicon —— 轻量虚拟机沙箱目前只支持 Apple Silicon。`,
+      nextStep: fallback,
       detail,
     };
   }
   if (!Number.isInteger(major) || major < MIN_DARWIN_MAJOR) {
     return {
       status: 'warn',
-      summary: `系统版本过低（Darwin ${f.darwinRelease}）—— boxlite 要 macOS 12 或更新（Darwin ${String(MIN_DARWIN_MAJOR)}+）`,
-      hint: `升级 macOS 到 12 及以上；或${fallback}`,
+      headline: '系统版本过低，沙箱用不了',
+      detailText: `轻量虚拟机沙箱要 macOS 12 或更新，这台机器是 Darwin ${f.darwinRelease}。`,
+      nextStep: `升级 macOS 到 12 及以上；或${fallback}`,
       detail,
     };
   }
   if (f.hvSupport === false) {
     return {
       status: 'warn',
-      summary:
-        '内核报告 kern.hv_support=0 —— 这台机器上拿不到硬件虚拟化，Hypervisor.framework 用不了（常见于跑在虚拟机里的 macOS）',
-      hint: `在物理机上运行平台；跑在虚拟机里则要宿主放开嵌套虚拟化。或${fallback}`,
+      headline: '拿不到硬件虚拟化，沙箱用不了',
+      detailText:
+        '内核报告本机不支持硬件虚拟化（常见于跑在虚拟机里的 macOS），轻量虚拟机沙箱起不来。',
+      nextStep: `在物理机上运行平台；跑在虚拟机里则要宿主放开嵌套虚拟化。或${fallback}`,
       detail,
     };
   }
   if (!f.frameworkPresent) {
     return {
       status: 'warn',
-      summary: `${HV_FRAMEWORK} 不在 —— 这在正常的 macOS 上不该发生，微 VM 档位（boxlite）用不了`,
-      hint: `确认系统完整性（这是系统自带框架，不由平台安装）。或${fallback}`,
+      headline: '系统缺了虚拟化框架，沙箱用不了',
+      detailText: `${HV_FRAMEWORK} 不在。这在正常的 macOS 上不该发生 —— 它是系统自带的，不由平台安装。`,
+      nextStep: `先确认系统完整性。或${fallback}`,
       detail,
     };
   }
   return {
     status: 'ok',
-    summary:
-      `Hypervisor.framework 就绪（Apple Silicon · Darwin ${f.darwinRelease}${f.hvSupport === true ? ' · kern.hv_support=1' : ''}）` +
-      ` —— 微 VM 档位（boxlite）可用${isDefaultProvider ? '，且是这台机器的默认档' : ''}` +
-      '。⛔ 它不需要 Docker，也不需要任何守护进程',
+    headline: isDefaultProvider ? '轻量虚拟机沙箱可用，正在用它' : '轻量虚拟机沙箱可用',
+    detailText:
+      `Apple Silicon · Darwin ${f.darwinRelease}${f.hvSupport === true ? '，内核报告支持硬件虚拟化' : ''}。` +
+      '它不需要 Docker，也不需要任何常驻服务。',
     detail,
   };
 }
@@ -223,29 +227,33 @@ export function linuxKvmVerdict(
   if (errno === null) {
     return {
       status: 'ok',
-      summary:
-        '/dev/kvm 可读写 —— 微 VM 档位（boxlite）可用' +
-        (isDefaultProvider ? '，且是这台机器的默认档' : ''),
+      headline: isDefaultProvider ? '轻量虚拟机沙箱可用，正在用它' : '轻量虚拟机沙箱可用',
+      detailText: '这台机器的硬件虚拟化设备可读写。',
       detail: { platform: 'linux', path: KVM, errno: null, isDefaultProvider },
     };
   }
   const missing = errno === 'ENOENT';
-  const what = missing ? '/dev/kvm 不存在' : `/dev/kvm 存在但当前进程无读写权限（${errno}）`;
+  const what = missing
+    ? '这台机器上没有硬件虚拟化设备 /dev/kvm'
+    : `硬件虚拟化设备 /dev/kvm 在，但平台进程读写不了它（${errno}）`;
 
   if (!isDefaultProvider) {
-    // ℹ️ 不是 ⚠️：这台机器的默认档不走微 VM，缺它什么都不耽误。
+    // ℹ️ 不是 ⚠️：这台机器的沙箱环境不走轻量虚拟机，缺它什么都不耽误。
     return {
       status: 'info',
-      summary: `${what} —— 微 VM 档位（boxlite）不可用，但**当前默认档不需要它**（走容器档 aio）`,
+      headline: '轻量虚拟机沙箱不可用，但用不到',
+      detailText: `${what}。这台机器的沙箱环境跑在容器里，缺它不耽误事。`,
       detail: { platform: 'linux', path: KVM, errno, isDefaultProvider: false },
     };
   }
   return {
     status: 'warn',
-    summary: `${what} —— 微 VM 档位（boxlite）不可用，而它正是这台机器的默认档`,
-    hint: missing
-      ? '宿主机需开启硬件虚拟化（BIOS VT-x/AMD-V）并加载 kvm 模块：lsmod | grep kvm；云主机需选支持嵌套虚拟化的规格'
-      : `把平台进程的运行用户加入 kvm 组：sudo usermod -aG kvm $(whoami) && ls -l ${KVM}`,
+    headline: '轻量虚拟机沙箱不可用',
+    detailText: `${what}，而这台机器的沙箱环境正是它。`,
+    nextStep: missing
+      ? '宿主机要开硬件虚拟化（BIOS 里的 VT-x / AMD-V）并加载 kvm 模块；云主机要选支持嵌套虚拟化的规格。'
+      : '把跑平台的那个账号加进 kvm 组，然后重启平台。',
+    command: missing ? 'lsmod | grep kvm' : `sudo usermod -aG kvm $(whoami) && ls -l ${KVM}`,
     detail: { platform: 'linux', path: KVM, errno, isDefaultProvider: true },
   };
 }

@@ -62,17 +62,24 @@ describe('超时不宣布离线，够不着才宣布', () => {
       t({ target: 'api.anthropic.com', timedOut: true }),
     ]);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('这不等于连不上');
-    expect(r.summary, '⛔ 超时不许被说成不可达').not.toContain('不可达');
-    expect(r.hint).toContain('重跑一次');
+    // ⚠️ headline 就要把它说成「慢」，⛔ 不许说成「连不上」——下一步不同。
+    expect(r.headline).toContain('慢');
+    expect(r.detailText).toContain('这不等于连不上');
+    const text = `${r.headline}${r.detailText ?? ''}`;
+    expect(text, '⛔ 超时不许被说成不可达').not.toContain('不可达');
+    // ⚠️ 「重跑一次看稳不稳定」是散文，归 nextStep；⛔ 它不是一条可粘贴的命令。
+    expect(r.nextStep).toContain('重跑一次');
+    expect(r.command, '⛔ 这一档没有命令，不许编一个').toBeUndefined();
   });
 
   it('⭐ 模型 API **真的够不着**（非超时）⇒ 仍然 fail 并宣布离线', () => {
     // ⚠️ 反面同样要钉：一个「永远只报 warn」的实现会让真断网时没人被告知。
     const r = outboundVerdict([t({ target: 'api.openai.com' })]);
     expect(r.status).toBe('fail');
-    expect(r.summary).toContain('Agent 将不可用');
-    expect(r.summary).toContain('不可达');
+    expect(r.headline).toContain('Agent 不可用');
+    expect(r.detailText).toContain('不可达');
+    // ⛔ 内部文档编号不许上屏。
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('P21-8');
   });
 
   it('混合（一个超时一个够不着）⇒ 按证据强的那个走，仍宣布离线', () => {
@@ -82,8 +89,8 @@ describe('超时不宣布离线，够不着才宣布', () => {
     ]);
     expect(r.status).toBe('fail');
     // 两种失败各说各的,不合并成一句
-    expect(r.summary).toContain('未在预算内应答');
-    expect(r.summary).toContain('不可达');
+    expect(r.detailText).toContain('未在超时时限内应答');
+    expect(r.detailText).toContain('不可达');
   });
 
   it('只有镜像仓库超时 ⇒ 模型 API 正常,不该扯上 Agent 可用性', () => {
@@ -92,7 +99,23 @@ describe('超时不宣布离线，够不着才宣布', () => {
       t({ target: 'ghcr.io', modelApi: false, timedOut: true }),
     ]);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('Agent 可用');
-    expect(r.summary).toContain('未在预算内应答');
+    expect(r.headline).toContain('Agent 仍可用');
+    expect(r.detailText).toContain('未在超时时限内应答');
+  });
+
+  it('⛔ 四档结论的 headline 都 ≤ 20 字、不换行、无 markdown 星号', () => {
+    const cases = [
+      [t({ target: 'a', ok: true, latencyMs: 10 })],
+      [t({ target: 'a', timedOut: true })],
+      [t({ target: 'a' })],
+      [t({ target: 'a', ok: true, latencyMs: 10 }), t({ target: 'g', modelApi: false })],
+    ];
+    for (const rows of cases) {
+      const r = outboundVerdict(rows);
+      expect([...r.headline].length, r.headline).toBeLessThanOrEqual(20);
+      expect(r.headline).not.toContain('\n');
+      const text = `${r.headline}${r.detailText ?? ''}${r.nextStep ?? ''}`;
+      expect(text, text).not.toContain('**');
+    }
   });
 });

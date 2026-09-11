@@ -112,9 +112,12 @@ export class HostAuthHelper implements AuthHelper {
       });
     } catch (e) {
       await rm(homeDir, { recursive: true, force: true }).catch(() => undefined);
+      // ⛔ **不回显整条 argv**（原文是 `${cmd.join(' ')}`）：终端用户看不懂也用不上一串
+      //    内部命令行，而它同时可能带出这台机器上的路径。真正需要它的人在日志里 ——
+      //    技术细节走 `cause`，上屏那句只说发生了什么、以及这是本机环境的问题。
       throw new Error(
-        `无法为登录 CLI 分配伪终端（${cmd.join(' ')}）：${(e as Error).message}。` +
-          '登录 CLI 会检测 TTY —— 没有伪终端时 `claude setup-token` 一个字节都不输出。',
+        `没能为登录程序分配伪终端：${(e as Error).message}。` +
+          '登录 CLI 会检查有没有终端，拿不到伪终端时它一个字节都不会输出。',
       );
     }
 

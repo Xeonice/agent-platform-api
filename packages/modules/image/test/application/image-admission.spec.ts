@@ -369,6 +369,35 @@ describe('⭐ 鸡生蛋：库里没有可用锚点时**拒绝**，而且拒的�
     expect(h.rows()).toHaveLength(0);
   });
 
+  /**
+   * ⭐ **这句话的读者是「正在注册自己镜像的开发者」，不是运维方。**
+   *
+   * ⛔ 上一版把运维手册塞进了这条 message：「请先让 `SANDBOX_DEFAULT_IMAGE` 指向的预制
+   * 镜像注册成功」—— 它出现在开发者的注册弹窗里，而他多半连那台机器的 `.env` 都碰不到。
+   * 让人去修一个他既够不着、也不是他弄坏的东西，比不给下一步更贵。
+   *
+   * ⚠️ **运维那段一个字都没删**，只是搬到了启动日志（`image-seeder.ts` 的
+   * `seedFailureNextStep()`，按部署形态分岔、比这一句详细得多）。
+   *
+   * MUTATION：把 `SANDBOX_DEFAULT_IMAGE` 加回这条 message ⇒ 本条红。
+   */
+  it('⭐ 这条拒绝要对**注册者**说话：不提运维配置项，且明说「不是你的镜像的问题」', async () => {
+    h.spec.images.set('registry.example/user/app:v1', { diffIds: [...BASE_LAYERS, layer('app')] });
+
+    const err = await h.service
+      .registerImage('registry.example/user/app:v1')
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    const message = (err as Error).message;
+    // ⛔ 运维方的环境变量不许出现在注册者的弹窗里。
+    expect(message).not.toContain('SANDBOX_DEFAULT_IMAGE');
+    // 「不是你的问题」必须说出来 —— 否则他会去改一个没坏的 Dockerfile。
+    expect(message).toContain('不是你这张镜像的问题');
+    // 而且要说得出下一步（P22 §1：禁止只报错不给动作）。
+    expect(message).toContain('联系管理员');
+  });
+
   it('有 builtin 但 diff_ids 为空（切片前的存量行）⇒ 同样拒绝，不当成「空前缀匹配一切」', async () => {
     // `[]` 是任何数组的前缀。若锚点不过滤空值，一行无法描述的存量数据就会让规则
     // **对所有镜像放行**——规则还在，只是永远不再拒绝任何东西。

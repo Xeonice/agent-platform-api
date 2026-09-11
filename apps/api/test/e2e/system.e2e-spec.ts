@@ -319,8 +319,14 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     const checks = frames.filter((f): f is DiagnoseCheckFrame => f.event === 'check');
     expect(checks).toHaveLength(8);
     expect(new Set(checks.map((c) => c.id))).toEqual(new Set(DIAGNOSE_CHECK_IDS));
-    // 每一项都必须给出一句能直接上 UI 的话。
-    for (const c of checks) expect(c.summary.length).toBeGreaterThan(0);
+    // 每一项都必须给出一句能直接上 UI 的结论，且它 ≤ 20 字、不换行、没有 markdown。
+    for (const c of checks) {
+      expect(c.headline.length, c.id).toBeGreaterThan(0);
+      expect([...c.headline].length, `${c.id}: ${c.headline}`).toBeLessThanOrEqual(20);
+      expect(c.headline, c.id).not.toContain('\n');
+      const text = `${c.headline}${c.detailText ?? ''}${c.nextStep ?? ''}`;
+      expect(text, `${c.id} 的上屏文案里有 markdown 星号`).not.toContain('**');
+    }
 
     const done = frames.at(-1) as DiagnoseDoneFrame;
     expect(done.event).toBe('done');
@@ -356,9 +362,9 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     //    而不是某个具体结论（那会让用例依赖跑测试的那台机器）。
     if (port.status === 'fail') {
       // P21-5 §9B：端口号 · 进程名与 pid · 平台原本要用它做什么，三样都要有。
-      expect(port.summary).toMatch(/pid \d+/);
-      expect(port.summary).toContain('平台 HTTP/WS 服务');
-      expect(port.hint).toContain('lsof');
+      expect(port.detailText).toMatch(/pid \d+/);
+      expect(port.detailText).toContain('平台 HTTP/WS 服务');
+      expect(port.command).toContain('lsof');
     } else {
       expect(['ok', 'warn', 'timeout']).toContain(port.status);
     }

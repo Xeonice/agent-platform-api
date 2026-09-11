@@ -112,7 +112,9 @@ describe('automation CRUD（10 §6.5）', () => {
       .post(`/api/projects/${projectId}/automations`)
       .send({ ...baseRule, timezone: 'Asia/NotACity' })
       .expect(400);
-    expect(res.body.code).toBe('VALIDATION_FAILED');
+    // ⚠️ **专码而不是 `VALIDATION_FAILED`**（10 §6.8 行 534）：`UTC+8` 拼写完全正确，
+    //    前端要按码给人话，压成"格式不对"说不出被拒的理由。
+    expect(res.body.code).toBe('INVALID_TIMEZONE');
     expect(res.body.sideEffectFree).toBe(true);
   });
 
