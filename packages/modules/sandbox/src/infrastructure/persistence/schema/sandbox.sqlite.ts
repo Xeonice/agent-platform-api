@@ -20,6 +20,18 @@ export const sandboxes = sqliteTable(
     name: text('name'),
     runtime: text('runtime').notNull(),
     /**
+     * 实际注入了凭证的 runtime（JSON 字符串数组），03 §4.3 ④。
+     *
+     * ⛔ **它是记录不是推导**：不许在用的时候拿「镜像支持的 ∩ 现在配了的」现算 ——
+     * provision 之后用户删掉凭证，现算会说「没有」而盒子里那份令牌还在；反过来也一样。
+     * 只有这一列与盒子里的事实对得上。
+     *
+     * ⚠️ **可空，且 NULL ≠ 空数组**：NULL = 本切片之前建的旧行（那时确实只注入
+     * `runtime` 那一个），仓储层读出来回落成 `[runtime]`；`'[]'` = 真的一个都没注入
+     * （凭证全没配）。合成一个值会让「旧行」与「裸跑」长得一样。
+     */
+    injectedRuntimes: text('injected_runtimes'),
+    /**
      * `image_manifests.id` — the manifest this sandbox runs (13 §2.4.5).
      *
      * ⚠️ THE MEANING OF THIS COLUMN CHANGED WITH THE IMAGE SLICE. It used to hold a

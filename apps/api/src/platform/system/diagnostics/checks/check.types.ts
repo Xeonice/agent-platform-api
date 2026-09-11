@@ -3,10 +3,19 @@ import type { DiagnoseCheckId, DiagnoseStatus, PresetImageStep } from '@platform
 /** 一项检查的结论。`durationMs` 由调度方计时 —— 检查自己不该报自己的耗时。 */
 export interface DiagnoseCheckResult {
   status: DiagnoseStatus;
-  /** 一行人话，**自带这一次实测出来的具体数字**（哪个端口、被谁占、还剩多少 GB）。 */
-  summary: string;
-  /** 可复制的命令 / 配置项。⛔ 不要写「请检查网络」这种没有下一步的句子。 */
-  hint?: string;
+  /**
+   * 一句话结论，**≤ 20 字、不换行**：这一项好不好 + 挡不挡我干活。
+   *
+   * ⛔ 证据、例外条款、为什么，一律下沉到 `detailText` —— 一句读到第三行才知道好坏的
+   * 结论，等于没有结论。
+   */
+  headline: string;
+  /** 第二层：证据（哪个端口、被谁占、还剩多少 GB）、例外条款、为什么。 */
+  detailText?: string;
+  /** 下一步 —— **人话**，普通字体、无复制按钮。⛔ 不要写「请检查网络」这种没有下一步的句子。 */
+  nextStep?: string;
+  /** 真正可粘贴执行的命令 / 配置项。⛔ **没有命令就不要编一个。** */
+  command?: string;
   step?: PresetImageStep;
   errorCode?: string;
   detail?: Record<string, unknown>;

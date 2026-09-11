@@ -34,6 +34,7 @@ export const DEFAULT_RETENTION_DAYS: RetentionDays = 30;
  * 只往目录里写了一个 `kept` 标记文件，`retained_volumes` 一条记录都不登记 —— 端点接上
  * 也只会永远返回空数组（10 §6 那一格的原话）。
  */
+
 @Injectable()
 export class RetainedVolumeService {
   private readonly logger = new Logger('RetainedVolumeService');
@@ -139,7 +140,15 @@ export class RetainedVolumeService {
     // I-RV-2：已清理的不可下载 —— 目录早就没了，能给的只有一个 20 字节的空 tar
     if (!volume || volume.isDeleted) throw new NotFoundException(`retained volume ${id} not found`);
     if (!(await this.store.exists(volume.workspacePath))) {
-      throw new NotFoundException(`retained volume ${id} is no longer on disk`);
+      // ⚠️ A DIFFERENT code from「记录不存在」: the record IS there and still counts
+      // against the quota, only its directory is gone. The user's next move differs
+      // (delete the row vs. refresh the list), so the two must not share one code.
+      throw new NotFoundException({
+        code: 'VOLUME_ARCHIVE_MISSING',
+        message: `retained volume ${id} is no longer on disk`,
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
     const archive = await this.store.openArchive(volume.workspacePath);
     return { ...archive, filename: `${volume.sandboxId ?? volume.id}.tar` };

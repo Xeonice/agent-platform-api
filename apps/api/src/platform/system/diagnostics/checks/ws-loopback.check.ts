@@ -28,7 +28,7 @@ import type { DiagnoseCheck, DiagnoseCheckResult, DiagnoseContext } from './chec
 @Injectable()
 export class WsLoopbackCheck implements DiagnoseCheck {
   readonly id = 'ws-loopback' as const;
-  readonly label = 'WS 回环';
+  readonly label = '实时推送自检';
 
   constructor(
     private readonly adapterHost: HttpAdapterHost,
@@ -40,8 +40,9 @@ export class WsLoopbackCheck implements DiagnoseCheck {
     if (port === null) {
       return {
         status: 'warn',
-        summary: 'HTTP 服务尚未开始监听，无法做回环测试',
-        hint: '平台仍在启动中时会出现这一项；稍后重新诊断',
+        headline: '平台还没开始监听，测不了',
+        detailText: '平台仍在启动中时会出现这一项。',
+        nextStep: '稍等几秒重新诊断。',
       };
     }
     const started = this.clock.now().getTime();
@@ -52,21 +53,29 @@ export class WsLoopbackCheck implements DiagnoseCheck {
       if (!/^0\{.*"sid"/.test(body.trim())) {
         return {
           status: 'fail',
-          summary: `回环可达但 /socket.io/ 没有返回 engine.io 握手包（收到 ${body.slice(0, 40)}…）`,
-          hint: '前面可能有反向代理没有透传 WebSocket/长轮询；确认它对 /socket.io/ 放行 Upgrade 与 Connection 头',
+          headline: '实时推送握手不通',
+          detailText:
+            `本机连得上，但实时推送的握手没有回应它该回的内容（收到 ${body.slice(0, 40)}…）。` +
+            '前面多半有一层反向代理没有透传 WebSocket / 长轮询。',
+          nextStep: '确认反向代理对 /socket.io/ 放行 Upgrade 与 Connection 头。',
           detail: { port, sample: body.slice(0, 120) },
         };
       }
       return {
         status: 'ok',
-        summary: `WS 传输端点在 127.0.0.1:${String(port)} 上应答正常（${String(this.clock.now().getTime() - started)}ms）`,
+        headline: '实时推送正常',
+        detailText: `本机 127.0.0.1:${String(port)} 应答正常（${String(this.clock.now().getTime() - started)}ms）。`,
         detail: { port },
       };
     } catch (e) {
       return {
         status: 'fail',
-        summary: `回环连接 127.0.0.1:${String(port)} 失败：${(e as Error).message} —— 实时推送（沙箱状态 / 终端 / 任务流）都会失灵`,
-        hint: `确认平台自身端口可从本机访问：curl -sv http://127.0.0.1:${String(port)}/api/health`,
+        headline: '连不上自己，实时推送会失灵',
+        detailText:
+          `从本机连 127.0.0.1:${String(port)} 失败：${(e as Error).message}。` +
+          '沙箱状态、终端、任务流都靠它推。',
+        nextStep: '确认平台自己的端口能从本机访问。',
+        command: `curl -sv http://127.0.0.1:${String(port)}/api/health`,
         detail: { port },
       };
     }

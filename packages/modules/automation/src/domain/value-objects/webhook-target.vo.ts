@@ -28,11 +28,13 @@ export class WebhookTarget {
     if (!parsed) {
       throw new AutomationInvariantError(
         `webhook url '${url}' is not a valid absolute URL (I-AUT-6)`,
+        'INVALID_WEBHOOK_URL',
       );
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new AutomationInvariantError(
         `webhook url must be http/https, got '${parsed.protocol.replace(':', '')}' (I-AUT-6)`,
+        'INVALID_WEBHOOK_URL',
       );
     }
     return new WebhookTarget(url, triggerOn);

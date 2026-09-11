@@ -43,7 +43,15 @@ export class SandboxExecAdapter implements SandboxExecPort {
 
   async bindingOf(sandboxId: string): Promise<SandboxRuntimeBinding> {
     const sandbox = await this.requireRunning(sandboxId);
-    return { sandboxId, runtimeId: sandbox.runtime, workdir: SANDBOX_WORKSPACE_MOUNT };
+    return {
+      sandboxId,
+      runtimeId: sandbox.runtime,
+      // 终端要据它决定「+ 新终端」下拉能开哪几个 CLI（06 §5.6）。
+      // ⛔ 读的是聚合上的记录（∪ 默认），不是"现在配了哪些凭证"——
+      //    两者在 provision 之后就会分叉，只有记录与盒子里的事实对得上。
+      availableRuntimes: sandbox.availableRuntimes,
+      workdir: SANDBOX_WORKSPACE_MOUNT,
+    };
   }
 
   private async requireRunning(sandboxId: string): Promise<Sandbox> {

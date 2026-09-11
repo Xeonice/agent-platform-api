@@ -12,6 +12,8 @@ export interface SandboxProps {
   id: SandboxId;
   projectId: ProjectId;
   runtime: string;
+  /** Runtimes whose credential provision actually injected (03 §4.3 ④). */
+  injectedRuntimes: string[];
   provider: string;
   /** Task display name; defaulted from `initialTask.prompt` at create time. */
   name: string;
@@ -63,6 +65,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _providerSandboxId: string | null;
   private _providerState: Record<string, unknown> | null;
   private _initialTask: InitialTask;
+  private _injectedRuntimes: string[];
   private _failureCode: string | null;
   private _failureReason: string | null;
   private _name: string;
@@ -72,6 +75,10 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private readonly _pendingTransitions: StateTransition[] = [];
 
   readonly projectId: ProjectId;
+  /**
+   * 这个沙箱是为哪个 runtime 建的 —— **默认值**，不是"唯一装了的那个"
+   * （语义迁移见 `SandboxDtoSchema.runtime`）。
+   */
   readonly runtime: string;
   readonly provider: string;
   readonly imageRef: string;
@@ -81,6 +88,7 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     super(props.id);
     this.projectId = props.projectId;
     this.runtime = props.runtime;
+    this._injectedRuntimes = props.injectedRuntimes;
     this.provider = props.provider;
     this.imageRef = props.imageRef;
     this.headless = props.headless;
@@ -96,6 +104,48 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._providerState = props.providerState;
     this._version = props.version;
     this._transitions = props.transitions;
+  }
+
+  /**
+   * 实际注入了凭证的 runtime（03 §4.3 ④）。**读的是记录，不是推导**——理由见
+   * `SandboxDtoSchema.injectedRuntimes`。
+   *
+   * ⚠️ 空数组有两种来源，对调用方是同一件事「没有任何一个 runtime 能在这里跑」：
+   * ① provision 时一个凭证都没配；② 本切片之前建的旧行（该列 NULL，仓储层回落成
+   * `[runtime]`，所以旧行读出来**不会**是空）。
+   */
+  get injectedRuntimes(): readonly string[] {
+    return this._injectedRuntimes;
+  }
+
+  /**
+   * 这个沙箱里**能跑哪几个 runtime** —— 默认那个 ∪ 实际注入了凭证的那些。
+   *
+   * ⚠️ **为什么要并上 `runtime` 而不是只看 `injectedRuntimes`**：一个凭证都没配的用户
+   * 照样能建任务，agent 会以**未登录**状态起来（provision 为此专门记了一条
+   * `sandbox.credential.absent`，文案就是「agent 将以未登录状态启动」）。只看注入列表
+   * 会把这条一直存在的路直接掐掉 —— 「没配凭证」从「能跑，只是没登录」变成「什么都
+   * 开不了」，而那不是本切片要改的东西。
+   *
+   * ⇒ 默认 runtime 的 CLI 由 provision 的 ③ 保证装好了（`ensureInstalled`），
+   * 所以它**永远**可用；`injectedRuntimes` 只**扩大**这个集合，永不缩小它。
+   *
+   * ⚠️ 派生放在聚合上、只有这一处：`assertRunnable`（发任务）与终端（开 CLI 标签）
+   * 必须给出同一个答案，两边各写一遍并集迟早会分叉。
+   */
+  get availableRuntimes(): readonly string[] {
+    return [...new Set([this.runtime, ...this._injectedRuntimes])];
+  }
+
+  /**
+   * provision 注入完成后落账（03 §4.3 ④）。**只在 provision/restart 里调**。
+   *
+   * ⚠️ restart 会重跑整个 `starting` 段、重新注入一次 ⇒ 这里是**覆盖**而不是并集：
+   * 用户在两次启动之间删掉的凭证，重启之后盒子里确实就没有了，并集会让这条记录
+   * 继续声称它还在。
+   */
+  recordInjectedRuntimes(runtimeIds: string[]): void {
+    this._injectedRuntimes = [...runtimeIds];
   }
 
   /** Rehydrate from persistence (repository.toDomain). No events raised. */
@@ -144,6 +194,8 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       id: input.id,
       projectId: input.projectId,
       runtime: input.runtime,
+      // 建的时候还没注入任何东西 —— provision 跑完 ④ 才落账。
+      injectedRuntimes: [],
       provider: input.provider,
       imageRef: input.imageRef,
       name,

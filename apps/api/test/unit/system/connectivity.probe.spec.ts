@@ -329,7 +329,7 @@ describe('本地 registry 的真实回环探测（本次事故的回归测试）
     // ⚠️ 这是事故的第二半伤害：把用户支去配一个根本不需要的代理。
     expect(r.hint).not.toContain('HTTPS_PROXY');
     expect(r.hint).not.toContain('HTTP_PROXY');
-    expect(r.hint).toContain('loopback 不出网');
+    expect(r.hint).toContain('本机地址不出网');
   });
 
   it('⛔ 本地 registry 的建议必须说清**谁要它**，并给出**不依赖 docker** 的路', async () => {
@@ -343,10 +343,10 @@ describe('本地 registry 的真实回环探测（本次事故的回归测试）
     process.env.SANDBOX_DEFAULT_IMAGE = `127.0.0.1:${String(port)}/x:v1`;
     const hint = (await probeRegistry()).hint ?? '';
 
-    expect(hint).toContain('boxlite'); // 谁要它
+    expect(hint).toContain('这台机器的沙箱环境'); // 谁要它（⛔ 不说内部 provider 名）
     expect(hint).toContain('断点续传'); // 为什么要
     expect(hint).toContain('平台本身不需要 Docker'); // ⛔ 别把人推向 docker
-    expect(hint).toContain('OCI registry'); // 不依赖 docker 的路
+    expect(hint).toContain('OCI 镜像仓库'); // 不依赖 docker 的路
     expect(hint).toContain('SANDBOX_DEFAULT_IMAGE'); // 连 registry 都不必起的路
     // docker 仍然可以是**其中一条**（有 docker 的人一条命令最快），但不能是唯一一条。
     expect(hint).toContain('docker run');

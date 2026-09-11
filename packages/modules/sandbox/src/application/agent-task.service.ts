@@ -292,12 +292,18 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
   }
 
   /**
-   * A Task needs a LIVE instance and the runtime the sandbox was provisioned with.
+   * A Task needs a LIVE instance and a runtime this sandbox can actually run.
    *
-   * The runtime check is not pedantry: provisioning installs exactly one CLI and
-   * injects exactly one credential (03 §4.3 ③④), so any other runtime id would reach
-   * the sandbox as a missing binary — a 30-second failure with a confusing message
-   * instead of an immediate, accurate refusal.
+   * ⚠️ **判据 2026-09 从「等于 `sandbox.runtime`」放宽成「在 `injectedRuntimes` 里」。**
+   * 旧注释写的是「provision 只装一个 CLI、只注入一份凭证」——那句话现在是**假话**：
+   * 镜像本来就预装了它声明支持的全部 CLI，而 provision 会把所有已配置的凭证一次性
+   * 注入（03 §4.3 ④）。继续按 `sandbox.runtime` 拒绝，会把一个**真的能跑**的任务
+   * 挡在门外。
+   *
+   * ⛔ 但**不能因此不校验**：一个既没预装 CLI、也没注入凭证的 runtime 到了沙箱里就是
+   * 一个找不到的二进制 —— 30 秒之后一条看不懂的失败，远不如门口一句准确的拒绝。
+   * ⇒ 判据换成那条**落库的记录**（⛔ 不是现算的"镜像支持的 ∩ 现在配了的"，理由见
+   * `SandboxDtoSchema.injectedRuntimes`）。
    */
   private assertRunnable(sandbox: Sandbox, runtimeId: string): void {
     if (!this.runtimes.has(runtimeId)) {
@@ -309,11 +315,14 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
         `sandbox ${sandbox.id} is '${sandbox.status}' — a Task can only start on a running one`,
       );
     }
-    if (sandbox.runtime !== runtimeId) {
+    const available = sandbox.availableRuntimes;
+    if (!available.includes(runtimeId)) {
+      // ⚠️ 拒绝语要说**真实**的理由。旧文案「它的 CLI 和凭证是唯一装了的」在多 runtime
+      //    之后是假话，而一句假的拒绝语会把排查引向完全错误的方向。
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
-        `sandbox ${sandbox.id} was provisioned for runtime '${sandbox.runtime}', not ` +
-          `'${runtimeId}' — its CLI and credential are the only ones installed`,
+        `sandbox ${sandbox.id} has no usable '${runtimeId}' runtime — ` +
+          `它能跑的是：${available.join('、')}（默认 ${sandbox.runtime}）`,
       );
     }
   }

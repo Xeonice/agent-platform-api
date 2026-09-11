@@ -1,0 +1,1 @@
+ALTER TABLE `sandboxes` ADD `injected_runtimes` text;

@@ -71,7 +71,7 @@ describe('/_ping 要有 docker 的证据，不是「有东西回了 200」', () 
     const r = await new ContainerRuntimeCheck(clock, registryWithDefault('aio')).run(ctx);
     expect(r.status).toBe('ok');
     expect(r.detail?.apiVersion).toBe('1.54');
-    expect(r.summary).toContain('Docker/29.5.3');
+    expect(r.detailText).toContain('Docker/29.5.3');
   });
 
   it('⛔ **200 但既没有 Api-Version 也不是 OK ⇒ 不算 ✅**（端口上坐着别的服务）', async () => {
@@ -83,7 +83,7 @@ describe('/_ping 要有 docker 的证据，不是「有东西回了 200」', () 
 
     const r = await new ContainerRuntimeCheck(clock, registryWithDefault('aio')).run(ctx);
     expect(r.status).toBe('fail');
-    expect(r.summary).toContain('不像一个容器运行时');
+    expect(r.detailText).toContain('不像一个容器服务');
   });
 
   it('只回一行 OK（没有响应头）也算 ✅ —— 老版本 daemon / 代理会剥头', async () => {
@@ -103,7 +103,7 @@ describe('/_ping 要有 docker 的证据，不是「有东西回了 200」', () 
     process.env.DOCKER_HOST = `tcp://127.0.0.1:${String(port)}`;
     const r = await new ContainerRuntimeCheck(clock, registryWithDefault('aio')).run(ctx);
     expect(r.status).toBe('fail');
-    expect(r.summary).toContain('500');
+    expect(r.detailText).toContain('500');
   });
 
   it('⛔ 端口在监听但**从不应答** ⇒ 不许挂着，也不许报 ✅', async () => {
@@ -119,7 +119,7 @@ describe('/_ping 要有 docker 的证据，不是「有东西回了 200」', () 
         signal: new AbortController().signal,
       });
       expect(r.status).toBe('fail');
-      expect(r.summary).toContain('300ms 内无应答');
+      expect(r.detailText).toContain('300ms 内无应答');
     } finally {
       tcp.close();
     }
@@ -132,7 +132,7 @@ describe('/_ping 要有 docker 的证据，不是「有东西回了 200」', () 
     process.env.DOCKER_HOST = `tcp://127.0.0.1:${String(port)}`;
     const r = await new ContainerRuntimeCheck(clock, registryWithDefault('aio')).run(ctx);
     expect(r.status).toBe('fail');
-    expect(r.summary).toContain('ECONNREFUSED');
+    expect(r.detailText).toContain('ECONNREFUSED');
   });
 });
 
@@ -143,24 +143,31 @@ describe('不可达时的严重度 —— 挂在「谁需要它」上', () => {
   it('⛔ 默认档是微 VM（boxlite）⇒ **ℹ️，不是 ❌** —— 这台机器本来就不需要 docker', () => {
     const r = unreachableVerdict('micro-vm', 'boxlite', endpoint, reason);
     expect(r.status).toBe('info');
-    expect(r.summary).toContain('不需要它');
-    expect(r.summary).toContain('boxlite');
-    // 建议仍要给（确实有人想用 aio 档），但**必须先说清默认档不需要它**，
+    // ⚠️ headline 就要把「不需要」说出来 —— 这一项在这台机器上不挡任何事。
+    expect(r.headline).toContain('不需要');
+    expect(r.detailText).toContain('不跑在容器里');
+    // 建议仍要给（确实有人想用容器沙箱），但**必须先说清这台机器不需要它**，
     // 否则这条建议就成了「去装 docker」的又一个入口。
-    expect(r.hint).toContain('只有显式选容器档');
+    expect(r.nextStep).toContain('只有显式选容器沙箱');
+    // ⛔ 「运行档位 / provider」这类内部词不许上屏。
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('档位');
   });
 
   it('默认档是容器档（aio）⇒ ❌，且说清它挡住了什么', () => {
     const r = unreachableVerdict('container', 'aio', endpoint, reason);
     expect(r.status).toBe('fail');
-    expect(r.summary).toContain('挡住了新建任务');
-    expect(r.hint).toContain('docker info');
+    expect(r.headline).toContain('建不了任务');
+    expect(r.detailText).toContain('挡住了新建任务');
+    // ⚠️ 命令归 command（等宽 + [复制]），散文归 nextStep —— 拆开的全部理由。
+    expect(r.command).toBe('docker info');
+    expect(r.nextStep).not.toContain('docker info');
   });
 
   it('⛔ 第三方 provider ⇒ ⚠️「不知道它要不要」，**不猜**', () => {
     const r = unreachableVerdict('unknown', 'my-cloud', endpoint, reason);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('无法断定');
+    expect(r.headline).toContain('说不出');
+    expect(r.detailText).toContain('断定不了');
   });
 
   it('三种底座的 status 两两不同（合并任意两种都会在这里红）', () => {
@@ -170,13 +177,25 @@ describe('不可达时的严重度 —— 挂在「谁需要它」上', () => {
     expect(new Set(s).size).toBe(3);
   });
 
-  it('建议按连接方式分岔：unix 说 docker info，tcp 说 socket proxy', () => {
-    expect(unreachableVerdict('container', 'aio', '/var/run/docker.sock', reason).hint).toContain(
+  it('建议按连接方式分岔：unix 说 docker info，tcp 说去查那个转发地址', () => {
+    expect(unreachableVerdict('container', 'aio', '/var/run/docker.sock', reason).command).toBe(
       'docker info',
     );
-    const tcp = unreachableVerdict('container', 'aio', 'tcp://docker-proxy:2375', reason).hint;
-    expect(tcp).toContain('docker-socket-proxy');
-    expect(tcp).not.toContain('docker info');
+    const tcp = unreachableVerdict('container', 'aio', 'tcp://docker-proxy:2375', reason);
+    expect(tcp.command).toContain('tcp://docker-proxy:2375/_ping');
+    expect(tcp.command).not.toContain('docker info');
+    // ⛔ `docker-socket-proxy` 是内部组件名，上屏说「转发用的代理」。
+    expect(tcp.nextStep).toContain('转发用的代理');
+  });
+
+  it('⛔ headline ≤ 20 字、不换行、无 markdown 星号（三种底座都算）', () => {
+    for (const k of ['container', 'micro-vm', 'unknown'] as const) {
+      const r = unreachableVerdict(k, 'p', endpoint, reason);
+      expect([...r.headline].length, r.headline).toBeLessThanOrEqual(20);
+      expect(r.headline).not.toContain('\n');
+      const text = `${r.headline}${r.detailText ?? ''}${r.nextStep ?? ''}`;
+      expect(text, text).not.toContain('**');
+    }
   });
 
   it('整条链路：默认档 boxlite + docker 不在 ⇒ 这一项报 ℹ️', async () => {

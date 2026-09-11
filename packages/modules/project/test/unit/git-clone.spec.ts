@@ -222,7 +222,6 @@ describe('classifyCloneError (03 §7.5)', () => {
     expect(classifyCloneError('fatal: Authentication failed for https://h/x')).toBe(
       'CLONE_FAILED_PERMISSION',
     );
-    expect(classifyCloneError('remote: Repository not found.')).toBe('CLONE_FAILED_PERMISSION');
     expect(classifyCloneError('Permission denied (publickey).')).toBe('CLONE_FAILED_PERMISSION');
     // hermetic no-cred clone (GIT_TERMINAL_PROMPT=0) → git prints this, NOT "auth failed".
     expect(
@@ -234,6 +233,33 @@ describe('classifyCloneError (03 §7.5)', () => {
     expect(
       classifyCloneError('remote: HTTP Basic: Access denied\nfatal: Authentication failed'),
     ).toBe('CLONE_FAILED_PERMISSION');
+  });
+  /**
+   * ★ `Repository not found` / 404 는 **NOT_FOUND, not PERMISSION** — the split this
+   *   suite exists to pin. A host answers 404 both for "private, no credential" and
+   *   for "you mistyped the URL" (on purpose: a 403 would leak that the repo exists),
+   *   so the server cannot know which happened. Folding it into PERMISSION made the UI
+   *   assert "you do not have access to this repository" — sometimes false, and it sent
+   *   a user with a typo down [configure Git credentials], which cannot fix a typo.
+   */
+  it('a bare not-found → NOT_FOUND (it is NOT proof of a permission problem)', () => {
+    expect(classifyCloneError('remote: Repository not found.')).toBe('CLONE_FAILED_NOT_FOUND');
+    expect(classifyCloneError("fatal: repository 'https://h/x.git' not found")).toBe(
+      'CLONE_FAILED_NOT_FOUND',
+    );
+    expect(classifyCloneError('The requested URL returned error: 404')).toBe(
+      'CLONE_FAILED_NOT_FOUND',
+    );
+  });
+  it('a not-found that ALSO names a rejected credential stays PERMISSION', () => {
+    // The host answered the auth handshake and said no — that IS a fact about
+    // permission, so the more specific code wins.
+    expect(
+      classifyCloneError('remote: Repository not found.\nfatal: Authentication failed for …'),
+    ).toBe('CLONE_FAILED_PERMISSION');
+    expect(classifyCloneError('The requested URL returned error: 403 (not found)')).toBe(
+      'CLONE_FAILED_PERMISSION',
+    );
   });
   it('disk full → DISK_INSUFFICIENT', () => {
     expect(classifyCloneError('error: write: No space left on device')).toBe('DISK_INSUFFICIENT');

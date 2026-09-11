@@ -45,6 +45,47 @@ import { ResourceAllocator } from '../resource-allocator';
  * 那种情况今天只有一种成因：本切片之前建出来、重启后再 `start` 的老沙箱（它们从来没被
  * 登记过）。给它一个能跑起来的默认值，而不是让一台升级过的机器上所有历史沙箱都起不来。
  */
+/** 一份备好的、还没落进沙箱的 runtime 凭证（03 §4.3 ④）。 */
+interface PreparedRuntimeCredential {
+  runtimeId: string;
+  credential: InjectableRuntimeCredential;
+}
+
+/**
+ * 把多份凭证的 env 合成建实例用的那一张表。
+ *
+ * ⛔ **同名 env 一律 fail-fast，绝不按顺序静默覆盖。**
+ *
+ * 既有纪律「凭证永远赢，靠顺序而非黑名单」（05 §4.1）说的是**凭证 vs 用户变量** ——
+ * 那里"谁赢"有明确的正确答案。**凭证 vs 凭证**是另一回事：两个 adapter 声明了同一个
+ * env 名，意味着其中一个 CLI 会读到另一家的令牌，而"按注册顺序谁在后面谁赢"这个答案
+ * **没有任何依据**（注册顺序是模块加载次序，不表达任何意图）。静默覆盖的后果是一个
+ * runtime 悄悄拿着错误的凭证跑——它不会报错，只会"登录不上"或者更糟，用另一个账号干活。
+ *
+ * ⇒ 这是**平台配置错误**（两个 adapter 撞了名字），该在这里响亮地停下，而不是让用户
+ * 去猜为什么 claude 标签用的是 codex 的 key。`ReservedEnvNameRegistrar` 在启动时按
+ * **声明**做同样的检查；这里按**实际数据**再做一次，因为声明可能不全。
+ */
+function mergeCredentialEnv(credentials: PreparedRuntimeCredential[]): Record<string, string> {
+  const merged: Record<string, string> = {};
+  const owner = new Map<string, string>();
+  for (const { runtimeId, credential } of credentials) {
+    for (const [name, value] of Object.entries(credential.env ?? {})) {
+      const previous = owner.get(name);
+      if (previous !== undefined) {
+        throw new Error(
+          `runtime '${previous}' 与 '${runtimeId}' 都要用环境变量 '${name}' 注入凭证 —— ` +
+            '两份凭证会互相覆盖，其中一个 CLI 将拿着另一家的令牌运行。' +
+            '这是平台配置错误（adapter 的 reservedEnvNames.credential 撞名），不是用户输入问题。',
+        );
+      }
+      owner.set(name, runtimeId);
+      merged[name] = value;
+    }
+  }
+  return merged;
+}
+
 const FALLBACK_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
 
 /**
@@ -157,7 +198,7 @@ export class ProvisionSandboxWorkflow {
       // post-start `injectCredential` — resolving it twice would decrypt twice for no
       // gain. Credentials are written LAST into the env map so a same-named user
       // variable can never win (05 §4.1 "凭证永远赢，靠顺序而非黑名单").
-      const credential = await this.prepareCredential(sandbox);
+      const credentials = await this.prepareCredentials(sandbox, image.spec);
       // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
       // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
       // 超分配」防的是一个与真实占用无关的数。
@@ -172,7 +213,7 @@ export class ProvisionSandboxWorkflow {
           // credential LAST, so a user-defined variable can never shadow a credential
           // — and `EnvVarSet` already refuses the credential NAMES at save time, which
           // makes this belt and braces rather than either alone.
-          env: { ...image.env, ...(credential?.env ?? {}) },
+          env: { ...image.env, ...mergeCredentialEnv(credentials) },
           volumes: [
             {
               source: ws.hostPath,
@@ -202,10 +243,17 @@ export class ProvisionSandboxWorkflow {
         // ② 失败路径同样拿得到它。`provider.start()` 炸在铺 13GB 镜像的中途,与炸在
         //    一个早就 staged 的镜像上,是两个不同的故障,下一步动作也不同。
         stageDetail = await this.imageStagedOf(provider, image.spec);
-        await this.runStartingSteps(sandbox, provider, handle, image.spec, credential, stageDetail);
+        await this.runStartingSteps(
+          sandbox,
+          provider,
+          handle,
+          image.spec,
+          credentials,
+          stageDetail,
+        );
         done();
       } finally {
-        credential?.zeroize();
+        for (const c of credentials) c.credential.zeroize();
       }
 
       this.advance(sandbox, 'running', 'scheduler');
@@ -266,15 +314,17 @@ export class ProvisionSandboxWorkflow {
     let stageDetail: Record<string, unknown> = {};
     try {
       this.advance(sandbox, 'starting', 'scheduler');
-      const credential = await this.prepareCredential(sandbox);
+      const spec = (await this.imageSpecOf(sandbox)).spec;
+      // ⚠️ 重启同样**重新备齐全部**凭证：用户在两次启动之间加/删过的凭证，重启之后
+      //    盒子里的事实就变了，`injectedRuntimes` 必须跟着覆盖（见实体上的注释）。
+      const credentials = await this.prepareCredentials(sandbox, spec);
       try {
-        const spec = (await this.imageSpecOf(sandbox)).spec;
         // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
         // 而用户对「重启」的时间预期比「新建」短得多。
         stageDetail = await this.imageStagedOf(provider, spec);
-        await this.runStartingSteps(sandbox, provider, handle, spec, credential, stageDetail);
+        await this.runStartingSteps(sandbox, provider, handle, spec, credentials, stageDetail);
       } finally {
-        credential?.zeroize();
+        for (const c of credentials) c.credential.zeroize();
       }
       this.advance(sandbox, 'running', 'scheduler');
       this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
@@ -296,7 +346,7 @@ export class ProvisionSandboxWorkflow {
     provider: SandboxProvider,
     handle: SandboxHandle,
     image: ResolvedImageSpec,
-    credential: InjectableRuntimeCredential | null,
+    credentials: PreparedRuntimeCredential[],
     /** 调用方已经问过了 —— 这里再问一次会拿到不同的答案，见调用点的注释。 */
     imageStaged: { imageStaged?: boolean },
   ): Promise<void> {
@@ -335,8 +385,8 @@ export class ProvisionSandboxWorkflow {
     // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
     await this.seedStartupFiles(sandbox, exec);
 
-    // ④ materialise the credential inside the sandbox.
-    await this.injectCredential(sandbox, credential, exec);
+    // ④ materialise the credentials inside the sandbox（复数，2026-09）。
+    await this.injectCredentials(sandbox, credentials, exec);
 
     // ⑤ start the agent session — this is what makes "the agent starts working the
     // moment the task starts" true for a user who closed the browser, and for MCP
@@ -446,13 +496,63 @@ export class ProvisionSandboxWorkflow {
    * a task before authorising a runtime, and the agent itself will say it is not logged
    * in. What must never happen is a SILENT half-state, so it is logged loudly.
    */
-  private async prepareCredential(sandbox: Sandbox): Promise<InjectableRuntimeCredential | null> {
+  /**
+   * 这个沙箱里**能用上**哪几份 runtime 凭证（03 §4.3 ④，2026-09 从单数改成复数）。
+   *
+   * ── 为什么是复数 ──────────────────────────────────────────────────────────
+   * 用户要能在终端里随手开 Codex / Claude Code / 纯终端（P21-1 §6）。CLI 本来就预装在
+   * 镜像里（`supportedRuntimes`），**真正的拦路虎是凭证**：env 形态的凭证（claude 的
+   * `CLAUDE_CODE_OAUTH_TOKEN`、api-key）**只能在建实例时给** —— 按调用传 `env` 会在
+   * 沙箱里被 `ps` 看见（04 §2.3★ 第 2 条），而已经起来的进程加不了 env。
+   * ⇒ 「点了 claude 标签再注入 claude 凭证」这条路对 env 形态根本走不通，只能在
+   * **建实例前**把所有已配置的一次性备齐。用户已裁决接受这个凭证面扩大，代价是
+   * 一个 Codex 任务的沙箱里也会有 Claude 的令牌 —— 所以注入了哪几份**必须落审计**。
+   *
+   * ⚠️ **候选集是镜像声明支持的那些**，不是注册表全集：往一个没装 claude CLI 的镜像里
+   * 注入 claude 凭证，只会让下拉里多出一个点开就失败的选项。`supportedRuntimes` 未声明
+   * （第三方镜像可以不声明）⇒ 只试 `sandbox.runtime` 那一个，与本切片之前的行为一致。
+   *
+   * ⚠️ `sandbox.runtime` **排第一**：它是这个沙箱的默认 runtime，排前面让审计与列表
+   * 读起来与「这个任务是为谁建的」一致。
+   */
+  private async prepareCredentials(
+    sandbox: Sandbox,
+    image: ResolvedImageSpec,
+  ): Promise<PreparedRuntimeCredential[]> {
+    const declared = image.supportedRuntimes ?? [];
+    const candidates = [sandbox.runtime, ...declared.filter((id) => id !== sandbox.runtime)].filter(
+      (id) => this.runtimes.has(id),
+    );
+
+    const prepared: PreparedRuntimeCredential[] = [];
+    for (const runtimeId of candidates) {
+      const credential = await this.prepareOneCredential(sandbox, runtimeId);
+      if (credential) prepared.push({ runtimeId, credential });
+    }
+    return prepared;
+  }
+
+  /** 单个 runtime 的凭证；没有可用凭证 ⇒ `null`（不是失败）。 */
+  private async prepareOneCredential(
+    sandbox: Sandbox,
+    runtimeId: string,
+  ): Promise<InjectableRuntimeCredential | null> {
     try {
-      return await this.credentials.prepareRuntimeCredential(sandbox.runtime);
+      return await this.credentials.prepareRuntimeCredential(runtimeId);
     } catch (e) {
       if (e instanceof CredentialPreparationError) {
+        // ⚠️ 只有**默认 runtime** 没凭证才值得报警：那意味着这个任务的 agent 会裸跑。
+        //    别的 runtime 没配凭证是**常态**（用户可能只配了一个），为它记一条 warn
+        //    审计会把正常状态刷成一片黄。
+        if (runtimeId !== sandbox.runtime) {
+          this.logger.log(
+            `sandbox ${sandbox.id}: no '${runtimeId}' credential (${e.code}); ` +
+              'that runtime will not be offered as a terminal tab',
+          );
+          return null;
+        }
         this.logger.warn(
-          `sandbox ${sandbox.id}: no usable '${sandbox.runtime}' credential (${e.code}); ` +
+          `sandbox ${sandbox.id}: no usable '${runtimeId}' credential (${e.code}); ` +
             'the agent will start UNAUTHENTICATED',
         );
         // ⚠️ 一条 WARN 日志不够。「agent 起来了但没登录」在用户眼里是「它什么都没干」，
@@ -465,8 +565,8 @@ export class ProvisionSandboxWorkflow {
           subjectType: 'sandbox',
           subjectId: sandbox.id,
           actor: 'scheduler',
-          summary: `没有可用的 ${sandbox.runtime} 凭证，agent 将以未登录状态启动`,
-          detail: { runtimeId: sandbox.runtime },
+          summary: `没有可用的 ${runtimeId} 凭证，agent 将以未登录状态启动`,
+          detail: { runtimeId },
           outcome: 'skipped',
           errorCode: e.code,
         });
@@ -502,15 +602,62 @@ export class ProvisionSandboxWorkflow {
     }
   }
 
-  private async injectCredential(
+  /**
+   * Step ④ —— 把备齐的每一份凭证都落进沙箱，然后**把「实际注入了哪几个」记在沙箱行上**。
+   *
+   * ⛔ 那条记录是本切片的要害：之后所有「这个沙箱能跑哪几个 runtime」的判断都读它，
+   *   ⛔ 绝不许在用的时候拿「镜像支持的 ∩ 现在配了的」现算 —— 用户 provision 之后
+   *   删掉 claude 凭证，现算会说「没有」而盒子里那份令牌其实还在；反过来，事后才配的
+   *   现算会说「有」而盒子里根本没有。两个方向都会让界面与沙箱里的事实对不上，
+   *   而下一步（开一个 CLI 标签 / 发一个任务）只有沙箱里的事实说了算。
+   *
+   * ⚠️ 单个 runtime 注入失败**不拖垮整段 provision**：别的 runtime 与任务本身照常跑。
+   *   失败的那个**不进** `injectedRuntimes` —— 这正是「记录而不是推导」的意义：
+   *   列表里只有真的成功了的那些。
+   */
+  private async injectCredentials(
     sandbox: Sandbox,
-    credential: InjectableRuntimeCredential | null,
+    credentials: PreparedRuntimeCredential[],
     exec: SandboxExecFn,
   ): Promise<void> {
-    if (!credential) return;
-    const adapter = this.runtimes.get(sandbox.runtime);
-    await adapter.injectCredential(credential, exec);
-    await this.credentials.recordRuntimeInjection(sandbox.runtime, sandbox.id);
+    const injected: string[] = [];
+    for (const { runtimeId, credential } of credentials) {
+      try {
+        await this.runtimes.get(runtimeId).injectCredential(credential, exec);
+        await this.credentials.recordRuntimeInjection(runtimeId, sandbox.id);
+        injected.push(runtimeId);
+      } catch (e) {
+        this.logger.warn(
+          `sandbox ${sandbox.id}: injecting '${runtimeId}' credential failed ` +
+            `(${(e as Error).message}); it will not be offered as a terminal tab`,
+        );
+      }
+    }
+    sandbox.recordInjectedRuntimes(injected);
+    this.persist(sandbox);
+
+    /**
+     * ★ 用户裁决要求的那条审计：**注入了哪几份凭证进哪个沙箱，事后要能查**。
+     *
+     * 它记的是这次注入的**范围**（凭证面扩大到了哪几家），与既有的
+     * `sandbox.credential.absent`（某个 runtime 没凭证）和 credential 上下文自己的
+     * 注入台账（`recordRuntimeInjection`，按 credentialId 记）是三件不同的事：
+     * 这一条回答的是「这个盒子里现在躺着哪几家的令牌」。
+     * ⛔ 不记任何凭证内容，只记 runtime id —— 审计要的是身份不是材料。
+     */
+    this.audit.record({
+      category: 'sandbox',
+      type: 'sandbox.credentials.injected',
+      subjectType: 'sandbox',
+      subjectId: sandbox.id,
+      actor: 'scheduler',
+      summary:
+        injected.length === 0
+          ? '未注入任何 runtime 凭证（沙箱内的 agent CLI 都将以未登录状态运行）'
+          : `已注入 ${String(injected.length)} 份 runtime 凭证：${injected.join('、')}`,
+      detail: { runtimeIds: injected, defaultRuntime: sandbox.runtime },
+      outcome: injected.length === 0 ? 'skipped' : 'ok',
+    });
   }
 
   /**

@@ -60,6 +60,7 @@ import type {
 import { UnknownRuntimeError } from '@platform/contracts';
 import { SandboxApplicationService } from '../../src/application/sandbox-application.service';
 import { ResourceAllocator } from '../../src/application/resource-allocator';
+import { SandboxExecAdapter } from '../../src/application/sandbox-exec.adapter';
 import { SchedulerQueue } from '../../src/application/scheduler-queue';
 import { QuotaReconciler } from '../../src/application/quota-reconciler';
 import { ResourceAllocation } from '../../src/domain/entities/resource-allocation.entity';
@@ -559,8 +560,15 @@ export class FakeAdapter implements RuntimeAdapter {
   async completeAuth(): Promise<never> {
     throw new Error('not used');
   }
+  /**
+   * ⚠️ `injectThrows` 是**多 runtime 注入**那条路唯一能验的接缝（03 §4.3 ④）：
+   * 「记录的是真的注入成功的那些」与「记录的是备好的那些」，只有在**有一个注入失败**
+   * 时才分得开 —— 全成功时两个实现产出的列表一模一样。
+   */
+  injectThrows?: string;
   async injectCredential(): Promise<void> {
     this.log.push('injectCredential');
+    if (this.injectThrows !== undefined) throw new Error(this.injectThrows);
   }
   /** 落启动文件（可选钩子）。`seedThrows` 用来验"失败不阻断 provision"。 */
   seedThrows = false;
@@ -624,6 +632,14 @@ export interface HarnessOptions {
   bootstrapReusesExisting?: boolean;
   /** What `prepareRuntimeCredential` returns; `null` ⇒ throws NO_CREDENTIAL. */
   credential?: InjectableRuntimeCredential | null;
+  /**
+   * 按 runtime 分别给凭证（多 runtime 注入，03 §4.3 ④）。查不到的 runtime 落回
+   * `credential`。⚠️ 值为 `null` = **这个 runtime 明确没有凭证**（抛 NO_CREDENTIAL），
+   * 与"没在这张表里"是两回事。
+   */
+  credentialsByRuntime?: Record<string, InjectableRuntimeCredential | null>;
+  /** 镜像声明预装了哪些 runtime（多 runtime 注入的候选集，缺省 `[]`）。 */
+  supportedRuntimes?: string[];
   /**
    * Make the project facade refuse. It is the LAST check in the create door, so it is
    * also the only seam through which a test can inject a door rejection the door's own
@@ -847,13 +863,18 @@ export function harness(opts: HarnessOptions = {}) {
 
   const injections: string[] = [];
   const credentials: CredentialFacade = {
-    async prepareRuntimeCredential(): Promise<InjectableRuntimeCredential> {
-      calls.push('prepareRuntimeCredential');
-      if (opts.credential === undefined || opts.credential === null) {
+    async prepareRuntimeCredential(runtimeId: string): Promise<InjectableRuntimeCredential> {
+      calls.push(`prepareRuntimeCredential:${runtimeId}`);
+      const perRuntime = opts.credentialsByRuntime;
+      const picked =
+        perRuntime !== undefined && runtimeId in perRuntime
+          ? perRuntime[runtimeId]
+          : opts.credential;
+      if (picked === undefined || picked === null) {
         const { CredentialPreparationError } = await import('@platform/contracts');
         throw new CredentialPreparationError('NO_CREDENTIAL', 'none configured in this harness');
       }
-      return opts.credential;
+      return picked;
     },
     async prepareForRefresh(): Promise<RefreshableRuntimeCredential> {
       throw new Error('not used');
@@ -944,7 +965,7 @@ export function harness(opts: HarnessOptions = {}) {
           version: 'latest',
           baseImage: ref,
           entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
-          supportedRuntimes: [],
+          supportedRuntimes: opts.supportedRuntimes ?? [],
           resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
           labelsRequired: ['platform.tmux'],
           diffIds: ['sha256:base-layer'],
@@ -967,7 +988,7 @@ export function harness(opts: HarnessOptions = {}) {
           version: 'latest',
           baseImage: ref,
           entrypointContract: { workdir: '/', entrypoint: ['/bin/sh'] },
-          supportedRuntimes: [],
+          supportedRuntimes: opts.supportedRuntimes ?? [],
           resourceDefaults: { cores: 1, ramMb: 512, diskMb: 1024 },
           labelsRequired: ['platform.tmux'],
           diffIds: ['sha256:base-layer'],
@@ -1105,9 +1126,17 @@ export function harness(opts: HarnessOptions = {}) {
     taskWorkflow,
   );
 
+  /**
+   * `SANDBOX_EXEC_PORT` 的真实实现（终端上下文就是通过它读沙箱的）。
+   * ⚠️ 用**真的**那个而不是替身：`bindingOf` 交给终端的东西是不是沙箱行上的记录，
+   * 只有真实现能验 —— 替身里写什么它就是什么。
+   */
+  const execPort = new SandboxExecAdapter(repo, registry);
+
   return {
     service,
     provision,
+    execPort,
     auditRecords,
     wsEvents,
     publishedEvents,

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { platform } from 'node:os';
 import { Injectable } from '@nestjs/common';
 import { env } from '../../../config/env';
 import type { DiagnoseCheck, DiagnoseCheckResult, DiagnoseContext } from './check.types';
@@ -77,12 +78,15 @@ export class PortConflictCheck implements DiagnoseCheck {
       );
       return {
         status: 'fail',
-        summary: lines.join('；'),
+        // ⚠️ headline 只回答「好不好 + 挡不挡我干活」。**被谁占**是这一项的全部价值，
+        //    但它带着进程名与 pid，一行放不下 —— 下沉到 detailText，⛔ 不许丢掉。
+        headline: `端口 ${String(conflicts[0]!.port.port)} 被占用，平台起不来`,
+        detailText: `${lines.join('；')}。`,
         // ⚠️ 建议里给的是**查证**命令而不是 `kill`：占用者可能是用户正在用的另一个应用
         //    （实测那次就是 Docker Desktop），诊断没有资格替他决定杀掉它。
-        hint:
-          `先确认它是什么：lsof -nP -iTCP:${String(conflicts[0]!.port.port)} -sTCP:LISTEN` +
-          `；确实该让路就停掉它，否则给平台换一个端口：PORT=<其它端口> 重启平台`,
+        nextStep:
+          '先确认它是什么，确实该让路就停掉它；否则给平台换一个端口（PORT=<其它端口>）后重启平台。',
+        command: `lsof -nP -iTCP:${String(conflicts[0]!.port.port)} -sTCP:LISTEN`,
         detail: {
           conflicts: conflicts.map((c) => ({
             port: c.port.port,
@@ -99,11 +103,13 @@ export class PortConflictCheck implements DiagnoseCheck {
       //    在最需要它的部署形态里静默消失。
       return {
         status: 'warn',
-        summary:
-          `无法查证端口 ${undetermined.map((p) => String(p.port)).join('、')} 的占用情况` +
-          '（本机没有 lsof / ss，或它们没有权限看到其它用户的进程）',
-        hint: '安装其一即可让这一项生效：apt-get install -y lsof  或  apt-get install -y iproute2',
-        detail: { ports: undetermined.map((p) => p.port) },
+        headline: '查不出端口有没有被占',
+        detailText:
+          `没能查证端口 ${undetermined.map((p) => String(p.port)).join('、')} 的占用情况` +
+          '（本机没有 lsof / ss，或它们没有权限看到其它用户的进程）。' +
+          '「查不出来」不等于「没被占」。',
+        ...missingToolAdvice(platform()),
+        detail: { ports: undetermined.map((p) => p.port), platform: platform() },
       };
     }
 
@@ -112,10 +118,11 @@ export class PortConflictCheck implements DiagnoseCheck {
       .join('、');
     return {
       status: 'ok',
-      summary:
+      headline: '端口没有冲突',
+      detailText:
         self.length > 0
-          ? `端口 ${listed} 正由平台自己监听（pid ${String(process.pid)}），无冲突`
-          : `端口 ${listed} 未被占用`,
+          ? `端口 ${listed} 正由平台自己监听（pid ${String(process.pid)}）。`
+          : `端口 ${listed} 未被占用。`,
       detail: { ports: this.watched(), selfPid: process.pid },
     };
   }
@@ -198,4 +205,33 @@ function run(cmd: string, args: string[], ctx: DiagnoseContext): Promise<RunResu
       },
     );
   });
+}
+
+/**
+ * 「装个工具这一项才查得了」—— **必须按平台分岔**（2026-09-11 修）。
+ *
+ * ⛔ 上一版无条件给 `apt-get install -y lsof`。macOS 上那条命令**执行不了**（没有 apt），
+ * 而 macOS 恰恰是本平台默认档的宿主之一 —— 一条执行不了的命令比不给命令更贵，
+ * 与 `connectivity.probe.ts#hintFor` 记的是同一条纪律。
+ *
+ * ⚠️ mac 自带 `lsof`，走到这里说明它**存在但看不到别的用户的进程** ⇒ 该说的是权限，
+ * 不是安装。⛔ 别给一条它已经有的东西的安装命令。
+ */
+export function missingToolAdvice(os: string): { nextStep: string; command?: string } {
+  if (os === 'darwin') {
+    // ⛔ 不给 `sudo` 命令：让用户用管理员权限重跑一次平台，与教他 sudo 一条查询命令
+    //    是两件事，后者查完了平台自己还是查不到。
+    return {
+      nextStep:
+        '这台机器自带 lsof，查不到多半是权限不够 —— 用能看到其它用户进程的账号重启平台后再诊断。',
+    };
+  }
+  if (os === 'linux') {
+    return {
+      nextStep: '装上 lsof（或 iproute2 里的 ss）之后这一项就能给出结论。',
+      command: 'apt-get install -y lsof',
+    };
+  }
+  // ⚠️ 认不出的平台**不编一条安装命令**：包管理器叫什么我们不知道。
+  return { nextStep: '在这台机器上装一个能列出监听端口的工具（lsof 或 ss）之后重跑诊断。' };
 }

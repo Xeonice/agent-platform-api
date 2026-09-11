@@ -290,6 +290,9 @@ export class AutomationApplicationService {
 
   private async require(id: string): Promise<Automation> {
     const found = await this.repo.findById(asAutomationId(id));
+    // 裸 `NotFoundException` 出线的是 filter 归一的 `NOT_FOUND`（10 §6.8 表里就有这一行），
+    // 那已经是一个**稳定业务码** —— 调用方知道自己请求的是哪条规则，不需要再造一个
+    // `AUTOMATION_NOT_FOUND`。⛔ 前端要读的是这个码，不是 HTTP 状态。
     if (!found) throw new NotFoundException(`automation ${id} not found`);
     return found;
   }
@@ -320,8 +323,11 @@ export class AutomationApplicationService {
       return fn();
     } catch (e) {
       if (e instanceof AutomationInvariantError) {
+        // ★ 码来自**抛出点**（`e.code`），不再一律 `VALIDATION_FAILED`：前端按码查人话表，
+        //   而「时区拼错」「超时不在四档」「webhook 地址不合法」是三条不同的出路。
+        //   没显式给码的抛出点仍然是 `VALIDATION_FAILED`（默认值），行为不变。
         throw new BadRequestException({
-          code: 'VALIDATION_FAILED',
+          code: e.code,
           message: e.message,
           retryable: false,
           sideEffectFree: true,

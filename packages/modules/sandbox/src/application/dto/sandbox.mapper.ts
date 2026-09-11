@@ -24,6 +24,9 @@ export const SandboxMapper = {
       id: agg.id as string,
       projectId: agg.projectId as string,
       runtime: agg.runtime,
+      // 「这个沙箱里能跑哪几个 CLI」——终端「+ 新终端」下拉的数据源（06 §5.6）。
+      // ⛔ 记录 ∪ 默认，不是推导：见 `Sandbox.availableRuntimes`。
+      availableRuntimes: [...agg.availableRuntimes],
       // the registry key the frontend needs to look this sandbox's capabilities up
       // against `GET /api/providers` after a reload.
       provider: agg.provider,
