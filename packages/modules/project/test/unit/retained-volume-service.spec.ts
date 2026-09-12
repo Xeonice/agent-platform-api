@@ -75,6 +75,9 @@ function makeHarness(opts: { removeFails?: string } = {}) {
       timeline.push(`save:${volume.id}:${volume.isDeleted ? 'deleted' : 'live'}`);
       rows.set(volume.id, volume);
     },
+    deleteByProjectSync() {
+      // 这个 spec 不走删项目那条路；空实现只为满足接口。
+    },
   };
 
   const calls: string[] = [];

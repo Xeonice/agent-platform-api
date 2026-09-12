@@ -14,6 +14,7 @@ import type { ProjectRepository } from '../../src/domain/repositories/project.re
 import type { BaselineManager } from '../../src/domain/ports/baseline-manager.port';
 import type { BaselineGit, FetchRequest } from '../../src/domain/ports/baseline-git.port';
 import type { CloneRequest, GitCloner } from '../../src/domain/ports/git-cloner.port';
+import type { RetainedVolumeRepository } from '../../src/domain/repositories/retained-volume.repository';
 
 /** Shared in-memory doubles for the project application tests (docs/backend/25). */
 
@@ -127,6 +128,23 @@ export class NoGitCredentialFacade implements CredentialFacade {
 export const fixedClock = (now: Date = NOW): Clock => ({ now: () => now });
 export const noopEvents: EventBus = { publishInTx: () => {}, subscribe: () => {} };
 export const directUow: UnitOfWork = { run: (fn) => fn({} as Tx) };
+
+/**
+ * 「这个项目下一份保留成果都没有」的仓储替身。
+ *
+ * ⚠️ 默认给**空**而不是给一份：`delete()` 的前置检查只拦 `deletedAt === null` 的，
+ * 给一份活的会让每个不关心保留成果的用例都莫名其妙地 409。要测拦截的用例自己覆盖
+ * `listByProject`（见 `project-error-codes.spec.ts`）。
+ */
+export const noRetainedVolumes: RetainedVolumeRepository = {
+  findById: () => Promise.resolve(null),
+  findByWorkspacePath: () => Promise.resolve(null),
+  listByProject: () => Promise.resolve([]),
+  listAll: () => Promise.resolve([]),
+  listExpired: () => Promise.resolve([]),
+  saveSync: () => {},
+  deleteByProjectSync: () => {},
+};
 
 export function gitProject(id: string, opts: { branch?: string } = {}): Project {
   return Project.create({

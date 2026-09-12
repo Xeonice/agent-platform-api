@@ -19,6 +19,7 @@ import {
   gitProject,
   noopEvents,
   NOW,
+  noRetainedVolumes,
 } from './_project-doubles';
 
 const LATER = new Date('2026-08-28T12:00:00.000Z');
@@ -49,6 +50,7 @@ function wire(now = LATER) {
     baseline,
     git,
     noSandboxes,
+    noRetainedVolumes,
     cloneWorkflow,
     syncWorkflow,
   );

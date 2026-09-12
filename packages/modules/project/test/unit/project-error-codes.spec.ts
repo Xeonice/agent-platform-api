@@ -5,6 +5,9 @@ import { ProjectApplicationService } from '../../src/application/project-applica
 import { SyncBaselineWorkflow } from '../../src/application/sync-baseline.workflow';
 import { CloneProjectWorkflow } from '../../src/application/clone-project.workflow';
 import { Project } from '../../src/domain/entities/project.entity';
+import { asProjectId, asRetainedVolumeId } from '@platform/shared-kernel';
+import { RetainedVolume } from '../../src/domain/entities/retained-volume.entity';
+import type { RetainedVolumeRepository } from '../../src/domain/repositories/retained-volume.repository';
 import {
   FakeBaselineManager,
   InMemoryProjectRepo,
@@ -17,6 +20,7 @@ import {
   gitProject,
   noopEvents,
   NOW,
+  noRetainedVolumes,
 } from './_project-doubles';
 
 /**
@@ -31,7 +35,7 @@ import {
  */
 const noSandboxes: SandboxFacade = { countByProject: async () => ({}) };
 
-function wire() {
+function wire(volumes: RetainedVolumeRepository = noRetainedVolumes) {
   const repo = new InMemoryProjectRepo();
   const baseline = new FakeBaselineManager();
   const git = new RecordingBaselineGit();
@@ -55,6 +59,7 @@ function wire() {
     baseline,
     git,
     noSandboxes,
+    volumes,
     cloneWorkflow,
     new SyncBaselineWorkflow(git, baseline, credentials, clock),
   );
@@ -120,5 +125,58 @@ describe('project 4xx 都带业务码（10 §6.8）', () => {
       service.create({ name: 'x', sourceType: 'git', repoUrl: 'not a url' }),
     );
     expect(code).toBe('INVALID_REPO_URL');
+  });
+});
+
+/**
+ * 删项目撞外键 —— 2026-09-11 实测确认的真 bug，这一组是它的回归闸门。
+ *
+ * ⚠️ **两条用例缺一不可，因为它们盯的是相反方向的失败**：
+ *   · 「还在占盘的要拦」—— 防止把用户明确留下的成果连带删成孤儿；
+ *   · 「已清理的不许拦」—— 这才是那个 bug 本身。`RetainedVolumeService.remove()` 是
+ *     **软删**（记录留档审计，写在 controller 的 ApiOperation 里），行永不消失。
+ *     DB 上那条 `onDelete: 'restrict'` 分不清「已清理」和「还在占盘」，于是
+ *     **一个项目只要曾经有过一份保留成果，就再也删不掉了**，用户把成果清干净也没用。
+ *     只补第一条会让这个 bug 原样活下来 —— 它当时就是"看起来有保护"的样子。
+ */
+describe('删项目 × 保留成果（I-RV × 项目删除）', () => {
+  const volumeOf = (deletedAt: Date | null): RetainedVolume =>
+    RetainedVolume.rehydrate({
+      id: asRetainedVolumeId('rv-1'),
+      projectId: asProjectId('p-1'),
+      sandboxId: null,
+      workspacePath: '/data/ws/rv-1',
+      source: 'manual-destroy',
+      diskBytes: 1024,
+      downloadBytes: 512,
+      retainedAt: NOW,
+      retainUntil: new Date(NOW.getTime() + 86_400_000),
+      deletedAt,
+    });
+
+  const repoWith = (vols: RetainedVolume[]): RetainedVolumeRepository => ({
+    ...noRetainedVolumes,
+    listByProject: () => Promise.resolve(vols),
+  });
+
+  it('⛔ 还在占盘的保留成果 ⇒ 409 INVALID_STATE，且文案要说出去哪儿清', async () => {
+    const { service, repo } = wire(repoWith([volumeOf(null)]));
+    repo.add(gitProject('p-1'));
+    const e = await service.delete('p-1').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(HttpException);
+    const env = envelopeOf(e);
+    expect(env.code).toBe('INVALID_STATE');
+    // ⚠️ 断言「给了下一步」而不是断言整句：措辞会改，"不许只说删不掉"不会改（P22 §1）。
+    expect(env.message).toMatch(/保留成果/);
+    expect(env.message).toMatch(/清理|回收/);
+    // 项目必须还在 —— 拒绝是 sideEffectFree 的。
+    expect(await repo.findById(asProjectId('p-1'))).not.toBeNull();
+  });
+
+  it('⭐ 已清理（deletedAt 非空）的保留成果**不许**拦删项目 —— 这条就是那个 bug', async () => {
+    const { service, repo } = wire(repoWith([volumeOf(NOW)]));
+    repo.add(gitProject('p-1'));
+    await expect(service.delete('p-1')).resolves.toBeUndefined();
+    expect(await repo.findById(asProjectId('p-1'))).toBeNull();
   });
 });
