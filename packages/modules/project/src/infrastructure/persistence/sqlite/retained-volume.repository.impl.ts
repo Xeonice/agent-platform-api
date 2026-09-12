@@ -66,6 +66,14 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
       .map(toDomain);
   }
 
+  /** 见接口注释：删项目时连带清掉登记行，否则 FK `restrict` 会让项目永远删不掉。 */
+  deleteByProjectSync(_tx: Tx, projectId: ProjectId): void {
+    this.db
+      .delete(retainedVolumes)
+      .where(eq(retainedVolumes.projectId, projectId as string))
+      .run();
+  }
+
   saveSync(_tx: Tx, volume: RetainedVolume): void {
     const values = {
       id: volume.id as string,
