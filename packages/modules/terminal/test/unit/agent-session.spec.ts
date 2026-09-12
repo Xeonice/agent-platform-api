@@ -220,6 +220,13 @@ describe('bootstrapAgentSession — which command the session runs', () => {
       'mouse',
       'on',
       ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律 —— session 级选项，`-g` 只改默认值，
+      //    老会话要靠每次 attach 前补设才生效，所以同样必须前置（06 §5）。
+      'set',
+      '-g',
+      'status',
+      'off',
+      ';',
       'new-session',
       '-d',
       // ★ `-x/-y` 不能省：detached 会话默认 **80x24**（实测），agent 一启动就按 80 列
@@ -280,6 +287,13 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
       'mouse',
       'on',
       ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律 —— session 级选项，`-g` 只改默认值，
+      //    老会话要靠每次 attach 前补设才生效，所以同样必须前置（06 §5）。
+      'set',
+      '-g',
+      'status',
+      'off',
+      ';',
       'attach',
       '-t',
       PLATFORM_AGENT_TMUX_SESSION,
@@ -300,6 +314,13 @@ describe('E2E-8-attachOnly — the gateway always attaches, never starts the tas
       '-g',
       'mouse',
       'on',
+      ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律 —— session 级选项，`-g` 只改默认值，
+      //    老会话要靠每次 attach 前补设才生效，所以同样必须前置（06 §5）。
+      'set',
+      '-g',
+      'status',
+      'off',
       ';',
       'new-session',
       '-A',
@@ -360,6 +381,32 @@ describe('每一个 tmux 命令都必须强制 UTF-8', () => {
     for (const cmd of cmds) {
       expect(cmd[0], `第一个词必须是 tmux：${cmd.join(' ')}`).toBe('tmux');
       expect(cmd[1], `⛔ 缺 -u：${cmd.join(' ')}`).toBe('-u');
+    }
+  });
+
+  it('⭐ 建会话**与 attach** 都要前置 `set -g status off`（tmux 自带状态栏不该露给用户）', () => {
+    // ⛔ 为什么要关（三条，任一条不成立就该重新讨论，而不是照着删）：
+    //    ① **窗口列表恒为一项**：这个产品里一个标签 = 一个独立 session
+    //       （`platform-agent` / `platform-shell-<id>`），不是同一 session 里的多个 window，
+    //       状态栏的导航功能在这里空转。
+    //    ② **它在泄漏内部标识符**：`platform-0` / `platform-shell-<32 位十六进制>` 是实现
+    //       细节，产品术语表要求把这类名字挡在用户视野外。
+    //    ③ **它想说的话已经有人说得更好**：「我在哪个任务、哪个会话」由标签栏与终端工具栏
+    //       的面包屑表达，那是产品自己的 UI 语言。
+    // ⚠️ **attach 那条不能省**，理由与 `mouse` 逐字相同：`status` 也是 session 级选项，
+    //    `-g` 只改默认值，改动之前就起着的会话拿不到 —— 靠每次 attach 补设。
+    // MUTATION: 任一处去掉 `STATUS_OFF` ⇒ 本条红；把它挪到动作词之后 ⇒ 也红。
+    for (const cmd of [
+      newSessionCmd('s', { cmd: ['x'] }),
+      attachOrCreateCmd('s', { cmd: ['x'] }),
+      attachSessionCmd('s'),
+    ]) {
+      const i = cmd.indexOf('status');
+      expect(i, `⛔ 缺 status 设置：${cmd.join(' ')}`).toBeGreaterThan(-1);
+      expect(cmd.slice(i - 2, i + 3)).toEqual(['set', '-g', 'status', 'off', ';']);
+      const action = cmd.findIndex((a) => a === 'new-session' || a === 'attach');
+      expect(action, `找不到动作词：${cmd.join(' ')}`).toBeGreaterThan(-1);
+      expect(i, `⛔ status 设置必须前置：${cmd.join(' ')}`).toBeLessThan(action);
     }
   });
 

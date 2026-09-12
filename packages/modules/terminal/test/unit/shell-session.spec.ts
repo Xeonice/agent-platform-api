@@ -78,6 +78,13 @@ describe('tmux 命令策略 —— 用户终端标签的入口', () => {
       'mouse',
       'on',
       ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律 —— session 级选项，`-g` 只改默认值，
+      //    老会话要靠每次 attach 前补设才生效，所以同样必须前置（06 §5）。
+      'set',
+      '-g',
+      'status',
+      'off',
+      ';',
       'new-session',
       '-A',
       '-s',
@@ -244,6 +251,13 @@ describe('TerminalSessionService#openSession —— 两支会话', () => {
       '-g',
       'mouse',
       'on',
+      ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律 —— session 级选项，`-g` 只改默认值，
+      //    老会话要靠每次 attach 前补设才生效，所以同样必须前置（06 §5）。
+      'set',
+      '-g',
+      'status',
+      'off',
       ';',
       'attach',
       '-t',
