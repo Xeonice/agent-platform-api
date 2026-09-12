@@ -203,13 +203,23 @@ describe('E2E-1-bootstrap — the agent session starts in provision, with no ter
     //    `set -g mouse on` 让 tmux 自己接管滚轮（否则 xterm 在备用屏里把滚轮翻译成
     //    方向键灌进 agent：codex 完全没反应，claude 却「碰巧能滚」）。
     // ⚠️ 只比**前缀**：后面还有 `-x/-y/-s` 与整段脚本，那些各有专门的断言。
-    expect(start.slice(0, 8)).toEqual([
+    // ⛔ **切到 `new-session` 为止，不写死长度**：这串前缀已经因为 `-u`、`mouse on`、
+    //    `status off` 变长过三次，每次都要回来改这个数字 —— 改错了是**静默地少比几项**
+    //    （断言照样绿）。按动作词切，长度自己算。
+    expect(start.slice(0, start.indexOf('new-session') + 1)).toEqual([
       'tmux',
       '-u',
       'set',
       '-g',
       'mouse',
       'on',
+      ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律（session 级选项，`-g` 只改默认值，
+      //    老会话靠每次 attach 前补设才生效），所以同样前置。见 06 §5。
+      'set',
+      '-g',
+      'status',
+      'off',
       ';',
       'new-session',
     ]);
@@ -376,6 +386,13 @@ describe('E2E-8-attachOnly — the terminal gateway attaches, it never starts th
       '-g',
       'mouse',
       'on',
+      ';',
+      // ⚠️ `status off`：与 `mouse on` 同一条纪律（session 级选项，`-g` 只改默认值，
+      //    老会话靠每次 attach 前补设才生效），所以同样前置。见 06 §5。
+      'set',
+      '-g',
+      'status',
+      'off',
       ';',
       'attach',
       '-t',

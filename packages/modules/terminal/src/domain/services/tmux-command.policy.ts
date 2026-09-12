@@ -26,7 +26,7 @@ export function hasSessionCmd(session: string): string[] {
 
 /** What a terminal client runs to join the already-running agent session. */
 export function attachSessionCmd(session: string): string[] {
-  return ['tmux', UTF8, ...MOUSE_ON, 'attach', '-t', session];
+  return ['tmux', UTF8, ...MOUSE_ON, ...STATUS_OFF, 'attach', '-t', session];
 }
 
 /**
@@ -130,6 +130,29 @@ const UTF8 = '-u';
  */
 const MOUSE_ON = ['set', '-g', 'mouse', 'on', ';'];
 
+/**
+ * 关掉 tmux 自带的状态栏（绿色那条）。
+ *
+ * ── 为什么要关 ────────────────────────────────────────────────────────────────
+ * ① **它的窗口列表永远只有一项**：这个产品里一个标签 = 一个**独立 session**
+ *    （`platform-agent` / `platform-shell-<id>`），不是同一个 session 里的多个 window。
+ *    所以状态栏的导航功能在这里恒为空转。
+ * ② **它在泄漏内部标识符**：`platform-0` / `platform-shell-<32 位十六进制>` 是实现细节，
+ *    产品术语表明确要把这类名字挡在用户视野之外。
+ * ③ **它想说的话已经有人说了，而且说得更好**：「我在哪个任务、哪个会话」由标签栏
+ *    （`Agent / Codex 1 / 终端 2`）和终端工具栏的面包屑（`项目 / Agent · 任务名`）表达 ——
+ *    那是产品自己的 UI 语言，而这条是 tmux 的原生 UI，风格与周边完全不搭。
+ *
+ * ⚠️ **与 `MOUSE_ON` 同一条纪律**：`status` 也是 session 级选项，`-g` 只改默认值，
+ * **已经在跑的老会话不会被追溯修改** —— 所以每次 `attach` 之前都要补设一次，
+ * 老会话才跟着受益。同理必须**前置**（写在前台阻塞命令之后等于没设）。
+ *
+ * ⛔ `has-session` / `kill-session` / `list-sessions` 那几条**不加**：理由与 `MOUSE_ON`
+ * 那条完全一样 —— 它们不 attach、没有客户端可言，而 `has-session` 与 `list-sessions`
+ * 的**退出码是载荷**（调用方据此判断"会话在不在"和"问不问得出来"），不该冒险链东西进去。
+ */
+const STATUS_OFF = ['set', '-g', 'status', 'off', ';'];
+
 export function newSessionCmd(
   session: string,
   command: AgentCommand,
@@ -139,6 +162,7 @@ export function newSessionCmd(
     'tmux',
     UTF8,
     ...MOUSE_ON,
+    ...STATUS_OFF,
     'new-session',
     '-d',
     '-x',
@@ -159,7 +183,17 @@ export function newSessionCmd(
  * destructive task (I-SBX-10).
  */
 export function attachOrCreateCmd(session: string, command: AgentCommand): string[] {
-  return ['tmux', UTF8, ...MOUSE_ON, 'new-session', '-A', '-s', session, agentScript(command)];
+  return [
+    'tmux',
+    UTF8,
+    ...MOUSE_ON,
+    ...STATUS_OFF,
+    'new-session',
+    '-A',
+    '-s',
+    session,
+    agentScript(command),
+  ];
 }
 
 /**
@@ -192,6 +226,7 @@ export function attachOrCreateShellCmd(session: string, workdir?: string): strin
     'tmux',
     UTF8,
     ...MOUSE_ON,
+    ...STATUS_OFF,
     'new-session',
     '-A',
     '-s',
@@ -247,6 +282,7 @@ export function attachOrCreateRuntimeCmd(
     'tmux',
     UTF8,
     ...MOUSE_ON,
+    ...STATUS_OFF,
     'new-session',
     '-A',
     '-s',
