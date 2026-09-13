@@ -23,34 +23,58 @@ describe('reflinkOutcome —— 三态各说各的话', () => {
   it('supported ⇒ ✅', () => {
     const r = reflinkOutcome({ kind: 'supported' }, ctx);
     expect(r.status).toBe('ok');
-    expect(r.hint).toBeUndefined();
+    expect(r.nextStep).toBeUndefined();
   });
 
   it('unsupported ⇒ ⚠️ + 换文件系统的建议（这条建议在 Linux 上是对的）', () => {
     const r = reflinkOutcome({ kind: 'unsupported', reason: 'EOPNOTSUPP' }, ctx);
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain('不支持 reflink');
-    expect(r.hint).toContain('Btrfs');
+    expect(r.headline).toContain('用不了');
+    expect(r.nextStep).toContain('Btrfs');
     // 原因要带出来 —— 「为什么不支持」是排障的下一个问题。
-    expect(r.summary).toContain('EOPNOTSUPP');
+    expect(r.detailText).toContain('EOPNOTSUPP');
   });
 
   it('⛔ unknown ⇒ **ℹ️ 而不是 ⚠️**，且**一个字都不提换文件系统**', () => {
-    const r = reflinkOutcome({ kind: 'unknown', reason: 'darwin: 不走 reflink 分支' }, ctx);
+    const r = reflinkOutcome({ kind: 'unknown', reason: 'darwin：不走秒级复制' }, ctx);
     // ⚠️ 「问不出来」既不是「支持」也不是「不支持」。渲染成 ⚠️ 会让人以为必须换文件系统，
     //    而在 macOS 上那是一件既做不到、也不需要做的事。
     expect(r.status).toBe('info');
-    expect(r.hint).toBeUndefined();
-    expect(r.summary).not.toContain('Btrfs');
-    expect(r.summary).not.toContain('XFS');
-    // 必须说清「为什么这里谈不上 CoW」，否则 ℹ️ 就是一句没有信息的话。
-    expect(r.summary).toContain('不走 reflink 分支');
-    expect(r.summary).toContain('不是可修的故障');
+    expect(r.nextStep).toBeUndefined();
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('Btrfs');
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('XFS');
+    // 必须说清「为什么这里谈不上秒级复制」，否则 ℹ️ 就是一句没有信息的话。
+    expect(r.detailText).toContain('只在 Linux 上走秒级复制');
+    expect(r.detailText).toContain('不是可修的故障');
   });
 
   it('⛔ unknown 不许说「不支持」—— 那正是被修掉的那句错误结论', () => {
     const r = reflinkOutcome({ kind: 'unknown', reason: 'ENOSYS' }, ctx);
-    expect(r.summary).not.toContain('不支持 reflink');
+    expect(`${r.headline}${r.detailText ?? ''}`).not.toContain('不支持');
+  });
+
+  // ── 本轮新增的三条纪律 ──────────────────────────────────────────────────
+  it('⛔ headline 不许超过 20 字，也不许换行（它渲染在图标同一行）', () => {
+    for (const kind of ['supported', 'unsupported', 'unknown'] as const) {
+      const r = reflinkOutcome({ kind, reason: 'x' } as never, ctx);
+      expect([...r.headline].length, r.headline).toBeLessThanOrEqual(20);
+      expect(r.headline).not.toContain('\n');
+    }
+  });
+
+  it('⛔ 上屏文案里一个 markdown 星号都不许有（前端没有 markdown 渲染器）', () => {
+    for (const kind of ['supported', 'unsupported', 'unknown'] as const) {
+      const r = reflinkOutcome({ kind, reason: 'x' } as never, ctx);
+      const text = `${r.headline}${r.detailText ?? ''}${r.nextStep ?? ''}`;
+      expect(text, text).not.toContain('**');
+    }
+  });
+
+  it('DATA_ROOT 这个字段名只在展开层出现一次做桥接，headline 里一个字都不提', () => {
+    const r = reflinkOutcome({ kind: 'supported' }, ctx);
+    expect(r.headline).not.toContain('DATA_ROOT');
+    // 运维方在 .env 里写的就是这个名字，所以展开层要留一次桥接。
+    expect(r.detailText).toContain('数据目录（DATA_ROOT）');
   });
 
   it('三态的 status 两两不同（合并任意两态都会在这里红）', () => {
@@ -69,11 +93,11 @@ describe('reflinkStrategy —— 探不探由平台决定', () => {
   it('⛔ 非 Linux 一律不探，且 reason 要说得出**为什么**', () => {
     // ⚠️ 这条是补一次**变异存活**：删掉短路后所有用例照旧全绿 —— 在 macOS 上兜一圈
     //    （cp 不认 --reflink → FICLONE_FORCE → ENOSYS）会落到同一个 unknown。
-    //    结论碰巧一样，但 reason 从「不走 reflink 分支」退化成一个读者无从解释的 ENOSYS。
+    //    结论碰巧一样，但 reason 从「只在 Linux 上走秒级复制」退化成一个读者无从解释的 ENOSYS。
     for (const os of ['darwin', 'win32', 'freebsd']) {
       const s = reflinkStrategy(os);
       expect(s.kind).toBe('not-applicable');
-      expect(s.kind === 'not-applicable' && s.reason).toContain('不走 reflink 分支');
+      expect(s.kind === 'not-applicable' && s.reason).toContain('只在 Linux 上走秒级复制');
       expect(s.kind === 'not-applicable' && s.reason).toContain(os);
     }
   });

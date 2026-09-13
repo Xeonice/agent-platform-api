@@ -32,10 +32,11 @@ export const projects = sqliteTable(
       'projects_clone_status_ck',
       sql`${t.cloneStatus} IN ('cloning','ready','failed')`,
     ),
-    // 03 §7.5: clone_error_code ∈ 5 values (when present)
+    // 03 §7.5: clone_error_code ∈ 6 values (when present).
+    // `CLONE_FAILED_NOT_FOUND` split out of PERMISSION — see CloneErrorCodeSchema.
     cloneErrorCk: check(
       'projects_clone_error_ck',
-      sql`${t.cloneErrorCode} IS NULL OR ${t.cloneErrorCode} IN ('CLONE_FAILED_PERMISSION','CLONE_FAILED_NETWORK','TIMEOUT','INTERRUPTED','DISK_INSUFFICIENT')`,
+      sql`${t.cloneErrorCode} IS NULL OR ${t.cloneErrorCode} IN ('CLONE_FAILED_PERMISSION','CLONE_FAILED_NOT_FOUND','CLONE_FAILED_NETWORK','TIMEOUT','INTERRUPTED','DISK_INSUFFICIENT')`,
     ),
     // I-PRJ-1: git ⇒ repo_url present; empty ⇒ repo_url null
     sourceUrlCk: check(

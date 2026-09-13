@@ -178,7 +178,39 @@ export type SandboxHealthWireParity = AssertTrue<Exact<SandboxHealthWire, Health
 export const SandboxDtoSchema = z.object({
   id: z.string(),
   projectId: z.string(),
+  /**
+   * 这个沙箱是**为哪个 runtime 建的**，也就是任务默认用哪个。
+   *
+   * ⚠️ **语义迁移（2026-09，多 runtime 终端标签）**：它曾经是「这个沙箱里**唯一**装了
+   * 的 runtime」——`assertRunnable` 据此拒绝一切跨 runtime 的任务，理由写着「它的 CLI
+   * 和凭证是唯一装了的」。那句话现在是**假话**：镜像本来就预装了全部内置 CLI，而
+   * provision 会把**所有**已配置且未过期的凭证一次性注入（03 §4.3 ④）。
+   *
+   * ⇒ 「实际能跑哪几个」由 `injectedRuntimes` 回答，本字段退化为**默认值**。
+   * ⛔ **名字不改**：它是对外契约（openapi 生成），改名会让每一个消费方跟着改，
+   * 而语义迁移用注释 + 新字段表达已经足够。
+   */
   runtime: z.string(),
+  /**
+   * 这个沙箱里**能跑哪几个 runtime** —— 终端「+ 新终端」下拉里能开哪几个 CLI，
+   * 以及 `POST .../runtimes/:rt/tasks` 允许哪几个 `:rt`。
+   *
+   * 它 = **默认 runtime** ∪ **实际注入成功了凭证的那些**（03 §4.3 ④）。
+   * ⚠️ 并上默认那个不是凑数：一个凭证都没配的用户照样能建任务，agent 以未登录状态
+   * 起来（provision 为此记 `sandbox.credential.absent`）。只列注入成功的会把这条
+   * 一直存在的路掐掉。
+   *
+   * ⛔ **它是一条记录，不是一次推导。** 绝不许在用的时候拿
+   * `image.supportedRuntimes ∩ 当前已配置的凭证` 现算：
+   *   · provision 之后用户删掉了 claude 凭证 ⇒ 现算说「没有」，而盒子里那份令牌还在；
+   *   · provision 时没配、事后才配 ⇒ 现算说「有」，而盒子里根本没有。
+   * 两个方向都会让界面与沙箱里的事实对不上，而这条链路的下一步（开一个 CLI 标签 /
+   * 发一个任务）**只有沙箱里的事实说了算**。
+   *
+   * ⚠️ 旧行（本切片之前建的沙箱）该列为 NULL ⇒ DTO 上回落成 `[sandbox.runtime]`：
+   * 那时确实只注入了那一个，这不是编造，是把当时的事实如实补上。
+   */
+  availableRuntimes: z.array(z.string()),
   /**
    * WHICH provider this sandbox actually runs on (`aio` / `boxlite` / a third-party
    * registry key).

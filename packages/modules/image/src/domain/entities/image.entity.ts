@@ -47,7 +47,10 @@ export class Image extends AggregateRoot<string> {
   assertDeletable(): void {
     if (this.isBuiltin) {
       throw new ImageNotDeletableError(
-        `image '${this.name}' is built-in: it can be disabled (PATCH { isActive: false }) but not deleted (I-IMG-4)`,
+        // ⚠️ 这句话会原样上屏（`ImageDeleteRefusedError` 透传 message）。
+        //    ⛔ 不写 `PATCH { isActive: false }`：用户手上只有一颗 [禁用] 按钮。
+        `'${this.name}' 是平台自带的预制镜像，不能删除 —— 删掉它平台就再也建不出任务了。` +
+          '不想让它出现在新任务的下拉里的话，点 [禁用]。',
       );
     }
   }

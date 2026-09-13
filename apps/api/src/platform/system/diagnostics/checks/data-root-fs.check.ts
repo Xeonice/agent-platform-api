@@ -41,7 +41,7 @@ type ReflinkVerdict =
 @Injectable()
 export class DataRootFsCheck implements DiagnoseCheck {
   readonly id = 'data-root-fs' as const;
-  readonly label = 'DATA_ROOT 文件系统';
+  readonly label = '数据目录文件系统';
 
   async run(ctx: DiagnoseContext): Promise<DiagnoseCheckResult> {
     const root = env.dataRoot;
@@ -50,8 +50,12 @@ export class DataRootFsCheck implements DiagnoseCheck {
     } catch (e) {
       return {
         status: 'fail',
-        summary: `DATA_ROOT 不可写：${root} —— ${(e as Error).message}`,
-        hint: `平台的全部持久化（工作区 / 审计库 / 日志）都写在这里。确认目录存在且属主正确：ls -ld ${root}`,
+        headline: '数据目录不可写，平台干不了活',
+        detailText:
+          `${root} 写不进去：${(e as Error).message}。` +
+          '平台的全部持久化（工作区副本 / 审计库 / 运行日志）都写在这里。',
+        nextStep: '确认这个目录存在、属主是跑平台的那个账号。',
+        command: `ls -ld ${root}`,
         detail: { dataRoot: root },
       };
     }
@@ -83,11 +87,12 @@ export class DataRootFsCheck implements DiagnoseCheck {
 export function reflinkOutcome(
   verdict: ReflinkVerdict,
   ctx: { root: string; fsLabel: string; os: string },
-): Pick<DiagnoseCheckResult, 'status' | 'summary' | 'hint'> {
+): Pick<DiagnoseCheckResult, 'status' | 'headline' | 'detailText' | 'nextStep'> {
   if (verdict.kind === 'supported') {
     return {
       status: 'ok',
-      summary: `${ctx.root} 文件系统 ${ctx.fsLabel}，支持 reflink（CoW 加速就绪，工作区复制近乎零字节）`,
+      headline: '秒级复制加速可用',
+      detailText: `数据目录（DATA_ROOT）${ctx.root} 是 ${ctx.fsLabel}，每个任务的工作区复制近乎零字节。`,
     };
   }
   if (verdict.kind === 'unknown') {
@@ -96,18 +101,22 @@ export function reflinkOutcome(
     //    一个恒 ⚠️ 的检查项等于没有检查项：看久了就没人看了，还会把另外七项的可信度一起拉低。
     return {
       status: 'info',
-      summary:
-        `${ctx.root} 文件系统 ${ctx.fsLabel}（${ctx.os}）—— 本平台的工作区复制**不走 reflink 分支**` +
-        '（`cp -a --reflink=auto` 只在 Linux 上跑，其余平台直接整份复制），所以 CoW 加速在这里无从谈起：' +
-        '每个 Task 的工作区会实占一份完整副本。这是开发机形态的既定行为，不是可修的故障。',
-      // ⛔ 刻意**不给** hint。这里没有任何该做的事 —— 在 macOS 上提示「换成 Btrfs/XFS」
-      //    会让人以为必须换文件系统，而生产部署本来就在 Linux 上（11 §1 的建议是给那一侧的）。
+      headline: '这台机器不走秒级复制',
+      detailText:
+        `数据目录（DATA_ROOT）${ctx.root} 是 ${ctx.fsLabel}（${ctx.os}）。` +
+        '平台的工作区复制只在 Linux 上走秒级复制，其余系统直接整份复制 —— ' +
+        '每个任务的工作区会实占一份完整副本。这是开发机形态的既定行为，不是可修的故障。',
+      // ⛔ 刻意**不给下一步**。这里没有任何该做的事 —— 在 macOS 上提示「换成 Btrfs/XFS」
+      //    会让人以为必须换文件系统，而生产部署本来就在 Linux 上。
     };
   }
   return {
     status: 'warn',
-    summary: `${ctx.root} 文件系统 ${ctx.fsLabel}，不支持 reflink（${verdict.reason}）—— CoW 加速功能受限，每个 Task 工作区会实占一份完整副本`,
-    hint: '把 DATA_ROOT 放到支持 reflink 的文件系统上（Btrfs / XFS with reflink=1）；不改也能用，只是更费磁盘（03 §1）',
+    headline: '秒级复制用不了，更费磁盘',
+    detailText:
+      `数据目录（DATA_ROOT）${ctx.root} 是 ${ctx.fsLabel}，不支持秒级复制（${verdict.reason}）—— ` +
+      '每个任务的工作区会实占一份完整副本。不改也能用。',
+    nextStep: '想省磁盘就把数据目录放到支持秒级复制的文件系统上（Btrfs，或开了 reflink 的 XFS）。',
   };
 }
 
@@ -249,7 +258,7 @@ export function reflinkStrategy(
   if (os === 'linux') return { kind: 'probe' };
   return {
     kind: 'not-applicable',
-    reason: `${os}: 工作区复制不走 reflink 分支（workspace-preparer 仅在 Linux 上用 cp --reflink=auto）`,
+    reason: `${os}：平台的工作区复制只在 Linux 上走秒级复制`,
   };
 }
 

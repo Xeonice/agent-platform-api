@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import type { ProcessStream } from '@platform/contracts';
 
 /**
@@ -23,6 +24,13 @@ export function readUntil<T>(
    *    `POST /api/runtimes/claude-code/auth/begin → 500 INTERNAL  Error: timeout`
    *    —— 等了两分钟，然后一个不说明**在等什么**、也不说明**下一步做什么**的 500。
    *    2026-09-07 实测就是这条（根因是宿主 helper 不是真 PTY，claude CLI 一字不出）。
+   *
+   * ⛔⛔ **2026-09-11：那次修复自己变成了那个 500。** 下面这段中文写得很好，但它被塞进一个
+   *    裸 `Error` 里 —— `mapAdapterError` 认不出它（没有 code），原样抛出 ⇒
+   *    `ErrorEnvelopeFilter` 的第 ④ 支（非 HttpException 一律不透传内部细节）把它整条换成
+   *    「服务内部错误，请稍后重试」。写给用户的话，用户一个字也没看到。
+   *    ⇒ 现在抛的是**带 code 的 HttpException**（`PROVIDER_UNAVAILABLE`，503，
+   *    27 §「beginAuth 错误」里为「helper 不可用」指定的那个码），走 filter 的第 ① 支原样出线。
    */
   what = 'CLI output',
 ): Promise<T> {
@@ -35,12 +43,13 @@ export function readUntil<T>(
       () =>
         finish(
           null,
-          new Error(
+          unavailable(
             `等待 ${what} 超时（${String(timeoutMs)}ms）` +
               (sawAnyBytes
-                ? '：CLI 有输出但没有出现期望的内容 —— 多半是 CLI 版本变了、输出格式与解析器对不上。'
-                : '：CLI **一个字节都没输出** —— 登录 CLI 会检测 TTY，' +
-                  '最常见的原因是没有给它伪终端；其次是这台机器够不到对应的授权服务。'),
+                ? '：命令有输出，但没有出现期望的内容 —— 多半是这个 CLI 换了版本，输出格式和平台的解析对不上了。'
+                : '：命令一个字节都没输出 —— 登录 CLI 会检查有没有终端，' +
+                  '最常见的原因是没给它分配伪终端；其次是这台机器连不上对应的登录服务。'),
+            sawAnyBytes ? 'CLI_OUTPUT_UNPARSED' : 'CLI_SILENT',
           ),
         ),
       timeoutMs,
@@ -54,7 +63,15 @@ export function readUntil<T>(
       for (const c of chunks) c.fill(0);
       chunks.length = 0;
       if (value !== null) resolve(value);
-      else reject(err ?? new Error('stream ended before a match'));
+      // ⚠️ 退出路径同理：裸 Error 在传输层同样会被换成那句「服务内部错误」。
+      else
+        reject(
+          err ??
+            unavailable(
+              `${what} 还没出结果，命令就已经退出了。多半是这个 CLI 在这台机器上没能正常启动。`,
+              'CLI_EXITED_EARLY',
+            ),
+        );
     };
 
     const attempt = (): void => {
@@ -74,5 +91,24 @@ export function readUntil<T>(
       const text = Buffer.concat(chunks).toString('utf8');
       finish(tryParse(text));
     });
+  });
+}
+
+/**
+ * 「等 CLI 没等到」→ 503 `PROVIDER_UNAVAILABLE`（27 §beginAuth 为 helper 不可用指定的码）。
+ *
+ * ⚠️ **给的是完整信封**（`code` + `message` + `retryable`），不是 `{code, message}`：
+ * `ErrorEnvelopeFilter` 的第 ② 支会把「半个信封」重建一遍并**丢掉 `details`**，
+ * 只有第 ① 支（完整信封）原样放行。
+ *
+ * ⛔ `message` 里**不拼码**（`access-audit.ts` 的纪律）：码在 `code` 位，机器可读的细分
+ * 原因在 `details`，`message` 只留人话。
+ */
+function unavailable(message: string, reason: string): Error {
+  return new ServiceUnavailableException({
+    code: 'PROVIDER_UNAVAILABLE',
+    message,
+    retryable: true,
+    details: [{ code: reason }],
   });
 }

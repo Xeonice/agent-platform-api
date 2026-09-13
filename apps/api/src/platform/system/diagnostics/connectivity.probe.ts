@@ -319,12 +319,12 @@ function hintFor(e: Error, target: Target, viaProxy: boolean): string {
   // ⇒ 文案要回答三件事：**谁**要它、**为什么**要、以及一条**不依赖 docker** 的路。
   if (isLoopback(target.host)) {
     return (
-      `本机 registry ${label} 没有应答（${msg}）。它是**微 VM 档（boxlite）**用来中转大镜像的本地镜像站` +
-      `（BoxLite 自己的镜像库不支持断点续传）—— ⛔ 平台本身不需要 Docker。三条路任选：` +
-      `① 起任意一个 OCI registry 监听 ${String(target.port)}（zot 是单个二进制，不必有 docker）；` +
+      `本机的镜像仓库 ${label} 没有应答（${msg}）。这台机器的沙箱环境靠它中转大镜像` +
+      `（沙箱自带的镜像库不支持断点续传）—— 平台本身不需要 Docker。三条路任选：` +
+      `① 起任意一个 OCI 镜像仓库监听 ${String(target.port)}（zot 是单个二进制，不必有 docker）；` +
       `② 有 docker 就一条命令：docker run -d -p ${String(target.port)}:5000 --name registry registry:2；` +
       `③ 把 SANDBOX_DEFAULT_IMAGE 指向一个已经可达的仓库（公网也行，如 ghcr.io/agent-infra/sandbox:latest）。` +
-      `⚠️ 这一项与代理无关 —— loopback 不出网`
+      `这一项与代理无关 —— 本机地址不出网`
     );
   }
   if (msg.includes('407')) {
@@ -340,10 +340,10 @@ function hintFor(e: Error, target: Target, viaProxy: boolean): string {
   // ⚠️ 这条要放在 `viaProxy` 之前：**经代理超时同样只是超时**，不能说成「代理无法到达」。
   if (e instanceof ProbeTimeoutError) {
     return (
-      `${label}（${target.why}）${msg} —— **这不等于连不上**：一条时快时慢的链路会周期性` +
-      `越过探测预算，而 agent 用的是长连接，在这种链路上通常照样能用。` +
-      `⇒ 重跑一次看它稳不稳定：偶发 ⇒ 多半只是慢，可以直接往下走；` +
-      `每次都这样 ⇒ 按不通处理（内网常见形态是「网络通、但要走代理」，在系统设置里填 HTTPS_PROXY 后重试）`
+      `这不等于连不上：${label}（${target.why}）${msg}，而一条时快时慢的链路会周期性` +
+      `越过超时时限，Agent 用的是长连接，在这种链路上通常照样能用。` +
+      `重跑一次看它稳不稳定：偶发多半只是慢，可以直接往下走；` +
+      `每次都这样就按不通处理（内网常见形态是「网络通、但要走代理」，在系统设置里填 HTTPS_PROXY 后重试）`
     );
   }
   if (viaProxy) {

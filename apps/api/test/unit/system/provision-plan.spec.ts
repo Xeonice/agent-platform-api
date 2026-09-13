@@ -196,3 +196,44 @@ describe('★ 第五条路：provider 自己铺（2026-09-10 加）', () => {
     expect(planProvision(facts({ providerCanStage: true })).sizeBytes).toBeNull();
   });
 });
+
+/**
+ * `why` / `from` / `to` **直接上屏**：它们渲染在向导与系统状态页的 [准备镜像] 卡片里
+ * （前端 `provisionOfferOf` 原样读出来，`PresetImageCheck.view` 原样渲染）。
+ *
+ * ⇒ 它们跟诊断文案受同一套纪律约束：
+ *   ⛔ 一个 markdown 标记都不许有（全链路是纯文本渲染，写了就原样上屏）；
+ *   ⛔ 内部词不许上屏（registry / provider / 铺开 / rootfs / 档位…）。
+ */
+describe('搬运计划的三句话是上屏文案，受同一套用词纪律约束', () => {
+  const all = [
+    planProvision(facts({ inLocalDocker: true })),
+    planProvision(facts({ asset: BOXLITE_ARM })),
+    planProvision(facts({ upstream: 'ghcr.io/x/y:latest' })),
+    planProvision(facts({ providerCanStage: true })),
+    planProvision(facts()),
+  ];
+
+  it('⛔ 一个 markdown 星号都不许有', () => {
+    // MUTATION: 在任意一句 `why` 里加回一对 `**` ⇒ 本条红。
+    for (const p of all) {
+      const text = `${p.why}${p.from}${p.to}`;
+      expect(text, `${p.source}: ${text}`).not.toContain('**');
+    }
+  });
+
+  it('⛔ 内部词不许上屏（registry / provider / 铺开 / rootfs / 档位）', () => {
+    for (const p of all) {
+      // ⚠️ `to` 在 registry 那几条路上是**真实的仓库主机名**（`localhost:5001`），
+      //    那是用户认得出的取值，不是内部词 —— 所以这里只扫 `why` 与 `from`。
+      const text = `${p.why}${p.from}`;
+      for (const banned of ['registry', 'provider', '铺开', 'rootfs', '档位', '资产清单']) {
+        expect(text, `${p.source} 里出现了内部词 '${banned}'：${text}`).not.toContain(banned);
+      }
+    }
+  });
+
+  it('每一条路的 `why` 各不相同 —— 合成一句就等于用户不知道平台要做什么', () => {
+    expect(new Set(all.map((p) => p.why)).size).toBe(all.length);
+  });
+});

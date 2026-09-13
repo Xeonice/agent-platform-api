@@ -39,7 +39,7 @@ import { defaultSubstrate, type Substrate } from './substrate';
 @Injectable()
 export class ContainerRuntimeCheck implements DiagnoseCheck {
   readonly id = 'container-runtime' as const;
-  readonly label = '容器运行时可达';
+  readonly label = '容器服务可达';
 
   constructor(
     @Inject(CLOCK) private readonly clock: Clock,
@@ -54,7 +54,8 @@ export class ContainerRuntimeCheck implements DiagnoseCheck {
       const ms = String(this.clock.now().getTime() - started);
       return {
         status: 'ok',
-        summary: `容器运行时可达（${target.describe}，${ms}ms${pong.server === null ? '' : ` · ${pong.server}`}）`,
+        headline: '容器服务可达',
+        detailText: `${target.describe}，${ms}ms${pong.server === null ? '' : ` · ${pong.server}`}。`,
         detail: {
           endpoint: target.describe,
           apiVersion: pong.apiVersion,
@@ -84,37 +85,45 @@ export function unreachableVerdict(
   provider: string,
   endpoint: string,
   reason: string,
-): Pick<DiagnoseCheckResult, 'status' | 'summary' | 'hint'> {
+): Pick<DiagnoseCheckResult, 'status' | 'headline' | 'detailText' | 'nextStep' | 'command'> {
   const unix = !endpoint.startsWith('tcp://');
-  // ⚠️ 建议要**按连接方式分岔**。socket 不存在时叫用户去改 DOCKER_HOST 是错的
+  // ⚠️ 下一步要**按连接方式分岔**。socket 不存在时叫用户去改 DOCKER_HOST 是错的
   // （他大概率只是没起 docker）；而 tcp 不通时叫他 `systemctl start docker` 同样
   // 错（那台机器上根本没有 docker）。同一句话覆盖两种环境 = 对其中一种撒谎。
   const howToFix = unix
-    ? `确认 docker 守护进程在跑：docker info；socket 路径不是默认值时用 DOCKER_HOST=unix:///path/to/docker.sock 指过去（当前：${endpoint}）`
-    : `确认 ${endpoint} 可达（docker-socket-proxy 起了没有、网络策略放行没有）：curl -s ${endpoint}/_ping`;
+    ? {
+        nextStep: `确认容器服务在跑；socket 路径不是默认值时用 DOCKER_HOST=unix:///path/to/docker.sock 指过去（当前：${endpoint}）。`,
+        command: 'docker info',
+      }
+    : {
+        nextStep: `确认 ${endpoint} 可达：转发用的代理起了没有、网络策略放行没有。`,
+        command: `curl -s ${endpoint}/_ping`,
+      };
+  const seen = `${endpoint} 上没有容器服务在应答（${reason}）。`;
 
   if (substrate === 'micro-vm') {
     return {
       status: 'info',
-      summary:
-        `${endpoint} 上没有容器运行时在应答（${reason}）—— ` +
-        `**当前默认档 '${provider}' 是微 VM，不需要它**，这不挡任何默认路径`,
-      hint: `只有显式选容器档（aio）的任务才用得上它；真要用就装好 docker 再重跑诊断（${howToFix}）`,
+      headline: '没有容器服务，但这台机器不需要',
+      detailText: `${seen}这台机器的沙箱环境不跑在容器里，这不挡任何默认路径。`,
+      nextStep: `只有显式选容器沙箱的任务才用得上它；真要用就装好 docker 再重跑诊断。${howToFix.nextStep}`,
+      command: howToFix.command,
     };
   }
   if (substrate === 'unknown') {
     return {
       status: 'warn',
-      summary:
-        `${endpoint} 上没有容器运行时在应答（${reason}）—— ` +
-        `当前默认档 '${provider}' 不是内置的 aio/boxlite，平台无法断定它要不要容器运行时`,
-      hint: `若这个 provider 靠容器跑：${howToFix}；若不靠，这一项可以忽略`,
+      headline: '说不出这台机器要不要容器服务',
+      detailText: `${seen}这台机器的沙箱环境是自己注册的 '${provider}'，平台断定不了它要不要容器服务。`,
+      nextStep: `它靠容器跑的话：${howToFix.nextStep}不靠的话这一项可以忽略。`,
+      command: howToFix.command,
     };
   }
   return {
     status: 'fail',
-    summary: `容器运行时不可达：${endpoint} —— ${reason}（当前默认档 '${provider}' 就是容器档，这一项挡住了新建任务）`,
-    hint: howToFix,
+    headline: '容器服务不可达，建不了任务',
+    detailText: `${seen}这台机器的沙箱环境就跑在容器里，所以这一项挡住了新建任务。`,
+    ...howToFix,
   };
 }
 
@@ -180,7 +189,7 @@ function ping(target: DockerTarget, ctx: DiagnoseContext): Promise<Pong> {
           if (apiVersion === null && body.trim() !== 'OK') {
             reject(
               new Error(
-                '/_ping 回了 200，但既没有 Api-Version 响应头也不是一行 OK —— 这个地址上有服务在应答，但它不像一个容器运行时',
+                '这个地址上有服务在应答，但它不像一个容器服务（/_ping 回了 200，却既没有 Api-Version 响应头也不是一行 OK）',
               ),
             );
             return;

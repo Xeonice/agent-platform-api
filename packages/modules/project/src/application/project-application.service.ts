@@ -38,6 +38,9 @@ const MAX_PROJECTS = 50; // I-PRJ-4
 /** HTTP + retryable for a failed baseline fetch, straight from 03 §7.5's table. */
 const FETCH_STATUS: Record<CloneErrorCode, HttpStatus> = {
   CLONE_FAILED_PERMISSION: HttpStatus.FORBIDDEN,
+  // 404, not 403: the remote did not open, and we do NOT know whether that is a
+  // missing credential or a typo in the URL (see CloneErrorCodeSchema).
+  CLONE_FAILED_NOT_FOUND: HttpStatus.NOT_FOUND,
   CLONE_FAILED_NETWORK: HttpStatus.BAD_GATEWAY,
   DISK_INSUFFICIENT: HttpStatus.INSUFFICIENT_STORAGE,
   TIMEOUT: HttpStatus.GATEWAY_TIMEOUT,
@@ -45,6 +48,7 @@ const FETCH_STATUS: Record<CloneErrorCode, HttpStatus> = {
 };
 const FETCH_RETRYABLE: Record<CloneErrorCode, boolean> = {
   CLONE_FAILED_PERMISSION: false, // the user must configure a credential
+  CLONE_FAILED_NOT_FOUND: false, // a credential or a different URL is needed first
   CLONE_FAILED_NETWORK: true,
   DISK_INSUFFICIENT: false, // the user must free space
   TIMEOUT: true,
@@ -85,19 +89,49 @@ export class ProjectApplicationService {
 
   async create(input: CreateProjectInput): Promise<ProjectDto> {
     // I-PRJ-1 as a 400 (the domain also enforces it as a last line of defence).
+    //
+    // ★ Every rejection below carries an explicit BUSINESS CODE, not a bare string.
+    //   Without one they all出线 as `BAD_REQUEST` (the filter's status→code fallback)
+    //   and the frontend has literally nothing to branch on but the English prose —
+    //   which is why `project limit reached (max 50)` used to reach users verbatim.
+    //   ⛔ Inferring the meaning from the status code is banned on the frontend
+    //   (`useProjects.ts` header), so the meaning has to be stated here.
     if (input.sourceType === 'git' && !input.repoUrl) {
-      throw new BadRequestException("sourceType 'git' requires repoUrl");
+      throw new BadRequestException({
+        code: 'INVALID_PROJECT_SOURCE',
+        message: "sourceType 'git' requires repoUrl",
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
     if (input.sourceType === 'empty' && input.repoUrl) {
-      throw new BadRequestException("sourceType 'empty' must omit repoUrl");
+      throw new BadRequestException({
+        code: 'INVALID_PROJECT_SOURCE',
+        message: "sourceType 'empty' must omit repoUrl",
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
     // I-PRJ-4: at most 50 projects; names are unique (app-level pre-check backed by
     // the DB UNIQUE index for the race).
     if ((await this.repo.count()) >= MAX_PROJECTS) {
-      throw new BadRequestException(`project limit reached (max ${MAX_PROJECTS})`);
+      throw new BadRequestException({
+        code: 'PROJECT_LIMIT_REACHED',
+        message: `project limit reached (max ${MAX_PROJECTS})`,
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
     if (await this.repo.findByName(input.name)) {
-      throw new ConflictException(`a project named '${input.name}' already exists`);
+      // 27 §... documents this as ALREADY_EXISTS(409); it never actually shipped —
+      // the bare ConflictException came out as `INVALID_STATE`, so the frontend's
+      // `code === 'ALREADY_EXISTS'` branch was dead code from the day it was written.
+      throw new ConflictException({
+        code: 'ALREADY_EXISTS',
+        message: `a project named '${input.name}' already exists`,
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
     const id = asProjectId(this.ids.next());
     const baselinePath = this.baselinePathFor(id);
@@ -234,7 +268,17 @@ export class ProjectApplicationService {
 
   private async require(id: string): Promise<Project> {
     const project = await this.repo.findById(asProjectId(id));
-    if (!project) throw new NotFoundException(`project ${id} not found`);
+    // `PROJECT_NOT_FOUND` (10 §6.8) rather than the filter's generic `NOT_FOUND`:
+    // the id in the message is a UUID nobody can act on, so the frontend renders
+    // its own sentence and needs a code to select it by.
+    if (!project) {
+      throw new NotFoundException({
+        code: 'PROJECT_NOT_FOUND',
+        message: `project ${id} not found`,
+        retryable: false,
+        sideEffectFree: true,
+      });
+    }
     return project;
   }
 
@@ -251,8 +295,27 @@ export class ProjectApplicationService {
   }
 
   private mapDomainError(e: unknown): unknown {
-    if (e instanceof InvalidRepoUrlError) return new BadRequestException(e.message);
-    if (e instanceof ProjectStateError) return new ConflictException(e.message);
+    if (e instanceof InvalidRepoUrlError) {
+      return new BadRequestException({
+        code: 'INVALID_REPO_URL',
+        message: e.message,
+        retryable: false,
+        sideEffectFree: true,
+      });
+    }
+    // ⚠️ Stays `INVALID_STATE` (409) on purpose — 10 §6.8 already names that code for
+    // exactly this set (sync on non-ready / convert-to-empty & retry-clone on
+    // non-failed) and the CALLER always knows which action it invoked, so one code
+    // plus the call site is enough to pick the right sentence. Minting three more
+    // codes would buy nothing the caller does not already know.
+    if (e instanceof ProjectStateError) {
+      return new ConflictException({
+        code: 'INVALID_STATE',
+        message: e.message,
+        retryable: false,
+        sideEffectFree: true,
+      });
+    }
     // A failed `git fetch --all` is the remote's answer, not a platform bug, so it keeps
     // its CLONE taxonomy code (03 §7.5). That is deliberate reuse: the frontend already
     // branches on these exact codes for a failed clone — PERMISSION ⇒ [配置 Git 凭证],

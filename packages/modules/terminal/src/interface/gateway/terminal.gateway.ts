@@ -11,6 +11,8 @@ import {
 } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
 import {
+  RUNTIME_ID_RE,
+  isTerminalShellId,
   SandboxProviderError,
   TERMINAL_AUTHENTICATOR,
   TERMINAL_EXIT_ATTACH_FAILED,
@@ -25,12 +27,17 @@ import type {
   TerminalHandshakeCredentials,
   TerminalServerFrame,
 } from '@platform/contracts';
-import { TerminalSessionService } from '../../application/terminal-session.service';
+import {
+  TerminalSessionService,
+  type TerminalTarget,
+} from '../../application/terminal-session.service';
 
 interface Attachment {
   stream: ProcessStream;
   socketSessionKey: string;
   sandboxId: string;
+  /** 这条连接连的是哪一个 tmux 会话（06 §5）。`agent` = `platform-agent`。 */
+  target: TerminalTarget;
 }
 
 /**
@@ -118,7 +125,71 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
         'the handshake query must name the sandbox this terminal attaches to (?sandboxId=…)',
       );
     }
+    // 寻址的第二半：连**哪一个**会话（06 §5）。放在 sandboxId 之后，理由相同 ——
+    // 它同样是寻址，同样不该被叫成未授权。
+    return this.rejectTarget(client);
+  }
+
+  /**
+   * `?kind=` / `?shellId=` 的形状校验。`null` = 可以放行。
+   *
+   * ⛔ **两种不合法都必须响亮地拒，不许兜底**：
+   *   · `kind` 认不出（`shel1` 这类笔误）⇒ 按 agent 处理的话，用户点「+ 新终端」会
+   *     安静地拿到 agent 那一屏的镜像（tmux 多 client attach 同一 session = 同一块屏幕，
+   *     实测见 `attachOrCreateShellCmd`），他在里面敲的每个字都进了正在跑的 agent；
+   *   · `shellId` 形状不对 ⇒ 悄悄新开一个的话，既掩盖了客户端 bug / 参数探测，
+   *     又会在沙箱里堆出没人认领的 tmux 会话。
+   */
+  private rejectTarget(client: Socket): Error | null {
+    const kind = this.readQuery(client, 'kind');
+    if (kind !== undefined && kind !== 'agent' && kind !== 'shell' && kind !== 'runtime') {
+      return wsHandshakeError(
+        'TERMINAL_TARGET_INVALID',
+        `?kind= must be 'agent', 'shell' or 'runtime', got ${JSON.stringify(kind)}`,
+      );
+    }
+    // `runtime` 必须说清是**哪个** runtime。
+    // ⚠️ 这里只查**形状**（握手 middleware 是同步的）；「这个沙箱里到底有没有它」
+    //    要读沙箱行、是异步的，落在 `openSession`（见 `runtimeCommandFor`）。
+    const runtimeId = this.readQuery(client, 'runtimeId');
+    if (kind === 'runtime' && (runtimeId === undefined || !RUNTIME_ID_RE.test(runtimeId))) {
+      return wsHandshakeError(
+        'TERMINAL_TARGET_INVALID',
+        `?kind=runtime must carry a well-formed ?runtimeId=, got ${JSON.stringify(runtimeId)}`,
+      );
+    }
+    const shellId = this.readQuery(client, 'shellId');
+    if (shellId !== undefined && shellId !== '' && !isTerminalShellId(shellId)) {
+      return wsHandshakeError(
+        'TERMINAL_TARGET_INVALID',
+        '?shellId= must be the 32-hex id this server minted (it is never client-chosen)',
+      );
+    }
     return null;
+  }
+
+  /**
+   * 这条连接连哪一个会话。缺省 —— 以及任何**旧客户端**（它根本不发 `kind`）—— 都是
+   * agent，所以这次改动对既有前端是零影响的。
+   *
+   * `kind=shell` 且没带 `shellId` = 「给我开一个新的」⇒ **服务端**现铸一个，并在
+   * `session` 首帧回传，让这个标签之后能接回同一个会话。
+   *
+   * ⛔ **客户端不许指定**（审计 P2-9，与 `socketSessionKey` 同一条纪律）：这个值会进
+   * 后端 `tmux -s` 的 argv。铸在这一层是因为 `randomBytes` 属 interface/infrastructure
+   * （01 §3：随机会让业务用例不可复现，eslint 有硬规则）—— 与下面那行铸
+   * `socketSessionKey` 的代码同处一层、同一条理由。
+   */
+  private resolveTarget(client: Socket): TerminalTarget {
+    const kind = this.readQuery(client, 'kind');
+    if (kind !== 'shell' && kind !== 'runtime') return { kind: 'agent' };
+    const presented = this.readQuery(client, 'shellId');
+    // 形状在握手 middleware 已经过闸（`rejectTarget`）；这里只区分"带了"与"没带"。
+    const shellId =
+      presented !== undefined && presented !== '' ? presented : randomBytes(16).toString('hex'); // 128-bit, server-generated
+    if (kind === 'shell') return { kind: 'shell', shellId };
+    // 形状已在握手 middleware 过闸；能到这里就一定带了合法的 runtimeId。
+    return { kind: 'runtime', shellId, runtimeId: this.readQuery(client, 'runtimeId') ?? '' };
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -129,16 +200,28 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     const cols = Number(this.readQuery(client, 'cols') ?? 80);
     const rows = Number(this.readQuery(client, 'rows') ?? 24);
     const reuse = this.readQuery(client, 'socketSessionKey');
+    const target = this.resolveTarget(client);
 
     try {
-      // ALWAYS attach the agent session provision already started (26 §8 / 裁决 D-15).
-      // The gateway no longer decides "is this the first session?" and never calls
-      // buildStartCommand — that moved into bootstrapAgentSession.
-      const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse });
+      // agent 那一支：ALWAYS attach the session provision already started
+      // (26 §8 / 裁决 D-15) —— 网关不判断「是不是第一个连接」、不调 buildStartCommand。
+      // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
+      const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse, target });
       const socketSessionKey = randomBytes(16).toString('hex'); // 128-bit, server-generated
-      this.attachments.set(client.id, { stream, socketSessionKey, sandboxId });
+      this.attachments.set(client.id, { stream, socketSessionKey, sandboxId, target });
 
-      this.send(client, { type: 'session', socketSessionKey });
+      // ⚠️ `shellId` **只在 shell 那一支带上**。agent 连接上给一个空串会让前端多出一条
+      //    「有 shellId 但它是空的」的分支 —— 缺席才是「这条连的是 agent」。
+      this.send(client, {
+        type: 'session',
+        socketSessionKey,
+        ...(target.kind === 'shell' ? { shellId: target.shellId } : {}),
+      });
+      // 清单**不挡在 `session` 之前**：它要问一次沙箱（一次 exec 往返），而 `session`
+      // 帧里装着重连凭据、也是前端判定"连上了"的那一帧。搭在它前面等于把开终端的
+      // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
+      if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
+
       stream.onData((chunk) => this.send(client, { type: 'data', data: chunk.toString('utf8') }));
       stream.onExit((code) => {
         this.send(client, { type: 'exit', code: code ?? -1 });
@@ -215,6 +298,62 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       case 'ping':
         this.send(client, { type: 'pong' });
         break;
+      case 'close_shell':
+        // 用户**显式**关掉了一个终端标签 ⇒ 销毁那一个 tmux 会话（06 §5）。
+        // ⚠️ 这是全网关**唯一**会销毁 tmux 会话的地方，而它拼不出 `platform-agent`。
+        void this.closeShell(att.sandboxId, frame.shellId);
+        break;
+    }
+  }
+
+  /**
+   * 把「这个 sandbox 里还有哪几个用户终端」推给前端（06 §5.5）。
+   *
+   * ⚠️ **只在 `kind=agent` 那条连接上推**，不是每条连接都推。清单是 **sandbox 级**的
+   * 事实、只有一个消费者（标签栏），而 Agent 标签是每次页面加载**必然**连、且**只连
+   * 一条**的那个（它是兜底选中的标签）。每条 shell 连接也推的话，N 个标签就要付 N 次
+   * `tmux list-sessions` 的 exec，换回 N 份一模一样的清单。
+   *
+   * ⚠️ **不做「排除当前已连着的会话」这种去重**。清单属于 **Task** 而不属于某个浏览器
+   * （06 §5.5 决策三）：换台机器打开同一个任务，也该看得见这些终端。按"谁连着就不报"
+   * 过滤的话，另一个窗口正开着的终端在这边就会凭空消失。⇒ 去重交给前端按 id 做
+   * （只加不减，08 §5.1）。
+   *
+   * ⚠️ fire-and-forget，但**失败不等于沉默**：`listShellSessions` 分不清时回 `null`，
+   * 这一帧照发 —— 前端据此说"查不到"，而不是"没有"。⛔ 不许用"不发帧"表示查不到：
+   * 那与"还没答"在前端无从区分。
+   */
+  private async pushShellInventory(client: Socket, sandboxId: string): Promise<void> {
+    try {
+      const shells = await this.sessions.listShellSessions(sandboxId);
+      this.send(client, { type: 'shells', shells });
+    } catch (e) {
+      // 走到这里说明是 `listShellSessions` 之外的意外（它自己已经把已知失败折成 null）。
+      this.logger.error(
+        `sandbox ${sandboxId}: push shell inventory failed: ${(e as Error).message}`,
+      );
+      this.send(client, { type: 'shells', shells: null });
+    }
+  }
+
+  /**
+   * 销毁一个用户 shell 会话。**fire-and-forget**：`onFrame` 是同步的，而用户点 [×]
+   * 之后不需要等一个回执 —— 标签在前端已经没了。
+   *
+   * ⚠️ 形状不合法的 `shellId` 会让 `closeShellSession` 抛（`shellSessionName`）。
+   * 那不是用户能处理的事，但**绝不能静默**：记 error，让它在日志里看得见。
+   * 走到这里的 id 理论上已经过了握手闸门，但这条帧的载荷是**帧里**的 id，
+   * 不是握手 query 里那个 —— 两者不是同一个值，所以这一层的校验不是多余的。
+   */
+  private async closeShell(sandboxId: string, shellId: string): Promise<void> {
+    try {
+      await this.sessions.closeShellSession(sandboxId, shellId);
+    } catch (e) {
+      this.logger.error(
+        `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${
+          (e as Error).message
+        }`,
+      );
     }
   }
 

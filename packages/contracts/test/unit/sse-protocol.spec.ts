@@ -54,7 +54,7 @@ describe('SSE 诊断帧契约', () => {
 
   it('帧字段形状在 canonical 里逐字列出（改字段必须改这一行）', () => {
     expect(SSE_PROTOCOL_CANONICAL).toContain(
-      'check{id,label,status,summary,hint?,step?,errorCode?,detail?,durationMs}',
+      'check{id,label,status,headline,detailText?,nextStep?,command?,step?,errorCode?,detail?,durationMs}',
     );
     expect(SSE_PROTOCOL_CANONICAL).toContain('start{checks[{id,label}],timeoutMs}');
     expect(SSE_PROTOCOL_CANONICAL).toContain('done{okCount,infoCount,warnCount,failCount,totalMs}');

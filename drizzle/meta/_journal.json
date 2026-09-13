@@ -141,6 +141,20 @@
       "when": 1788186334037,
       "tag": "0019_abnormal_carmella_unuscione",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1789062919312,
+      "tag": "0020_bitter_vanisher",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1789114075274,
+      "tag": "0021_same_stephen_strange",
+      "breakpoints": true
     }
   ]
 }

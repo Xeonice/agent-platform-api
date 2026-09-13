@@ -180,7 +180,7 @@ describe('T-SBX-31 — the `starting` 段 runs its five steps in the pinned orde
 
     const order = h.calls.filter((c) => c !== 'buildStartCommand' && c !== 'buildAttachCommand');
     expect(order).toEqual([
-      'prepareRuntimeCredential',
+      'prepareRuntimeCredential:claude-code',
       'provider.create',
       'provider.start',
       'agent-readiness-probe',

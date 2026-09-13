@@ -25,6 +25,7 @@ export class TimeoutPolicy {
     if (!(ALLOWED_TIMEOUT_MINUTES as readonly number[]).includes(minutes)) {
       throw new AutomationInvariantError(
         `timeout must be one of ${ALLOWED_TIMEOUT_MINUTES.join('/')} minutes (I-AUT-5), got ${String(minutes)}`,
+        'INVALID_TIMEOUT',
       );
     }
     return new TimeoutPolicy(minutes as TimeoutMinutes);

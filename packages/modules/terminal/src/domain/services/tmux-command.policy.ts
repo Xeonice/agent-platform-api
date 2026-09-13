@@ -163,6 +163,227 @@ export function attachOrCreateCmd(session: string, command: AgentCommand): strin
 }
 
 /**
+ * 用户自己开的那个终端标签（06 §5「第 N 个标签」）。
+ *
+ * ── 为什么必须是**另一个 session**，而不是再 attach 一次 ────────────────────────
+ * tmux 的 pane 属于 **session**，不属于 client。2026-09-11 实测（tmux 3.7b，两个
+ * `script` 造的 pty 同时 attach 一个 session）：
+ *
+ *     list-clients → tty=/dev/ttys001 session=S ; tty=/dev/ttys004 session=S
+ *     list-panes -a → S:0.0 id=%0                  ← **只有一个 pane**
+ *
+ * 也就是说"再开一条 WS 连上 `platform-agent`"拿到的是**同一块屏幕的镜像**，
+ * 敲进去的字会落进正在跑的 agent。第二个终端只能是第二个 session。
+ * 同一次实测里换个名字 `new-session -A -s platform-shell-…` 就得到了独立的 `%1`。
+ *
+ * ── 为什么**不复用** `agentScript()` ─────────────────────────────────────────
+ * `agentScript` 在命令退出后会打一行「agent session ended」再 `exec $SHELL` —— 那条对
+ * agent 会话是对的（跑完的 agent 不该把会话一起带走，用户来看结果时要有个 shell）。
+ * 放到用户 shell 上它就变成了**永远退不掉的会话**：用户敲 `exit`，脚本再给他起一个。
+ * 这里干脆不给命令，让 tmux 起镜像自己的默认 shell —— `exit` 就是 exit。
+ *
+ * ⚠️ `-u` 与前置 `set -g mouse on` 一个都不能少，而且是从**同两个常量**取的：
+ * 少了 `-u`，这个新标签里所有非 ASCII 字符会变成 `_`；少了 `mouse on`，滚轮会被
+ * xterm.js 翻译成一串方向键灌进标签里跑着的程序（两条的实测记录见上面各自的注释）。
+ * ⇒ 想加新入口时照抄这一行的形状，别自己拼 `['tmux', ...]`。
+ */
+export function attachOrCreateShellCmd(session: string, workdir?: string): string[] {
+  return [
+    'tmux',
+    UTF8,
+    ...MOUSE_ON,
+    'new-session',
+    '-A',
+    '-s',
+    session,
+    ...(workdir === undefined ? [] : ['-c', workdir]),
+  ];
+}
+
+/**
+ * 会话上记「这个标签里跑的是哪个 runtime」的 tmux **用户选项**名（06 §5.6）。
+ *
+ * ⚠️ 它的全部用途是**刷新之后还能把标签名叫对**：清单里只有 shellId，没有这个标记的话
+ * 一个正跑着 Claude Code 的标签在刷新后会显示成「终端 2」。
+ *
+ * ⚠️ **由会话自己在里面设**（见 `runtimeTabScript`），不是外面设的 —— `new-session -A`
+ * 是前台阻塞命令，链在它后面的命令要等它退出才轮得到执行（与 `MOUSE_ON` 必须前置是
+ * 同一条理由）。
+ *
+ * ⚠️ **读不到不是错误**：实测 tmux 3.7b 的 `-F '#{@platform_runtime}'` 对未设的会话给
+ * **空串**（不报错）。沙箱里是 3.3a —— 万一那一版不支持 `#{@…}`，退化成"读不到" ⇒
+ * 标签回落成「终端 N」，也就是本切片之前的行为，不会更坏。⛔ 所以解析侧永远不许因为
+ * 这一列缺失/为空而丢掉整条会话。
+ */
+export const TMUX_RUNTIME_OPTION = '@platform_runtime';
+
+/** 用户终端标签的 tmux 会话名前缀。`platform-agent` 与它**不同前缀**，见下。 */
+export const PLATFORM_SHELL_SESSION_PREFIX = 'platform-shell-';
+
+/**
+ * 用户自己开的 **runtime 标签**（06 §5.6）：一个独立 tmux 会话里跑一个 agent CLI，
+ * 不带任何任务指令。
+ *
+ * ⚠️ **命令来自 `buildAttachCommand()`**，⛔ 不是 `buildStartCommand()`。契约里那条
+ * 注释写得很清楚：`buildAttachCommand` 是「没有指令要带时」终端会话跑的东西。
+ * 用 `buildStartCommand` 意味着这个标签会变成一个**没人记账的任务**：它带着指令跑，
+ * 而平台不会为它建 AgentTask，于是产物、审计、超时、可取消全都没有。
+ * ⇒ 「在终端里开一个 CLI」与「发起一个任务」是两件事，这一行就是它们的分界。
+ *
+ * ⚠️ **这里复用 `agentScript()`，与纯 shell 标签相反** —— 两边的理由恰好互补：
+ *   · 纯 shell 标签的命令**就是** shell，`agentScript` 退出后再 `exec $SHELL` 会让它
+ *     永远退不掉（用户敲 `exit` 又给他起一个）；
+ *   · runtime 标签的命令是 CLI，用户敲 `/exit` 退出 CLI 之后 `agentScript` 给他留下
+ *     一个普通 shell —— 这正是想要的：标签不会在他眼前突然消失（还没看完的输出也就
+ *     还在），而那个 shell 里再敲一次 `exit` 会真的结束会话。与 agent 会话「跑完的
+ *     agent 不该把会话一起带走」是同一条取舍。
+ */
+export function attachOrCreateRuntimeCmd(
+  session: string,
+  runtimeId: string,
+  command: AgentCommand,
+): string[] {
+  return [
+    'tmux',
+    UTF8,
+    ...MOUSE_ON,
+    'new-session',
+    '-A',
+    '-s',
+    session,
+    runtimeTabScript(runtimeId, command),
+  ];
+}
+
+/**
+ * runtime 标签的负载：先给**自己这个会话**打上 runtime 标记，再跑 CLI。
+ *
+ * ⚠️ 标记必须在会话**里面**打（`set-option` 不带 `-t`，作用于当前会话）——外面链不上，
+ * 见 `TMUX_RUNTIME_OPTION` 的注释。
+ * ⚠️ `|| true`：老 tmux 不认 `@`-用户选项也只是少一个标签名，⛔ 绝不能让整个标签起不来。
+ */
+export function runtimeTabScript(runtimeId: string, command: AgentCommand): string {
+  const mark = `tmux set-option ${TMUX_RUNTIME_OPTION} ${shellQuote(runtimeId)} 2>/dev/null || true`;
+  return `${mark}; ${agentScript(command)}`;
+}
+
+/** 清单里的一条：会话 id + 里面跑的 runtime（纯终端标签没有后者）。 */
+export interface ShellSessionSummary {
+  shellId: string;
+  runtimeId?: string;
+}
+
+/**
+ * 用户终端标签 id 的形状：32 位小写十六进制（128-bit）。
+ *
+ * ⚠️ 与 `@platform/contracts` 的 `TERMINAL_SHELL_ID_RE` 是**同一条**正则的两份拷贝 ——
+ * 领域层不许 import contracts（23 §4.5），所以只能各留一份，由
+ * `test/unit/shell-session.spec.ts` 逐字钉住。
+ */
+export const SHELL_SESSION_ID_RE = /^[0-9a-f]{32}$/;
+
+/**
+ * id → tmux 会话名。**形状不对就抛**，不做兜底。
+ *
+ * ⛔ 这里是「客户端不许指定 session 名」这条纪律**在 argv 侧**的最后一道闸门：
+ * 名字最终原样进 `tmux -s <name>`，所以这一步之后必须已经不可能有引号/空格/分号。
+ * 抛而不是回一个安全默认值，是因为"形状不对"只有两种来源 —— 客户端 bug 或探测，
+ * 两种都要在这里停住，而不是换个名字继续跑。
+ *
+ * ⛔ 它同时使 `platform-agent` **拼不出来**：那不是 32 位十六进制。
+ * 「agent 会话绝不被销毁」于是不再依赖任何一处 `if (name !== 'platform-agent')`
+ * 的记性 —— 走这条路根本构造不出那个名字。
+ */
+export function shellSessionName(shellId: string): string {
+  if (!SHELL_SESSION_ID_RE.test(shellId)) {
+    throw new Error(
+      `shellId 形状不合法（应为 32 位小写十六进制，服务端生成）：${JSON.stringify(shellId)}`,
+    );
+  }
+  return `${PLATFORM_SHELL_SESSION_PREFIX}${shellId}`;
+}
+
+/**
+ * 销毁**一个用户终端标签**的 tmux 会话（06 §5）。入参是 id 而不是会话名 —— 名字由
+ * `shellSessionName()` 现拼，于是这个入口在类型之外还有一层结构性保证：
+ * **它构造不出 `platform-agent`**。
+ *
+ * ⚠️ 不带 `set -g mouse on`，理由与 `hasSessionCmd` 那条一样：这条命令不 attach、
+ * 也不渲染任何东西，没有客户端可言。`-u` 留着只为与同文件其余入口保持一致形状。
+ */
+export function killShellSessionCmd(shellId: string): string[] {
+  return ['tmux', UTF8, 'kill-session', '-t', shellSessionName(shellId)];
+}
+
+/**
+ * `list-sessions` 的输出格式：`<会话名>\t<创建时间(unix 秒)>`。
+ *
+ * ⚠️ 创建时间不是可有可无的装饰：它是**标签顺序**的唯一诚实来源（06 §5.5）。刷新之后
+ * 前端手里只有一串 id，「谁是终端 1」只能由沙箱里这份事实回答。
+ */
+const SESSION_LIST_FORMAT = `#{session_name}\t#{session_created}\t#{${TMUX_RUNTIME_OPTION}}`;
+
+/**
+ * 列出沙箱里所有 tmux 会话（调用方再按前缀 + 形状筛出我们自己的）。
+ *
+ * ⚠️ **不带 `set -g mouse on`**，与 `hasSessionCmd` 同一条理由，而且这里更硬：
+ * 这条命令的**退出码是载荷** —— 非零 = 「问不出来」（tmux server 不在 / 沙箱不通），
+ * 要与「答了，一个都没有」分开（06 §5.5 三态）。前面链一条 `set` 就是拿链式命令的
+ * 退出码去冒充它的，那会把「不知道」悄悄变成「没有」。
+ * `-u` 照旧带上，与同文件其余入口保持一致形状。
+ */
+export function listSessionsCmd(): string[] {
+  return ['tmux', UTF8, 'list-sessions', '-F', SESSION_LIST_FORMAT];
+}
+
+/**
+ * 把 `listSessionsCmd()` 的 stdout 解析成**我们自己的**用户终端会话 id，按创建时间升序。
+ *
+ * ⛔ **两道闸门，缺一不可**：
+ *   ① 前缀 `platform-shell-` —— 把 `platform-agent` 挡在外面（它进了清单，前端就会
+ *      给任务自己的会话多渲染一个可关的标签）；
+ *   ② 剩余部分必须过 `SHELL_SESSION_ID_RE`（32 位小写十六进制）。⚠️ 光有前缀不够：
+ *      用户完全可以在沙箱里自己 `tmux new -s platform-shell-hi`，那是**他的**会话，
+ *      不该冒充成平台的标签；而且这一段最终会回到 `tmux -s` 的 argv 里。
+ *
+ * ⚠️ 形状不合**静默跳过**，不抛 —— 那是别人的会话，不是我们的错误。抛的话，沙箱里
+ * 随便一个手工起的同前缀会话就能让整张清单取不回来（一个更坏的失败）。
+ *
+ * ⚠️ 扛得住空输入与半行：`no server running` 这类是 **stderr + 非零退出码**，走的是
+ * 调用方的「问不出来」那一支，到不了这里；这里只负责"给什么就诚实解析什么"。
+ */
+export function parseShellSessionList(stdout: string): ShellSessionSummary[] {
+  const rows: { shellId: string; runtimeId?: string; created: number }[] = [];
+  for (const line of stdout.split('\n')) {
+    // ⚠️ 只削行尾的 `\r`，⛔ 不整行 trim：runtime 是**最后一列且可能为空**，
+    //    整行 trim 在这里无害，但"先 trim 再 split"会让人以为空列是被清理掉的 ——
+    //    实际是 `split` 给了空串，与"没这一列"在下面走同一条路。
+    const [name, created, runtimeId] = line.replace(/\r$/, '').split('\t');
+    if (name === undefined || !name.startsWith(PLATFORM_SHELL_SESSION_PREFIX)) continue;
+    const id = name.slice(PLATFORM_SHELL_SESSION_PREFIX.length);
+    if (!SHELL_SESSION_ID_RE.test(id)) continue; // 别人的会话，静默跳过
+    const t = Number(created);
+    rows.push({
+      shellId: id,
+      created: Number.isFinite(t) ? t : 0,
+      // ⚠️ 空 / 缺席 ⇒ **不带这个字段**（纯终端标签，或老 tmux 读不出用户选项）。
+      //    ⛔ 绝不因为读不到它而丢掉整条会话 —— 那会让刷新之后标签直接少几个。
+      ...(runtimeId === undefined || runtimeId.trim() === ''
+        ? {}
+        : { runtimeId: runtimeId.trim() }),
+    });
+  }
+  // 按创建时间升序；同秒创建的按 id 排，保证同一份输入永远得到同一个顺序
+  //（顺序决定前端的「终端 1..n」，抖一下就是标签改名）。
+  rows.sort(
+    (a, b) => a.created - b.created || (a.shellId < b.shellId ? -1 : a.shellId > b.shellId ? 1 : 0),
+  );
+  return rows.map(({ shellId, runtimeId }) =>
+    runtimeId === undefined ? { shellId } : { shellId, runtimeId },
+  );
+}
+
+/**
  * Wrap the adapter's command in a small script:
  *   - `cd` into the workspace so the agent starts where the code is;
  *   - materialise `env` as `K=V` prefixes (NEVER secrets — argv/env are readable via

@@ -46,3 +46,19 @@ export function defaultSubstrate(registry: ProviderRegistry): {
   const provider = registry.defaultProvider;
   return { provider, substrate: substrateOf(provider) };
 }
+
+/**
+ * 这一档的预制镜像**体积量级** —— 实测值，⛔ 不许跨档引用另一档的数字。
+ *
+ * ⚠️ 「体积必须按档说」是踩出来的纪律：boxlite 那张压缩后 0.3GB，aio 那张 13GB，
+ * **差 40 倍**。拿其中一个当常量，会在另一半机器上要么把人吓走（以为要腾 13GB），
+ * 要么让他在真该腾空间的那一档上以为几百 MB 就够。
+ *
+ * ⚠️ 第三方 provider 一律「说不出」（`null`）—— 与 {@link substrateOf} 同一条纪律：
+ * 「不知道」不能说成「没有」，更不能拿内置档的数字去顶。
+ */
+export function presetImageSizeText(tier: string): string | null {
+  if (tier === 'boxlite') return '压缩后约 0.3GB';
+  if (tier === 'aio') return '约 13GB';
+  return null;
+}

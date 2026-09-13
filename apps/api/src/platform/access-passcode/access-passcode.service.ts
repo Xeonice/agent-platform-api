@@ -52,13 +52,16 @@ export class AccessPasscodeService {
 
     const enabled = this.passcodes.enabled;
     if (input.action === 'enable' && enabled) {
+      // ⛔ **不要把 API 字段名当操作指引。** 原文写着「请用 action: "regenerate"」——
+      //    那是请求体里的一个字段值，对着界面的人根本不知道该在哪儿输入它。
+      //    说他在界面上能做的那件事，字段名留给 openapi。
       throw this.conflict(
-        '访问口令已经启用。要更换口令请用 action: "regenerate" —— ' +
-          '它会作废旧口令并返回新的明文（已通过的会话不受影响）。',
+        '访问口令已经启用了。想换一个的话，用页面上的「重新生成口令」——' +
+          '旧口令会立即作废并给出新的明文（已经登入的会话不受影响）。',
       );
     }
     if (input.action === 'regenerate' && !enabled) {
-      throw this.conflict('访问口令尚未启用，没有可重新生成的口令；请先用 action: "enable"。');
+      throw this.conflict('访问口令还没启用，没有可以重新生成的口令；请先把访问口令打开。');
     }
 
     const plain = PasscodeService.generatePasscode();

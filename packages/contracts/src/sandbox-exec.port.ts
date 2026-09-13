@@ -17,8 +17,22 @@ export const SANDBOX_WORKSPACE_MOUNT = '/workspace';
 
 export interface SandboxRuntimeBinding {
   sandboxId: string;
-  /** Registry key of the runtime this sandbox hosts (`codex` / `claude-code` / …). */
+  /**
+   * Registry key of the runtime this sandbox was provisioned FOR — its **default**,
+   * not its only one (语义迁移见 `SandboxDtoSchema.runtime`).
+   */
   runtimeId: string;
+  /**
+   * Which agent CLIs a terminal tab may launch in this sandbox (06 §5.6) —
+   * the sandbox's default runtime ∪ the runtimes whose credential was actually
+   * injected at provision time.
+   *
+   * ⛔ A RECORD, NOT A DERIVATION: read back from the sandbox row, never recomputed
+   * from "which credentials are configured right now" — those two answers drift the
+   * moment a user adds or removes a credential after provision, and only the row
+   * matches what is actually inside the box.
+   */
+  availableRuntimes: readonly string[];
   /** Working directory inside the sandbox. */
   workdir: string;
 }

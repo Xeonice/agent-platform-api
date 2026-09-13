@@ -262,7 +262,10 @@ export class CodexAdapter implements RuntimeAdapter {
       verificationUrl: challenge.verificationUrl,
       userCode: challenge.userCode,
       expiresAt: ctx.deviceCodeExpiresAt,
-      instructions: `在浏览器打开 ${challenge.verificationUrl} 并输入设备码 ${challenge.userCode} 完成授权。`,
+      // ⛔ **不要把 URL 和设备码第三次拼进句子里。** 它们已经作为独立字段（`verificationUrl` /
+      //    `userCode`）下发，前端单独渲染成一个按钮和一串大字号的码；再在这句话里念一遍，
+      //    屏幕上同一个东西出现三次，而且这句里的那份还不能点、不能一键复制。
+      instructions: '在打开的页面里粘贴上面这串设备码，就能完成登录。',
     };
   }
 

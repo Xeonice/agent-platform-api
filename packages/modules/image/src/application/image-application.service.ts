@@ -77,7 +77,10 @@ export class ImageDeleteRefusedError extends Error {
 /** Raised when a manifest id does not exist. Mapped to 404 `NOT_FOUND`. */
 export class ImageNotFoundError extends Error {
   constructor(id: string) {
-    super(`image manifest ${id} not found`);
+    // ⚠️ **这条 message 会原样出现在用户的 toast 里**（前端 `imageErrorToast` 现在把它
+    //    透出去）。裸英文 + 一个 uuid 对用户是零信息 —— 中文说清"这一行没了"与下一步。
+    //    id 留在句尾括号里：报障时它仍然是唯一能定位的东西。
+    super(`这个镜像版本已经不在平台里了，可能是刚被别处删掉。刷新一下列表再看看。（${id}）`);
     this.name = 'ImageNotFoundError';
   }
 }
@@ -341,9 +344,10 @@ export class ImageApplicationService {
     // construction, so 「check for updates」 is not a failure here, it is a category
     // error (27 §6 → INVALID_STATE 409).
     if (isOciDigest(manifest.version)) {
+      // ⚠️ 同上：这句话会上屏。它说的不是"出错了"，而是"这个动作对这张镜像没有意义"。
       throw new ImageStateError(
-        `manifest ${id} is pinned by digest, so there is no tag to re-resolve; ` +
-          'a digest-pinned image cannot drift.',
+        '这张镜像是按版本直接注册的（没有 tag），所以不会有新版本可以检查 —— ' +
+          '一个具体版本永远指向同一份内容。要换版本的话，请注册一个新的镜像坐标。',
       );
     }
 
@@ -387,8 +391,9 @@ export class ImageApplicationService {
     const referencing = await this.manifests.countReferencingSandboxes(id);
     if (referencing > 0) {
       throw new ImageDeleteRefusedError(
-        `还有 ${String(referencing)} 个 Task 在使用这个版本，删除会让它们的镜像坐标悬空；` +
-          '请改为禁用（PATCH { isActive: false }）。',
+        // ⛔ 不写 `PATCH { isActive: false }`：那是接口写法，用户手上只有一颗按钮。
+        `还有 ${String(referencing)} 个任务在用这个版本，删掉会让它们指向一张不存在的镜像；` +
+          '请改为在这张镜像上点 [禁用] —— 禁用之后它不再出现在新任务的下拉里，已有任务不受影响。',
       );
     }
     const siblings = await this.manifests.listByImage(image.id);
@@ -527,11 +532,27 @@ export class ImageApplicationService {
   private async lineageVerdict(resolved: ResolvedImage): Promise<LineageVerdict> {
     const anchors = (await this.manifests.listBuiltinAnchors()).filter((a) => a.diffIds.length > 0);
     if (anchors.length === 0) {
+      /**
+       * ⚠️ **这句话的读者是「正在注册自己镜像的开发者」，不是运维方。**
+       *
+       * ⛔ 上一版把运维方的操作手册塞进了这里：「请先让 `SANDBOX_DEFAULT_IMAGE` 指向的
+       *    预制镜像注册成功」。它出现在开发者的注册弹窗上 —— 而他多半连那台机器的
+       *    `.env` 都碰不到，更不知道 `SANDBOX_DEFAULT_IMAGE` 是什么。让人去修一个他
+       *    既够不着、也不是他弄坏的东西，比不给下一步更贵。
+       *
+       * ⚠️ **运维那段一个字都没删，只是搬了家**：它现在只在启动日志里出现
+       *    （`image-seeder.ts` 的 `seedFailureNextStep()`，按部署形态分岔、比这一句
+       *    详细得多），运维方看 `docker compose up` 的输出就能拿到。
+       *
+       * ⚠️ **仍然不许静默放行**（原纪律不变）：放行等于这条约束根本不存在。这里改的只是
+       *    「跟谁说、说什么」，拒绝本身与错误码（`INVALID_STATE`，C 类"请求没错但此刻
+       *    不行"）一个字没动。
+       */
       throw new ImageStateError(
-        '平台还没有可用的预制镜像作为血统基准，暂时无法注册自定义镜像。' +
-          '自定义镜像必须基于平台预制镜像，而平台需要先有一张预制镜像才能做这个比对——' +
-          '通常是开机播种失败（离线部署 / registry 不可达）。' +
-          '请先让 SANDBOX_DEFAULT_IMAGE 指向的预制镜像注册成功，再回来注册这一张。',
+        '平台自己的预制镜像还没准备好，所以现在没法注册自定义镜像。' +
+          '自定义镜像必须从平台的预制镜像改起，而平台得先有一张预制镜像才能做这个比对。' +
+          '⚠️ 这是平台的部署配置问题，不是你这张镜像的问题 —— 你不用改 Dockerfile。' +
+          '请联系管理员：原因写在平台的启动日志里，系统状态页也看得到。修好之后再回来注册这一张。',
       );
     }
 

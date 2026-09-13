@@ -222,3 +222,116 @@ describe('submitSecret dispatches api-key FORMAT validation to the adapter (no r
     );
   });
 });
+
+/**
+ * 出线形状：**码归 `code` 位、原因归 `details`、`message` 只留人话**
+ * （`apps/api/src/platform/access-passcode/access-audit.ts` 的纪律，runtime 侧曾有三处违反）。
+ */
+describe('submitSecret 的拒绝信封（码不许拼进散文；理由必须下发）', () => {
+  function rejectingAdapter(reason: string | undefined): RuntimeAdapter {
+    return {
+      ...runHalfStub,
+      id: 'picky',
+      displayName: 'Picky',
+      vendor: 'Picky Inc',
+      loginCommand: () => ['picky', 'login'],
+      getAuthMethods: () => ['api-key'],
+      validateApiKey: (): ApiKeyFormatVerdict =>
+        reason === undefined ? { ok: false } : { ok: false, reason },
+      createCredentialFromSecret: async (): Promise<RuntimeCredential> => {
+        throw new Error('should not be reached');
+      },
+      beginAuth: async () => {
+        throw new Error('unused');
+      },
+      completeAuth: async () => {
+        throw new Error('unused');
+      },
+      injectCredential: async () => {},
+    };
+  }
+
+  it('AUTH_REJECTED：code 在 code 位、中文理由在 details[].message、message 里没有码', async () => {
+    const svc = makeService(
+      registryWith([rejectingAdapter('开头不是 sk-，可能拿错了 key。')]),
+      fakeCredentials().service,
+    );
+    const err: unknown = await svc
+      .submitSecret('picky', 'api-key', 'nope')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnauthorizedException);
+    const body = (err as UnauthorizedException).getResponse() as {
+      code: string;
+      message: string;
+      sideEffectFree?: boolean;
+      details?: { message?: string }[];
+    };
+    expect(body.code).toBe('AUTH_REJECTED');
+    // ⛔ 以前 message 是 `invalid api key: … (AUTH_REJECTED)`，而信封 code 是 UNAUTHORIZED。
+    expect(body.message).not.toContain('AUTH_REJECTED');
+    expect(body.message).not.toContain('invalid api key');
+    // ⛔ 六条精确判定此前从不下发；前端读的就是 details[].message。
+    expect(body.details?.[0]?.message).toBe('开头不是 sk-，可能拿错了 key。');
+    // 校验在存库之前 —— 这一位是结构性事实，不是猜的。
+    expect(body.sideEffectFree).toBe(true);
+  });
+
+  it('adapter 没给理由 → 不编一条（details 缺席，前端落自己的兜底）', async () => {
+    const svc = makeService(registryWith([rejectingAdapter(undefined)]), fakeCredentials().service);
+    const err: unknown = await svc
+      .submitSecret('picky', 'api-key', 'nope')
+      .catch((e: unknown) => e);
+    const body = (err as UnauthorizedException).getResponse() as { details?: unknown };
+    expect(body.details).toBeUndefined();
+  });
+
+  it('不支持的方式 → UNSUPPORTED_METHOD 在 code 位，message 是人话', async () => {
+    const svc = makeService(registryWith([rejectingAdapter('x')]), fakeCredentials().service);
+    const err: unknown = await svc
+      .submitSecret('picky', 'access-token-paste', 'whatever')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    const body = (err as BadRequestException).getResponse() as { code: string; message: string };
+    expect(body.code).toBe('UNSUPPORTED_METHOD');
+    expect(body.message).not.toContain('UNSUPPORTED_METHOD');
+  });
+
+  it('adapter 不给掩码 → **不拿 adapter.id 冒充帐号名**', async () => {
+    const nameless: RuntimeAdapter = {
+      ...runHalfStub,
+      id: 'codexish',
+      displayName: 'Codexish',
+      vendor: 'X',
+      loginCommand: () => ['x', 'login'],
+      getAuthMethods: () => ['api-key'],
+      createCredentialFromSecret: async (): Promise<RuntimeCredential> => {
+        const cred: RuntimeCredential = {
+          runtimeId: 'codexish',
+          obtainedVia: 'api-key',
+          // ⚠️ 故意不给 maskedIdentifier —— 契约上它是可选的。
+          issuedAt: '',
+          credentialFiles: [],
+          env: { K: 'v' },
+          zeroize(): void {
+            cred.env = undefined;
+          },
+        };
+        return cred;
+      },
+      beginAuth: async () => {
+        throw new Error('unused');
+      },
+      completeAuth: async () => {
+        throw new Error('unused');
+      },
+      injectCredential: async () => {},
+    };
+    const { service, stored } = fakeCredentials();
+    const svc = makeService(registryWith([nameless]), service);
+    const out = await svc.submitSecret('codexish', 'api-key', 'anything');
+    // ⛔ 回落成 `adapter.id` 会让卡片上出现一个裸的 `codexish` 冒充帐号名。
+    expect(out.maskedIdentifier).not.toBe('codexish');
+    expect(out.maskedIdentifier).toBe('已连接（无帐号信息）');
+    expect(stored[0]?.maskedIdentifier).toBe('已连接（无帐号信息）');
+  });
+});

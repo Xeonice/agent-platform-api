@@ -1,11 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
+  RUNTIME_ID_RE,
+  isTerminalShellId,
   WS_SCHEMA_HASH,
   WS_TASKS_SCHEMA_HASH,
   WS_PROTOCOL_CANONICAL,
   X_SCHEMA_HASH_HEADER,
 } from '@platform/contracts';
-import type { SandboxWsEvent, TaskClientFrame, TaskServerFrame } from '@platform/contracts';
+import type {
+  SandboxWsEvent,
+  TaskClientFrame,
+  TaskServerFrame,
+  TerminalClientFrame,
+  TerminalServerFrame,
+  TerminalSessionKind,
+} from '@platform/contracts';
 
 /**
  * WS protocol handshake constant (docs/shared/14 §2.5). S1 pins WS_SCHEMA_HASH to
@@ -14,13 +23,22 @@ import type { SandboxWsEvent, TaskClientFrame, TaskServerFrame } from '@platform
  */
 describe('WS protocol schema hash', () => {
   it('is the pinned cross-repo literal (must equal the frontend constant)', () => {
-    expect(WS_SCHEMA_HASH).toBe('sb-terminal-v1');
+    // v1 → v2：多标签（06 §5）—— `session` 多了 `shellId?`，客户端多了
+    //          `close_shell{shellId}`。
+    // v2 → v3：刷新后恢复标签（06 §5.5）—— 服务端多了 `shells{shells}`。
+    // v3 → v4：终端标签能选跑什么 CLI（06 §5.6）—— 握手多了 `kind=runtime` +
+    //          `?runtimeId=`，清单元素从裸 id 变成 `{shellId, runtimeId?}`。
+    // ⚠️ 每一次 bump 都是**必须**的，哪怕改动对老客户端是兼容的（多出的字段它会忽略、
+    // 新帧它不认就丢）：hash 的职责就是回答"这份前端与这个后端说的是不是同一套帧"，
+    // 不 bump 就等于让一个不认识 `shells` 的前端宣称自己认识 —— 而那个前端会把
+    // 「刷新后恢复标签」整件事静默地做不到，界面上没有任何异常。
+    expect(WS_SCHEMA_HASH).toBe('sb-terminal-v4');
     expect(X_SCHEMA_HASH_HEADER).toBe('x-schema-hash');
   });
 
   it('documents the canonical frame shapes it stands for', () => {
     expect(WS_PROTOCOL_CANONICAL).toContain('terminal.server:data{data}');
-    expect(WS_PROTOCOL_CANONICAL).toContain('session{socketSessionKey}');
+    expect(WS_PROTOCOL_CANONICAL).toContain('session{socketSessionKey,shellId?}');
   });
 
   it('carries all EIGHT /events variants, including the two starting-段 progress ones', () => {
@@ -48,13 +66,96 @@ describe('WS protocol schema hash', () => {
     );
   });
 
-  it('the /terminal frame shapes did NOT change, so the pinned handshake hash stands', () => {
+  it('the /terminal frame shapes and the hash move in LOCKSTEP (v4 = 多标签 + 恢复 + 选 CLI)', () => {
     // WS_SCHEMA_HASH gates the /terminal handshake only; adding an /events variant
-    // must not break a frontend that pins the literal (14 §2.5).
+    // must not break a frontend that pins the literal (14 §2.5). 反过来，改 /terminal
+    // 的帧形状**必须**同时 bump —— 这一对断言钉在一起就是为了让"改了形状忘了 bump"
+    // 在这里当场红，而那是唯一有人会想起通知另一个仓的时刻。
     expect(WS_PROTOCOL_CANONICAL).toContain(
-      'terminal.client:input{data},resize{cols,rows},ping|' +
-        'terminal.server:data{data},exit{code},pong,session{socketSessionKey}',
+      'terminal.client:input{data},resize{cols,rows},ping,close_shell{shellId}|' +
+        'terminal.server:data{data},exit{code},pong,session{socketSessionKey,shellId?},' +
+        'shells{shells[shellId,runtimeId?]}',
     );
+    expect(WS_SCHEMA_HASH).toBe('sb-terminal-v4');
+  });
+
+  /**
+   * ⭐ `shells` 的**三态**（06 §5.5）。`null` 不是凑数的第三个值：
+   *   · `[...]` 有这些（顺序 = tmux 创建顺序，前端据此编「终端 1..n」）
+   *   · `[]`    确认没有
+   *   · `null`  **问不出来**（tmux server 不在 / 沙箱不通）
+   * ⛔ 把第三态折成 `[]` 就是把「不知道」说成「没有」—— 用户看到"你没有开过终端"，
+   *   而真相可能是他有三个终端正跑着东西。
+   */
+  it('shells 帧能表达三态，`null` 与 `[]` 不是一回事', () => {
+    const known: TerminalServerFrame = { type: 'shells', shells: [{ shellId: 'a'.repeat(32) }] };
+    const none: TerminalServerFrame = { type: 'shells', shells: [] };
+    const unknown: TerminalServerFrame = { type: 'shells', shells: null };
+    expect(known.shells).toHaveLength(1);
+    expect(none.shells).toEqual([]);
+    expect(unknown.shells).toBeNull();
+    // 用"不发这一帧"表示第三态是不行的：那与"还没答"在前端无从区分。
+    expect(WS_PROTOCOL_CANONICAL).toContain('shells{shells[shellId,runtimeId?]}');
+  });
+
+  /**
+   * `close_shell` 是全协议**唯一**能销毁一个 tmux 会话的帧，所以它的形状要单独钉。
+   *
+   * ⛔ 载荷必须是 `shellId`，不能退化成"关掉我这条连接对应的那个"：被 LRU 淘汰的
+   * 标签没有连接（08 §5.2），而用户照样会点它的 [×] —— 少了这个载荷，那个 tmux 会话
+   * 就成了界面上看不见、也再关不掉的孤儿。
+   */
+  it('close_shell 带 shellId，而不是"关掉我这条连接的那个"', () => {
+    const frame: TerminalClientFrame = { type: 'close_shell', shellId: 'a'.repeat(32) };
+    expect(frame.shellId).toHaveLength(32);
+    expect(WS_PROTOCOL_CANONICAL).toContain('close_shell{shellId}');
+  });
+
+  /**
+   * ⭐ 清单元素带 `runtimeId?`（06 §5.6）——**刷新之后标签名还能叫对**。
+   *
+   * ⚠️ 缺席 = 这是个**纯终端**标签（或者沙箱里的 tmux 老到读不出那个用户选项）。
+   * ⛔ 缺席不许被当成某个默认 runtime：那会让一个纯终端标签顶着「Codex」的名字。
+   */
+  it('shells 元素能区分「纯终端」与「跑着某个 CLI」', () => {
+    const frame: TerminalServerFrame = {
+      type: 'shells',
+      shells: [{ shellId: 'a'.repeat(32) }, { shellId: 'b'.repeat(32), runtimeId: 'claude-code' }],
+    };
+    const shells = frame.type === 'shells' ? (frame.shells ?? []) : [];
+    expect(shells[0]?.runtimeId).toBeUndefined();
+    expect(shells[1]?.runtimeId).toBe('claude-code');
+  });
+
+  /**
+   * ⭐ `kind` 的三个值 —— ⛔ 别把 `agent` 和 `runtime` 混起来（06 §5.6）。
+   *
+   * `agent` 是**这个 Task 自己**那个 `platform-agent` 会话（provision 起的、关不掉）；
+   * `runtime` 是用户随手开的一个 CLI 标签（独立会话、可关、跟任务没关系）。
+   */
+  it('kind 是三值，且 agent ≠ runtime', () => {
+    const kinds: TerminalSessionKind[] = ['agent', 'shell', 'runtime'];
+    expect(kinds).toHaveLength(3);
+    expect(RUNTIME_ID_RE.test('claude-code')).toBe(true);
+    expect(RUNTIME_ID_RE.test('codex')).toBe(true);
+    // argv 侧的形状闸门（它会进 tmux 负载里的 set-option 参数）。
+    expect(RUNTIME_ID_RE.test('')).toBe(false);
+    expect(RUNTIME_ID_RE.test('a b')).toBe(false);
+    expect(RUNTIME_ID_RE.test("x';id;'")).toBe(false);
+  });
+
+  /**
+   * ⛔ **agent 会话不许被任何一帧销毁**（裁决 D-15）。这条钉的是形状层的保证：
+   * shellId 的字符集里没有 `-`，所以 `platform-agent` 永远不是一个合法 shellId，
+   * `shellSessionName()` 也就永远拼不出那个名字。
+   */
+  it('shellId 的形状本身就把 platform-agent 挡在外面', () => {
+    expect(isTerminalShellId('a'.repeat(32))).toBe(true);
+    expect(isTerminalShellId('platform-agent')).toBe(false);
+    expect(isTerminalShellId('$(id)')).toBe(false);
+    expect(isTerminalShellId('A'.repeat(32))).toBe(false); // 大写不算
+    expect(isTerminalShellId('a'.repeat(31))).toBe(false);
+    expect(isTerminalShellId(undefined)).toBe(false);
   });
 });
 

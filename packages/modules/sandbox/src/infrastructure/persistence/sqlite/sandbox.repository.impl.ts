@@ -108,6 +108,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         providerHandle: sandbox.providerSandboxId,
         workspacePath: sandbox.workspacePath,
         providerState: encodeProviderState(sandbox.providerState),
+        injectedRuntimes: encodeInjectedRuntimes(sandbox.injectedRuntimes),
         initialPrompt: sandbox.initialTask.prompt ?? null,
         initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
         failureCode: sandbox.failureCode,
@@ -126,6 +127,9 @@ export class SqliteSandboxRepository implements SandboxRepository {
           providerHandle: sandbox.providerSandboxId,
           workspacePath: sandbox.workspacePath,
           providerState: encodeProviderState(sandbox.providerState),
+          // provision/restart 跑完 ④ 之后会落账（覆盖，不是并集 —— 见
+          // `Sandbox.recordInjectedRuntimes`）。
+          injectedRuntimes: encodeInjectedRuntimes(sandbox.injectedRuntimes),
           // the instruction itself never changes after T1; only its consumed marker
           // moves (once, forward) — see I-SBX-10.
           initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
@@ -170,6 +174,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       workspacePath: row.workspacePath,
       providerSandboxId: row.providerHandle,
       providerState: decodeProviderState(row.providerState),
+      injectedRuntimes: decodeInjectedRuntimes(row.injectedRuntimes, row.runtime),
       initialTask: InitialTask.create({
         prompt: row.initialPrompt,
         consumedAt: row.initialPromptConsumedAt,
@@ -193,6 +198,33 @@ export class SqliteSandboxRepository implements SandboxRepository {
  * ⚠️ 平台**不认识里面任何一个键**（见 `SandboxHandle.providerState`）：这里只负责
  * 「对象 ⇄ 文本」，不校验形状、不填默认值——那样做等于替 provider 定义它的私有状态。
  */
+/**
+ * `injectedRuntimes` ↔ 一列 JSON 文本（03 §4.3 ④）。
+ *
+ * ⚠️ **NULL 与 `'[]'` 不是一回事，这就是这两个函数存在的全部理由**：
+ *   · NULL  = 本切片**之前**建的旧行。那时 provision 只注入 `sandbox.runtime` 那一个
+ *     —— 回落成 `[runtime]` 不是编造，是把当时的事实如实补上；
+ *   · `'[]'` = 真的一个凭证都没注入（一个都没配）。
+ * 合成一个值，「旧沙箱」就会与「裸跑的沙箱」长得一模一样，而前者能开一个 CLI 标签、
+ * 后者一个都开不了。
+ *
+ * 解析失败同样回落成 `[runtime]` 并**不抛**：一列坏 JSON 不该让整个沙箱读不出来。
+ */
+function encodeInjectedRuntimes(ids: readonly string[]): string {
+  return JSON.stringify([...ids]);
+}
+
+function decodeInjectedRuntimes(raw: string | null, fallbackRuntime: string): string[] {
+  if (raw === null) return [fallbackRuntime];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [fallbackRuntime];
+    return parsed.filter((v): v is string => typeof v === 'string');
+  } catch {
+    return [fallbackRuntime];
+  }
+}
+
 function encodeProviderState(state: Record<string, unknown> | null): string | null {
   return state === null ? null : JSON.stringify(state);
 }

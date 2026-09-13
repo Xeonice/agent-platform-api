@@ -117,7 +117,7 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
       sizeBytes: null,
       from: '本机 docker 镜像库',
       to: registryAuthorityOf(f.ref),
-      why: `'${f.ref}' 的字节已经在本机 docker 镜像库里，只是没推到 registry —— 平台自己推上去即可，不出网、不重建`,
+      why: `'${f.ref}' 的字节已经在本机 docker 镜像库里，只是没推到镜像仓库 —— 平台自己推上去即可，不出网、不重建`,
       asset: null,
     };
   }
@@ -127,11 +127,11 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
       source: 'release-asset',
       provisionable: true,
       sizeBytes: f.asset.sizeBytes,
-      from: `发布资产 ${f.asset.asset}`,
+      from: `发布包 ${f.asset.asset}`,
       to: registryAuthorityOf(f.ref),
       why:
-        `发布资产清单里有匹配这台机器的那一份（${f.asset.provider} · ${f.asset.platform} · ${f.asset.kind}）—— ` +
-        '平台校验 sha256 后自己装载并推上去',
+        `发布包里有匹配这台机器的那一份（${f.asset.provider} · ${f.asset.platform} · ${f.asset.kind}）—— ` +
+        '平台校验完整性后自己装载并推上去',
       asset: f.asset,
     };
   }
@@ -146,8 +146,8 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
       from: f.upstream,
       to: registryAuthorityOf(f.ref),
       why:
-        `本机 docker 镜像库与发布资产清单都没有，但配了上游坐标 '${f.upstream}' —— ` +
-        '平台纯 HTTP 把它搬过来（不碰 docker，boxlite 档的宿主本来就可以没有 docker）',
+        `本机 docker 镜像库与发布包都没有，但配了上游坐标 '${f.upstream}' —— ` +
+        '平台自己把它搬过来（不需要 docker —— 这台机器的沙箱环境本来就可以没有 docker）',
       asset: null,
     };
   }
@@ -165,10 +165,10 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
       //    而 amd64 那份不一样 —— 拿任一个当常量都会在另一半机器上说错。
       sizeBytes: null,
       from: f.ref,
-      to: '本机 provider 镜像库',
+      to: '本机镜像库',
       why:
-        `'${f.ref}' 够得着，只是还没铺进本机的 provider 镜像库 —— ` +
-        '平台自己拉一次即可（**不必等到第一个任务**：那时用户已经写完指令，等待落在最差的时机）',
+        `'${f.ref}' 够得着，只是还没下载到这台机器上 —— ` +
+        '不必等到第一个任务（那时你已经写完指令，等待落在最差的时机），平台现在就能拉一次',
       asset: null,
     };
   }
@@ -180,8 +180,8 @@ export function planProvision(f: ProvisionFacts): ProvisionPlan {
     from: '（无）',
     to: registryAuthorityOf(f.ref),
     why:
-      `'${f.ref}' 的字节在这台机器上够不着：本机 docker 镜像库里没有、发布资产清单没有匹配这台机器的那一份、也没有配上游坐标（SANDBOX_PRESET_IMAGE_SOURCE）。` +
-      '⇒ 这一格确实只能构建，平台代劳不了',
+      `'${f.ref}' 的字节在这台机器上够不着：本机 docker 镜像库里没有、发布包里没有匹配这台机器的那一份、也没有配上游坐标（SANDBOX_PRESET_IMAGE_SOURCE）。` +
+      '这一格确实只能自己构建，平台代劳不了',
     asset: null,
   };
 }

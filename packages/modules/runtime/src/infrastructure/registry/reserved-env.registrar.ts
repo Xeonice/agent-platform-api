@@ -40,9 +40,46 @@ export class ReservedEnvNameRegistrar implements OnApplicationBootstrap {
   ) {}
 
   onApplicationBootstrap(): void {
+    this.assertNoCredentialEnvCollision();
     const names = runtimeReservedEnvNamesOf(this.registry);
     if (names.length === 0) return;
     registerReservedEnvNames(names);
     this.logger.log(`env blacklist extended by registered runtimes: ${names.join(', ')}`);
+  }
+
+  /**
+   * ⛔ **两个 adapter 不许用同一个 env 名注入凭证** —— 启动就炸，不留到运行时。
+   *
+   * ── 它为什么是本切片才需要的 ─────────────────────────────────────────────
+   * 在此之前一个沙箱只注入**一份**凭证，撞名不会有后果。现在 provision 会把所有已配置
+   * 的凭证合进**同一张** env 表（03 §4.3 ④）：两个 adapter 声明了同一个名字，就意味着
+   * 其中一个 CLI 会读到另一家的令牌。
+   *
+   * ⛔ **不按注册顺序静默覆盖**：注册顺序是模块加载次序，不表达任何意图，"谁在后面谁
+   * 赢"没有依据。而后果是沉默的 —— 那个 CLI 不报错，只是"登录不上"，或者更糟：
+   * 用另一个账号干活。既有的「凭证永远赢，靠顺序而非黑名单」（05 §4.1）说的是
+   * **凭证 vs 用户变量**，那里"谁赢"有明确答案；**凭证 vs 凭证**没有。
+   *
+   * ⚠️ 这是**声明层**的检查（`reservedEnvNames.credential`），可能不全（adapter 可以
+   * 不声明）。provision 在合并**实际** env 时还会再查一次（`mergeCredentialEnv`）——
+   * 那一层抓的是声明没覆盖到的。两层都要有：这一层让平台在启动时就说不，
+   * 而不是等某个用户建沙箱时才发现。
+   */
+  private assertNoCredentialEnvCollision(): void {
+    const owner = new Map<string, string>();
+    for (const adapter of this.registry.list()) {
+      for (const name of adapter.reservedEnvNames?.credential ?? []) {
+        const previous = owner.get(name);
+        if (previous !== undefined && previous !== adapter.id) {
+          throw new Error(
+            `runtime adapter '${previous}' 与 '${adapter.id}' 都声明用环境变量 '${name}' ` +
+              '注入凭证。一个沙箱现在会同时注入多份凭证（03 §4.3 ④），撞名意味着其中一个 ' +
+              'CLI 会拿着另一家的令牌运行 —— 这是平台配置错误，必须改掉其中一个 adapter，' +
+              '而不是靠注册顺序决定谁赢。',
+          );
+        }
+        owner.set(name, adapter.id);
+      }
+    }
   }
 }

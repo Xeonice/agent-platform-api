@@ -94,7 +94,12 @@ function harness(rules: ExecRule[] = []) {
       return exec;
     },
     async bindingOf(sandboxId) {
-      return { sandboxId, runtimeId: 'codex', workdir: '/workspace' };
+      return {
+        sandboxId,
+        runtimeId: 'codex',
+        availableRuntimes: ['codex', 'claude-code'],
+        workdir: '/workspace',
+      };
     },
   };
   const ptyCalls: OpenPtyOptions[] = [];

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -110,7 +111,7 @@ export class RuntimeApplicationService {
     try {
       AuthMethodPolicy.assertSupported(method, adapter.getAuthMethods());
     } catch (e) {
-      if (e instanceof UnsupportedAuthMethodError) throw new BadRequestException(e.message);
+      if (e instanceof UnsupportedAuthMethodError) throw unsupportedMethod(e);
       throw e;
     }
     const challengeRef = this.ids.next();
@@ -127,9 +128,19 @@ export class RuntimeApplicationService {
         adapter.configDirEnvNames,
       );
     } catch (e) {
-      throw new ServiceUnavailableException(
-        `auth helper unavailable: ${(e as Error).message} (PROVIDER_UNAVAILABLE)`,
-      );
+      // ⛔ 以前这里是 `ServiceUnavailableException('auth helper unavailable: … (PROVIDER_UNAVAILABLE)')`：
+      //    码被**拼进散文**，而信封里的 `code` 是 `codeForStatus(503)` 算出来的 `INTERNAL` ——
+      //    同一个响应，正文说 PROVIDER_UNAVAILABLE、`code` 位写 INTERNAL，互相矛盾。
+      //    `access-passcode/access-audit.ts` 的注释明令禁止把码拼进散文；runtime 侧曾有三处这么干。
+      // ⇒ 码归 code 位，原始技术细节归 details，message 只留人话。
+      throw new ServiceUnavailableException({
+        code: 'PROVIDER_UNAVAILABLE',
+        message: '本机的登录程序没能启动，暂时没法开始登录。',
+        retryable: true,
+        // 门口就失败了：`openSession` 抛错时什么都没建起来（下面的 `sessions.put` 还没走到）。
+        sideEffectFree: true,
+        details: [{ code: 'HELPER_SESSION_OPEN_FAILED', message: (e as Error).message }],
+      });
     }
 
     try {
@@ -391,7 +402,7 @@ export class RuntimeApplicationService {
     try {
       AuthMethodPolicy.assertSupported(method, adapter.getAuthMethods());
     } catch (e) {
-      if (e instanceof UnsupportedAuthMethodError) throw new BadRequestException(e.message);
+      if (e instanceof UnsupportedAuthMethodError) throw unsupportedMethod(e);
       throw e;
     }
     // The adapter owns its provider's key FORMAT (05 §3.1) — no `runtimeId === 'codex'`
@@ -406,7 +417,24 @@ export class RuntimeApplicationService {
       const verdict = adapter.validateApiKey?.(secret) ?? { ok: true };
       if (!verdict.ok) {
         // never echo the value (P2-3) — only the reason.
-        throw new UnauthorizedException(`invalid api key: ${verdict.reason} (AUTH_REJECTED)`);
+        //
+        // ⛔ 以前是 `invalid api key: ${reason} (AUTH_REJECTED)` 一句英文散文，两个毛病：
+        //    ① 码拼进散文，而信封 `code` 是 `codeForStatus(401)` 的 `UNAUTHORIZED` —— 又是自相矛盾；
+        //    ② 精确的 reason 只活在 message 里，而前端读的是 `details[].message`
+        //       （`useRuntimeAuthFlow.reasonsFromError`）⇒ 六条判定一条都没上屏。
+        // ⇒ 码归 code 位、原因归 details、message 只留人话。
+        throw new UnauthorizedException({
+          code: 'AUTH_REJECTED',
+          message: '这串 API Key 没有通过格式检查，没有保存。',
+          retryable: false,
+          // 校验在存库之前，这一支确实什么都没动过。
+          sideEffectFree: true,
+          // 前端读的就是这一位（`details[].message`）。adapter 没给理由时**不造一条** ——
+          // 空的 details 会让前端落到它自己的兜底句，那比编一个理由好。
+          ...(verdict.reason === undefined || verdict.reason === ''
+            ? {}
+            : { details: [{ message: verdict.reason }] }),
+        });
       }
     }
     const cred = await adapter.createCredentialFromSecret(method, secret);
@@ -460,7 +488,10 @@ export class RuntimeApplicationService {
       const { maskedIdentifier } = await this.credentials.storeRuntimeCredential({
         runtimeId: adapter.id,
         obtainedVia: cred.obtainedVia,
-        maskedIdentifier: cred.maskedIdentifier ?? adapter.id,
+        // ⛔ 回落**不能是 `adapter.id`**：卡片上那一格是「这是哪个帐号」，
+        //    塞一个 `codex` 进去等于让运行时的内部键冒充帐号名，用户会以为自己的帐号叫 codex。
+        //    没有帐号信息就说没有 —— 这比编一个像模像样的名字诚实。
+        maskedIdentifier: cred.maskedIdentifier ?? '已连接（无帐号信息）',
         payload,
         expiresAt: this.expiryFor(adapter, cred.obtainedVia),
       });
@@ -539,4 +570,22 @@ function messageOf(e: unknown): string {
     if (typeof m === 'string') return m;
   }
   return String(e);
+}
+
+/**
+ * `UNSUPPORTED_METHOD` → 400，**码在 code 位**。
+ *
+ * ⛔ 以前是 `new BadRequestException(e.message)`，而 `e.message` 里拼着 `(UNSUPPORTED_METHOD)`
+ * ——`codeForStatus(400)` 又给信封盖了个 `BAD_REQUEST`：同一个响应两个码。
+ * 这是 runtime 侧三处「把码拼进散文」的最后一处。
+ */
+function unsupportedMethod(e: UnsupportedAuthMethodError): HttpException {
+  return new BadRequestException({
+    code: 'UNSUPPORTED_METHOD',
+    message: '这个 Agent 不支持这种登录方式。',
+    retryable: false,
+    // 方式校验是门口的第一道，什么都没动过。
+    sideEffectFree: true,
+    details: [{ code: 'UNSUPPORTED_METHOD', method: e.method }],
+  });
 }

@@ -21,5 +21,13 @@ export function unusedSessions(): TerminalSessionService {
     bootstrapAgentSession: (): never => {
       throw new Error('TerminalSessionService.bootstrapAgentSession 不该被这组用例调用');
     },
+    // 多标签之后公开面多了这一个（06 §5）。⛔ 同样不给空壳：一个悄悄成功的
+    // `closeShellSession` 会让"断开不许销毁会话"那组用例在实现回退时照样绿。
+    closeShellSession: (): never => {
+      throw new Error('TerminalSessionService.closeShellSession 不该被这组用例调用');
+    },
+    listShellSessions: (): never => {
+      throw new Error('TerminalSessionService.listShellSessions 不该被这组用例调用');
+    },
   });
 }

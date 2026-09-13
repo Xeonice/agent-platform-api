@@ -118,19 +118,35 @@ export interface DiagnoseCheckFrame {
   label: string;
   status: DiagnoseStatus;
   /**
-   * 一行人话，**直接上 UI**。
+   * 一句话结论，**≤ 20 字、不换行、直接上 UI 的第一行**。
    *
-   * ⚠️ 它必须自带可执行性。「端口 3000 被占用」这句话对用户没有任何用 —— 他下一步要做的
-   * 是**找出占它的东西**，而那恰恰是诊断能直接答、用户手动查却很费劲的部分
-   * （P21-5 §9B）。所以端口那一项的 summary 长这样：
-   * 「端口 3000（平台 HTTP/WS 服务）被 com.docke (pid 41235) 占用」。
+   * 它只回答两件事：**这一项好不好 + 挡不挡我干活**。证据、例外条款、为什么，
+   * 一律下沉到 {@link detailText}。
+   *
+   * ⚠️ 它替代了旧的 `summary`。拆开的原因：旧字段既要当标题又要装证据，于是长成了
+   * 三行散文，而界面上它渲染在图标同一行 —— 用户要读完一整段才知道这一项到底好不好。
    */
-  summary: string;
+  headline: string;
   /**
-   * 修复建议 —— **可复制的命令或配置项**，不是「请检查网络」这种。
-   * P21-5 §6：「修复建议 | 点击复制命令到剪贴板」。
+   * 第二层：证据、例外条款、为什么。默认收进展开层。
+   *
+   * ⚠️ 名字不叫 `detail`，因为 {@link detail} 早就被结构化细节占着（pid、字节数、
+   * digest），而那一份是给日志与前端分支用的机读数据，两者不能互换。
    */
-  hint?: string;
+  detailText?: string;
+  /**
+   * 下一步 —— **人话，普通字体，没有复制按钮**（「重跑一次看稳不稳定」这种）。
+   *
+   * ⚠️ 它与 {@link command} 是**两个字段**，因为它们在界面上长得不一样。合成一个
+   * `hint` 时，一段散文顶着一个 [复制] 按钮渲染进等宽框 —— 复制下来也没地方粘。
+   */
+  nextStep?: string;
+  /**
+   * 真正**可粘贴执行**的命令 / 配置项。等宽渲染 + [复制]。
+   *
+   * ⛔ **没有命令就不要编一个。** 一条执行不了的命令比不给命令更贵。
+   */
+  command?: string;
   /** 仅 `id: 'preset-image'`：链走到哪一步（见 {@link PresetImageStep}）。 */
   step?: PresetImageStep;
   /**
@@ -266,7 +282,7 @@ export type PresetImageCode = (typeof PRESET_IMAGE_CODES)[number];
  */
 export const SSE_PROTOCOL_CANONICAL =
   'diagnose.server:start{checks[{id,label}],timeoutMs},' +
-  'check{id,label,status,summary,hint?,step?,errorCode?,detail?,durationMs},' +
+  'check{id,label,status,headline,detailText?,nextStep?,command?,step?,errorCode?,detail?,durationMs},' +
   'done{okCount,infoCount,warnCount,failCount,totalMs}|' +
   'diagnose.status:ok,info,warn,fail,timeout|' +
   'diagnose.checks:container-runtime,dev-kvm,disk-space,port-conflict,' +

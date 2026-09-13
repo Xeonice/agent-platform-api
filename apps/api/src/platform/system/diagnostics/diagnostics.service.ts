@@ -136,8 +136,10 @@ export class DiagnosticsService {
         return {
           ...base,
           status: 'timeout',
-          summary: `${check.label}：${String(DIAGNOSE_TIMEOUT_MS / 1000)} 秒内没有结果 —— 这一项没有结论，其余项不受影响`,
-          hint: '排查这一项对应的依赖是否在 hang（而不是在报错）；再跑一次诊断看它是否稳定超时',
+          // ⚠️ 「超时」≠「不可达」：这一项**没有结论**，不是「结论是坏的」。
+          headline: `${String(DIAGNOSE_TIMEOUT_MS / 1000)} 秒内没有结果`,
+          detailText: '这一项这次没有结论，其余项不受影响。',
+          nextStep: '看这一项依赖的东西是卡住了还是在报错；再跑一次诊断，看它是不是每次都超时。',
           durationMs: this.clock.now().getTime() - started,
         };
       }
@@ -149,7 +151,8 @@ export class DiagnosticsService {
       return {
         ...base,
         status: 'fail',
-        summary: `${check.label}：检查本身出错（${(e as Error).message}）`,
+        headline: '这一项检查自己出错了',
+        detailText: `${(e as Error).message}`,
         durationMs: this.clock.now().getTime() - started,
       };
     }
@@ -179,7 +182,7 @@ export class DiagnosticsService {
       summary: `系统诊断发现 ${String(bad.length)} 项异常：${bad.map((f) => f.label).join('、')}`,
       detail: {
         at: this.clock.now().toISOString(),
-        checks: frames.map((f) => ({ id: f.id, status: f.status, summary: f.summary })),
+        checks: frames.map((f) => ({ id: f.id, status: f.status, headline: f.headline })),
       },
     });
   }
