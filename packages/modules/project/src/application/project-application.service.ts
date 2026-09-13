@@ -22,6 +22,8 @@ import { Project } from '../domain/entities/project.entity';
 import type { CloneErrorCode } from '../domain/entities/project.entity';
 import { PROJECT_REPOSITORY } from '../domain/repositories/project.repository';
 import type { ProjectRepository } from '../domain/repositories/project.repository';
+import { RETAINED_VOLUME_REPOSITORY } from '../domain/repositories/retained-volume.repository';
+import type { RetainedVolumeRepository } from '../domain/repositories/retained-volume.repository';
 import { BASELINE_MANAGER } from '../domain/ports/baseline-manager.port';
 import type { BaselineManager } from '../domain/ports/baseline-manager.port';
 import { BASELINE_GIT } from '../domain/ports/baseline-git.port';
@@ -75,6 +77,7 @@ export class ProjectApplicationService {
     @Inject(BASELINE_MANAGER) private readonly baseline: BaselineManager,
     @Inject(BASELINE_GIT) private readonly git: BaselineGit,
     @Inject(SANDBOX_FACADE) private readonly sandboxes: SandboxFacade,
+    @Inject(RETAINED_VOLUME_REPOSITORY) private readonly volumes: RetainedVolumeRepository,
     private readonly cloneWorkflow: CloneProjectWorkflow,
     private readonly syncWorkflow: SyncBaselineWorkflow,
   ) {}
@@ -232,8 +235,27 @@ export class ProjectApplicationService {
     return this.toDto(project);
   }
 
+  /**
+   * 删项目。
+   *
+   * ⚠️ **还在占盘的保留成果会拦下这一步**（下面那段）。这条规则此前写在 DB 的
+   * `onDelete: 'restrict'` 上，而那是错的：`RetainedVolumeService.remove()` 是**软删**
+   * （记录留档审计），行永远不消失 ⇒ 一个项目只要曾经有过一份保留成果就**再也删不掉**，
+   * 用户把成果清干净也没用。已在真库上实证。FK 已退回弱引用，见
+   * `retained-volume.sqlite.ts` 里 `projectId` 的注释。
+   *
+   * ⇒ 判据必须是 `deletedAt === null`（还在占盘），而不是「有没有这一行」。
+   * 这件事只有应用层知道，所以约束落在这里。
+   */
   async delete(id: string, input: DeleteProjectInput = {}): Promise<void> {
     const project = await this.require(id);
+    // ⚠️ 走 `mapDomainError` 而不是直接抛：领域错误漏出去就是 500，
+    //    而这是一次**可预期的拒绝**，用户该拿到 409 和一句能照做的话。
+    try {
+      await this.assertNoLiveRetainedVolumes(id);
+    } catch (e) {
+      throw this.mapDomainError(e);
+    }
     if (project.cloneStatus === 'cloning') this.cloneWorkflow.cancel(id);
     const keptBaseline = input.keepBaseline ?? false;
     if (!keptBaseline) {
@@ -244,6 +266,11 @@ export class ProjectApplicationService {
     // 压根不存在 —— 删掉项目后 `seq` 一点没动。
     project.markDeleted(keptBaseline, this.clock.now());
     this.uow.run((tx) => {
+      // ⚠️ **必须在删项目之前**：`retained_volumes.project_id` 上是
+      //    `onDelete: 'restrict'`，留着任何一行都会把下面那句顶回来。
+      //    到这里能走过前置检查，说明剩下的全是已清理的墓碑行（见
+      //    `deleteByProjectSync` 的注释：卷的生命周期本身在 `audit_events` 里）。
+      this.volumes.deleteByProjectSync(tx, asProjectId(id));
       this.repo.deleteSync(tx, asProjectId(id));
       this.events.publishInTx(tx, project.pullEvents());
     });
@@ -292,6 +319,29 @@ export class ProjectApplicationService {
   /** 只投递事件、不写行 —— 给「聚合状态没变但确实发生了一件事」的路径用（cancel-clone）。 */
   private publish(project: Project): void {
     this.uow.run((tx) => this.events.publishInTx(tx, project.pullEvents()));
+  }
+
+  /**
+   * 还在占盘的保留成果 ⇒ 拒绝删项目（409 `INVALID_STATE`）。
+   *
+   * ⛔ **不级联删除**：保留成果是用户**明确选择留下**的产物，销毁它必须是一次单独的、
+   * 他自己按下的动作。把它折进「删项目」里，用户点一次就永久失去了两样东西，
+   * 而他只打算失去一样。
+   *
+   * ⚠️ 文案里给出**去哪儿清**，不只说「删不掉」——与镜像那条「请改为点 [禁用]」同姿态
+   * （P22 §1：拒绝必须带下一步，否则用户卡死在这里）。
+   *
+   * ⚠️ 只数 `deletedAt === null` 的。已清理的那些是审计留档，不该拦任何人。
+   */
+  private async assertNoLiveRetainedVolumes(id: string): Promise<void> {
+    const live = (await this.volumes.listByProject(asProjectId(id))).filter(
+      (v) => v.deletedAt === null,
+    );
+    if (live.length === 0) return;
+    throw new ProjectStateError(
+      `这个项目下还有 ${String(live.length)} 份保留成果没清理，删掉项目会让它们再也找不到归属；` +
+        '请先到「保留成果」里逐份清理，或等它们到期自动回收，然后再删项目。',
+    );
   }
 
   private mapDomainError(e: unknown): unknown {

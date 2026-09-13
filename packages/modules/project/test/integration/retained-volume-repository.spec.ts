@@ -39,7 +39,7 @@ function makeHarness() {
     now,
   });
   uow.run((tx) => projects.saveSync(tx, project));
-  return { sqlite, db, repo, uow, now };
+  return { sqlite, db, repo, projects, uow, now };
 }
 
 const volume = (id: string, path: string, now: Date, days: 3 | 7 | 30 = 30) =>
@@ -135,6 +135,41 @@ describe('SqliteRetainedVolumeRepository（真 sqlite + 真 migration）', () =>
     // 直接改只读字段，模拟「应用层那道校验被绕过/写坏」——双保险要证明的正是这种情形
     Object.defineProperty(v, 'retainUntil', { value: new Date('2026-08-30T00:00:00.000Z') });
     expect(() => h.uow.run((tx) => h.repo.saveSync(tx, v))).toThrow(/CHECK/i);
+  });
+
+  /**
+   * ⭐ **删项目撞外键**（2026-09-11 实测确认的真 bug 的现场）。
+   *
+   * `remove()` 是软删（`deleted_at` 打标，行永远留着，「记录会留下，供审计」）。
+   * 而 `project_id` 上是 `onDelete: 'restrict'` —— 它分不清「已清理」和「还在占盘」，
+   * 于是**一个项目只要曾经有过一份保留成果就再也删不掉了**，用户把成果清干净也没用。
+   *
+   * ⚠️ 这一条必须在**真 sqlite + 真 migration** 上跑：单测里的仓储替身不会有 FK，
+   * 拿替身写的「已清理的不许拦」在这个 bug 面前是**绿的**——它证明不了任何事。
+   */
+  it('⭐ 已清理的保留成果（deleted_at 非空）不许拦住删项目', () => {
+    const v = volume('rv-tomb', '/data/workspaces/tomb', h.now);
+    h.uow.run((tx) => h.repo.saveSync(tx, v));
+    v.markDeleted(h.now); // 用户清理掉了它，行留档
+    h.uow.run((tx) => h.repo.saveSync(tx, v));
+
+    // 删项目前必须连带清掉登记行，否则 FK 顶回来。
+    expect(() =>
+      h.uow.run((tx) => {
+        h.repo.deleteByProjectSync(tx, asProjectId('prj-rv'));
+        h.projects.deleteSync(tx, asProjectId('prj-rv'));
+      }),
+    ).not.toThrow();
+  });
+
+  it('⛔ 不先清登记行就删项目 ⇒ FK 顶回来（这就是那个 bug 的机理，钉住它别被"优化"掉）', () => {
+    const v = volume('rv-tomb2', '/data/workspaces/tomb2', h.now);
+    h.uow.run((tx) => h.repo.saveSync(tx, v));
+    v.markDeleted(h.now);
+    h.uow.run((tx) => h.repo.saveSync(tx, v));
+    expect(() => h.uow.run((tx) => h.projects.deleteSync(tx, asProjectId('prj-rv')))).toThrow(
+      /FOREIGN KEY/i,
+    );
   });
 
   it('project_id 的 FK 是真的：不存在的项目登不进来', () => {
