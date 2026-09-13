@@ -29,7 +29,11 @@ import type { BaselineManager } from '../domain/ports/baseline-manager.port';
 import { BASELINE_GIT } from '../domain/ports/baseline-git.port';
 import type { BaselineGit } from '../domain/ports/baseline-git.port';
 import { CloneError } from '../domain/ports/git-cloner.port';
-import { InvalidRepoUrlError, ProjectStateError } from '../domain/errors/project-errors';
+import {
+  InvalidRepoUrlError,
+  ProjectHasLiveRetainedVolumesError,
+  ProjectStateError,
+} from '../domain/errors/project-errors';
 import { CloneProjectWorkflow } from './clone-project.workflow';
 import { SyncBaselineWorkflow } from './sync-baseline.workflow';
 import { ProjectMapper } from './dto/project.mapper';
@@ -338,7 +342,10 @@ export class ProjectApplicationService {
       (v) => v.deletedAt === null,
     );
     if (live.length === 0) return;
-    throw new ProjectStateError(
+    // ⛔ **专属错误类，不复用 `ProjectStateError`**：那个翻译成 `INVALID_STATE`，
+    //    而删项目这条路上该码原本只有「还有任务在跑」一个成因、前端写死了一句文案。
+    //    共用会让带着保留成果来删的用户看到一句假话。理由详见错误类自己的注释。
+    throw new ProjectHasLiveRetainedVolumesError(
       `这个项目下还有 ${String(live.length)} 份保留成果没清理，删掉项目会让它们再也找不到归属；` +
         '请先到「保留成果」里逐份清理，或等它们到期自动回收，然后再删项目。',
     );
@@ -358,6 +365,16 @@ export class ProjectApplicationService {
     // non-failed) and the CALLER always knows which action it invoked, so one code
     // plus the call site is enough to pick the right sentence. Minting three more
     // codes would buy nothing the caller does not already know.
+    // ⚠️ **放在 `ProjectStateError` 之前**：它不是 `ProjectStateError` 的子类，顺序其实
+    //    无关，但写在前面能让读的人先看见「这个码是从通用的 INVALID_STATE 里拆出来的」。
+    if (e instanceof ProjectHasLiveRetainedVolumesError) {
+      return new ConflictException({
+        code: 'PROJECT_HAS_LIVE_RETAINED_VOLUMES',
+        message: e.message,
+        retryable: false,
+        sideEffectFree: true,
+      });
+    }
     if (e instanceof ProjectStateError) {
       return new ConflictException({
         code: 'INVALID_STATE',

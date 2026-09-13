@@ -159,13 +159,20 @@ describe('删项目 × 保留成果（I-RV × 项目删除）', () => {
     listByProject: () => Promise.resolve(vols),
   });
 
-  it('⛔ 还在占盘的保留成果 ⇒ 409 INVALID_STATE，且文案要说出去哪儿清', async () => {
+  it('⛔ 还在占盘的保留成果 ⇒ 409 PROJECT_HAS_LIVE_RETAINED_VOLUMES（⛔ 不是通用的 INVALID_STATE）', async () => {
     const { service, repo } = wire(repoWith([volumeOf(null)]));
     repo.add(gitProject('p-1'));
     const e = await service.delete('p-1').catch((x: unknown) => x);
     expect(e).toBeInstanceOf(HttpException);
     const env = envelopeOf(e);
-    expect(env.code).toBe('INVALID_STATE');
+    // ⚠️ **专属码，⛔ 不许退回通用的 `INVALID_STATE`**：删项目这条路上 `INVALID_STATE`
+    //    还有另一个成因（还有任务在跑 / 克隆没停），前端对那个码写死了一句文案。
+    //    两个成因共用一个码 ⇒ 带着保留成果来删的用户会看到「还有任务在跑」这句假话，
+    //    还被指向错误的地方。
+    expect(env.code).toBe('PROJECT_HAS_LIVE_RETAINED_VOLUMES');
+    // ⛔ 顺带钉住它**确实不是**那个通用码 —— 上面一条改成 `toBe('INVALID_STATE')` 也会红，
+    //    但这一条让"为什么不能是它"留在代码里。
+    expect(env.code).not.toBe('INVALID_STATE');
     // ⚠️ 断言「给了下一步」而不是断言整句：措辞会改，"不许只说删不掉"不会改（P22 §1）。
     expect(env.message).toMatch(/保留成果/);
     expect(env.message).toMatch(/清理|回收/);
