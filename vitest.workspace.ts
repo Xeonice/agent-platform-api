@@ -90,9 +90,18 @@ export default defineWorkspace([
       // e2e drive SHARED external resources (docker daemon, the :5001 registry,
       // and — critically — BoxLite, which permits only ONE runtime per BOXLITE_HOME
       // (~/.boxlite) AT A TIME across processes. Multiple runtimes coexist fine
-      // within one process, so run ALL e2e files in a SINGLE worker process
+      // within one process, so ALL e2e files must run in a SINGLE worker process
       // sequentially; separate forks would contend on the BoxLite lock and 500.
       // Unit/integration/contract projects stay parallel.
+      //
+      // ⚠️⚠️ 下面这行是**死的** —— 它表达意图，但不产生效果（2026-09-14 实测）。
+      // `createForksPool` 读的是 `ctx.config.poolOptions?.forks`，而 workspace 模式下
+      // pool 在**根级**创建一次，project 级的 poolOptions 根本不参与。实测 e2e 一直是
+      // 9 个 worker 并行跑的,从来没有串行过。之所以没炸:碰 BoxLite 的那 7 个 e2e 在
+      // 没有本机镜像的机器上全部被 skip —— 问题被 skip 掩盖着,镜像一铺好就会撞锁。
+      // ⛔ 不要因为"配了就该生效"而信任它。真正的串行保证在 `scripts/vitest-capped.mjs`
+      // (VITEST_MAX_FORKS=1),那是唯一能在 pool 创建前把值送进去的位置。
+      // 这一行保留:语义正确,且将来 vitest 若修了 project 级 pool 配置它会自动接上。
       poolOptions: { forks: { singleFork: true } },
     },
   },
