@@ -32,7 +32,7 @@ import { BoxliteSandboxFiles } from './boxlite-files';
 import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
 import { runGuestScript } from './boxlite-guest-shell';
-import { isImageStaged, layerCacheBytes } from './boxlite-image-store';
+import { imageStageProgress, isImageStaged } from './boxlite-image-store';
 import { readBoxliteHealth } from './boxlite-health';
 
 /**
@@ -231,20 +231,29 @@ export class BoxliteSandboxProvider implements SandboxProvider {
       //
       // ⚠️ 1 秒一次：层缓存是**一个扁平目录、8 个文件**，一次 stat 遍历可以忽略；
       //    更密没有意义（进度条不需要更快），更疏用户会觉得卡住。
-      // ⚠️ 测不出来就**一次都不报**（`layerCacheBytes` 返回 null）—— 契约那条
+      // ⚠️ 测不出来就**一次都不报**（`imageStageProgress` 返回 null）—— 契约那条
       //    「宁可沉默也不要猜」。调用方于是退回「已用时长」。
       // ⚠️ **基线在这里减掉**（契约：报的是「本次新落盘字节」）。库里本来就有别的镜像的
       //    层，不减的话进度条一上来就停在某个高位 —— 那比没有进度更让人困惑。
       //    ⚠️ 测不出基线（目录还不存在 = 头一次拉）就按 0 算，那时它本来就是 0。
-      const base = onProgress === undefined ? 0 : ((await layerCacheBytes(home, fsp, join)) ?? 0);
+      // ⚠️ **按这张镜像自己的清单量，⛔ 不再用「全店字节 − 基线」那一套**（2026-09-14 改）。
+      //    旧算法只在缓存**单调增长**时成立，而实测不是：153 KB/s 的链路上那个 210MB 的
+      //    大层下到一半就断，boxlite **把半截层删掉重来** —— `images/layers` 从 157MB 掉回
+      //    112MB（文件 8 → 7）。于是 `当前 − 基线` 变负、被 `Math.max(0, …)` 钉死在 0：
+      //    界面显示「已下载 2MB · 1%」，而磁盘上其实已有 8 层里的 7 层
+      //    （109.8/319.8 ≈ **34%**），「已用时长」还在跳 22 分钟 —— 用户看到的就是
+      //    「一直在反复跑」。详见 `imageStageProgress` 的注释。
+      // ⚠️ 架构名映射照 `oci-registry.client.ts` 既有写法（OCI 用 `amd64`，Node 用 `x64`），
+      //    ⛔ 别自己发明一份。
+      const wantArch = process.arch === 'arm64' ? 'arm64' : 'amd64';
       const timer =
         onProgress === undefined
           ? undefined
           : setInterval(() => {
-              void layerCacheBytes(home, fsp, join).then((bytes) => {
+              void imageStageProgress(home, image.digest, wantArch, fsp, join).then((p) => {
                 // ⛔ 测不出来就**不报**（契约那条「宁可沉默也不要猜」）——⚠️ 不是报 0：
                 //    一个 0 会画成「一直卡在 0%」，而字节明明在进来。
-                if (bytes !== null) onProgress(Math.max(0, bytes - base));
+                if (p !== null) onProgress(p.have);
               });
             }, 1_000);
       try {
