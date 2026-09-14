@@ -75,7 +75,7 @@ export function boxliteImageRegistries(): JsImageRegistry[] {
 /**
  * BoxLite 的 home —— 与 SDK 自己的解析口径一致（`BOXLITE_HOME`，缺省 `~/.boxlite`）。
  *
- * ⚠️ 平台只在**量进度**时用它（`layerCacheBytes`）。⛔ 不要拿它去读写任何东西：
+ * ⚠️ 平台只在**量进度**时用它（`imageStageProgress`）。⛔ 不要拿它去读写任何东西：
  * 那是 BoxLite 的私有目录，写进去等于绕过它自己的记账。
  */
 export function boxliteHome(): string {

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isImageStaged,
   normaliseStoreReference,
-  layerCacheBytes,
+  imageStageProgress,
 } from '../../src/infrastructure/providers/boxlite/boxlite-image-store';
 
 /**
@@ -128,52 +128,120 @@ describe('normaliseStoreReference —— 只在裸 tag 那条路上动手', () =
 const join = (...p: string[]): string => p.join('/');
 
 /**
- * ⭐ **量 boxlite 的层缓存**（2026-09-10）。
- *
- * ⛔ 全部失败路径都必须回 `null`（「测不了」）而不是 0（「什么都没下」）：一个 0 会画成
- * 一条卡在 0% 的进度条，而字节明明在进来 —— 契约那条「宁可沉默也不要猜」。
+ * `imageStageProgress` —— 按**这张镜像自己的清单**量进度。
  *
  * ⚠️ 这里读的是 **BoxLite 的私有目录布局**，SDK 没暴露它。用例把这份耦合钉出来，
  * 好让哪天升级挪了目录时，红的是它而不是用户屏幕上那条不动的条。
+ *
+ * ⛔ 它取代的旧算法是「全店字节 − 调用开始时的基线」。下面前两条用例钉的正是**那套算法
+ * 栽过的两个坑**（2026-09-14 真机）：缓存缩水导致读数为负被钉死在 0；以及分子排除了
+ * 已缓存的层而分母是整张镜像。
  */
-describe('layerCacheBytes', () => {
-  const fs = (files: Record<string, number>) => ({
-    readdir: (): Promise<string[]> => Promise.resolve(Object.keys(files)),
+describe('imageStageProgress', () => {
+  const INDEX = 'sha256:aa';
+  const ARM = 'sha256:bb';
+  const AMD = 'sha256:cc';
+
+  /** 8 层里挑 3 层够说明问题：一个大层 + 两个小层。 */
+  const armManifest = {
+    layers: [
+      { digest: 'sha256:L1', size: 100 },
+      { digest: 'sha256:L2', size: 200 },
+      { digest: 'sha256:BIG', size: 700 },
+    ],
+  };
+
+  const make = (onDisk: Record<string, number>, manifests?: Record<string, unknown>) => ({
+    readFile: (p: string): Promise<string> => {
+      const name = p.split('/').pop() ?? '';
+      const table: Record<string, unknown> = manifests ?? {
+        'sha256-aa.json': {
+          manifests: [
+            { digest: AMD, platform: { architecture: 'amd64', os: 'linux' } },
+            { digest: ARM, platform: { architecture: 'arm64', os: 'linux' } },
+          ],
+        },
+        'sha256-bb.json': armManifest,
+        'sha256-cc.json': { layers: [{ digest: 'sha256:X', size: 999999 }] },
+      };
+      const doc = table[name];
+      return doc === undefined
+        ? Promise.reject(new Error('ENOENT'))
+        : Promise.resolve(JSON.stringify(doc));
+    },
     stat: (p: string): Promise<{ size: number }> => {
-      const name = p.split('/').pop()!;
-      const size = files[name];
+      const name = p.split('/').pop() ?? '';
+      const size = onDisk[name];
       return size === undefined ? Promise.reject(new Error('ENOENT')) : Promise.resolve({ size });
     },
   });
 
-  it('⭐ 累加 stat.size —— ⛔ 不是 du（du 报磁盘块，实测高 4.4%）', async () => {
-    const got = await layerCacheBytes('/home', fs({ 'a.tar.gz': 100, 'b.tar.gz': 250 }), join);
-    expect(got).toBe(350);
+  it('⭐ 缓存缩水（半截层被丢弃）⇒ 读数**跟着下降**，⛔ 不是钉死在 0', async () => {
+    // 大层下到 400 字节时被丢弃 ⇒ 磁盘上只剩两个小层。
+    const before = await imageStageProgress(
+      '/home',
+      INDEX,
+      'arm64',
+      make({ 'sha256-L1.tar.gz': 100, 'sha256-L2.tar.gz': 200, 'sha256-BIG.tar.gz': 400 }),
+      join,
+    );
+    const after = await imageStageProgress(
+      '/home',
+      INDEX,
+      'arm64',
+      make({ 'sha256-L1.tar.gz': 100, 'sha256-L2.tar.gz': 200 }),
+      join,
+    );
+    expect(before?.have).toBe(700);
+    // ⛔ 旧算法在这里会变负、被 `Math.max(0, …)` 钉死在 0，于是界面「卡在 1%」而磁盘上
+    //    明明有两层。新算法如实说 300 —— 它恰好告诉用户「刚才那一层白下了」。
+    expect(after?.have).toBe(300);
+    expect(after?.total).toBe(1000);
   });
 
-  it('⛔ 目录不存在 ⇒ null，不是 0', async () => {
-    const boom = {
-      readdir: (): Promise<string[]> => Promise.reject(new Error('ENOENT')),
-      stat: (): Promise<{ size: number }> => Promise.reject(new Error('unused')),
-    };
-    expect(await layerCacheBytes('/home', boom, join)).toBeNull();
+  it('⭐ 分子分母**同源**：已缓存的层算进分子，⛔ 不被排除在外', async () => {
+    // 三层里已有两层落盘：30% —— 旧算法在续传时会把它算成接近 0%。
+    const got = await imageStageProgress(
+      '/home',
+      INDEX,
+      'arm64',
+      make({ 'sha256-L1.tar.gz': 100, 'sha256-L2.tar.gz': 200 }),
+      join,
+    );
+    expect(got).toEqual({ have: 300, total: 1000 });
   });
 
-  it('⭐ 单个文件读不到 ⇒ 跳过它，⛔ 不让整次测量失败（拉取中改名是正常竞态）', async () => {
-    const files: Record<string, number> = { 'a.tar.gz': 100, 'gone.tar.gz': 0 };
-    const flaky = {
-      readdir: (): Promise<string[]> => Promise.resolve([...Object.keys(files), 'vanished.tar.gz']),
-      stat: (p: string): Promise<{ size: number }> => {
-        const name = p.split('/').pop()!;
-        return name === 'vanished.tar.gz'
-          ? Promise.reject(new Error('ENOENT'))
-          : Promise.resolve({ size: files[name] ?? 0 });
-      },
-    };
-    expect(await layerCacheBytes('/home', flaky, join)).toBe(100);
+  it('⭐ 多架构 index ⇒ 取**本机架构**那一份，⛔ 不许拿第一个充数', async () => {
+    // amd64 那份只有一层 999999 字节；取错了 total 就是错的。
+    const arm = await imageStageProgress('/home', INDEX, 'arm64', make({}), join);
+    const amd = await imageStageProgress('/home', INDEX, 'amd64', make({}), join);
+    expect(arm?.total).toBe(1000);
+    expect(amd?.total).toBe(999999);
   });
 
-  it('空目录 ⇒ 0（那是「确实还没下」，与「测不了」不同）', async () => {
-    expect(await layerCacheBytes('/home', fs({}), join)).toBe(0);
+  it('⛔ 本机架构不在 index 里 ⇒ null（「我量不了」），⛔ 不是 0', async () => {
+    expect(await imageStageProgress('/home', INDEX, 'riscv64', make({}), join)).toBeNull();
+  });
+
+  it('⛔ 清单读不到 ⇒ null，不是 0（0 会画成「一直卡在 0%」）', async () => {
+    expect(await imageStageProgress('/home', 'sha256:missing', 'arm64', make({}), join)).toBeNull();
+  });
+
+  it('一层都还没开始下 ⇒ have=0（那是「确实还没下」，与「测不了」不同）', async () => {
+    expect(await imageStageProgress('/home', INDEX, 'arm64', make({}), join)).toEqual({
+      have: 0,
+      total: 1000,
+    });
+  });
+
+  it('⛔ 落盘略多于清单声称的量 ⇒ 钳到 size，不许出现 >100%', async () => {
+    const got = await imageStageProgress(
+      '/home',
+      INDEX,
+      'arm64',
+      make({ 'sha256-L1.tar.gz': 100, 'sha256-L2.tar.gz': 200, 'sha256-BIG.tar.gz': 9999 }),
+      join,
+    );
+    expect(got?.have).toBe(1000);
   });
 });

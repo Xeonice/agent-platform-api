@@ -73,54 +73,113 @@ export function normaliseStoreReference(ref: string): string {
   return `docker.io/${qualified}:${tag ?? 'latest'}`;
 }
 
+/** 一张镜像的铺开进度：`have` = 这张镜像的层已经落盘多少字节，`total` = 它一共多少。 */
+export interface ImageStageProgress {
+  have: number;
+  total: number;
+}
+
 /**
- * How many bytes BoxLite's layer cache holds right now — the raw number behind
- * `SandboxProvider.stageImage`'s `onProgress`.
+ * 按**这张镜像自己的清单**量进度。⛔ 取代 `layerCacheBytes` + 调用方减基线那一套。
  *
- * ── Why the filesystem and not the SDK ──────────────────────────────────────────
- * ⚠️ MEASURED 2026-09-10: the BoxLite SDK (0.9.7) exposes NO progress and NO
- * partial-size read — `ImageHandle` is exactly `{ pull, list }`, and `ImageInfo`
- * only carries `sizeBytes` for a COMPLETED image. Without this read, a pull of the
- * boxlite preset image (8 layers, 320MB compressed) is a silent bar; on a 273 KB/s
- * link that silence lasted 20 minutes.
+ * ── 为什么换掉基线法（2026-09-14 真机打脸）─────────────────────────────────────
+ * 旧算法是 `本次新落盘 = 当前全店字节 − 调用开始时的全店字节`。它只在缓存**单调增长**
+ * 时成立，而实测并不是：153 KB/s 的链路上，那个 210MB 的大层下到一半就断，boxlite
+ * **把半截层删掉重来** —— `images/layers` 从 157MB 掉回 112MB（文件 8 → 7）。
+ * 于是 `当前 − 基线` 变成负数，被 `Math.max(0, …)` 钉死在 **0**：界面显示「已下载 2MB ·
+ * 1%」，而磁盘上其实已经有 8 层里的 7 层、109.8MB / 319.8MB ≈ **34%**，
+ * 「已用时长」还在往上跳 22 分钟。用户看到的是「一直在反复跑」。
  *
- * ⚠️ WHAT MAKES IT HONEST RATHER THAN A GUESS: the cache is one flat directory of
- * `sha256-<digest>.tar.gz` files, and `stat.size` on them matches the manifest's
- * layer sizes EXACTLY (verified: `sha256-0b90fc09….tar.gz` = 220_195_394 bytes =
- * the 210MB layer in the arm64 manifest). ⛔ `du` does NOT match — it reports
- * allocated blocks and ran 4.4% high (334MB vs 320MB). Sum `stat.size`, never `du`.
+ * ⚠️ 还有一处口径不一致：分子是「本次新落盘」，分母却是**整张镜像**。续传时已缓存的部分
+ * 被分子排除、却仍留在分母里 —— 即使一切正常也会显示接近 0%。
  *
- * ⚠️ IT IS A RUNNING TOTAL FOR THE WHOLE STORE, not for one image — that is the
- * contract (`bytesInStore`). Other images' layers are already there when the pull
- * starts; the CALLER subtracts its own baseline, so they cancel out.
+ * ── 新算法为什么是对的 ────────────────────────────────────────────────────────
+ * 清单里每一层都有 `digest` 与 `size`，而磁盘上层文件正是按同一个 digest 命名
+ * （`sha256-<digest>.tar.gz`）。⇒ **分子分母同源**：
+ *   · `total` = 清单里所有层的 size 之和（= 那个「约 320MB」）
+ *   · `have`  = 这些 digest 在磁盘上实际占了多少（`stat.size`）
  *
- * ⚠️ THIS READS BOXLITE'S PRIVATE LAYOUT, WHICH IS THE ONE THING TO REMEMBER ABOUT
- * IT. The path is not part of any published API and an upgrade may move it. ⇒ every
- * failure mode returns `null` (「I cannot measure」), never 0 (「nothing downloaded」):
- * a 0 would render as a bar that sits at 0% while bytes are visibly arriving, which
- * is exactly the 「wrong number is worse than a spinner」 case the contract warns of.
+ * ⚠️ **正在下的那一层也算得进去**：boxlite 把半截层直接写在 `layers/` 里、用最终 digest
+ * 命名（实测：下载中文件数是 8，丢弃后变 7）。所以进度是**平滑**的，不是一层一跳。
+ * ⛔ 这一点很要紧 —— 那个 210MB 的层占全量 66%，一层一跳的话它会在 34% 停二十分钟。
+ *
+ * ⚠️ **丢层时 `have` 会下降，这是如实反映，不是 bug**：它恰好告诉用户「刚才那一层白下了」，
+ * 而旧算法把这件事伪装成「卡在 1%」。⛔ 不要在这里加"只增不减"的钳制。
+ *
+ * ⚠️ 任何一步测不出来都返回 `null`（「我量不了」），⛔ 不返回 0（「什么都没下」）——
+ * 与本文件既有纪律一致：一个错的数比一个转圈更糟。
  */
-export async function layerCacheBytes(
+export async function imageStageProgress(
   home: string,
-  fs: { readdir(p: string): Promise<string[]>; stat(p: string): Promise<{ size: number }> },
+  manifestDigest: string,
+  platformArch: string,
+  fs: {
+    readFile(p: string, enc: 'utf8'): Promise<string>;
+    stat(p: string): Promise<{ size: number }>;
+  },
   join: (...parts: string[]) => string,
-): Promise<number | null> {
-  try {
-    const dir = join(home, 'images', 'layers');
-    const names = await fs.readdir(dir);
-    let total = 0;
-    for (const name of names) {
-      // ⚠️ 单个文件读不到就跳过它，⛔ 不让整次测量失败：拉取过程中文件会被创建/改名，
-      //    一次 ENOENT 是正常竞态，把它升级成「测不了」会让进度条无谓地消失。
-      try {
-        total += (await fs.stat(join(dir, name))).size;
-      } catch {
-        continue;
-      }
+): Promise<ImageStageProgress | null> {
+  const manifestPath = (digest: string): string =>
+    join(home, 'images', 'manifests', `${digest.replace(':', '-')}.json`);
+
+  const readManifest = async (digest: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const parsed: unknown = JSON.parse(await fs.readFile(manifestPath(digest), 'utf8'));
+      return typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
     }
-    return total;
-  } catch {
-    // 目录不存在（还没拉过任何镜像）也走这里 —— 那时确实「测不出增量基线」。
-    return null;
+  };
+
+  let doc = await readManifest(manifestDigest);
+  if (doc === null) return null;
+
+  // ⚠️ 多架构 index：顶层只有 `manifests`，真正的层清单在**本机架构**那一份里。
+  //    ⛔ 不许随便取第一个 —— amd64 与 arm64 的层完全不同，取错了分母就是错的。
+  const children = doc['manifests'];
+  if (Array.isArray(children)) {
+    const match = children.find((m): m is Record<string, unknown> => {
+      if (typeof m !== 'object' || m === null) return false;
+      const p = (m as Record<string, unknown>)['platform'];
+      return (
+        typeof p === 'object' &&
+        p !== null &&
+        (p as Record<string, unknown>)['architecture'] === platformArch
+      );
+    });
+    if (match === undefined) return null;
+    const childDigest = match['digest'];
+    if (typeof childDigest !== 'string') return null;
+    doc = await readManifest(childDigest);
+    if (doc === null) return null;
   }
+
+  const layers = doc['layers'];
+  if (!Array.isArray(layers) || layers.length === 0) return null;
+
+  let total = 0;
+  let have = 0;
+  for (const raw of layers) {
+    if (typeof raw !== 'object' || raw === null) return null;
+    const layer = raw as Record<string, unknown>;
+    const digest = layer['digest'];
+    const size = layer['size'];
+    if (typeof digest !== 'string' || typeof size !== 'number') return null;
+    total += size;
+    try {
+      const onDisk = await fs.stat(
+        join(home, 'images', 'layers', `${digest.replace(':', '-')}.tar.gz`),
+      );
+      // ⚠️ 半截层的 `stat.size` 就是"已经写进去多少"，直接用。
+      //    ⛔ 钳到 `size` 是必要的：极少数情况下落盘会略多于清单声称的量，
+      //       而一个 >100% 的读数会让人以为进度是坏的。
+      have += Math.min(onDisk.size, size);
+    } catch {
+      // 这一层还没开始下 —— 不是错误，计 0。
+      continue;
+    }
+  }
+  return { have, total };
 }
