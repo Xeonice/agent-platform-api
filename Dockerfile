@@ -64,5 +64,27 @@ COPY --from=builder /app/packages              ./packages
 COPY --from=builder /app/drizzle               ./drizzle
 COPY --from=builder /app/package.json          ./package.json
 
+# ── 版本三元组:构建期注入,运行期由 GET /api/system/version 原样报出 ──────────
+# 平台版本是**主仓的 tag**(只有主仓钉得住两个 submodule 指针 = 一份可复现的部署状态),
+# 而跑起来的是这个容器——它手上没有主仓,读不到那个 tag。所以只能在构建这一刻塞进来。
+#
+# ⚠️ **三个 ARG 都可以不传**,不传时 `ENV` 落成空串,`platform/config/env.ts` 把空串
+# 归一成 `null`,端点如实回 `null`。⛔ 别给它们写默认值——一个写死的默认版本号会让
+# 每一个忘了传 build-arg 的构建都报出同一个**看起来像真的**的版本。
+#
+#   docker build \
+#     --build-arg APP_VERSION="$(git describe --tags --always)" \
+#     --build-arg APP_COMMIT="$(git rev-parse HEAD)" \
+#     --build-arg APP_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+#
+# ⚠️ 这三行放在**最后**是有意的:ARG 的值一变就会让它之后的每一层缓存失效,而版本号
+# 每次构建都不一样。放在 COPY 前面等于每次构建都从头装一遍依赖。
+ARG APP_VERSION=
+ARG APP_COMMIT=
+ARG APP_BUILT_AT=
+ENV APP_VERSION=$APP_VERSION \
+    APP_COMMIT=$APP_COMMIT \
+    APP_BUILT_AT=$APP_BUILT_AT
+
 EXPOSE 3000
 CMD ["node", "apps/api/dist/main.js"]

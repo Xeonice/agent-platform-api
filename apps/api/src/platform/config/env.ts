@@ -14,7 +14,31 @@ export const env = {
   get accessPasscode(): string {
     return process.env.ACCESS_PASSCODE ?? '';
   },
+  /**
+   * 构建期注入的版本三元组（Dockerfile 的三个 ARG → ENV）。
+   *
+   * ⚠️ **空串和未设视为同一件事，都归一成 `null`** —— `docker build` 不带 `--build-arg`
+   * 时 `ARG APP_VERSION` 会让 `ENV APP_VERSION=` 落成**空串**而不是缺席，两种形态在
+   * 这里必须收敛，否则端点会报出一个 `version: ""`。
+   *
+   * ⛔ 没注入时**不要**退回 `package.json` 的 version（见 `SystemVersionDtoSchema` 抬头）。
+   */
+  get appVersion(): string | null {
+    return nonEmpty(process.env.APP_VERSION);
+  },
+  get appCommit(): string | null {
+    return nonEmpty(process.env.APP_COMMIT);
+  },
+  get appBuiltAt(): string | null {
+    return nonEmpty(process.env.APP_BUILT_AT);
+  },
 };
+
+/** `undefined` / `''` / 纯空白 ⇒ `null`；否则原样（**不 trim 成别的东西**，只判空）。 */
+function nonEmpty(raw: string | undefined): string | null {
+  const v = raw?.trim();
+  return v ? v : null;
+}
 
 /** True when the bind address is not the loopback interface (triggers a warning). */
 export function isExposedBind(host: string): boolean {

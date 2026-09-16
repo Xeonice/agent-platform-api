@@ -5,7 +5,24 @@
 #     never touches the raw docker.sock (container-escape surface收敛).
 services:
   api:
-    build: .
+    # ⚠️ 版本三元组从**宿主环境**透传进构建期(Dockerfile 的三个 ARG),运行期由
+    #   `GET /api/system/version` 原样报出。⛔ 三个都**不给默认值**:留空时端点如实回
+    #   `null`,而一个写死的默认版本号会让每一次忘了设的构建都报出同一个假版本。
+    #
+    #   出厂就带版本号请这样起:
+    #     APP_VERSION=$(git describe --tags --always) \
+    #     APP_COMMIT=$(git rev-parse HEAD) \
+    #     APP_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    #     docker compose up --build
+    #
+    #   ⚠️ 版本取的是**主仓**的 tag(平台版本只在主仓上打),不是 api 子仓的 ——
+    #   在 submodule 目录里跑 `git describe` 拿到的是另一条时间线。
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-}
+        APP_COMMIT: ${APP_COMMIT:-}
+        APP_BUILT_AT: ${APP_BUILT_AT:-}
     ports:
       - '127.0.0.1:3000:3000' # ★ loopback only — do NOT change to 0.0.0.0 without intent
     environment:

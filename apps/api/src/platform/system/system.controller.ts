@@ -16,6 +16,7 @@ import {
   SystemProvidersDtoSchema,
   SystemResourcesDtoSchema,
   SystemSettingsDtoSchema,
+  SystemVersionDtoSchema,
   UpdateSystemSettingsRequestSchema,
 } from '@platform/contracts';
 import type {
@@ -24,12 +25,14 @@ import type {
   SystemProvidersDto,
   SystemResourcesDto,
   SystemSettingsDto,
+  SystemVersionDto,
 } from '@platform/contracts';
 import { AccessPasscodeService } from '../access-passcode/access-passcode.service';
 import { InitializationService } from './initialization.service';
 import { SystemSettingsService } from './system-settings.service';
 import { SystemResourcesService } from './system-resources.service';
 import { SystemProvidersService } from './system-providers.service';
+import { SystemVersionService } from './system-version.service';
 import { DiagnosticsService } from './diagnostics/diagnostics.service';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
 import { PRESET_IMAGE_NOT_PROVISIONABLE } from '@platform/contracts';
@@ -41,6 +44,7 @@ export class SystemSettingsResponseDto extends createZodDto(SystemSettingsDtoSch
 export class UpdateSystemSettingsDto extends createZodDto(UpdateSystemSettingsRequestSchema) {}
 export class SystemResourcesResponseDto extends createZodDto(SystemResourcesDtoSchema) {}
 export class SystemProvidersResponseDto extends createZodDto(SystemProvidersDtoSchema) {}
+export class SystemVersionResponseDto extends createZodDto(SystemVersionDtoSchema) {}
 export class AccessPasscodeRequestDto extends createZodDto(AccessPasscodeActionSchema) {}
 export class AccessPasscodeResponseDto extends createZodDto(AccessPasscodeResultSchema) {}
 
@@ -60,6 +64,7 @@ export class SystemController {
     private readonly provisioner: PresetImageProvisioner,
     private readonly settings: SystemSettingsService,
     private readonly resources: SystemResourcesService,
+    private readonly version: SystemVersionService,
     private readonly providers: SystemProvidersService,
     private readonly diagnostics: DiagnosticsService,
     private readonly passcodes: AccessPasscodeService,
@@ -137,6 +142,16 @@ export class SystemController {
   @ApiOkResponse({ type: SystemResourcesResponseDto })
   getResources(): Promise<SystemResourcesDto> {
     return this.resources.snapshot();
+  }
+
+  @Get('version')
+  @ApiOperation({
+    summary:
+      '当前实例的版本三元组（构建期注入）。⏳ 不含「检查更新」——那是 21-8 §4 的 v1.5 区块，缺的是更新源的裁决不是代码',
+  })
+  @ApiOkResponse({ type: SystemVersionResponseDto })
+  getVersion(): SystemVersionDto {
+    return this.version.snapshot();
   }
 
   @Get('providers')

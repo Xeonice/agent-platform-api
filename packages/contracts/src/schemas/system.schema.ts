@@ -494,3 +494,43 @@ export const SystemProvidersDtoSchema = z.object({
   healthWindowMs: z.number().int().positive(),
 });
 export type SystemProvidersDto = z.infer<typeof SystemProvidersDtoSchema>;
+
+/**
+ * `GET /api/system/version` —— 运行中的实例报出自己是哪一版（10 §6.6）。
+ *
+ * ── 它修的是什么 ────────────────────────────────────────────────────────────
+ * 平台版本是**主仓的 tag**（只有主仓能钉住一份完整可复现的部署状态：两个 submodule
+ * 指针）。而跑起来的是 `api` 这个容器 —— 它手上没有主仓，读不到那个 tag。于是在此之前
+ * 「当前版本」这件事**只活在 git 里，界面上看不见**：用户装了一个实例，却没有任何办法
+ * 回答「我装的是哪一版」，报障时也说不清。
+ *
+ * ⇒ 版本在**构建期**注入（`APP_VERSION` / `APP_COMMIT` / `APP_BUILT_AT`，Dockerfile 的
+ * 三个 ARG），本端点只是把注入的东西原样报出来。
+ *
+ * ⚠️⚠️ **三个字段都可以是 `null`，而 `null` 是一个有意义的答案，不是一个待填的坑。**
+ * ⛔ 尤其不许在没注入时退回去读 `api/package.json` 的 version —— 那是**包版本**
+ * （当前 `0.0.1`），与主仓 tag 没有任何关系。拿它冒充平台版本，报出来的是一个**看起来
+ * 像真的、但永远是错的**版本号；而 `null` 至少会让人去查构建怎么没注入。这与
+ * `platform/config/env.ts` 里 `HTTP_BIND_GATED_BY` 那条同一纪律：**要一句显式声明，
+ * 不要一个猜测**。
+ *
+ * ⚠️ 三个字段**各自独立缺席**（不是「要么全有要么全无」）：从源码目录直接 `node dist/main.js`
+ * 起的实例三个都会是 `null`；只注了 `APP_VERSION` 没注 commit 的构建也是合法形态。
+ * 所以这里是三个 nullable，不是一个 `known: false` 的判别联合 —— 后者会逼着构建脚本
+ * 「要么凑齐要么装不知道」。
+ *
+ * ⏳ **「检查更新」不在本端点内**，那是 21-8 §4 的 v1.5 区块。它缺的不是代码是裁决：
+ * 21-8 §6 自己把「版本检查源与静默失败策略」列为技术缺口，而本项目的第一个 release
+ * 才刚打出来，**还没有可供比对的更新源**。⛔ 别顺手在这里加一个 `latestVersion` 字段
+ * 去外呼 —— 私有化部署的默认姿态是不出网，那条外呼的失败路径（离线一律静默、绝不阻塞）
+ * 是产品明写的要求，不是随手能带上的。
+ */
+export const SystemVersionDtoSchema = z.object({
+  /** 主仓 tag，如 `v0.1.0`。构建期未注入 ⇒ `null`（见上，不要兜底成包版本）。 */
+  version: z.string().min(1).nullable(),
+  /** 主仓 commit（完整或短 sha 由构建脚本决定，本端点不加工）。未注入 ⇒ `null`。 */
+  commit: z.string().min(1).nullable(),
+  /** 构建时刻，ISO 8601。未注入 ⇒ `null`。 */
+  builtAt: z.string().datetime().nullable(),
+});
+export type SystemVersionDto = z.infer<typeof SystemVersionDtoSchema>;
