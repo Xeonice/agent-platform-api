@@ -2355,6 +2355,28 @@
         ]
       }
     },
+    "/api/system/version": {
+      "get": {
+        "operationId": "SystemController_getVersion",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemVersionResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "当前实例的版本三元组（构建期注入）。⏳ 不含「检查更新」——那是 21-8 §4 的 v1.5 区块，缺的是更新源的裁决不是代码",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/system/providers": {
       "get": {
         "operationId": "SystemController_getProviders",
@@ -5408,6 +5430,31 @@
           "disk",
           "retainedVolumes",
           "activeTasks"
+        ]
+      },
+      "SystemVersionResponseDto": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true
+          },
+          "commit": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true
+          },
+          "builtAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "version",
+          "commit",
+          "builtAt"
         ]
       },
       "SystemProvidersResponseDto": {

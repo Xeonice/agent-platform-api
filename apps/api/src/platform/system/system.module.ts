@@ -6,6 +6,7 @@ import { InitializationService } from './initialization.service';
 import { SystemResourcesService } from './system-resources.service';
 import { MEMORY_SOURCES, systemMemorySources } from './memory.probe';
 import { SystemProvidersService } from './system-providers.service';
+import { SystemVersionService } from './system-version.service';
 import { ConnectivityProbe } from './diagnostics/connectivity.probe';
 import { DiagnosticsService } from './diagnostics/diagnostics.service';
 import { DIAGNOSE_CHECKS, type DiagnoseCheck } from './diagnostics/checks/check.types';
@@ -48,6 +49,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
     SystemResourcesService,
     { provide: MEMORY_SOURCES, useValue: systemMemorySources },
     SystemProvidersService,
+    SystemVersionService,
     ConnectivityProbe,
     DiagnosticsService,
     ContainerRuntimeCheck,
