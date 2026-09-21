@@ -38,7 +38,7 @@ import { DIAGNOSE_CHECKS, type DiagnoseCheck } from './checks/check.types';
 export const DIAGNOSE_TIMEOUT_MS = 10_000;
 
 /**
- * 八项诊断的调度器（02 §5.3 / P21-5 §6）。
+ * 逐项诊断的调度器（02 §5.3 / P21-5 §6）。
  *
  * ── 并行，不是串行 ──────────────────────────────────────────────────────────
  * ⚠️ **整轮耗时 ≈ 最慢那项 ≈ 5s，不是累加的 40s。** 02 §5.3 原文写过「整轮最坏接近
@@ -166,7 +166,7 @@ export class DiagnosticsService {
    * `sandbox.health`「只在状态翻转时记」同源。
    *
    * ⚠️ `detail` 里只放**逐项的结论**（id / status / summary），不放 `detail` 字段本身：
-   * 那里面有路径、pid、digest，一轮八项攒起来能有几 KB，而审计是「发生了什么」不是
+   * 那里面有路径、pid、digest，一轮各项攒起来能有几 KB，而审计是「发生了什么」不是
    * 「为什么」（P21-5 §10.1）—— 深度排障看运行日志。
    */
   private recordAudit(frames: readonly DiagnoseCheckFrame[]): void {

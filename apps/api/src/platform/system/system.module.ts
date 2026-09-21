@@ -40,7 +40,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
  * 字都不用改 —— 它已经按契约 `DIAGNOSE_CHECK_IDS` 排序并校验完整性了。
  *
  * ⚠️ 数组里的顺序**不重要**（`DiagnosticsService.ordered()` 按契约重排），但仍按契约
- * 顺序写，好让读代码的人一眼对得上八项清单。
+ * 顺序写，好让读代码的人一眼对得上契约里那份清单。
  */
 @Module({
   controllers: [HealthController, SystemController],

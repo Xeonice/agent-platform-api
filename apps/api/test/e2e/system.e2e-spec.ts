@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import {
   DIAGNOSE_CHECK_IDS,
+  SSE_DIAGNOSE_SCHEMA_HASH,
   IMAGE_SPEC_REGISTRY,
   PROJECT_FACADE,
   SANDBOX_PROVIDER_REGISTRY,
@@ -294,8 +295,8 @@ describe('GET /api/system/providers（运维看板，≠ GET /api/providers）',
   });
 });
 
-describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
-  it('首帧按契约顺序列出八项，八项各出一帧，末帧汇总', async () => {
+describe('POST /api/system/diagnose —— SSE 逐项（02 §5.3）', () => {
+  it('首帧按契约顺序列出全部检查项，每项各出一帧，末帧汇总', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/system/diagnose')
       .send({})
@@ -303,7 +304,10 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
       .expect('Content-Type', /text\/event-stream/);
 
     // 版本随头下发（SSE 上它是告知不是门）。
-    expect(res.headers['x-schema-hash']).toBe('sb-diagnose-v1');
+    // ⚠️ 对着常量断言，别抄字面量 —— 与下面 `DIAGNOSE_TIMEOUT_MS` 那条同一纪律。
+    //    2026-09-22 加第 ⑨ 项诊断、hash v1→v2 时这里红了：本条要钉的是
+    //    「响应头发的 = 契约声明的」，抄一个 v1 进来只会把它变成「hash 不许改」。
+    expect(res.headers['x-schema-hash']).toBe(SSE_DIAGNOSE_SCHEMA_HASH);
     // 反代缓冲会让「逐项出结果」这个唯一的产品要求当场失效，且只在生产上失效。
     expect(res.headers['x-accel-buffering']).toBe('no');
 
@@ -317,7 +321,7 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     expect(start.timeoutMs).toBe(DIAGNOSE_TIMEOUT_MS);
 
     const checks = frames.filter((f): f is DiagnoseCheckFrame => f.event === 'check');
-    expect(checks).toHaveLength(8);
+    expect(checks).toHaveLength(DIAGNOSE_CHECK_IDS.length);
     expect(new Set(checks.map((c) => c.id))).toEqual(new Set(DIAGNOSE_CHECK_IDS));
     // 每一项都必须给出一句能直接上 UI 的结论，且它 ≤ 20 字、不换行、没有 markdown。
     for (const c of checks) {
@@ -331,7 +335,7 @@ describe('POST /api/system/diagnose —— SSE 八项（02 §5.3）', () => {
     const done = frames.at(-1) as DiagnoseDoneFrame;
     expect(done.event).toBe('done');
     expect(done.okCount + done.infoCount + done.warnCount + done.failCount).toBe(8);
-    // 并行 ⇒ 整轮 ≈ 最慢那项，绝不是八项累加（02 §5.3 订正的那一条）。
+    // 并行 ⇒ 整轮 ≈ 最慢那项，绝不是各项累加（02 §5.3 订正的那一条）。
     expect(done.totalMs).toBeLessThan(8 * DIAGNOSE_TIMEOUT_MS);
   }, 30_000);
 
