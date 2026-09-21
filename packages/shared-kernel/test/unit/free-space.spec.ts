@@ -9,7 +9,29 @@ vi.mock('node:fs/promises', async (orig) => ({
   statfs,
 }));
 
-const { availableBytesFor } = await import('../../src/fs/free-space');
+/**
+ * `df` 的替身。
+ *
+ * ⚠️ 打桩的是 `node:child_process` 的 `execFile` 回调形态，而实现用的是
+ * `promisify(execFile)` —— promisify 认的是「最后一个参数是 (err, result) 回调」这个
+ * 约定，所以替身必须照着调回调，⛔ 不能直接 `mockResolvedValue`。
+ */
+const execFileMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (orig) => ({
+  ...(await orig<typeof import('node:child_process')>()),
+  execFile: execFileMock,
+}));
+
+/** 让下一次 df 调用回这段 stdout（`null` = 让 df 失败）。 */
+function stubDf(stdout: string | null): void {
+  execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: unknown) => {
+    const done = cb as (e: Error | null, r?: { stdout: string; stderr: string }) => void;
+    if (stdout === null) done(new Error('df: not found'));
+    else done(null, { stdout, stderr: '' });
+  });
+}
+
+const { availableBytesFor, filesystemStatsFor } = await import('../../src/fs/free-space');
 
 /**
  * ★ 两个磁盘预检共用的那段算术 —— 2026-08 之前它**零覆盖**。
@@ -102,5 +124,83 @@ describe('availableBytesFor：真实文件系统上的行为', () => {
     const unborn = await availableBytesFor(resolve(dir, 'a/b/c/not-created-yet'));
     expect(Number.isFinite(unborn)).toBe(true);
     expect(Math.abs(unborn - here) / here).toBeLessThan(0.01);
+  });
+});
+
+/**
+ * ★ `bsize` 未必是「块计数的单位」—— 2026-09-18 在一台真机上撞出来的。
+ *
+ * ── 事实 ──────────────────────────────────────────────────────────────────────
+ * POSIX 说 `f_blocks/f_bfree/f_bavail` 的单位是 **`f_frsize`**，不是 `f_bsize`。两者在
+ * ext4/xfs/APFS 上恰好相等，所以拿 `bsize` 算了很久都是对的；而 Node 的 `statfs`
+ * **根本不暴露 `f_frsize`**（v22 实测只有七个字段）。
+ *
+ * 容器里 bind 进来的宿主目录（virtiofs / gRPC-FUSE）把 `f_bsize` 报成传输尺寸 1 MiB，
+ * 于是 926 GB 被算成 231 TB —— **虚报 256 倍**，OrbStack 与 Docker Desktop 都复现。
+ * 而 `DATA_ROOT` 恰恰就是那个 bind mount ⇒ 每一个 macOS 部署都中。
+ *
+ * ── 为什么必须有这几条 ────────────────────────────────────────────────────────
+ * 这段算术的下游是 clone / workspace 复制 / tar 解包 / 调度器容量 的预检分母。
+ * 虚报 256 倍不会让任何东西报错，它只是**让所有磁盘门禁静默放行** —— 然后在真的写满
+ * 时以 ENOSPC 收场，而那正是这些预检存在的全部理由。⚠️ 真机上跑这套断言是测不出来的：
+ * 开发机的 APFS 上 `bsize === frsize`，这条路径永远走不到。
+ */
+describe('bsize 不是片段大小时：不能拿它当单位', () => {
+  afterEach(() => {
+    statfs.mockReset();
+    execFileMock.mockReset();
+  });
+
+  it('bsize=1MiB（FUSE 的传输尺寸）⇒ 改问 df，而不是算出 256 倍的数', async () => {
+    // 实测值：OrbStack 把 bind mount 的 bsize 报成 1048576，blocks 仍是 4KiB 单位。
+    statfs.mockResolvedValue({ blocks: 242824745n, bavail: 172452586n, bsize: 1048576, type: 0 });
+    // df 报的是真相（1024 字节块）：926 GiB 总 / 658 GiB 可用。
+    stubDf(
+      'Filesystem 1024-blocks      Used Available Capacity Mounted on\n' +
+        'mac          971298980 281808620 689490360      30% /data\n',
+    );
+
+    const stats = await filesystemStatsFor('/data');
+    // MUTATION: 把实现里的 `capacityFromStatfs(fs) ?? await capacityFromDf(probe)`
+    //   换回 `blocks * bsize` ⇒ 这里得到 254599771586560（231 TB），红。
+    expect(stats?.totalBytes).toBe(971298980 * 1024);
+    expect(stats?.availableBytes).toBe(689490360 * 1024);
+  });
+
+  it('df 的第一列含空格也解析得对 —— ⛔ 不能按列切', async () => {
+    statfs.mockResolvedValue({ blocks: 1n, bavail: 1n, bsize: 1048576, type: 0 });
+    stubDf(
+      'Filesystem 1024-blocks Used Available Capacity Mounted on\n' +
+        'My Fancy Volume  1000  400  600  40% /mnt/some dir\n',
+    );
+    const stats = await filesystemStatsFor('/mnt/some dir');
+    expect(stats?.totalBytes).toBe(1000 * 1024);
+    expect(stats?.availableBytes).toBe(600 * 1024);
+  });
+
+  it('⛔⛔ bsize 可疑且 df 也答不上来 ⇒ 回 null，不许退回那个已知错的大数', async () => {
+    statfs.mockResolvedValue({ blocks: 242824745n, bavail: 172452586n, bsize: 1048576, type: 0 });
+    stubDf(null);
+
+    // 一个已知虚报 256 倍的数，比「量不到」坏得多：它会把所有磁盘门禁静默放行。
+    expect(await filesystemStatsFor('/data')).toBeNull();
+    // 而预检侧收到「量不到」时的既定口径是不拦（见 availableBytesFor 抬头）。
+    expect(await availableBytesFor('/data')).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('64 KiB 仍然当作真实片段大小 —— ext4/xfs 的合法上限，不该被误伤', async () => {
+    statfs.mockResolvedValue({ blocks: 10n, bavail: 4n, bsize: 65536, type: 0 });
+    stubDf(null); // 不该被用到
+
+    expect(await availableBytesFor('/x')).toBe(4 * 65536);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('原生文件系统（bsize=4096）一次 df 都不调 —— 这条路径必须零额外开销', async () => {
+    statfs.mockResolvedValue({ blocks: 100n, bavail: 50n, bsize: 4096, type: 0 });
+    stubDf(null);
+
+    expect(await availableBytesFor('/x')).toBe(50 * 4096);
+    expect(execFileMock).not.toHaveBeenCalled();
   });
 });

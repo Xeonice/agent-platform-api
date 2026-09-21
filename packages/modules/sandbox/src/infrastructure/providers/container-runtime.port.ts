@@ -61,6 +61,22 @@ export interface ContainerRuntime {
    * 重新回答。这是它与凭证的关键区别——凭证反推不出来，所以那个才落库。
    */
   agentOrigin(id: string, agentPort: number): Promise<string>;
+
+  /**
+   * 这张镜像的字节**已经在本运行时自己的库里**了吗（对应契约 `SandboxProvider.imageStaged`）。
+   *
+   * ⚠️ **可选**：答不上来的实现不要实现它 —— 契约那条「不知道 ≠ false」。谎报一个
+   * `false` 会让向导去做一次不必要的拉取；谎报 `true` 会让它跳过唯一该做的那一步。
+   */
+  hasImage?(ref: string): Promise<boolean>;
+
+  /**
+   * 把镜像拉进本运行时自己的库 —— **不建容器**（对应契约 `SandboxProvider.stageImage`）。
+   *
+   * ⚠️ 必须**幂等**：已经在库里时再调一次也要正常返回（契约明写调用方可以不先问 hasImage）。
+   * ⚠️ `onProgress` 报的是**本次调用新落盘的字节**，测不出来就一次都别报（宁可沉默不要猜）。
+   */
+  pullImage?(ref: string, onProgress?: (bytesDownloaded: number) => void): Promise<void>;
 }
 
 export interface ContainerCreateSpec {

@@ -74,7 +74,7 @@ const checksOf = (fs: DiagnoseServerFrame[]): DiagnoseCheckFrame[] =>
   fs.filter((f): f is DiagnoseCheckFrame => f.event === 'check');
 
 describe('DiagnosticsService —— 帧序与完整性', () => {
-  it('首帧是 start，按契约顺序列出全部八项（页面据它画 ⏳ 占位）', async () => {
+  it('首帧是 start，按契约顺序列出全部九项（页面据它画 ⏳ 占位）', async () => {
     const { service } = harness(allChecks());
     const frames = await collect(service);
     expect(frames[0]!.event).toBe('start');
@@ -82,18 +82,22 @@ describe('DiagnosticsService —— 帧序与完整性', () => {
     expect(startOf(frames).timeoutMs).toBe(DIAGNOSE_TIMEOUT_MS);
   });
 
-  it('末帧是 done，八项各出一帧 check', async () => {
+  it('末帧是 done，九项各出一帧 check', async () => {
     const { service } = harness(allChecks());
     const frames = await collect(service);
     expect(frames.at(-1)!.event).toBe('done');
-    expect(checksOf(frames)).toHaveLength(8);
-    expect(new Set(checksOf(frames).map((f) => f.id)).size).toBe(8);
+    // ⚠️ 用 DIAGNOSE_CHECK_IDS.length 而不是再写一遍数字 —— 项数的**唯一真相**在契约里，
+    //    这里抄一份就意味着下次增删要改两处（2026-09-22 加第 ⑨ 项时就是这么红的）。
+    expect(checksOf(frames)).toHaveLength(DIAGNOSE_CHECK_IDS.length);
+    expect(new Set(checksOf(frames).map((f) => f.id)).size).toBe(DIAGNOSE_CHECK_IDS.length);
   });
 
   it('装配少一项 ⇒ 当场抛，而不是安静地少发一帧', async () => {
     // ⚠️ 少发一帧的后果是前端那一格**永远停在 ⏳** —— 一个看起来像「还在跑」的永久状态。
-    const { service } = harness(allChecks().slice(0, 7));
-    await expect(collect(service)).rejects.toThrow(/缺 \[preset-image\]/);
+    const { service } = harness(allChecks().slice(0, -1));
+    // 从契约末项派生 —— ⛔ 写死 id 就意味着每次在清单尾部加一项都要回来改一次。
+    const dropped = DIAGNOSE_CHECK_IDS.at(-1)!;
+    await expect(collect(service)).rejects.toThrow(new RegExp(`缺 \\[${dropped}\\]`));
   });
 
   it('装配多一项（契约里没有的 id）⇒ 同样当场抛', async () => {
@@ -104,16 +108,18 @@ describe('DiagnosticsService —— 帧序与完整性', () => {
 });
 
 describe('DiagnosticsService —— 一项坏掉不阻塞整轮（02 §5.3）', () => {
-  it('一项抛异常 ⇒ 它自己是 fail，其余七项照常出帧', async () => {
+  it('一项抛异常 ⇒ 它自己是 fail，其余各项照常出帧', async () => {
     const { service } = harness(allChecks({ 'dev-kvm': () => Promise.reject(new Error('boom')) }));
     const frames = await collect(service);
-    expect(checksOf(frames)).toHaveLength(8);
+    expect(checksOf(frames)).toHaveLength(DIAGNOSE_CHECK_IDS.length);
     const kvm = checksOf(frames).find((f) => f.id === 'dev-kvm')!;
     expect(kvm.status).toBe('fail');
     expect(kvm.detailText).toContain('boom');
     // ⛔ headline 是「这一项好不好」，异常文本属于第二层。
     expect(kvm.headline).not.toContain('boom');
-    expect(checksOf(frames).filter((f) => f.status === 'ok')).toHaveLength(7);
+    expect(checksOf(frames).filter((f) => f.status === 'ok')).toHaveLength(
+      DIAGNOSE_CHECK_IDS.length - 1,
+    );
   });
 
   it('一项超时 ⇒ status:"timeout"，整轮不被它拖住', async () => {
@@ -129,12 +135,12 @@ describe('DiagnosticsService —— 一项坏掉不阻塞整轮（02 §5.3）', 
       await done;
       const outbound = checksOf(frames).find((f) => f.id === 'outbound-network')!;
       expect(outbound.status).toBe('timeout');
-      expect(checksOf(frames)).toHaveLength(8);
+      expect(checksOf(frames)).toHaveLength(DIAGNOSE_CHECK_IDS.length);
       expect(frames.at(-1)!.event).toBe('done');
       // ⚠️ timeout 必须计进 failCount：给出「7 ok / 0 fail」这种读数会让人以为
       //    「没有失败」，而其实有一项 5s 内答不上来。
       expect(doneOf(frames).failCount).toBe(1);
-      expect(doneOf(frames).okCount).toBe(7);
+      expect(doneOf(frames).okCount).toBe(DIAGNOSE_CHECK_IDS.length - 1);
     } finally {
       vi.useRealTimers();
     }
@@ -150,7 +156,8 @@ describe('DiagnosticsService —— 一项坏掉不阻塞整轮（02 §5.3）', 
     );
     const frames = await collect(service);
     const done = doneOf(frames);
-    expect(done.okCount).toBe(5);
+    // 三项被覆盖成 info/warn/fail，其余都是 ok。
+    expect(done.okCount).toBe(DIAGNOSE_CHECK_IDS.length - 3);
     expect(done.infoCount).toBe(1);
     expect(done.warnCount).toBe(1);
     expect(done.failCount).toBe(1);

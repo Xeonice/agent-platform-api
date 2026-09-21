@@ -196,7 +196,7 @@ export class SystemController {
   })
   @ApiOperation({
     summary:
-      '八项诊断，SSE 逐项流式（帧类型手写于两仓 sse-protocol.ts）。八项并行、单项超时 5s，整轮 ≈ 最慢那项；断连即中止剩余检查',
+      '逐项诊断，SSE 流式（帧类型手写于两仓 sse-protocol.ts）。各项并行、单项超时 5s，整轮 ≈ 最慢那项；断连即中止剩余检查',
   })
   async diagnose(@Res() res: SseResponse): Promise<void> {
     const writer = new SseWriter(res);

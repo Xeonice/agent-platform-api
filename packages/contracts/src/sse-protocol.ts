@@ -29,7 +29,7 @@ import type { AuditSeverity } from './schemas/system.schema';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 八项的 id，**数组顺序 = 展示顺序**（P21-5 §6：「异步并行但顺序固定」）。
+ * 各项的 id，**数组顺序 = 展示顺序**（P21-5 §6：「异步并行但顺序固定」）。
  *
  * ⚠️ **前端不得自己维护一份这个清单。** 每一轮诊断的第一帧（`start`）会把本数组
  * 原样下发，前端据它渲染「未完成项 ⏳」的占位 —— 因为在第一个 `check` 帧到达之前，
@@ -45,6 +45,12 @@ export const DIAGNOSE_CHECK_IDS = [
   'ws-loopback',
   'data-root-fs',
   'preset-image',
+  // ⚠️ 2026-09-22 新增。它回答的是一个此前只能靠「点了登录才发现」的问题：
+  //    容器形态下登录 CLI 跑在 auth helper 容器里（11 §1.1），那个容器没起来时
+  //    「帐号登录」必然失败 —— 而失败文案是「多半是这个 CLI 没能正常启动」，
+  //    ⛔ 指错了方向。§1.1 运行纪律本来就要求「helper 里 CLI 缺失或版本不受支持
+  //    要在系统状态页显性报出，而不是等用户点登录才失败」。
+  'auth-helper',
 ] as const;
 export type DiagnoseCheckId = (typeof DIAGNOSE_CHECK_IDS)[number];
 
@@ -95,7 +101,7 @@ export type PresetImageStep = (typeof PRESET_IMAGE_STEPS)[number];
 /**
  * 首帧。**在任何一项跑完之前发出**，让页面立刻能画出八个 ⏳ 占位。
  *
- * ⚠️ 它不是可省的装饰。没有它，前端要么自己硬抄一份八项清单（= 第四份手抄），要么
+ * ⚠️ 它不是可省的装饰。没有它，前端要么自己硬抄一份检查清单（= 第四份手抄），要么
  * 只能「收到一项画一项」—— 而并行执行下最快的那项可能是第 ⑥ 项，页面会先画出一行
  * 孤零零的「WS 回环 ✅」，看起来像诊断只有一项。
  */
@@ -108,7 +114,7 @@ export interface DiagnoseStartFrame {
 }
 
 /**
- * 逐项结论。八项**并行**跑，所以到达顺序**不等于** {@link DIAGNOSE_CHECK_IDS} 的顺序
+ * 逐项结论。各项**并行**跑，所以到达顺序**不等于** {@link DIAGNOSE_CHECK_IDS} 的顺序
  * —— 前端按 id 归位，不要按到达顺序追加（02 §5.3 订正：整轮 ≈ 最慢那项 ≈ 5s，
  * 不是累加的 40s）。
  */
@@ -286,7 +292,7 @@ export const SSE_PROTOCOL_CANONICAL =
   'done{okCount,infoCount,warnCount,failCount,totalMs}|' +
   'diagnose.status:ok,info,warn,fail,timeout|' +
   'diagnose.checks:container-runtime,dev-kvm,disk-space,port-conflict,' +
-  'outbound-network,ws-loopback,data-root-fs,preset-image|' +
+  'outbound-network,ws-loopback,data-root-fs,preset-image,auth-helper|' +
   'diagnose.preset-image.steps:config,registry,lineage,registration,staged|' +
   'diagnose.preset-image.codes:PRESET_IMAGE_NOT_CONFIGURED,PRESET_IMAGE_NOT_IN_REGISTRY,' +
   'PRESET_IMAGE_NOT_PLATFORM_BUILT,PRESET_IMAGE_NOT_SEEDED|' +
@@ -307,7 +313,7 @@ export const SSE_PROTOCOL_CANONICAL =
  * 版本不匹配而拒绝一次只读诊断，等于在最需要它的时候把它关掉。前端读到不认识的
  * hash 应当照常渲染已认识的帧并提示升级，而不是中断。
  */
-export const SSE_DIAGNOSE_SCHEMA_HASH = 'sb-diagnose-v1';
+export const SSE_DIAGNOSE_SCHEMA_HASH = 'sb-diagnose-v2';
 
 /**
  * 诊断结论 → 审计严重度的映射（`system.diagnose` 那条审计用，13 §2.8.2）。
