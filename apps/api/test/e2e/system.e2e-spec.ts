@@ -334,9 +334,12 @@ describe('POST /api/system/diagnose —— SSE 逐项（02 §5.3）', () => {
 
     const done = frames.at(-1) as DiagnoseDoneFrame;
     expect(done.event).toBe('done');
-    expect(done.okCount + done.infoCount + done.warnCount + done.failCount).toBe(8);
+    // ⚠️ 对着常量断言 —— 与本文件上面 `DIAGNOSE_TIMEOUT_MS` 那条同一纪律。
+    expect(done.okCount + done.infoCount + done.warnCount + done.failCount).toBe(
+      DIAGNOSE_CHECK_IDS.length,
+    );
     // 并行 ⇒ 整轮 ≈ 最慢那项，绝不是各项累加（02 §5.3 订正的那一条）。
-    expect(done.totalMs).toBeLessThan(8 * DIAGNOSE_TIMEOUT_MS);
+    expect(done.totalMs).toBeLessThan(DIAGNOSE_CHECK_IDS.length * DIAGNOSE_TIMEOUT_MS);
   }, 30_000);
 
   it('第 ⑧ 项走完五步链到 staged（本仓真的备齐了预制镜像时的样子）', async () => {
