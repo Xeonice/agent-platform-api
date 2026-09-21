@@ -20,6 +20,8 @@ import { ClaudeCodeAdapter } from '../infrastructure/adapters/claude-code/claude
 import { DefaultRuntimeAdapterRegistry } from '../infrastructure/registry/runtime-adapter.registry';
 import { ReservedEnvNameRegistrar } from '../infrastructure/registry/reserved-env.registrar';
 import { HostAuthHelper } from '../infrastructure/helper/host-auth-helper';
+import { ContainerAuthHelper } from '../infrastructure/helper/container-auth-helper';
+import { HelperContainerSession } from '../infrastructure/helper/helper-container.session';
 import { SqliteRuntimeSettingsRepository } from '../infrastructure/persistence/sqlite/runtime-settings.repository.impl';
 import { RuntimeSettingsReaderWriter } from '../infrastructure/settings/runtime-settings.reader';
 import { CredentialRefreshScanner } from '../infrastructure/refresh/credential-refresh.scanner';
@@ -50,7 +52,28 @@ import { RuntimeController } from './http/runtime.controller';
     RuntimeSettingsReaderWriter,
     DefaultRuntimeCredentialStateReader,
     { provide: RUNTIME_ADAPTER_REGISTRY, useClass: DefaultRuntimeAdapterRegistry },
-    { provide: AUTH_HELPER, useClass: HostAuthHelper },
+    HelperContainerSession,
+    HostAuthHelper,
+    ContainerAuthHelper,
+    {
+      /**
+       * 形态二选一（11 §1.1 的 `auth.helper.mode`，默认 `container`）。
+       *
+       * ⚠️⚠️ **默认必须是 container。** 宿主形态要求「后端进程所在环境自带两个 CLI」——
+       * 而出厂部署形态是 `docker compose up`，api 跑在 `node:22-bookworm-slim` 里,
+       * 那张镜像**没有也不该有**这两个 CLI（装进去就是与沙箱两条独立升级线，11 §1.1）。
+       * ⇒ 此前这里硬接 `HostAuthHelper`，于是每一个容器部署点「帐号登录」必然失败，
+       * 报的还是一句「多半是这个 CLI 在这台机器上没能正常启动」——
+       * ⛔ 而真相是它压根没装。2026-09-22 在一台真机上复现后改掉。
+       *
+       * ⚠️ `host` 仍然保留，且**不是遗留代码**：裸机 systemd 部署（11 §1.3）没有容器
+       * 运行时，那一档只能走宿主 CLI。
+       */
+      provide: AUTH_HELPER,
+      inject: [ContainerAuthHelper, HostAuthHelper],
+      useFactory: (container: ContainerAuthHelper, host: HostAuthHelper): unknown =>
+        (process.env['AUTH_HELPER_MODE'] ?? 'container') === 'host' ? host : container,
+    },
     { provide: RUNTIME_SETTINGS_REPOSITORY, useClass: SqliteRuntimeSettingsRepository },
     { provide: RUNTIME_INSTALLATION_REPOSITORY, useClass: SqliteRuntimeInstallationRepository },
     { provide: RUNTIME_INSTALL_ORCHESTRATOR, useExisting: RuntimeInstallOrchestratorService },
@@ -66,6 +89,12 @@ import { RuntimeController } from './http/runtime.controller';
     RUNTIME_SETTINGS_READER,
     RUNTIME_SETTINGS_WRITER,
     RUNTIME_CREDENTIAL_STATE_READER,
+    // ⚠️ 导出它**只为一个消费方**：`platform/system` 的 `AuthHelperCheck` 要读
+    //    helper 的就绪状态（11 §1.1「不要等用户点登录才失败」）。
+    // ⛔ 2026-09-22 漏了这一行 ⇒ api **起不来**（Nest 解析不出
+    //    `AuthHelperCheck` 的第 0 个参数）。而单测一条都没红：它们把 session
+    //    mock 掉了，**DI 接线从来没被执行过**。这类漏接只有真正把模块装起来才看得见。
+    HelperContainerSession,
   ],
 })
 export class RuntimeModule {}

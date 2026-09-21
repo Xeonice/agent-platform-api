@@ -19,12 +19,16 @@ import type { DiagnoseStatus } from '@platform/contracts';
  * 两仓可以一起漂而门禁全绿。两条合起来才传递地钉住「后端发的帧 == 前端认的帧」。
  */
 describe('SSE 诊断帧契约', () => {
-  it('canonical 覆盖八项检查，且顺序就是展示顺序（P21-5 §6）', () => {
+  it('canonical 覆盖九项检查，且顺序就是展示顺序（P21-5 §6）', () => {
     // ⚠️ 不是「包含这八个 id」而是「按这个顺序逐字包含」——顺序本身是产品要求
     //    （异步并行但展示顺序固定），只断言集合会让一次重排安静通过。
     expect(SSE_PROTOCOL_CANONICAL).toContain(`diagnose.checks:${DIAGNOSE_CHECK_IDS.join(',')}`);
-    expect(DIAGNOSE_CHECK_IDS).toHaveLength(8);
-    expect(DIAGNOSE_CHECK_IDS[7]).toBe('preset-image');
+    // ⚠️ 这个数字**就该随每次增删而红** —— 它逼着加检查的人回到这里，顺带回到
+    //    `SSE_PROTOCOL_CANONICAL` 与前端那份镜像（两边都是手钉的字面量）。
+    //    2026-09-22 第 ⑨ 项 `auth-helper`：容器形态下登录 CLI 跑在 helper 容器里，
+    //    它没起来时此前只能靠「点了登录才发现」（11 §1.1 运行纪律要求显性报出）。
+    expect(DIAGNOSE_CHECK_IDS).toHaveLength(9);
+    expect(DIAGNOSE_CHECK_IDS[8]).toBe('auth-helper');
   });
 
   it('canonical 钉住 status 闭集（含 info 与 timeout 这两个易被合并掉的）', () => {
@@ -61,7 +65,7 @@ describe('SSE 诊断帧契约', () => {
   });
 
   it('schema hash 是独立于 WS 那两个的钉死字面量', () => {
-    expect(SSE_DIAGNOSE_SCHEMA_HASH).toBe('sb-diagnose-v1');
+    expect(SSE_DIAGNOSE_SCHEMA_HASH).toBe('sb-diagnose-v2');
   });
 });
 

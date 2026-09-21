@@ -57,6 +57,33 @@ ENV NODE_ENV=production
 # **不接受用户代码**——用户代码跑在它创建的兄弟容器里。真正的隔离边界在那儿,
 # 以及只白名单 CONTAINERS/EXEC/IMAGES 的 docker-socket-proxy 上。
 
+# ⛔⛔ **git 克隆跑在 api 进程(这个容器)里,不是在沙箱容器里** —— `simple-git` 只是对
+# `child_process.spawn('git', …)` 的封装,`node:22-bookworm-slim` 这张基础镜像**不带
+# git**(实测 `docker run --rm node:22-bookworm-slim sh -c 'command -v git'` 是空)。
+# 不装的后果不是「某个功能报错」,是「建项目 / 同步基线 / 校验 Git 凭证」这三条路**全部
+# 在容器里找不到 `git` 可执行文件而失败**,而这三条恰好是这个平台的入口功能:
+#   · packages/modules/project/src/infrastructure/git/git-cloner.ts   —— 建项目克隆
+#   · packages/modules/project/src/infrastructure/git/baseline-git.ts —— `branch -r` / `fetch --all`
+#   · packages/modules/credential/src/infrastructure/git/git-ls-remote.tester.ts —— 凭证测试
+#
+# 装的三样,每样对应一条代码路径,将来想瘦身请先读完这三行再删:
+#   · git            —— 上面三条路径共同需要的可执行文件本身。
+#   · openssh-client —— `packages/modules/project/src/infrastructure/git/git-env.ts` 的
+#     `mergeAuthEnv()` **总是**给每一次 git 调用注入 `GIT_SSH_COMMAND`(无凭证时兜底成
+#     `ssh -F /dev/null …` 以关闭环境 SSH 身份;有凭证时指向平台落盘的私钥),而
+#     credential 模块把 SSH 私钥列为一等公民的凭证类型(`git-auth.materializer.ts` /
+#     `known-hosts.ts`)——只要有一个项目用 `git@`/`ssh://` 地址,git 的 ssh 传输层就会
+#     去 spawn `ssh` 这个二进制,不装它,ssh 形态的私有仓 100% 失败(而 https 形态的仓
+#     不会触发这条,所以本地拿一个 https 公开仓测过「能建项目」不代表这条已经补齐)。
+#   · ca-certificates —— 装的是系统信任的 CA 根证书(`/etc/ssl/certs`)。Node 自己的
+#     `fetch`(undici)带了内置证书链、不依赖这份系统信任库,**但 git 走 libcurl/OpenSSL,
+#     读的是系统信任库**——不装它,任何 `https://` 地址的 clone / fetch / ls-remote 都会
+#     以 `SSL certificate problem: unable to get local issuer certificate` 失败,
+#     且报错信息和「网络不通」长得一样,容易被误判成防火墙问题。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/node_modules          ./node_modules
 COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=builder /app/apps/api/dist         ./apps/api/dist
@@ -72,10 +99,21 @@ COPY --from=builder /app/package.json          ./package.json
 # 归一成 `null`,端点如实回 `null`。⛔ 别给它们写默认值——一个写死的默认版本号会让
 # 每一个忘了传 build-arg 的构建都报出同一个**看起来像真的**的版本。
 #
+#   ⚠️⚠️ **在 `api/` 里直接 `docker build` 时,版本号要从【主仓】取,不是这个仓。**
+#   ⛔ 这里此前写的是裸的 `git describe --tags --always` —— 那是错的:submodule 有
+#   自己独立的 `.git`,在 `api/` 里跑它拿到的是 **api 仓自己那条时间线**
+#   (实测得到 `sandbox-image-v2-20-g1427649`),而平台版本只在主仓上打(`v0.1.0`)。
+#   ⇒ 用 `--show-superproject-working-tree` 定位主仓,**不要**写 `git -C ..`:
+#      后者依赖"主仓一定是上一级目录"这个假设,目录一挪就碎。
+#
+#   SUPER=$(git rev-parse --show-superproject-working-tree)
 #   docker build \
-#     --build-arg APP_VERSION="$(git describe --tags --always)" \
-#     --build-arg APP_COMMIT="$(git rev-parse HEAD)" \
+#     --build-arg APP_VERSION="$(git -C "$SUPER" describe --tags --always)" \
+#     --build-arg APP_COMMIT="$(git -C "$SUPER" rev-parse HEAD)" \
 #     --build-arg APP_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+#
+#   📌 多数人不需要这条 —— 正常部署是在**主仓根目录**跑 `docker compose up --build`
+#      (见主仓 README §3),那里裸的 `git describe` 就是对的。
 #
 # ⚠️ 这三行放在**最后**是有意的:ARG 的值一变就会让它之后的每一层缓存失效,而版本号
 # 每次构建都不一样。放在 COPY 前面等于每次构建都从头装一遍依赖。

@@ -3,6 +3,7 @@ import type Docker from 'dockerode';
 import {
   SandboxProviderError,
   SandboxProviderErrorCode,
+  pinnedImageRef,
   type ProcessSpec,
   type ProcessStream,
   type SandboxFiles,
@@ -12,6 +13,7 @@ import {
   type SandboxProviderCapabilities,
   type SandboxProviderContext,
   type SandboxRuntimeStatus,
+  type ResolvedImageSpec,
 } from '@platform/contracts';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -238,6 +240,52 @@ export class AioSandboxProvider implements SandboxProvider {
       const message = e instanceof Error ? e.message : String(e);
       return /ECONNREFUSED|connect|fetch failed/i.test(message) ? false : undefined;
     }
+  }
+
+  /**
+   * 镜像的字节在不在本运行时自己的库里（契约 `imageStaged`）。
+   *
+   * ⚠️⚠️ **运行时答不上来时必须【抛】，不能答 `false`。** 契约那条「不知道 ≠ false」：
+   * 谎报 false 会让向导去拉一张其实已在的镜像；而调用方本来就按
+   * `typeof provider.imageStaged === 'function'` 之外**还要**接住异常 —— 它是 hint 不是 gate。
+   * ⛔ 这里之所以不能像 boxlite 那样直接实现，是因为 `ContainerRuntime` 是个端口，
+   * 不同实现（docker / podman / …）未必都有这只手。
+   */
+  async imageStaged(image: ResolvedImageSpec): Promise<boolean> {
+    if (typeof this.runtime.hasImage !== 'function') {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
+        `container runtime '${this.runtime.kind}' cannot tell whether an image is local`,
+      );
+    }
+    return this.runtime.hasImage(pinnedImageRef(image));
+  }
+
+  /**
+   * 把镜像拉进本运行时的库 —— **不建容器**（契约 `stageImage`）。
+   *
+   * ── 它补的是什么（2026-09-22 真机撞出来）──────────────────────────────────
+   * 此前**只有 boxlite 实现了它**，于是 docker/aio 这条路上没有任何地方拉镜像：
+   * 一台 ghcr 可达、镜像只是还没下载的机器，`planProvision` 四条可搬的路全不成立 ⇒
+   * 落到 `build-only`「平台代劳不了」，而向导第 3 步**全绿放过**（答不出 `imageStaged`，
+   * 「不知道 ≠ 没有」），最后在第一次 `create()` 时撞 `No such image` ——
+   * 那时用户已经写完指令点了发起，等待落在最差的时机（`provision-plan.ts` 文件头
+   * 反复讲的正是这件事）。
+   *
+   * ⚠️ 用 `pinnedImageRef(image)`（`ref@digest`）而不是裸 tag，与 `create()` 同一坐标 ——
+   * ⛔ 两处不一致就会出现「拉下来了但建容器说没有」。
+   */
+  async stageImage(
+    image: ResolvedImageSpec,
+    onProgress?: (bytesDownloaded: number) => void,
+  ): Promise<void> {
+    if (typeof this.runtime.pullImage !== 'function') {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
+        `container runtime '${this.runtime.kind}' cannot pull images`,
+      );
+    }
+    await this.runtime.pullImage(pinnedImageRef(image), onProgress);
   }
 
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {

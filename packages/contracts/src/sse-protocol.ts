@@ -45,6 +45,12 @@ export const DIAGNOSE_CHECK_IDS = [
   'ws-loopback',
   'data-root-fs',
   'preset-image',
+  // ⚠️ 2026-09-22 新增。它回答的是一个此前只能靠「点了登录才发现」的问题：
+  //    容器形态下登录 CLI 跑在 auth helper 容器里（11 §1.1），那个容器没起来时
+  //    「帐号登录」必然失败 —— 而失败文案是「多半是这个 CLI 没能正常启动」，
+  //    ⛔ 指错了方向。§1.1 运行纪律本来就要求「helper 里 CLI 缺失或版本不受支持
+  //    要在系统状态页显性报出，而不是等用户点登录才失败」。
+  'auth-helper',
 ] as const;
 export type DiagnoseCheckId = (typeof DIAGNOSE_CHECK_IDS)[number];
 
@@ -286,7 +292,7 @@ export const SSE_PROTOCOL_CANONICAL =
   'done{okCount,infoCount,warnCount,failCount,totalMs}|' +
   'diagnose.status:ok,info,warn,fail,timeout|' +
   'diagnose.checks:container-runtime,dev-kvm,disk-space,port-conflict,' +
-  'outbound-network,ws-loopback,data-root-fs,preset-image|' +
+  'outbound-network,ws-loopback,data-root-fs,preset-image,auth-helper|' +
   'diagnose.preset-image.steps:config,registry,lineage,registration,staged|' +
   'diagnose.preset-image.codes:PRESET_IMAGE_NOT_CONFIGURED,PRESET_IMAGE_NOT_IN_REGISTRY,' +
   'PRESET_IMAGE_NOT_PLATFORM_BUILT,PRESET_IMAGE_NOT_SEEDED|' +
@@ -307,7 +313,7 @@ export const SSE_PROTOCOL_CANONICAL =
  * 版本不匹配而拒绝一次只读诊断，等于在最需要它的时候把它关掉。前端读到不认识的
  * hash 应当照常渲染已认识的帧并提示升级，而不是中断。
  */
-export const SSE_DIAGNOSE_SCHEMA_HASH = 'sb-diagnose-v1';
+export const SSE_DIAGNOSE_SCHEMA_HASH = 'sb-diagnose-v2';
 
 /**
  * 诊断结论 → 审计严重度的映射（`system.diagnose` 那条审计用，13 §2.8.2）。

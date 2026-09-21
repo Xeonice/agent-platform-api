@@ -181,6 +181,69 @@ export class DockerContainerRuntime implements ContainerRuntime {
    * （用 `info.Name` 而不是在这里重新拼一遍 `platform-<provider>-<id>` —— 拼的那一份
    * 早晚会与 provider 里的那一份漂移，而漂移的症状是「连不上」，不是「不一致」）。
    */
+  /**
+   * 镜像在不在本机 docker 库里（端口 `hasImage`）。
+   *
+   * ⚠️ 用 `inspect` 而不是 `listImages` 再自己比对：`getImage(ref).inspect()` 认
+   * `repo:tag` 也认 `repo@sha256:…`，而清单里的 `RepoDigests`/`RepoTags` 形状不统一，
+   * 自己比对就要重写一遍 docker 的引用解析 —— 那是一份必然与它漂移的抄写。
+   *
+   * ⛔ **只有 404 才算「不在」**。连不上 daemon、权限被代理挡掉，都不是「镜像不在」——
+   * 那时答 `false` 会让向导去拉一张其实已经在的镜像，或者把一次基础设施故障
+   * 说成一次缺镜像。⇒ 非 404 一律往外抛，让「不知道」留在「不知道」。
+   */
+  async hasImage(ref: string): Promise<boolean> {
+    try {
+      await this.docker.getImage(ref).inspect();
+      return true;
+    } catch (e: unknown) {
+      if ((e as { statusCode?: number }).statusCode === 404) return false;
+      throw this.toProviderError(e);
+    }
+  }
+
+  /**
+   * 把镜像拉进本机 docker 库（端口 `pullImage`）—— **不建容器**。
+   *
+   * ── 为什么需要它（2026-09-22 真机撞出来的缺口）─────────────────────────────
+   * 此前全仓**只有 boxlite 实现了 `stageImage`**，docker/aio 这条路上没有任何地方
+   * 拉镜像。于是一台 ghcr 可达、镜像只是还没下载的 docker 机器上：
+   *   · `provision-plan` 四条可搬的路全不成立 ⇒ 落到 `build-only`「平台代劳不了」；
+   *   · 向导第 3 步却**全绿放过**（aio 答不出 `imageStaged`，而「不知道 ≠ 没有」）；
+   *   · 然后在第一次 `create()` 时撞 `No such image` —— 那时用户已经写完指令点了发起。
+   * ⇒ 补上这只手，`planProvision` 的 `provider-stage` 分支在 docker 上也成立了。
+   *
+   * ⚠️ **幂等**：已在库里时 docker 自己会答 `Image is up to date`，照常正常返回。
+   *
+   * ⚠️ 进度用 dockerode 的**逐层事件**，⛔ 不是自己轮询目录（boxlite 那边是因为它的
+   * SDK 不给回调才只能轮询）。按**层 id 取最新值再求和**，而不是把每个事件累加 ——
+   * 同一层会反复报 `current`，累加出来的数会远超实际、进度条冲过 100%。
+   * ⚠️ 层被丢弃重下时 `current` 会**回退**，求和因此可能变小；如实报出去即可
+   * （契约要的就是「本次落盘字节」，⛔ 不要用 `Math.max` 把它钉成单调 —— 那会把
+   * 「下到一半断了重来」画成「一直在涨」，正是 boxlite 那边记过的教训）。
+   */
+  async pullImage(ref: string, onProgress?: (bytesDownloaded: number) => void): Promise<void> {
+    const stream = await this.guard(() => this.docker.pull(ref));
+    const perLayer = new Map<string, number>();
+    await new Promise<void>((resolve, reject) => {
+      this.docker.modem.followProgress(
+        stream,
+        (err: Error | null) => (err === null ? resolve() : reject(this.toProviderError(err))),
+        (evt: { id?: string; progressDetail?: { current?: number } }) => {
+          if (onProgress === undefined) return;
+          const cur = evt.progressDetail?.current;
+          // ⚠️ 没有 id 或没有 current 的事件（`Pulling from …`、`Status: …`）直接跳过，
+          //    ⛔ 别把它们当 0 记进表 —— 那会在层表里留下一堆恒 0 的条目。
+          if (evt.id === undefined || typeof cur !== 'number') return;
+          perLayer.set(evt.id, cur);
+          let total = 0;
+          for (const v of perLayer.values()) total += v;
+          onProgress(total);
+        },
+      );
+    });
+  }
+
   async agentOrigin(id: string, agentPort: number): Promise<string> {
     const info = await this.guard(() => this.docker.getContainer(id).inspect());
     const network = this.network();

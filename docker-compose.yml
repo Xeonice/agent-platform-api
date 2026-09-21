@@ -9,14 +9,22 @@ services:
     #   `GET /api/system/version` 原样报出。⛔ 三个都**不给默认值**:留空时端点如实回
     #   `null`,而一个写死的默认版本号会让每一次忘了设的构建都报出同一个假版本。
     #
-    #   出厂就带版本号请这样起:
-    #     APP_VERSION=$(git describe --tags --always) \
-    #     APP_COMMIT=$(git rev-parse HEAD) \
+    #   出厂就带版本号请这样起(在 `api/` 目录里,即本文件所在目录,跑 `docker compose up`):
+    #     APP_VERSION=$(git -C "$(git rev-parse --show-superproject-working-tree)" describe --tags --always) \
+    #     APP_COMMIT=$(git -C "$(git rev-parse --show-superproject-working-tree)" rev-parse HEAD) \
     #     APP_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
     #     docker compose up --build
     #
-    #   ⚠️ 版本取的是**主仓**的 tag(平台版本只在主仓上打),不是 api 子仓的 ——
-    #   在 submodule 目录里跑 `git describe` 拿到的是另一条时间线。
+    #   ⚠️ 版本取的是**主仓**的 tag(平台版本只在主仓上打,只有主仓钉得住 api/web 两个
+    #   submodule 指针 = 一份可复现的部署状态),不是 api 子仓的。
+    #   ⛔ **这里此前写的是 `git describe --tags --always`(不带 `-C`)—— 那是错的**
+    #   (2026-09-18 实测推翻):用户是在 `api/` 目录里跑 compose,而 `api/` 是**它自己
+    #   的 git 仓库**(submodule 有独立的 .git),裸 `git describe` 走的是 api 仓自己那条
+    #   tag 时间线(实测拿到 `sandbox-image-v2-…`),不是主仓的 `v0.1.0`。
+    #   `git rev-parse --show-superproject-working-tree` 是 git 自带的「我在哪个主仓的
+    #   submodule 里」探测,从 `api/` 内的任何子目录跑都答得对(不依赖「主仓就是上一级
+    #   目录」这个此前默认成立、以后目录一挪就碎的假设),实测在本仓返回
+    #   `.../云agent管理平台`,再拿它 `describe` 才是 `v0.1.0`。
     build:
       context: .
       args:
@@ -118,6 +126,39 @@ services:
       # 此前这里写死 `/data` 而卷是 `${DATA_ROOT}:/data`,默认值下两边并不相等。
       DATA_ROOT: ${DATA_ROOT:-/srv/agent-platform/data}
       DATABASE_URL: ${DATA_ROOT:-/srv/agent-platform/data}/platform.db
+      # ⛔⛔ **compose 的 `./.env` 只对本文件里的 `${VAR}` 做字符串插值,不会把变量
+      #   注入容器** —— 这两件事长得像,行为完全不同。运维方在 `api/.env` 里写下
+      #   `ACCESS_PASSCODE=xxxx` 重启,以为门锁上了;实际上如果这里没有对应的
+      #   `ACCESS_PASSCODE: ${ACCESS_PASSCODE:-}`,容器内的 `process.env.ACCESS_PASSCODE`
+      #   仍是 undefined,`PasscodeService.source` 落成 `'none'`、`PasscodeGuard` 照旧
+      #   自禁用 —— **看起来做了、实际没有**,而且不报任何错误。
+      #   ⇒ 下面每新增一个「运维方会在 `.env` 里填」的变量,都必须在这里配一行同名透传,
+      #   否则它对 compose 部署形态就是个死字段。新增变量时先问一句:「这个值
+      #   `process.env.X` 在 api 进程里真的会被读到吗」——只在 `.env.example` 里但没人读的
+      #   不用管,过一遍 `grep process.env` 就知道。
+      #
+      # Access passcode(.env.example 213-215,shared/11 §3.1)。留空 = 门禁关闭
+      # (`NoopAuthGuard`)。
+      ACCESS_PASSCODE: ${ACCESS_PASSCODE:-}
+      # 预制镜像搬运源(.env.example 217-235,`preset-image-provisioner.ts`)。两个都留空
+      # 时平台走 `provider-stage`(见 A5 订正,不是 `.env.example` 原先说的
+      # `upstream-copy`)——单档出厂部署本来就不需要配这两行,但既然 `.env.example` 把它们
+      # 摆在「运维方可能会填」的位置,compose 就不能假装它们不存在。
+      # ⚠️ `SANDBOX_IMAGE_ASSETS_DIR` 若真的填了,它指向的必须是一个**宿主路径**、且
+      #   要用上面 `volumes:` 同款的「宿主路径 = 容器路径」bind mount 显式挂进来 ——
+      #   本文件不替它加这条 volume(留空是绝大多数部署的常态,提前挂一个不存在的路径
+      #   反而会重演 A4 那种「compose 直接起不来」)。只透传环境变量、不接文件系统的这一半,
+      #   同样是「填了等于没填」的坑,只是从「门禁」换成了「搬镜像」。
+      SANDBOX_IMAGE_ASSETS_DIR: ${SANDBOX_IMAGE_ASSETS_DIR:-}
+      SANDBOX_PRESET_IMAGE_SOURCE: ${SANDBOX_PRESET_IMAGE_SOURCE:-}
+      # ⛔ **`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 故意不在这里**——核实过
+      #   (`connectivity.probe.ts` / `outbound-network.check.ts` / `proxy-redaction.ts`)
+      #   之后发现这三个从来不是 api 进程会读的**环境变量**:代理坐标是「系统设置」里的
+      #   `httpProxy` / `httpsProxy` / `noProxy`,存在 `system_settings` 表里,由初始化
+      #   向导 / 系统设置页写入,不经 `process.env`。所有代码里出现这三个大写名字的地方
+      #   都是**提示用户去系统设置页填**的人话字符串,不是这个进程自己会 `process.env.` 读的
+      #   东西。⇒ 加了也没用,不加也不缺——真要过一遍 `grep process.env` 才敢下这个结论,
+      #   不要凭名字眼熟就当它们是同一类变量。
     # ⚠️ **这一行是 `api/images/README.md` 那份「本机明文 registry」配方的一部分,不是
     #   可选项**(2026-08-30 从零复验的落差:配方要求 api 服务带 `extra_hosts`,而本文件
     #   此前一个字都没有 —— 照配方做的人会发现容器里 `registry.local` 解析不出来,
@@ -137,11 +178,46 @@ services:
       #   少写 `default` 这一行的后果是 api 连不上 docker-proxy —— 一个 Task 都建不出来。
       - default
       - sandbox
+    # ⚠️ 单机私有化部署没有编排器帮你重启 —— `restart` 策略就是这台机器唯一的自愈手段。
+    #   `unless-stopped` 而不是 `always`:宿主重启后如果运维方手动 `docker compose stop`
+    #   过,不希望下一次开机把它悄悄拉起来(`always` 会无视这次手动停止)。
+    restart: unless-stopped
+    # ⚠️ 探针必须是**真实存在的端点**——`health.controller.ts` 挂在 `@Controller('health')`,
+    #   而 `configure-app.ts` 里 `app.setGlobalPrefix('api')`,合起来是 `/api/health`,
+    #   ⛔ 不是裸的 `/health`(2026-09-18 读代码核实,此前口头猜过一次 `/health`,是错的)。
+    #   它是 `PasscodeGuard` 唯一豁免的端点(见该文件注释),所以健康检查不用管
+    #   ACCESS_PASSCODE 有没有配。
+    # ⚠️ 探针用 `node` 里置的 `fetch` 而不是 `curl`/`wget`——runtime 镜像**没有**这两个
+    #   二进制(A1 只装了 git/openssh-client/ca-certificates,没有理由再为了一次自检多装
+    #   一个包),而 `node` 反正在镜像里(它就是拿来跑 `apps/api/dist/main.js` 的),用它
+    #   自己发一次请求不多花一粒字节。
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s # 迁移在启动时跑(Dockerfile 头部注①),给它一点余量再开始判定
+    # ⛔⛔ **此前只有 `depends_on: [docker-proxy]`(隐式 `condition: service_started`)——
+    #   那只保证 docker-proxy **容器起了**,不保证它**能应答**。haproxy 需要时间加载配置,
+    #   api 若在这个窗口期第一次连 `tcp://docker-proxy:2375` 会直接连接失败,而这只在
+    #   「建第一个 Task 之前」的这几秒钟窗口内才会发生,复现全靠运气(A3 描述的正是这条)。
+    #   收紧到 `service_healthy`,靠的正是上面给 docker-proxy 新加的 `/_ping` 探针 ——
+    #   两者是一体的:没有探针就没有「健康」这个状态可等。
     depends_on:
-      - docker-proxy
+      docker-proxy:
+        condition: service_healthy
 
   docker-proxy:
     image: tecnativa/docker-socket-proxy
+    # 同上:单机部署没有编排器,`docker-proxy` 挂了 api 的每一次 docker 调用都会失败,
+    # 必须能自己起来。
+    restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment: # only the API surfaces the aio provider needs
@@ -149,6 +225,16 @@ services:
       EXEC: '1'
       IMAGES: '1'
       POST: '1'
+    # `/_ping` 是这张镜像内置的 haproxy 健康探针路径,**不受**上面的 CONTAINERS/EXEC/
+    # IMAGES/POST 白名单限制(那份名单管的是 docker API 代理转发,`_ping` 是它自己应答的
+    # 固定路由)——实测即使只开这四项,`wget -qO- http://localhost:2375/_ping` 依旧回
+    # `OK`。镜像基于 alpine,**没有** `curl`,但**有** `wget`(实测)。
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:2375/_ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   # auth-helper: resident lightweight helper reusing the default AIO image
   # (11 §1.1). Reserved — the CLI login flow lands in the runtime slice.

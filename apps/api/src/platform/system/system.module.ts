@@ -18,6 +18,7 @@ import { OutboundNetworkCheck } from './diagnostics/checks/outbound-network.chec
 import { WsLoopbackCheck } from './diagnostics/checks/ws-loopback.check';
 import { DataRootFsCheck } from './diagnostics/checks/data-root-fs.check';
 import { PresetImageCheck } from './diagnostics/checks/preset-image.check';
+import { AuthHelperCheck } from './diagnostics/checks/auth-helper.check';
 import {
   IMAGE_FACADE,
   parseImageRef,
@@ -33,7 +34,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
 /**
  * 系统端点的装配（01 §2 `platform/system/`；23 D-11/D-12：不属任何限界上下文）。
  *
- * ⚠️ **八项检查经 `DIAGNOSE_CHECKS` 这一个 token 注入，而不是让 `DiagnosticsService`
+ * ⚠️ **九项检查经 `DIAGNOSE_CHECKS` 这一个 token 注入，而不是让 `DiagnosticsService`
  * 直接构造它们。** 每一项都有自己的依赖（registry / facade / settings / HttpAdapterHost），
  * 手工 new 会把 DI 搬进 service；而且**新增一项只需要往这个数组里加一行**，调度器一个
  * 字都不用改 —— 它已经按契约 `DIAGNOSE_CHECK_IDS` 排序并校验完整性了。
@@ -60,6 +61,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
     WsLoopbackCheck,
     DataRootFsCheck,
     PresetImageCheck,
+    AuthHelperCheck,
     DockerodeProvisionAdapter,
     {
       // ⚠️ 三个依赖都收窄成窄口子（`PresetImageDockerPort` / `AssetsDirSource` /
@@ -155,6 +157,7 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
         WsLoopbackCheck,
         DataRootFsCheck,
         PresetImageCheck,
+        AuthHelperCheck,
       ],
       useFactory: (...checks: DiagnoseCheck[]): DiagnoseCheck[] => checks,
     },
