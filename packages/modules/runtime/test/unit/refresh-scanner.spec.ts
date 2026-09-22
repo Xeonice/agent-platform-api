@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { runHalfStub } from '../_run-half';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -53,6 +53,9 @@ function fakeHelper(refreshedAccess: string): AuthHelper {
       );
       return {
         homeDir,
+        // ⚠️ 与实现同一条：读回来必须经会话自己这只手。这个替身用的是真临时目录，
+        //    所以这里就是真 fs —— 语义与宿主形态一致。
+        readFile: (rel: string) => readFile(join(homeDir, rel), 'utf8'),
         pty: {
           ref: 'x',
           // ⚠️ 契约必需，此前这个替身缺着（2026-09-05 补）。
@@ -253,6 +256,9 @@ describe('CredentialRefreshScanner (05 §5.1)', () => {
         );
         return {
           homeDir,
+          // ⚠️ 与实现同一条：读回来必须经会话自己这只手。这个替身用的是真临时目录，
+          //    所以这里就是真 fs —— 语义与宿主形态一致。
+          readFile: (rel: string) => readFile(join(homeDir, rel), 'utf8'),
           pty: {
             ref: 'x',
             // ⚠️ 契约必需，此前这个替身缺着（2026-09-05 补）。

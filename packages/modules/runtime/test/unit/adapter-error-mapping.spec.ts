@@ -54,6 +54,9 @@ function registryWith(adapters: RuntimeAdapter[]): RuntimeAdapterRegistry {
 const inertHelper: AuthHelper = {
   openSession: async (): Promise<AuthHelperSession> => ({
     homeDir: '/tmp/inert',
+    // 本替身不读任何文件 —— ⛔ 抛而不是回空串：默默返回 '' 会让
+    //    「adapter 忘了读凭证文件」这类缺陷悄悄通过。
+    readFile: (): Promise<string> => Promise.reject(new Error('本替身不提供文件')),
     pty: {
       ref: 'inert',
       detach: () => undefined,

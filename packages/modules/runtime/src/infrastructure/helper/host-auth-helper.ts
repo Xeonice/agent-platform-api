@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { Injectable, Logger } from '@nestjs/common';
@@ -125,6 +125,10 @@ export class HostAuthHelper implements AuthHelper {
     return {
       pty,
       homeDir,
+      // 宿主形态下会话就在本进程的文件系统上 —— 直接读即可。
+      // ⚠️ 仍然经这个方法而不是让调用方自己拼路径:容器形态下那条路走不通
+      //    （那边的 homeDir 在容器里），而两个形态必须对调用方长得一模一样。
+      readFile: (relPath) => readFile(join(homeDir, relPath), 'utf8'),
       dispose: async () => {
         try {
           child.kill();

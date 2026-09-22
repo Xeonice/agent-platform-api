@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import { AdapterAuthError } from '@platform/contracts';
 import type {
@@ -277,7 +275,12 @@ export class CodexAdapter implements RuntimeAdapter {
     if (input.cancel) throw new AdapterAuthError('AUTH_REJECTED', 'login cancelled');
     // device-auth: the user authorizes in their browser; wait for the CLI to confirm.
     await readUntil(ctx.pty, (s) => (codexLoginSucceeded(s) ? true : null), COMPLETE_TIMEOUT_MS);
-    const raw = await readFile(join(ctx.homeDir, 'auth.json'), 'utf8');
+    // ⚠️⚠️ **必须经 `ctx.readFile`,⛔ 不能用 node 的 `readFile(join(ctx.homeDir, …))`。**
+    //    `homeDir` 是**会话所在那一侧**的路径 —— 容器形态下它在 helper 容器里,
+    //    后端进程 `open()` 只会 ENOENT。2026-09-22 真机实测:device login 走完了、
+    //    codex 也确实写出了 auth.json,平台却报 ENOENT,而**用户看到的是
+    //    「对方拒绝了这次登录」** —— 登录其实成功了,指向完全错误的方向。
+    const raw = await ctx.readFile('auth.json');
     const auth = parseCodexAuthJson(raw);
     const access = auth.tokens?.access_token;
     if (!access || access.length === 0) {

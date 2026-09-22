@@ -147,6 +147,7 @@ export class RuntimeApplicationService {
       const raw = await adapter.beginAuth(method, {
         pty: session.pty,
         homeDir: session.homeDir,
+        readFile: (rel) => session.readFile(rel),
         challengeRef,
         deviceCodeExpiresAt: method === 'oauth-device' ? deviceCodeExpiresAt : undefined,
       });
@@ -224,6 +225,7 @@ export class RuntimeApplicationService {
         {
           pty: entry.session.pty,
           homeDir: entry.session.homeDir,
+          readFile: (rel) => entry.session.readFile(rel),
           challengeRef,
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
@@ -273,6 +275,7 @@ export class RuntimeApplicationService {
       const cred = await adapter.awaitSelfCompletion(entry.challenge.toDto(), {
         pty: entry.session.pty,
         homeDir: entry.session.homeDir,
+        readFile: (rel) => entry.session.readFile(rel),
         challengeRef,
         deviceCodeExpiresAt: entry.challenge.expiresAt,
       });
@@ -347,6 +350,7 @@ export class RuntimeApplicationService {
         {
           pty: entry.session.pty,
           homeDir: entry.session.homeDir,
+          readFile: (rel) => entry.session.readFile(rel),
           challengeRef,
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },

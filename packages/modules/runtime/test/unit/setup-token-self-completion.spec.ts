@@ -47,6 +47,9 @@ function scriptedHelper(): { helper: AuthHelper; deliver: () => void; written: s
     openSession: async (): Promise<AuthHelperSession> =>
       await Promise.resolve({
         homeDir: '/tmp/none',
+        // 本替身不读任何文件 —— ⛔ 抛而不是回空串：默默返回 '' 会让
+        //    「adapter 忘了读凭证文件」这类缺陷悄悄通过。
+        readFile: (): Promise<string> => Promise.reject(new Error('本替身不提供文件')),
         pty: {
           ref: 'x',
           detach: () => undefined,
