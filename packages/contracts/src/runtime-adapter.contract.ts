@@ -56,6 +56,21 @@ export interface AuthCompletionInput {
 export interface AuthSessionContext {
   pty: ProcessStream;
   homeDir: string;
+  /**
+   * 读回**这个隔离 HOME 里**的一个文件（路径相对 `homeDir`）。
+   *
+   * ⚠️⚠️ **⛔ 不要用 node 的 `readFile(join(ctx.homeDir, …))` 代替它。**
+   * `homeDir` 是**会话所在那一侧**的路径 —— 宿主形态下它就在后端进程的文件系统上，
+   * 而**容器形态下它在 helper 容器里**，后端进程去 `open()` 只会得到 ENOENT。
+   *
+   * 2026-09-22 真机实测就是这个形状：device login 走完、CLI 确实写出了 `auth.json`，
+   * 平台却报 `ENOENT: … '/tmp/auth-helper.6iPgbZSh/auth.json'`，而**用户看到的是
+   * 「对方拒绝了这次登录」** —— 登录其实成功了。
+   *
+   * ⚠️ 这一半此前是缺的:种子文件（`HelperSeedFile`）早就经 helper 写进会话那一侧了,
+   * 读回来却还走宿主 fs —— **同一件事的两半走了两条路**。
+   */
+  readFile(relPath: string): Promise<string>;
   /** Session id minted by the app layer (= the in-memory AuthSession key). */
   challengeRef: string;
   /**

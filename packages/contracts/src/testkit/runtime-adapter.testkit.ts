@@ -141,6 +141,11 @@ function inertAuthSession(): AuthSessionContext {
   return {
     pty,
     homeDir: '/nonexistent/testkit-home',
+    // ⚠️ **抛而不是回空串。** testkit 验的是 adapter 对契约的遵守，不是它读到了什么；
+    //    一个默默返回 '' 的替身会让「adapter 忘了读凭证文件」这类缺陷悄悄通过，
+    //    而抛出来的那一刻恰好说明它真的走到了这一步。
+    readFile: (relPath: string): Promise<string> =>
+      Promise.reject(new Error(`testkit: 未提供 '${relPath}' 的内容`)),
     challengeRef: 'testkit-challenge',
   };
 }

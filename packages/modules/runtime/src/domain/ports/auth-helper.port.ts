@@ -39,6 +39,16 @@ export interface AuthHelperSession {
   pty: HelperProcessStream;
   /** The per-op isolated HOME — also the value of every `configDirEnvNames` entry. */
   homeDir: string;
+  /**
+   * 读回这个 HOME 里的一个文件（路径相对 `homeDir`）—— 与 {@link HelperSeedFile}
+   * 那半「写进去」对称的另一半。
+   *
+   * ⚠️⚠️ **⛔ 调用方不许自己 `readFile(join(homeDir, …))`。** `homeDir` 是**会话所在
+   * 那一侧**的路径:容器形态下它在 helper 容器里,后端进程 `open()` 必然 ENOENT
+   * （2026-09-22 真机实测:登录成功、文件写出来了,平台却读不到,而用户看到的是
+   * 「对方拒绝了这次登录」）。结构上与契约的 `AuthSessionContext.readFile` 孪生。
+   */
+  readFile(relPath: string): Promise<string>;
   dispose(): Promise<void>;
 }
 

@@ -68,6 +68,7 @@ export class ContainerAuthHelper implements AuthHelper {
       return {
         pty,
         homeDir,
+        readFile: (relPath) => this.readOne(exec, homeDir, relPath),
         dispose: async () => {
           await pty.kill().catch(() => undefined);
           // ⚠️ 即便容器整个没了这里也不该抛 —— `dispose` 跑在 `finally` 里，
@@ -83,6 +84,27 @@ export class ContainerAuthHelper implements AuthHelper {
       await exec(['rm', '-rf', homeDir]).catch(() => undefined);
       throw e;
     }
+  }
+
+  /**
+   * 从**容器内**的 HOME 读回一个文件。
+   *
+   * ⚠️⚠️ 这一半此前是缺的,而缺的后果不是「读不到」这么直白:2026-09-22 真机上
+   * device login **走完了**、codex 也确实写出了 `auth.json`,平台却在
+   * `readFile(join(ctx.homeDir, 'auth.json'))` 上拿到 ENOENT —— 那个路径在容器里。
+   * ⛔ 而用户看到的是「对方拒绝了这次登录」,指向完全错误的方向。
+   *
+   * ⚠️ 用 `cat` 而不是 `docker cp`:后者在本仓不存在（runtime 层没有 exec 也没有 cp,
+   * 一切都走镜像内的 agent）。⚠️ 路径经 `$1` 传入,⛔ 不拼进脚本。
+   */
+  private async readOne(exec: SandboxExecFn, homeDir: string, relPath: string): Promise<string> {
+    const target = posix.join(homeDir, relPath);
+    const r = await exec(['sh', '-c', 'cat "$1"', 'sh', target]);
+    if (r.exitCode !== 0) {
+      // ⛔ 不回显内容（可能是凭证）,只说哪个相对路径没读到。
+      throw new Error(`helper 容器里读不到 '${relPath}'（exit=${String(r.exitCode)}）`);
+    }
+    return r.stdout;
   }
 
   /** 在**容器内**开一个一次性 HOME，返回绝对路径。 */

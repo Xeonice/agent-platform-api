@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK, shiftMs } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -135,7 +133,9 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
       );
       try {
         await this.waitForExit(session.pty, REFRESH_CMD_TIMEOUT_MS);
-        const raw = await readFile(join(session.homeDir, cap.authFileRelPath), 'utf8');
+        // ⚠️ 同 `codex.adapter` 那条:经会话自己的 readFile,⛔ 不走宿主 fs ——
+        //    容器形态下 `session.homeDir` 在 helper 容器里。
+        const raw = await session.readFile(cap.authFileRelPath);
         const { accessToken, credentialFiles } = cap.parseRefreshedAuth(raw);
         if (!accessToken) throw new Error('refreshed auth file missing access token');
         // Re-store BOTH halves: the adapter's freshly SANITIZED injectable files and the
