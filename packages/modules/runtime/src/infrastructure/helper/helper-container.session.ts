@@ -59,6 +59,16 @@ export interface HelperContainerAccess {
   require(): Promise<{ provider: SandboxProvider; handle: SandboxHandle }>;
 }
 
+/**
+ * 开机预热的重试次数与间隔。
+ *
+ * ⚠️ 覆盖的是两种「等一下就好」的形态：① 与 `ImageSeeder` 的赛跑（秒级）；
+ * ② 镜像还在拉（分钟级，`stageImage` 自己会等，所以这里主要是①）。
+ * ⛔ 不要调得很大 —— 真正缺镜像的机器不该被无限重试掩盖成「一直在准备中」。
+ */
+const PREHEAT_ATTEMPTS = 5;
+const PREHEAT_RETRY_MS = 3_000;
+
 @Injectable()
 export class HelperContainerSession implements OnApplicationBootstrap, HelperContainerAccess {
   private readonly logger = new Logger('HelperContainerSession');
@@ -84,9 +94,44 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
 
   onApplicationBootstrap(): void {
     // ⛔ 不 await。见抬头：拉镜像不能挡住启动，失败也不能让平台起不来。
-    void this.ensure().catch((e: unknown) => {
-      this.logger.warn(`auth helper 预热失败（登录功能将不可用，其余不受影响）：${msgOf(e)}`);
-    });
+    void this.preheat();
+  }
+
+  /**
+   * 开机预热 —— **带重试**，⛔ 不是一次不成就永久放弃。
+   *
+   * ⚠️⚠️ **它必须重试，因为它与 `ImageSeeder` 赛跑,而且真的输过。**
+   * 2026-09-22 真机日志（同一秒内）：
+   *
+   *     17:17:11 WARN HelperContainerSession 预热失败：镜像还没注册进平台
+   *     17:17:11 LOG  ImageSeeder            seeded built-in image …sandbox   ← 在我之后
+   *
+   * Nest 的 `onApplicationBootstrap` **不保证跨模块顺序**,而 `resolveImage` 要查的
+   * 正是 seeder 刚登记的那一行。⛔ 不能靠「让 runtime 模块依赖 image 模块」来排序 ——
+   * 那是为了一次预热去造一条真实的模块依赖。
+   *
+   * ⚠️ **输掉这场赛跑的后果不是「慢一点」,是诊断开始撒谎**：第 ⑨ 项会报
+   * 「帐号登录暂不可用」,而用户真去点登录时 `require()` 会重试并成功 ——
+   * 一个「说不可用但其实可用」的诊断,比没有这一项更坏。
+   *
+   * ⚠️ 只重试**开机预热**这一条路。用户点登录走的 `require()` 仍然一次定生死:
+   * 那时人在等,快速失败并说清原因,好过静默重试一分钟。
+   */
+  private async preheat(): Promise<void> {
+    for (let attempt = 1; attempt <= PREHEAT_ATTEMPTS; attempt += 1) {
+      try {
+        await this.ensure();
+        return;
+      } catch (e: unknown) {
+        const last = attempt === PREHEAT_ATTEMPTS;
+        this.logger.warn(
+          `auth helper 预热第 ${String(attempt)}/${String(PREHEAT_ATTEMPTS)} 次未成：${msgOf(e)}` +
+            (last ? '（登录功能将不可用，其余不受影响；用户点登录时仍会再试一次）' : '，稍后重试'),
+        );
+        if (last) return;
+        await new Promise((r) => setTimeout(r, PREHEAT_RETRY_MS));
+      }
+    }
   }
 
   /** 给诊断项用：不触发创建，只如实报当前状态。 */
@@ -106,7 +151,12 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    */
   async require(): Promise<{ provider: SandboxProvider; handle: SandboxHandle }> {
     if (this.ready !== null) return this.ready;
-    await this.ensure();
+    // ⚠️ **必须吞掉 `ensure()` 的原始错误再统一改写。** 此前这里是裸 `await`,
+    //    于是底层那句（「预制镜像还没注册进平台」之类）会**直接穿透出去**,
+    //    下面这句统一文案根本到不了 —— 上层 `beginAuth` 认的是这一句才包成
+    //    `PROVIDER_UNAVAILABLE`,穿透的那个会被当成未知错误变成哑巴 500。
+    //    ⚠️ 原因没有丢:它在 `lastError` 里,被下面这句带上。
+    await this.ensure().catch(() => undefined);
     if (this.ready === null) {
       throw new Error(`auth helper 容器不可用：${this.lastError ?? '未知原因'}`);
     }
