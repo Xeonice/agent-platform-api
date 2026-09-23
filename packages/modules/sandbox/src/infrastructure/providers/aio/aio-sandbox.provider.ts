@@ -142,7 +142,7 @@ export class AioSandboxProvider implements SandboxProvider {
     const env = withJobSurvivalEnv(withAgentAuthEnv(ctx.env, auth));
     const id = await this.runtime.create({
       sandboxId: ctx.sandboxId,
-      instanceName: `platform-${this.name}-${ctx.sandboxId}`,
+      instanceName: this.instanceNameOf(ctx.sandboxId),
       image: ctx.image,
       env,
       labels: {
@@ -251,6 +251,24 @@ export class AioSandboxProvider implements SandboxProvider {
    * ⛔ 这里之所以不能像 boxlite 那样直接实现，是因为 `ContainerRuntime` 是个端口，
    * 不同实现（docker / podman / …）未必都有这只手。
    */
+  /**
+   * sandboxId → 容器名。**只此一处**（此前只存在于 `create` 里那一行模板串）。
+   * ⛔ 平台侧任何地方都不许再拼一遍 —— 见契约 `destroyBySandboxId` 的注释。
+   */
+  private instanceNameOf(sandboxId: string): string {
+    return `platform-${this.name}-${sandboxId}`;
+  }
+
+  /**
+   * 按 sandboxId 清掉曾经建过的那个实例（契约 `destroyBySandboxId`）。
+   *
+   * ⚠️ 这里能做到,是因为**容器名由本 provider 自己按 sandboxId 推导**,而
+   * `ContainerRuntime.destroy` 既认 id 也认名字、且对 404 幂等（04 §2.2）。
+   */
+  async destroyBySandboxId(sandboxId: string): Promise<void> {
+    await this.runtime.destroy(this.instanceNameOf(sandboxId));
+  }
+
   async imageStaged(image: ResolvedImageSpec): Promise<boolean> {
     if (typeof this.runtime.hasImage !== 'function') {
       throw new SandboxProviderError(

@@ -191,11 +191,24 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
       }
 
       // 先清残留：api 重启后那个旧容器还在，名字会撞。
-      // ⚠️ 用 `destroy` 而不是先 `inspect` 判断 —— 不存在时 destroy 本就该是幂等的，
-      //    多一次 inspect 只是多一个会失败的形态。
-      await provider
-        .destroy({ provider: provider.name, providerSandboxId: HelperContainerSession.SANDBOX_ID })
-        .catch(() => undefined);
+      //
+      // ⚠️⚠️ **这里此前是错的，而且从来没生效过**（2026-09-22 真机撞出来）：
+      // 原本传的是 `providerSandboxId: SANDBOX_ID`，而 aio/docker 的
+      // `providerSandboxId` 是**容器 ID**，容器名却是 `platform-aio-auth-helper`。
+      // ⇒ destroy 404（被 `.catch` 吞掉）⇒ create 撞
+      //   `409 Conflict: container name … is already in use`。
+      // ⛔ 第一次部署能成只是因为当时没有残留 —— **只要 api 重启而 helper 还活着，
+      //   就必然复现**，而预热的 5 次重试全部撞同一堵墙。
+      //
+      // ⛔ 修法**不是**在这里拼 `platform-<provider>-<sandboxId>`：那是 provider 的
+      // 私有命名规则，抄一份出来就是这个仓反复警告的那种「两处各有一份真相」。
+      // ⇒ 走契约新增的 `destroyBySandboxId`，命名规则留在 provider 家里。
+      //
+      // ⚠️ 没有这只手的 provider ⇒ 跳过清理。降级是明确的：create 会撞名字冲突并
+      //    如实报出来，⛔ 而不是静默出错。
+      if (typeof provider.destroyBySandboxId === 'function') {
+        await provider.destroyBySandboxId(HelperContainerSession.SANDBOX_ID).catch(() => undefined);
+      }
 
       const handle = await provider.create({
         sandboxId: HelperContainerSession.SANDBOX_ID,

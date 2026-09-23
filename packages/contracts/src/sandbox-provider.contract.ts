@@ -551,6 +551,27 @@ export interface SandboxProvider {
    */
   stageImage?(image: ResolvedImageSpec, onProgress?: (bytesInStore: number) => void): Promise<void>;
 
+  /**
+   * 销毁「**我曾经用这个 sandboxId 建过的那个实例**」—— 不需要拿着当初那个 handle。
+   *
+   * ── 为什么非有它不可（2026-09-22 真机撞出来）──────────────────────────────
+   * `SandboxHandle.providerSandboxId` 是 provider 的私有标识（aio/docker 上是**容器 ID**），
+   * 而进程重启之后平台手上**只剩 sandboxId**。于是「先清残留再建」这件事没法做：
+   * 拿 sandboxId 当 providerSandboxId 去 `destroy` 只会 404,然后 `create` 撞
+   * `409 Conflict: container name "/platform-aio-auth-helper" is already in use`。
+   * auth helper 正是这个形状 —— 它用固定 sandboxId,api 一重启就必然撞上。
+   *
+   * ⛔⛔ **调用方不许自己拼那个名字。** `platform-<provider>-<sandboxId>` 是
+   * `aio-sandbox.provider.ts` 的私有知识;抄一份出去就是「同一个词在两处指不同东西」
+   * 的又一例（`parseImageRef`、`imagePreinstalls` 两处注释讲的都是它）。
+   * ⇒ 命名规则留在 provider 家里,平台只说「按这个 sandboxId 清掉」。
+   *
+   * ⚠️ **必须幂等**：不存在时正常返回,⛔ 不抛。调用方通常不知道有没有残留。
+   * ⚠️ 可选:没有这只手的 provider 不实现它,调用方按 `typeof … === 'function'` 判断,
+   *    并接受「清不了残留」这个降级（它的症状是 create 撞名字冲突,而不是静默出错）。
+   */
+  destroyBySandboxId?(sandboxId: string): Promise<void>;
+
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `jobs`. */
