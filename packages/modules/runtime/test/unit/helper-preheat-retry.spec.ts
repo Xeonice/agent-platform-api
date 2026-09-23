@@ -18,9 +18,10 @@ import { HelperContainerSession } from '../../src/infrastructure/helper/helper-c
  */
 
 /** 造一对 registry / images 替身；`failTimes` 次之后 `findRegisteredByRef` 才返回镜像。 */
-function harness(failTimes: number) {
+function harness(failTimes: number, o: { withDestroyBySandboxId?: boolean } = {}) {
   let asked = 0;
   const created: string[] = [];
+  const destroyedBy: string[] = [];
   // ⚠️ 补全成完整的 `SandboxProvider`:用不到的方法一律**抛**而不是给假值 ——
   //    本用例只该走 create/start/destroy,万一实现偷偷调了别的会当场炸而不是安静通过。
   const nope = (m: string) => (): never => {
@@ -42,7 +43,15 @@ function harness(failTimes: number) {
       return Promise.resolve({ provider: 'aio', providerSandboxId: 'cid' });
     },
     start: () => Promise.resolve(),
-    destroy: () => Promise.resolve(),
+    destroy: nope('destroy'),
+    ...(o.withDestroyBySandboxId === false
+      ? {}
+      : {
+          destroyBySandboxId: (id: string): Promise<void> => {
+            destroyedBy.push(id);
+            return Promise.resolve();
+          },
+        }),
     stop: nope('stop'),
     inspect: nope('inspect'),
     spawn: nope('spawn'),
@@ -69,6 +78,7 @@ function harness(failTimes: number) {
   return {
     session: new HelperContainerSession(registry as ProviderRegistry, facade as ImageFacade),
     created,
+    destroyedBy,
     asked: () => asked,
   };
 }
@@ -111,5 +121,32 @@ describe('HelperContainerSession：require() 不重试', () => {
     await expect(session.require()).rejects.toThrow(/auth helper 容器不可用/);
     // MUTATION: 让 require 也走 preheat ⇒ 这里会变成 5 次，本条红。
     expect(asked()).toBe(1);
+  });
+});
+
+describe('HelperContainerSession：清残留必须按 sandboxId', () => {
+  it('⭐⭐ 走 destroyBySandboxId，⛔ 不把 sandboxId 当成 providerSandboxId 去 destroy', async () => {
+    // ⚠️ 2026-09-22 真机撞出来的:原本传的是
+    //    `destroy({ providerSandboxId: 'auth-helper' })`,而 aio 的 providerSandboxId
+    //    是**容器 ID**、容器名却是 `platform-aio-auth-helper` ⇒ destroy 404 被吞掉 ⇒
+    //    create 撞 `409 Conflict: container name … is already in use`。
+    // ⛔ 第一次部署能成只是因为当时没有残留;只要 api 重启而 helper 还活着就必然复现。
+    //
+    // MUTATION: 改回 `provider.destroy({ providerSandboxId: SANDBOX_ID })` ⇒
+    //   harness 里 `destroy` 是会抛的 `nope('destroy')`,本条立刻红。
+    const { session, destroyedBy, created } = harness(0);
+    session.onApplicationBootstrap();
+    await vi.waitFor(() => expect(session.status().ready).toBe(true));
+
+    expect(destroyedBy).toEqual(['auth-helper']);
+    // 且顺序是「先清后建」—— 反过来就白清了。
+    expect(created).toEqual(['auth-helper']);
+  });
+
+  it('provider 没有这只手时跳过清理，⛔ 不因此让整个预热失败', async () => {
+    // 降级是明确的:create 会撞名字冲突并如实报出来,而不是静默出错。
+    const { session } = harness(0, { withDestroyBySandboxId: false });
+    session.onApplicationBootstrap();
+    await vi.waitFor(() => expect(session.status().ready).toBe(true));
   });
 });
