@@ -7,7 +7,7 @@ import type {
   ProcessStream,
 } from '@platform/contracts';
 import { AioAgentHttp } from './aio-http';
-import { exec, openTerminal } from './aio-guest-shell';
+import { exec, openTerminal, type TerminalLaunch } from './aio-guest-shell';
 import { listFiles, openFileStream, readFileBytes, writeFileContent } from './aio-files';
 import { killJob, readJob, releaseJob, startJob } from './aio-jobs';
 
@@ -49,8 +49,13 @@ export class AioSandboxAgentClient {
   }
 
   // ── shell 面（`SandboxProvider.spawn`）─────────────────────────────────────
-  openTerminal(cols: number, rows: number, cmd?: string[]): Promise<ProcessStream> {
-    return openTerminal(this.http, cols, rows, cmd);
+  openTerminal(
+    cols: number,
+    rows: number,
+    cmd?: string[],
+    launch?: TerminalLaunch,
+  ): Promise<ProcessStream> {
+    return openTerminal(this.http, cols, rows, cmd, launch);
   }
 
   exec(spec: ProcessSpec): Promise<ProcessStream> {

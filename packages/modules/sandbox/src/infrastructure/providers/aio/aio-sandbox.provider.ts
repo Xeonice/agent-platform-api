@@ -309,7 +309,12 @@ export class AioSandboxProvider implements SandboxProvider {
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
     const client = await this.agentClient(handle);
     return spec.tty
-      ? client.openTerminal(spec.cols ?? 80, spec.rows ?? 24, spec.cmd)
+      ? // ⚠️ `env` / `cwd` 也要递下去：tty 这条通道没有原生位置放它们，`openTerminal`
+        // 会翻译成一行 shell（`launchLine`）。⛔ 不递就是契约声明了却被静默丢掉。
+        client.openTerminal(spec.cols ?? 80, spec.rows ?? 24, spec.cmd, {
+          env: spec.env,
+          cwd: spec.cwd,
+        })
       : client.exec(spec);
   }
 
