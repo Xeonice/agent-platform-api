@@ -18,7 +18,8 @@ import { AioExecProcessStream, AioWsProcessStream } from './aio-process.stream';
  *
  * ── 为什么 tty 与 exec 走两个不同端点 ────────────────────────────────────────
  * `ws /v1/shell/ws` **不接受命令**：连上就起它自己的默认 shell（uplink 帧只有
- * `input` / `resize`），所以 `ProcessSpec.cmd` 只能靠往 shell 里 `exec` 一行进去。
+ * `input` / `resize`），所以 `ProcessSpec.cmd`（以及 `env` / `cwd`）只能靠往 shell 里
+ * 敲一行进去 —— 见 `launchLine`。
  * 而 `POST /v1/bash/exec` 原生带 `exec_dir` / `env` / `hard_timeout`，配套
  * `/v1/bash/kill` 投递真实信号 —— `/v1/shell/exec` 则会**静默丢掉 `env`**（实测）。
  */
@@ -53,7 +54,11 @@ export async function openTerminal(
   cols: number,
   rows: number,
   cmd?: string[],
+  launch?: TerminalLaunch,
 ): Promise<ProcessStream> {
+  // ⚠️ 先把要敲进去的那行拼出来 **再连** —— `env` 名字非法要在开 ws 之前就炸，
+  //    否则就是「连上了、什么都没跑、也没人报错」，正是下面注释在说的那种静默。
+  const line = launchLine(cmd ?? [], launch);
   const ticket = http.authenticated ? await http.issueWsTicket() : undefined;
   const ws = new WebSocket(wsUrl(http, ticket));
   await awaitOpen(http, ws);
@@ -61,12 +66,13 @@ export async function openTerminal(
   // by the agent on connect, so no explicit "start" frame is required.
   safeSend(ws, { type: 'resize', data: { cols, rows } });
   const stream = new AioWsProcessStream(ws);
-  if (cmd !== undefined && cmd.length > 0) await runInTerminal(ws, stream, cmd);
+  if (line !== '') await runInTerminal(ws, stream, line);
   return stream;
 }
 
 /**
- * Make an interactive session run `cmd` (S5: `tmux attach -t platform-agent`).
+ * Make an interactive session run the line `launchLine` built (S5: `tmux attach -t
+ * platform-agent`).
  *
  * WHY THIS IS TYPED INTO THE SHELL RATHER THAN PASSED AS A PARAMETER: the agent's
  * `ws /v1/shell/ws` takes NO command — it always spawns its own default shell on
@@ -85,9 +91,63 @@ export async function openTerminal(
  * interactive shell that never announced itself is still far more likely to accept
  * the line than not, and refusing to attach would be a worse failure than a retry.
  */
-async function runInTerminal(ws: WebSocket, stream: ProcessStream, cmd: string[]): Promise<void> {
+async function runInTerminal(ws: WebSocket, stream: ProcessStream, line: string): Promise<void> {
   await awaitShellReady(ws);
-  stream.write(`exec ${cmd.map(shellQuote).join(' ')}\n`);
+  stream.write(line);
+}
+
+/**
+ * `ProcessSpec` 里那两个在这条通道上**没有原生位置**的字段。
+ *
+ * ⚠️ 它们不是可选的锦上添花：契约把 `env` / `cwd` 声明在 `ProcessSpec` 上，provider
+ * 收下再丢掉，调用方就会拿到一个「跑起来了但环境不是它要的」的进程 —— 比直接失败难查
+ * 得多。2026-09-23 真机上正是这样：`ContainerAuthHelper` 靠 `env.HOME` / `env.<CLI>_HOME`
+ * 做每次登录的隔离目录，丢了之后 codex 写进容器默认 HOME，平台在隔离目录里读不到
+ * `auth.json`，于是报「对方拒绝了这次登录」—— ⛔ 又一次指错方向。
+ */
+export interface TerminalLaunch {
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * 把 `cmd` / `env` / `cwd` 编成**一行 shell**。
+ *
+ * ── 为什么只能编进命令行 ──────────────────────────────────────────────────────
+ * 这条通道的 uplink 帧只有 `input` / `resize`（见文件头），**没有任何一处能放 env 或
+ * 工作目录**。所以要么在这里翻译成 shell 语法，要么静默丢掉 —— 没有第三种。
+ *
+ * ── 三个刻意的选择 ───────────────────────────────────────────────────────────
+ * ① `cd … || exit 1` 而**不是** `cd … && exec …`：`&&` 在 cd 失败时会把用户留在一个
+ *    **看起来正常的默认 shell** 里（错的目录、错的进程），那正是本文件反复在删的那种
+ *    「静默降级」。`exit 1` 让会话直接结束，调用方的 `onExit` 立刻知道出事了。
+ * ② `export K=V` 而**不是** `env K=V cmd`：后者把值放进 `env` 的 **argv**，容器里任何
+ *    一个进程都能从 `/proc/<pid>/cmdline` 读到；前者只进 shell 自己的 environ
+ *    （`ProcessSpec.stdin` 的注释立的就是这条规矩）。
+ * ③ 用 `cd` + `export` 这两个 POSIX 特性而**不是** `env -C`：后者要 coreutils ≥ 8.28，
+ *    而镜像换一张就可能是 busybox —— ⛔ 不拿「这张镜像恰好有」当依据。
+ *
+ * ⚠️ 值经 `shellQuote` 单引号包死；名字**校验而不是转义**：`export` 的左边不是一个词
+ * 位置，引号在那儿没有意义，非法名字只能拒绝。
+ */
+function launchLine(cmd: string[], launch: TerminalLaunch | undefined): string {
+  const parts: string[] = [];
+  if (launch?.cwd !== undefined && launch.cwd !== '') {
+    parts.push(`cd ${shellQuote(launch.cwd)} || exit 1`);
+  }
+  for (const [name, value] of Object.entries(launch?.env ?? {})) {
+    if (!ENV_NAME_RE.test(name)) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INVALID_STATE,
+        `environment variable name '${name}' is not a valid shell identifier`,
+      );
+    }
+    parts.push(`export ${name}=${shellQuote(value)}`);
+  }
+  if (cmd.length > 0) parts.push(`exec ${cmd.map(shellQuote).join(' ')}`);
+  return parts.length === 0 ? '' : `${parts.join('; ')}\n`;
 }
 
 /**

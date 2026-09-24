@@ -110,7 +110,18 @@ export class ContainerAuthHelper implements AuthHelper {
   /** 在**容器内**开一个一次性 HOME，返回绝对路径。 */
   private async mintHome(exec: SandboxExecFn): Promise<string> {
     // `umask 077` ⇒ 目录 0700。⚠️ 不能事后 chmod：那中间有一个窗口它是可读的。
-    const r = await exec(['sh', '-c', 'umask 077; mktemp -d /tmp/auth-helper.XXXXXXXX']);
+    //
+    // ⚠️⚠️ **建在 `$HOME` 下而不是 `/tmp`。** codex 会自己检查这件事，撞上就打印
+    // `Refusing to create helper binaries under temporary dir "/tmp"` —— 它把临时目录
+    // 当成不可信位置（那里的东西别人能换掉）。⛔ 而它只是**警告**、照样往下跑，所以
+    // 这条不会让登录直接失败，只会让它在某个更深的地方坏掉。
+    // `${HOME:-/tmp}` 的兜底是给「镜像里没设 HOME」那种情况留的：宁可回到旧行为，
+    // 也不要 `mktemp` 拿到一个空路径。
+    const r = await exec([
+      'sh',
+      '-c',
+      'umask 077; d="${HOME:-/tmp}"; mkdir -p "$d" && mktemp -d "$d/auth-helper.XXXXXXXX"',
+    ]);
     const home = r.stdout.trim();
     // ⛔ **必须校验是绝对路径**，这不是防御性编程。宿主形态踩过一模一样的坑：homeDir
     //    是相对的时候，codex 会按自己的 cwd 再解析一遍然后直接退出，而 claude 不校验、
