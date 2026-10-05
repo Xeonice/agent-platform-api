@@ -55,6 +55,23 @@ async function failedProject(name: string) {
   };
 }
 describe('PRJ real HTTP, Git subprocess, current SQLite and baseline filesystem', () => {
+  it('PRJ-002 accepts and persists 40 Unicode code points while the 41st is rejected before project creation', async () => {
+    const name = '😀'.repeat(40);
+    const created = await http()
+      .post('/api/projects')
+      .send({ name, sourceType: 'empty' })
+      .expect(202);
+    expect(created.body.name).toBe(name);
+    const repository = platform.app.get<ProjectRepository>(PROJECT_REPOSITORY);
+    expect((await repository.findById(asProjectId(created.body.id)))?.name).toBe(name);
+    const before = (await http().get('/api/projects').expect(200)).body.length;
+    const rejected = await http()
+      .post('/api/projects')
+      .send({ name: `${name}😀`, sourceType: 'empty' })
+      .expect(400);
+    expect(rejected.body.code).toBe('VALIDATION_FAILED');
+    expect((await http().get('/api/projects').expect(200)).body).toHaveLength(before);
+  });
   it('creates an actual empty directory immediately; completed cancellation is read-only and ready conversion/sync are refused', async () => {
     const created = await http()
       .post('/api/projects')

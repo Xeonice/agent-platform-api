@@ -6,6 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
 import { AppModule } from '../app.module';
 import { ErrorEnvelope } from '../bootstrap/error-envelope.dto';
+import { applyUnicodeLengthConstraints } from '../bootstrap/openapi-constraints';
 
 async function main(): Promise<void> {
   process.env.DATABASE_URL = ':memory:';
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
   const document = SwaggerModule.createDocument(app, config, {
     extraModels: [ErrorEnvelope],
   });
+  applyUnicodeLengthConstraints(document);
   const out = resolve(process.cwd(), 'openapi.json');
   writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`);
   await app.close();

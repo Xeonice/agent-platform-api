@@ -2,6 +2,7 @@ import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
 import { ErrorEnvelope } from './error-envelope.dto';
+import { applyUnicodeLengthConstraints } from './openapi-constraints';
 
 /**
  * OpenAPI mount (docs/backend/02 §8).
@@ -21,5 +22,6 @@ export function setupSwagger(app: INestApplication): void {
   const document = SwaggerModule.createDocument(app, config, {
     extraModels: [ErrorEnvelope],
   });
+  applyUnicodeLengthConstraints(document);
   SwaggerModule.setup('docs', app, document, { jsonDocumentUrl: 'openapi.json' });
 }

@@ -26,5 +26,19 @@
   "browserEvidence": "../artifacts/migration-audit/cross-execution-report.json",
   "browserScenario": "../e2e-contract/acceptance/task-lifecycle.spec.ts",
   "scope": "Rest DTO generation and declared protocol canonical/hash parity; runtime HTTP/WS/MCP/browser results remain separate execution evidence.",
-  "checkedAt": "2026-10-05T10:35:47.773366+00:00"
+  "checkedAt": "2026-10-05T10:35:47.773366+00:00",
+  "projectNameUnicodeRecheck": {
+    "checkedAt": "2026-10-05T15:33:52.509682+00:00",
+    "command": "pnpm openapi:emit (fresh temporary DATA_ROOT, current Node22 build)",
+    "generatedName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "openApiByteStable": true,
+    "apiWebOpenApiByteEqual": true,
+    "generatedWebTypeHashUnchanged": true,
+    "contractEvidence": "acceptance/prj/pure/name-boundaries.spec.ts",
+    "httpSqliteEvidence": "acceptance/prj/protocol/project-creation-recovery.spec.ts"
+  }
 }

@@ -268,15 +268,22 @@
       "AC-PRJ-015.2",
       "AC-PRJ-015.3",
       "AC-PRJ-016.4",
-      "AC-PRJ-021.2"
+      "AC-PRJ-021.2",
+      "AC-PRJ-002.5"
     ],
-    "purpose": "Complete Nest HTTP with real Git subprocess and non-loopback local transport: baseline exists, completed cancel is readonly, retry replaces prior real failure, conversion preserves identity and empties code, failed-project admission has no task/provider side effects.",
+    "purpose": "Complete Nest HTTP with real Git subprocess and non-loopback local transport: baseline exists, completed cancel is readonly, retry replaces prior real failure, conversion preserves identity and empties code, failed-project admission has no task/provider side effects. Real HTTP accepts 40 emoji into SQLite and rejects the 41st before creating a project.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/img/sqlite/environment-inheritance.spec.ts",
     "acs": ["AC-IMG-026.1", "AC-IMG-024.6"],
     "purpose": "Actual production application, current SQLite and AES-GCM copy all three runtime variables and exact Secret ciphertext to the new digest; activation is atomic, retry preserves edited target parameters and cross-tag inheritance writes nothing. Card summary remains a separate frontend responsibility.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/prj/pure/name-boundaries.spec.ts",
+    "acs": ["AC-PRJ-002.5"],
+    "purpose": "Actual creation schema counts Unicode code points consistently for ASCII, CJK, surrogate pairs and combining sequences; 40 are preserved and the 41st is rejected. Form truncation remains frontend evidence.",
     "relation": "backend-support"
   }
 ]

@@ -45,6 +45,9 @@ export type CloneErrorCode = z.infer<typeof CloneErrorCodeSchema>;
 export const WorkspaceModeSchema = z.enum(['copy']);
 export type WorkspaceMode = z.infer<typeof WorkspaceModeSchema>;
 
+/** Unicode code points, matching the form, SQLite length() and OpenAPI maxLength. */
+export const PROJECT_NAME_MAX_LENGTH = 40;
+
 /**
  * Create request. The git⇒repoUrl / empty⇒no-repoUrl invariant (I-PRJ-1) is a
  * plain object here (clean OpenAPI reflection) and enforced in the application
@@ -52,7 +55,10 @@ export type WorkspaceMode = z.infer<typeof WorkspaceModeSchema>;
  * createZodDto/Swagger cannot introspect for properties).
  */
 export const CreateProjectSchema = z.object({
-  name: z.string().min(1).max(40), // I-PRJ-4: name length 1–40 (13/23)
+  name: z
+    .string()
+    .min(1)
+    .refine((name) => Array.from(name).length <= PROJECT_NAME_MAX_LENGTH, '项目名称最多 40 个字符'), // I-PRJ-4: name length 1–40 Unicode code points (13/23)
   sourceType: ProjectSourceTypeSchema,
   repoUrl: z.string().min(1).max(2048).optional(),
   repoBranch: z.string().min(1).max(255).optional(),
