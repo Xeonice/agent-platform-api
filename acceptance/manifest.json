@@ -12544,6 +12544,11 @@
           "file": "acceptance/acc/sqlite/first-access.spec.ts",
           "purpose": "Fresh real SQLite bootstrap stores only hash, banner is one-time, fixed signing secret rejects destructive rotation, and WS honors explicit loopback policy.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
+          "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
+          "relation": "backend-support"
         }
       ]
     },
@@ -12667,8 +12672,14 @@
       "when": "提交",
       "then": "设会话 cookie（REQ-ACC-006），离开口令门（AC-ACC-003.2）",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": []
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
+          "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
+          "relation": "backend-support"
+        }
+      ]
     },
     {
       "id": "AC-ACC-005.1",
@@ -12685,6 +12696,11 @@
         {
           "file": "acceptance/acc/protocol/protected-resource-attempts.spec.ts",
           "purpose": "Complete Nest HTTP guard separates anonymous requests from explicit guesses; an established cookie remains usable during address lockout.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
+          "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
           "relation": "backend-support"
         }
       ]
@@ -12768,6 +12784,11 @@
         {
           "file": "acceptance/acc/protocol/session-rotation.spec.ts",
           "purpose": "Complete Nest HTTP passcode rotation and session behavior; execution status comes from the run report.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
+          "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
           "relation": "backend-support"
         }
       ]

@@ -17,16 +17,16 @@
     "web/src/types/generated/openapi.d.ts": "75d05c2eae6d8064c33921a4b8903e0b3dd2d6df300c64bef084857f885640b1"
   },
   "after": {
-    "api/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
-    "web/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
-    "web/src/types/generated/openapi.d.ts": "75d05c2eae6d8064c33921a4b8903e0b3dd2d6df300c64bef084857f885640b1"
+    "api/openapi.json": "7ce01475643cb1fb43757ff38ff92b1dfc13b2a0d08aa9765cf967a73cdd8d85",
+    "web/openapi.json": "7ce01475643cb1fb43757ff38ff92b1dfc13b2a0d08aa9765cf967a73cdd8d85",
+    "web/src/types/generated/openapi.d.ts": "448006423928cea91ec5bcc28912d93251e449e1f675bc771695d0825ecc9a6c"
   },
   "wireDeclarationPairs": 5,
   "wireEvidence": "acceptance/wire-snapshots.json",
   "browserEvidence": "../artifacts/migration-audit/cross-execution-report.json",
   "browserScenario": "../e2e-contract/acceptance/task-lifecycle.spec.ts",
   "scope": "Rest DTO generation and declared protocol canonical/hash parity; runtime HTTP/WS/MCP/browser results remain separate execution evidence.",
-  "checkedAt": "2026-10-05T10:35:47.773366+00:00",
+  "checkedAt": "2026-10-05T19:21:47.808203+00:00",
   "projectNameUnicodeRecheck": {
     "checkedAt": "2026-10-05T15:33:52.509682+00:00",
     "command": "pnpm openapi:emit (fresh temporary DATA_ROOT, current Node22 build)",
@@ -75,6 +75,68 @@
       "apps/api/src/bootstrap/mcp.setup.ts": "2e193b976a86b976d2b3511c84bb3abe05b8c1108033717bb8840a0ddc03e22d",
       "packages/contracts/src/schemas/project.schema.ts": "b5d8097a299acdb4b2074032a4d32445fb9dc951cc9e771fb73bbf00ba0fe915",
       "acceptance/prj/protocol/project-creation-recovery.spec.ts": "e5209b535db408290a1d0044e9f02d6fdde5e192d1c5d7677a214e7778c8df7d"
+    }
+  },
+  "publicNetworkAndDeploymentRecheck": {
+    "checkedAt": "2026-10-05T19:21:47.808203+00:00",
+    "commands": [
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm build",
+      "pnpm test:acceptance:report",
+      "pnpm openapi:emit (twice after deployment DTO; second byte-stable)",
+      "pnpm acceptance:manifest",
+      "pnpm check:acceptance",
+      "node scripts/check-fake-provider-caps.mjs",
+      "node scripts/check-wire-snapshots.mjs",
+      "web owner: copy openapi + pnpm generate:api + typecheck/lint + fresh102"
+    ],
+    "fullAcceptance": {
+      "files": 45,
+      "tests": 196,
+      "passed": 196,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeMatcherEvaluations": 794,
+      "sourceExpectationSites": 731
+    },
+    "newOperationalEndpoint": "GET /api/deployment/status (normal passcode guard)",
+    "readyScope": "Read-only SQLite quick_check(1) and foreign_key_check; registered default provider; actual native SDK module import for BoxLite without new runtime/lock/VM; active valid/warning default image database snapshot. No guest VM/network/OAuth readiness claim.",
+    "idleScope": "Barrier file rejects new writes and Engine.IO handshakes. Idle reads current SQLite blockers, actual HTTP streams/Engine.IO clients, opening/live/retiring auth resources. Enabled automations and all unreleased allocations block release; controller must observe stable idle after placing barrier. Existing connections are not terminated.",
+    "originScope": "Exact explicit production HTTPS sibling origins; credentials CORS/preflight and transport-level WebSocket policy. No-Origin authenticated CLI/MCP retained. Empty allowlist alone permits local reverse proxy only when literal local browser origin and actual loopback peer; forwarded host/proto never authorize.",
+    "proxyScope": "Only explicit cloudflare-loopback trusts a single valid CF-Connecting-IP from loopback socket; XFF/Forwarded/X-Real-IP ignored; loopback password bypass stays based on original socket and is forbidden in public proxy mode.",
+    "openApiChangedAsExpected": true,
+    "secondEmitByteStable": true,
+    "apiWebOpenApiByteEqual": true,
+    "artifacts": {
+      "api/openapi.json": "7ce01475643cb1fb43757ff38ff92b1dfc13b2a0d08aa9765cf967a73cdd8d85",
+      "web/openapi.json": "7ce01475643cb1fb43757ff38ff92b1dfc13b2a0d08aa9765cf967a73cdd8d85",
+      "web/src/types/generated/openapi.d.ts": "448006423928cea91ec5bcc28912d93251e449e1f675bc771695d0825ecc9a6c"
+    },
+    "executionReportHash": "8f44f831920a1ba3005858851a5cda7da6e07488a275e540800061e10fc4213a",
+    "sourceHashes": {
+      ".env.example": "d855f5437883b7d482668a0ee6af83ed8818532fc01534f8156afb8caf279645",
+      "apps/api/src/main.ts": "8420be0aea2043678be7712b8e9d7d5a11d0dc73225e512840dc5cab8425123e",
+      "apps/api/src/app.module.ts": "a2fb03ec4f207a70a37d2cf0c0cf7eb299f001198b6e88f5785ea63b22597a6b",
+      "apps/api/src/bootstrap/configure-app.ts": "2dcc91590d8ec5cf41aa74b1cbf148a7dd0c78aee5355c0d6283edfae22d4bc2",
+      "apps/api/src/bootstrap/websocket.setup.ts": "a7e4ca19aabb2ad67618b9326cc1c7ccd6a655c1b8b5d6317539e66ca6f07ee3",
+      "apps/api/src/bootstrap/public-origin-policy.ts": "5cc48785f24e6e49f306bbe688f57044dbc2b4c1625a829496f2e9fe7ef77340",
+      "apps/api/src/bootstrap/deployment.setup.ts": "6293016c6d40f8b8ead0e5d7c3f6e6aafda116ef5540fda67a280d408caa1b5b",
+      "apps/api/src/platform/config/public-network.ts": "97f378b53aff460851a0ef56638f5bdd078e41d9c6d4af1443ddeccae81b4378",
+      "apps/api/src/platform/access-passcode/client-ip.ts": "b2551f153ddceb8fd5dfb712ab41aab14bbec5192e9c61cc1cc771b2be0faa32",
+      "apps/api/src/platform/access-passcode/passcode.guard.ts": "8a72a5a6d88418fa71b0a8bc3233629355548d6815392773d7e859902a44da3f",
+      "apps/api/src/platform/access-passcode/access.controller.ts": "6a496d1ce78891ac126f670d9918d3d14c14d7ab4d385b0dbe7ee5238f2edf10",
+      "apps/api/src/platform/deployment/deployment-state.ts": "bc4b72ff186da87bc5f5ff755abd8616601b257a53a758599c5401bd48ee10d5",
+      "apps/api/src/platform/deployment/deployment.controller.ts": "f722622d8a3d956d42bc668f6d03fc9568afc472202ef82836bf7e58047cb33f",
+      "apps/api/src/platform/deployment/deployment.module.ts": "06fc65401f57171156b329ca4a45b772cd2c4ef2ffcd3a1d26c38e42eef68aa6",
+      "packages/modules/runtime/src/application/runtime-application.service.ts": "37ca99116f1103f6d331ef07e87a19b50f5184dd77c7d1f75d44e12992cc0efb",
+      "packages/modules/sandbox/src/infrastructure/providers/boxlite/boxlite-runtime.ts": "479134e5a33b5556f866e717de7869eed5859383834a11436f43bcae0581dca5",
+      "packages/modules/sandbox/src/index.ts": "ab7eaf25112f64dd14fe8e3ef52e5fb4b5b8cd8f8ee2db4ceb09c6bef605e63b",
+      "acceptance/support/platform-app.ts": "bf220f607056616117e86ba3f719ce5c361cf79a719e544e998793ceb2af816c",
+      "acceptance/acc/pure/public-network-config.spec.ts": "3670bbdce172c0dca0654242610f99db18b309505d672e883b9b537fb1039b19",
+      "acceptance/acc/protocol/public-origin-and-proxy.spec.ts": "2b5fbc06e03a61939e0c6babc24ddace763010a5b59582ed00a7393de35fbe47",
+      "acceptance/dep/protocol/deployment-barrier.spec.ts": "7a5aa2db049fb2da9d82a2cee9e96cb1ca8078c5a9c1081951d85e87bcd83328",
+      "acceptance/auth/service/session-lifecycle.spec.ts": "f31fd0f70e7dc3a7f443f62ae25772bb81fc51fe497901b28d46a68d73642004"
     }
   }
 }

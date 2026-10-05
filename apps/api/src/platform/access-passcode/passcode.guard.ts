@@ -4,6 +4,8 @@ import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
 import { passcodeInvalid, passcodeLocked, passcodeRequired } from './passcode-errors';
 import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
+import { readPublicNetworkConfig } from '../config/public-network';
+import { requestClientIp } from './client-ip';
 
 /**
  * Access passcode Guard — the FIRST real APP_GUARD (docs/shared/11 §3.1, MVP;
@@ -18,6 +20,7 @@ import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
  */
 @Injectable()
 export class PasscodeGuard implements CanActivate {
+  private readonly network = readPublicNetworkConfig();
   constructor(
     private readonly passcodes: PasscodeService,
     private readonly limiter: PasscodeAttemptLimiter,
@@ -32,7 +35,7 @@ export class PasscodeGuard implements CanActivate {
     if (this.isExempt(req) || this.passcodes.allowsLoopback(req.socket.remoteAddress)) return true;
 
     const now = Date.now();
-    const ip = req.ip ?? 'unknown';
+    const ip = requestClientIp(req, this.network);
 
     /**
      * ⚠️ **已认证的会话先放行，锁定检查排在它后面 —— 顺序是承重的。**

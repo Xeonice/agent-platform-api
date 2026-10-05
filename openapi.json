@@ -2670,6 +2670,28 @@
           "system"
         ]
       }
+    },
+    "/api/deployment/status": {
+      "get": {
+        "operationId": "DeploymentController_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read-only deployment barrier, idle blockers and DB/SDK/image-registration readiness (no VM probe)",
+        "tags": [
+          "system"
+        ]
+      }
     }
   },
   "info": {
@@ -6263,6 +6285,113 @@
         },
         "required": [
           "lines"
+        ]
+      },
+      "DeploymentStatusDto": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "idle": {
+            "type": "boolean"
+          },
+          "readiness": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "type": "boolean"
+              },
+              "provider": {
+                "type": "boolean"
+              },
+              "image": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "database",
+              "provider",
+              "image"
+            ]
+          },
+          "inFlightHTTP": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "activeWS": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "credentialAuth": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "blockers": {
+            "type": "object",
+            "properties": {
+              "sandboxes": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "agentTasks": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "automationRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "enabledAutomations": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "resourceAllocations": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "cloningProjects": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "projectCleanupJobs": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              }
+            },
+            "required": [
+              "sandboxes",
+              "agentTasks",
+              "automationRuns",
+              "enabledAutomations",
+              "resourceAllocations",
+              "cloningProjects",
+              "projectCleanupJobs"
+            ]
+          }
+        },
+        "required": [
+          "ready",
+          "draining",
+          "idle",
+          "readiness",
+          "inFlightHTTP",
+          "activeWS",
+          "credentialAuth",
+          "blockers"
         ]
       },
       "ErrorEnvelope": {

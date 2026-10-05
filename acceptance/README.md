@@ -26,6 +26,8 @@ node scripts/check-wire-snapshots.mjs
 
 `check:acceptance` 要从包含主仓设计文档的 workspace 执行；独立 API CI 运行实际场景与报告，不凭缺失的外部文档生成通过结论。`execution-report.json` 保存已执行测试、零跳过检查、实际 Vitest matcher 调用数和测试源 SHA-256。静态 expect 表达式数量单独记录，不能充当实际断言数。
 
-本轮已退休旧 tracked API 测试与附属文件 241 个（216 个 spec、13 个 CLI 捕获文件、12 个 helper）。迁入的 25 个来源是本次迁移中新写的回归，详见 `adopted-regressions.json`。最终实跑结果为 42 个新 spec、166/166 个测试通过、0 skipped；后续运行以 `execution-report.json` 为准。
+本轮已退休旧 tracked API 测试与附属文件 241 个（216 个 spec、13 个 CLI 捕获文件、12 个 helper）。迁入的 25 个来源是本次迁移中新写的回归，详见 `adopted-regressions.json`。最终实跑结果为 45 个新 spec、196/196 个测试通过、0 skipped；后续运行以 `execution-report.json` 为准。
 
 主仓 `pnpm --dir e2e-contract test` 使用真实 Chromium、生产 Next.js、完整编译后 Nest 和干净 SQLite。持久报告位于主仓 `artifacts/migration-audit/cross-execution-report.json`，明确实际场景、运行时断言与外部夹具边界；它不代表厂商 OAuth、真实 Docker/BoxLite 或 native PTY 已验收。
+
+新增公开部署验收使用真实 HTTP/MCP/Engine.IO WebSocket、临时屏障文件和干净 SQLite。来源政策与可信 CF 客户端 IP 另有纯策略边界验收。`GET /api/deployment/status` 的 `ready` 仅检查 SQLite quick_check/外键、默认 provider/BoxLite 原生 SDK 模块加载与默认镜像登记状态，不创建 VM；`idle` 是当次可观测空闲，发布控制器必须先创建 `DEPLOYMENT_DRAIN_FILE` 并连续等待空闲，禁止同数据目录双 API。更新屏障阻止新的写请求与 WS 握手，既有连接保留并继续阻挡更新。新增运营场景在 scenario-map 中明确记为 operational-deployment，不虚增 1,016 个产品 AC。

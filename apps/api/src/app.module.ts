@@ -15,6 +15,7 @@ import { RealtimeModule } from './platform/events/realtime.module';
 import { LoggingModule } from './platform/logging';
 import { mcpModuleOptions } from './bootstrap/mcp.setup';
 import { guardProviders } from './bootstrap/guards.setup';
+import { DeploymentModule } from './platform/deployment/deployment.module';
 
 /**
  * Root module (01 §2): assembles the @Global platform, the MCP transport, the
@@ -45,6 +46,7 @@ import { guardProviders } from './bootstrap/guards.setup';
     //    （provider / runtime adapter / image spec）与 `IMAGE_FACADE`，它们由那几个
     //    @Global 模块提供 —— 装配顺序与图上的可读性一致，省得下一个人去猜。
     SystemModule,
+    DeploymentModule,
   ],
   providers: [...guardProviders],
 })

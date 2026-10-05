@@ -50,6 +50,11 @@ export async function loadBoxliteSdk(): Promise<BoxliteSdk> {
   }
 }
 
+/** Load native bindings only; does not instantiate a runtime, take its lock or create a VM. */
+export async function assertBoxliteSdkAvailable(): Promise<void> {
+  await loadBoxliteSdk();
+}
+
 /**
  * Image registries for the BoxLite runtime (ADR 工程注记): keep `docker.io` (the
  * micro-VM bootstrap base `debian:bookworm-slim`) + the local HTTP mirror that

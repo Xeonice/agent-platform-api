@@ -67,6 +67,15 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
   private shuttingDown = false;
   private sweepTimer?: ReturnType<typeof setInterval>;
 
+  /** Operational read-only count includes opening and failed-disposal resources. */
+  activeAuthCount(): number {
+    const sessions = new Set([
+      ...this.sessions.entries().map((entry) => entry.challengeRef),
+      ...this.retiring.keys(),
+    ]);
+    return this.beginning.size + sessions.size;
+  }
+
   onModuleInit(): void {
     this.sweepTimer = setInterval(() => {
       void this.sweepAuthSessions();

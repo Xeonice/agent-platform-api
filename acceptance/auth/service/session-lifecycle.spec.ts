@@ -128,6 +128,7 @@ describe('AUTH010 登录会话资源生命周期', () => {
     await h.app.cancelAuth('codex', first.challengeRef);
     await h.app.cancelAuth('codex', first.challengeRef);
     expect(h.store.entries()).toHaveLength(0);
+    expect(h.app.activeAuthCount()).toBe(0);
     expect(h.dispose).toHaveBeenCalledTimes(1);
   });
   it('无人访问的授权链接在有效期后一个清扫周期内回收', async () => {
@@ -148,10 +149,12 @@ describe('AUTH010 登录会话资源生命周期', () => {
     const first = await h.app.beginAuth('codex', 'setup-token');
     await h.app.cancelAuth('codex', first.challengeRef);
     expect(h.store.entries()).toHaveLength(0);
+    expect(h.app.activeAuthCount()).toBe(1);
     await expect(h.app.beginAuth('claude-code', 'setup-token')).rejects.toMatchObject({
       response: { code: 'AUTH_SESSION_CAPACITY' },
     });
     await h.app.sweepAuthSessions();
+    expect(h.app.activeAuthCount()).toBe(0);
     await expect(h.app.beginAuth('claude-code', 'setup-token')).resolves.toMatchObject({
       challengeRef: 'login-2',
     });
@@ -187,6 +190,7 @@ describe('AUTH010 登录会话资源生命周期', () => {
     const late = deferred<AuthHelperSession>();
     h.helper.openSession.mockImplementationOnce(() => late.promise);
     const result = h.app.beginAuth('codex', 'setup-token').catch((error: unknown) => error);
+    expect(h.app.activeAuthCount()).toBe(1);
     await h.app.onModuleDestroy();
     late.resolve(h.session);
     expect(await result).toMatchObject({ response: { code: 'PROVIDER_UNAVAILABLE' } });

@@ -3,6 +3,7 @@ import { IMAGE_SPEC_REGISTRY, SANDBOX_PROVIDER_REGISTRY } from '@platform/contra
 import type { ProviderRegistry } from '@platform/contracts';
 import { AppModule } from '../../apps/api/src/app.module';
 import { configurePlatformApp } from '../../apps/api/src/bootstrap/configure-app';
+import { setupWebsockets } from '../../apps/api/src/bootstrap/websocket.setup';
 import { ProtocolProvider, registryMetadataFixture } from './protocol-resources';
 import { useEnv } from './strict-ports';
 export { ProtocolProvider, registryMetadataFixture } from './protocol-resources';
@@ -34,6 +35,7 @@ export async function createPlatform(patch: Record<string, string | undefined> =
     .compile();
   const app = module.createNestApplication();
   configurePlatformApp(app);
+  setupWebsockets(app);
   await app.init();
   await app.listen(0);
   return {

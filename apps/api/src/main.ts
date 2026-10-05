@@ -7,8 +7,10 @@ import { configurePlatformApp } from './bootstrap/configure-app';
 import { setupWebsockets } from './bootstrap/websocket.setup';
 import { describeBindExposure, env } from './platform/config/env';
 import { PlatformLoggerService } from './platform/logging';
+import { readPublicNetworkConfig } from './platform/config/public-network';
 
 async function bootstrap(): Promise<void> {
+  const network = readPublicNetworkConfig();
   // production entrypoint opts into startup orphan reconciliation (13 §4); tests
   // (which boot throwaway apps on fresh :memory: DBs) leave it off by default.
   process.env.SANDBOX_RECONCILE_ON_BOOT ??= 'true';
@@ -19,9 +21,9 @@ async function bootstrap(): Promise<void> {
   app.useLogger(app.get(PlatformLoggerService));
 
   // 三样全局装配收在一处，**e2e 用的是同一个函数**（见那里的长注释）。
-  configurePlatformApp(app);
+  configurePlatformApp(app, network);
 
-  setupWebsockets(app);
+  setupWebsockets(app, network);
   setupSwagger(app);
 
   // 绑在通配地址时的那条提示 —— 判定在 `describeBindExposure`（纯函数，单测在

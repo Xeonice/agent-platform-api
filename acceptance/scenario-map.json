@@ -285,5 +285,23 @@
     "acs": ["AC-PRJ-002.5"],
     "purpose": "Actual creation schema counts Unicode code points consistently for ASCII, CJK, surrogate pairs and combining sequences; 40 are preserved and the 41st is rejected. Form truncation remains frontend evidence.",
     "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
+    "acs": ["AC-ACC-002.3", "AC-ACC-004.4", "AC-ACC-005.1", "AC-ACC-006.1"],
+    "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/acc/pure/public-network-config.spec.ts",
+    "acs": [],
+    "purpose": "Operational deployment policy: explicit origins and local CF proxy settings reject ambiguous/unsafe declarations; peer trust and IPv6 canonicalization are checked. No new product AC count is invented.",
+    "relation": "operational-deployment"
+  },
+  {
+    "file": "acceptance/dep/protocol/deployment-barrier.spec.ts",
+    "acs": [],
+    "purpose": "New authorized deployment preparation: actual file barrier, protected readiness/idle probe, live SSE/WS counters, current SQLite blockers, auth disposal and FK failure. Does not claim provider VM or product initialization readiness.",
+    "relation": "operational-deployment"
   }
 ]
