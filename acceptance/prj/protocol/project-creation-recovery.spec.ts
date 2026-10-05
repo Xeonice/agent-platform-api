@@ -3,6 +3,8 @@ import { readdir, stat } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { asProjectId } from '@platform/shared-kernel';
 import { createPlatform } from '../../support/platform-app';
 import {
@@ -55,6 +57,47 @@ async function failedProject(name: string) {
   };
 }
 describe('PRJ real HTTP, Git subprocess, current SQLite and baseline filesystem', () => {
+  it('MCP advertises the Unicode name limit and enforces it while preserving the same project record as REST', async () => {
+    const client = new Client(
+      { name: 'project-name-acceptance', version: '1' },
+      { capabilities: {} },
+    );
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${platform.url}/api/mcp`)));
+      const tools = (await client.listTools()).tools;
+      const create = tools.find((tool) => tool.name === 'create_project');
+      expect(create?.inputSchema.properties?.name).toMatchObject({
+        type: 'string',
+        minLength: 1,
+        maxLength: 40,
+      });
+      expect(
+        tools.find((tool) => tool.name === 'create_sandbox')?.inputSchema.properties?.projectId,
+      ).toMatchObject({ type: 'string', minLength: 1 });
+      const name = '🚀'.repeat(40);
+      const created = await client.callTool({
+        name: 'create_project',
+        arguments: { name, sourceType: 'empty' },
+      });
+      expect(created.isError).not.toBe(true);
+      const content = created.content as { type: string; text: string }[];
+      const dto = JSON.parse(content[0].text) as { id: string; name: string };
+      expect(dto.name).toBe(name);
+      expect((await http().get(`/api/projects/${dto.id}`).expect(200)).body.name).toBe(name);
+      const repository = platform.app.get<ProjectRepository>(PROJECT_REPOSITORY);
+      expect((await repository.findById(asProjectId(dto.id)))?.name).toBe(name);
+      const before = (await http().get('/api/projects').expect(200)).body.length;
+      const rejected = await client.callTool({
+        name: 'create_project',
+        arguments: { name: `${name}😀`, sourceType: 'empty' },
+      });
+      expect(rejected.isError).toBe(true);
+      expect((rejected.content as { text: string }[])[0].text).toContain('项目名称最多 40 个字符');
+      expect((await http().get('/api/projects').expect(200)).body).toHaveLength(before);
+    } finally {
+      await client.close();
+    }
+  });
   it('PRJ-002 accepts and persists 40 Unicode code points while the 41st is rejected before project creation', async () => {
     const name = '😀'.repeat(40);
     const created = await http()

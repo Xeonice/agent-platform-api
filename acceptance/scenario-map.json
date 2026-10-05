@@ -271,7 +271,7 @@
       "AC-PRJ-021.2",
       "AC-PRJ-002.5"
     ],
-    "purpose": "Complete Nest HTTP with real Git subprocess and non-loopback local transport: baseline exists, completed cancel is readonly, retry replaces prior real failure, conversion preserves identity and empties code, failed-project admission has no task/provider side effects. Real HTTP accepts 40 emoji into SQLite and rejects the 41st before creating a project.",
+    "purpose": "Complete Nest HTTP with real Git subprocess and non-loopback local transport: baseline exists, completed cancel is readonly, retry replaces prior real failure, conversion preserves identity and empties code, failed-project admission has no task/provider side effects. Real HTTP and MCP accept 40 emoji into the same SQLite/REST records and reject the 41st without creating a project; actual MCP tools/list advertises maxLength 40 while other tool inputs remain available.",
     "relation": "backend-support"
   },
   {

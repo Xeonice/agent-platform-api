@@ -40,5 +40,41 @@
     "generatedWebTypeHashUnchanged": true,
     "contractEvidence": "acceptance/prj/pure/name-boundaries.spec.ts",
     "httpSqliteEvidence": "acceptance/prj/protocol/project-creation-recovery.spec.ts"
+  },
+  "projectNameMcpRecheck": {
+    "checkedAt": "2026-10-05T16:16:47.243707+00:00",
+    "command": "pnpm test:acceptance:report; pnpm openapi:emit (fresh temporary DATA_ROOT, Node22)",
+    "adapter": "Public @rekog/mcp-nest serverMutator wraps the public setRequestHandler registration and reflects only create_project.name.maxLength in tools/list; the framework runtime safeParse and authorization are unchanged.",
+    "runtimeConstraint": "CreateProjectSchema Unicode code-point refinement and PROJECT_NAME_MAX_LENGTH remain the authority.",
+    "advertisedName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "transportEvidence": "acceptance/prj/protocol/project-creation-recovery.spec.ts",
+    "testedBoundary": "Real HTTP MCP tools/list and callTool: 40 emoji retained in SQLite and REST; 41 rejected with no added project. Actual discovery also retains create_sandbox projectId schema.",
+    "fullAcceptance": {
+      "files": 42,
+      "tests": 166,
+      "passed": 166,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeMatcherEvaluations": 700,
+      "sourceExpectationSites": 632
+    },
+    "openApiByteStable": true,
+    "apiWebOpenApiByteEqual": true,
+    "generatedWebTypeHashUnchanged": true,
+    "artifactHashes": {
+      "openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+      "../web/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+      "../web/src/types/generated/openapi.d.ts": "75d05c2eae6d8064c33921a4b8903e0b3dd2d6df300c64bef084857f885640b1"
+    },
+    "sourceHashes": {
+      "apps/api/src/bootstrap/mcp-input-constraints.ts": "d9d3050dc6a4a12e3c1254fee1e955000bf9c169dc4f8e048a928d471969f053",
+      "apps/api/src/bootstrap/mcp.setup.ts": "2e193b976a86b976d2b3511c84bb3abe05b8c1108033717bb8840a0ddc03e22d",
+      "packages/contracts/src/schemas/project.schema.ts": "b5d8097a299acdb4b2074032a4d32445fb9dc951cc9e771fb73bbf00ba0fe915",
+      "acceptance/prj/protocol/project-creation-recovery.spec.ts": "e5209b535db408290a1d0044e9f02d6fdde5e192d1c5d7677a214e7778c8df7d"
+    }
   }
 }

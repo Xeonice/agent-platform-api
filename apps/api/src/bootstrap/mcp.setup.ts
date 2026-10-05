@@ -1,4 +1,5 @@
 import { McpTransportType, type McpOptions } from '@rekog/mcp-nest';
+import { withMcpInputConstraints } from './mcp-input-constraints';
 
 /**
  * MCP transport configuration (docs/backend/02 §6 Bootstrap).
@@ -11,4 +12,5 @@ export const mcpModuleOptions: McpOptions = {
   name: 'agent-platform-mcp',
   version: '0.0.1',
   transport: [McpTransportType.STREAMABLE_HTTP, McpTransportType.SSE],
+  serverMutator: withMcpInputConstraints,
 };
