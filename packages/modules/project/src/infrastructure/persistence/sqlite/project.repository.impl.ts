@@ -28,6 +28,11 @@ export class SqliteProjectRepository implements ProjectRepository {
     return row ? this.toDomain(row) : null;
   }
 
+  findByIdSync(_tx: Tx, id: ProjectId): Project | null {
+    const row = this.db.select().from(projects).where(eq(projects.id, id)).get();
+    return row ? this.toDomain(row) : null;
+  }
+
   async findByName(name: string): Promise<Project | null> {
     const row = this.db.select().from(projects).where(eq(projects.name, name)).get();
     return row ? this.toDomain(row) : null;

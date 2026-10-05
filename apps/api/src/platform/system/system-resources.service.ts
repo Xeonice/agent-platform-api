@@ -1,12 +1,13 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { inArray, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE, filesystemStatsFor, fromEpochMs } from '@platform/shared-kernel';
 import { sandboxes } from '@platform/sandbox';
-import type { ResourceLevel, SystemResourcesDto } from '@platform/contracts';
+import { SANDBOX_FACADE } from '@platform/contracts';
+import type { ResourceLevel, SystemResourcesDto, SandboxFacade } from '@platform/contracts';
 import { env } from '../config/env';
 import { MEMORY_SOURCES, readMemory, type MemoryReading, type MemorySources } from './memory.probe';
 import { DISK_CRITICAL_PERCENT, DISK_WARN_PERCENT } from './diagnostics/checks/disk-space.check';
@@ -68,6 +69,7 @@ export class SystemResourcesService {
      * —— 直接调系统调用意味着两条分支各只有一半机器验得到，另一半永远没人跑。
      */
     @Inject(MEMORY_SOURCES) private readonly memorySources: MemorySources,
+    @Optional() @Inject(SANDBOX_FACADE) private readonly sandbox?: SandboxFacade,
   ) {}
 
   /** RAM 水位。测量走端口，**判定走纯函数** —— 见 `ramGauge`。 */
@@ -83,6 +85,7 @@ export class SystemResourcesService {
   }
 
   async snapshot(): Promise<SystemResourcesDto> {
+    const capacity = await this.sandbox?.defaultCapacity();
     const cores = Math.max(cpus().length, 1);
     const load = loadavg()[0] ?? 0;
     const cpuPercent = (load / cores) * 100;
@@ -99,6 +102,7 @@ export class SystemResourcesService {
     const retainedPercent = diskTotal === 0 ? 0 : (retained.totalBytes / diskTotal) * 100;
 
     return {
+      ...(capacity === undefined ? {} : { capacity }),
       cpu: {
         cores,
         loadAvg1m: round(load, 2),

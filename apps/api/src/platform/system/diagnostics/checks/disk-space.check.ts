@@ -115,7 +115,8 @@ function firstImageWarning(tier: string): string {
  * 清理建议 —— **按当前默认档分岔**，⛔ 不许把两档的假设写在同一句里。
  */
 function cleanupNextStep(tier: string): string {
-  const common = '先清保留卷（系统状态页「保留卷占用」）或删掉已完成任务的工作区。';
+  const common =
+    '先清理保留下来的成果（系统状态「成果占用」那一行的 [清理成果]），或删掉不用的项目。';
   const substrate = substrateOf(tier);
   if (substrate === 'container') {
     return `${common}这台机器的沙箱环境跑在容器里，还可以回收不用的镜像层。`;

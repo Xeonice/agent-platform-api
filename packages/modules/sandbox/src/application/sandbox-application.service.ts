@@ -20,6 +20,9 @@ import {
   SandboxProviderErrorCode,
   UnknownRuntimeError,
   toExecFn,
+  isSandboxFailureCode,
+  INTERNAL_ERROR_CODE,
+  WAITING_INPUT_QUERY,
 } from '@platform/contracts';
 import type {
   ResourceQuota,
@@ -41,9 +44,12 @@ import type {
   ProjectRuntimeContext,
   ImageFacade,
   WorkspaceSource,
+  RegisterRetainedVolumeCommand,
+  WaitingInputQueryPort,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { ResourceAllocator } from './resource-allocator';
+import { withTeardownDeadline } from './teardown-deadline';
 import { SandboxHealthMonitor } from './sandbox-health.monitor';
 import { mapProviderErrorToHttp } from './provider-error.http';
 import {
@@ -52,7 +58,7 @@ import {
   atDoor,
   doorRejection,
 } from './door-rejection.http';
-import { Sandbox } from '../domain/entities/sandbox.entity';
+import { Sandbox, type SandboxFailureOperation } from '../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
@@ -77,6 +83,16 @@ import { planQuota } from '../domain/services/resource-pool.domain-service';
  * has its own orchestrator, which is why it does not come through here.
  */
 const EXEC_TIMEOUT_MS = 60_000;
+
+export type DestroySandboxOptions = DestroySandboxInput & {
+  force?: boolean;
+  retained?: Omit<RegisterRetainedVolumeCommand, 'projectId' | 'sandboxId' | 'workspacePath'>;
+};
+
+interface Teardown {
+  promise: Promise<void>;
+  force: AbortController;
+}
 
 /**
  * HTTP status for each way the project facade can refuse (10 §6.8 「门口拒绝」).
@@ -118,6 +134,7 @@ interface AdmittedCreate {
  */
 @Injectable()
 export class SandboxApplicationService {
+  private readonly teardowns = new Map<string, Teardown>();
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
@@ -134,6 +151,7 @@ export class SandboxApplicationService {
     private readonly health: SandboxHealthMonitor,
     /** 03 §3 的互斥登记 —— `RESOURCE_EXHAUSTED` 在本平台唯一的真实抛出点。 */
     private readonly resources: ResourceAllocator,
+    @Inject(WAITING_INPUT_QUERY) private readonly waiting: WaitingInputQueryPort,
   ) {}
 
   /**
@@ -159,8 +177,16 @@ export class SandboxApplicationService {
     }));
   }
 
-  async create(input: CreateSandboxInput): Promise<SandboxDto> {
+  async create(
+    input: CreateSandboxInput & {
+      sourceAutomationId?: string;
+      sourceAutomationName?: string;
+      artifactRetentionDays?: 3 | 7 | 30;
+    },
+  ): Promise<SandboxDto> {
     const admitted = await this.admit(input);
+    // Fetch display metadata before reserving capacity or persisting the task.
+    const image = await this.imageFacade.findTaskImageSummary(admitted.imageRef);
 
     const headless = input.headless ?? false;
     const sandbox = Sandbox.create({
@@ -171,6 +197,9 @@ export class SandboxApplicationService {
       provider: admitted.providerName,
       imageRef: admitted.imageRef,
       headless,
+      sourceAutomationId: input.sourceAutomationId,
+      sourceAutomationName: input.sourceAutomationName,
+      artifactRetentionDays: input.artifactRetentionDays,
       // T-1: the instruction is PERSISTED here, in T1. Its consumer
       // (`bootstrapAgentSession`) runs after the 202 in a workflow whose only input is
       // a `sandboxId` (26 §1) — anything crossing that boundary needs storage, and the
@@ -199,10 +228,18 @@ export class SandboxApplicationService {
     // `retryable:true` 已经把用户真正需要的下一步（等一会儿再来）说清楚了。
     try {
       await this.resources.reserve({ sandboxId: sandbox.id, quota: admitted.quota }, (tx) => {
+        this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
         this.repo.saveSync(tx, sandbox);
         this.events.publishInTx(tx, sandbox.pullEvents());
       });
     } catch (e) {
+      if (e instanceof ProjectAccessError) {
+        // The final project check precedes every write in this transaction. It
+        // closes deletion/reclone races after the asynchronous admission reads.
+        return atDoor(async () => {
+          throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
+        });
+      }
       throw this.mapProviderError(e);
     }
 
@@ -214,7 +251,7 @@ export class SandboxApplicationService {
     // synchronously up to its first await), return it immediately, and let provision
     // drive the state machine in the background (each transition persists + publishes
     // a SandboxStateChanged event for the WS relay). Failures land `failed`.
-    const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
+    const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
     void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
     return dto;
   }
@@ -235,6 +272,17 @@ export class SandboxApplicationService {
     const admitted = await this.admit(input);
     const verdict = await this.resources.probe(admitted.quota);
     return verdict.ok;
+  }
+
+  async defaultCapacity() {
+    const image = await this.resolveImage(undefined, this.registry.defaultProvider);
+    return this.resources.defaultCapacity(
+      planQuota({
+        imageDefaults: image.resourceDefaults,
+        baselineSizeBytes: null,
+        diskFloorMb: this.resources.diskFloorMb,
+      }),
+    );
   }
 
   /**
@@ -510,8 +558,9 @@ export class SandboxApplicationService {
 
   async get(id: string): Promise<SandboxDto> {
     const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
+    if (!sandbox || sandbox.status === 'destroyed')
+      throw new NotFoundException(`sandbox ${id} not found`);
+    return this.toDto(sandbox);
   }
 
   /**
@@ -559,9 +608,17 @@ export class SandboxApplicationService {
       );
     }
     const provider = this.registry.get(sandbox.provider);
-    // advances to `starting` synchronously, then runs the 段 in the background.
+    const image =
+      sandbox.imageRef === ''
+        ? null
+        : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
+    try {
+      this.advance(sandbox, 'starting', 'user');
+    } catch (error) {
+      throw this.mapProviderError(error);
+    }
     void this.provision.restartSafely(sandbox, provider);
-    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
+    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
   }
 
   /**
@@ -594,16 +651,25 @@ export class SandboxApplicationService {
     const handle = this.handleOf(sandbox);
     try {
       this.advance(sandbox, 'stopping', 'user');
+    } catch (error) {
+      throw this.mapProviderError(error);
+    }
+    try {
       if (handle) await provider.stop(handle);
-      this.advance(sandbox, 'stopped', 'user');
+      const current = await this.repo.findById(sandbox.id);
+      if (!current || current.status === 'destroying' || current.status === 'destroyed') {
+        throw this.invalidState('任务正在删除，请刷新任务状态。');
+      }
+      this.advance(current, 'stopped', 'user');
+      return this.toDto(current);
     } catch (e) {
-      this.tryAdvance(sandbox, 'failed', 'user');
+      const current = await this.repo.findById(sandbox.id);
+      if (current?.status === 'stopping') this.recordFailure(current, e, 'stop');
       // `stopped` **保留**登记（工作区还在盘上、实例还在，`start` 会把它接回来）；
       // `failed` 不会 —— 它是终态，这条沙箱不会再回来占任何东西。
       await this.resources.release(sandbox.id);
       throw this.mapProviderError(e);
     }
-    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id));
   }
 
   /**
@@ -705,9 +771,39 @@ export class SandboxApplicationService {
     const sandboxes = projectId
       ? await this.repo.findByProject(asProjectId(projectId))
       : await this.repo.findAll();
-    return sandboxes
-      .filter((s) => s.status !== 'destroyed')
-      .map((s) => SandboxMapper.toDto(s, false, this.health.healthOf(s.id)));
+    const visible = sandboxes.filter((s) => s.status !== 'destroyed');
+    const waiting = this.waiting.filterWaiting(visible.map((s) => s.id));
+    const imageIds = [...new Set(visible.map((s) => s.imageRef).filter((id) => id !== ''))];
+    const images = new Map(
+      await Promise.all(
+        imageIds.map(async (id) => [id, await this.imageFacade.findTaskImageSummary(id)] as const),
+      ),
+    );
+    return visible.map((s) =>
+      SandboxMapper.toDto(
+        s,
+        this.waitingDisplayApplies(s) && waiting.has(s.id),
+        this.health.healthOf(s.id),
+        images.get(s.imageRef),
+      ),
+    );
+  }
+
+  private async toDto(sandbox: Sandbox): Promise<SandboxDto> {
+    const image =
+      sandbox.imageRef === ''
+        ? null
+        : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
+    return SandboxMapper.toDto(
+      sandbox,
+      this.waitingDisplayApplies(sandbox) && this.waiting.isWaiting(sandbox.id),
+      this.health.healthOf(sandbox.id),
+      image,
+    );
+  }
+
+  private waitingDisplayApplies(sandbox: Sandbox): boolean {
+    return !sandbox.headless && (sandbox.status === 'running' || sandbox.status === 'idle');
   }
 
   /**
@@ -717,60 +813,124 @@ export class SandboxApplicationService {
    * revoke coordinator (05 §4) escalates to `force` when a graceful teardown times out
    * so a wedged container can never block clearing a revoked credential's bindings.
    */
-  async destroy(id: string, input: DestroySandboxInput & { force?: boolean } = {}): Promise<void> {
-    const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    const provider = this.registry.get(sandbox.provider);
-    const handle = this.handleOf(sandbox);
-    const graceful = !(input.force ?? false);
+  destroy(id: string, input: DestroySandboxOptions = {}): Promise<void> {
+    const existing = this.teardowns.get(id);
+    if (existing) {
+      if (input.force) existing.force.abort();
+      return existing.promise;
+    }
+    const force = new AbortController();
+    if (input.force) force.abort();
+    const promise = this.teardown(id, input, force.signal).finally(() => this.teardowns.delete(id));
+    this.teardowns.set(id, { promise, force });
+    return promise;
+  }
 
+  private async teardown(
+    id: string,
+    input: DestroySandboxOptions,
+    force: AbortSignal,
+  ): Promise<void> {
+    // Cancellation is synchronous: no suspended workflow may write its old aggregate
+    // after this request has expressed deletion intent.
+    const drained = this.provision.cancel(id);
+    let sandbox = await this.repo.findById(asSandboxId(id));
+    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+    if (sandbox.status === 'destroyed') return;
+    const previous = sandbox.status;
+    if (sandbox.status !== 'destroying') this.advance(sandbox, 'destroying', 'user');
+    const provider = this.registry.get(sandbox.provider);
     try {
-      // Bring the aggregate to a state from which `destroying` is legal (23 I-SBX-1:
-      // stopped|failed → destroying). `force` skips only the graceful `provider.stop()`
-      // IO — the state walk itself is unchanged so the transition table stays honoured.
-      if (sandbox.status === 'running' || sandbox.status === 'idle') {
-        this.advance(sandbox, 'stopping', 'user');
-        if (handle && graceful) await provider.stop(handle);
-        this.advance(sandbox, 'stopped', 'user');
-      } else if (sandbox.status === 'stopping') {
-        // recover an interrupted graceful attempt (a prior teardown that timed out
-        // inside provider.stop persisted `stopping` before we escalated to force).
-        this.advance(sandbox, 'stopped', 'user');
-      } else if (sandbox.status === 'starting') {
-        this.advance(sandbox, 'failed', 'user'); // starting → failed → destroying
+      // Workspace preparation/provider.create may still finish. Wait for its handle
+      // before cleanup so neither a copied directory nor a late instance can reappear.
+      if (!sandbox.providerSandboxId) {
+        await withTeardownDeadline(drained, id);
+        sandbox = (await this.repo.findById(sandbox.id)) ?? sandbox;
       }
-      this.advance(sandbox, 'destroying', 'user');
-      if (handle) await provider.destroy(handle);
+      const handle = this.handleOf(sandbox);
+      if (
+        handle &&
+        !force.aborted &&
+        ['running', 'idle', 'starting', 'stopping'].includes(previous)
+      ) {
+        await this.stopForTeardown(provider, handle, force);
+      }
+      if (handle) {
+        try {
+          await withTeardownDeadline(provider.destroy(handle), id);
+        } catch (error) {
+          if (
+            !(error instanceof SandboxProviderError) ||
+            error.code !== SandboxProviderErrorCode.NOT_FOUND
+          )
+            throw error;
+        }
+      }
       const retained = await this.workspace.cleanup(id, { keep: input.keepVolume ?? false });
-      // 03 §7.7 / 24 §3：保留下来的目录必须**登记**进 project 侧的账本，否则「已保留卷」
-      // 永远是空的 —— 此前这里只到 `cleanup` 为止，一条记录都不写。
-      //
-      // ⚠️ **两个聚合两个事务**（24 §5.2）：登记走 PRJ 侧，sandbox 终态走 SBX 侧，中间
-      // 崩溃时重放靠 `workspacePath` 的 UNIQUE（I-RV-3）保证不重复登记。
-      // ⚠️ 登记失败**不打断销毁**（门面内部吞掉并记日志）：实例已经没了、目录已经留下了，
-      // 此时把 destroy 判失败只会留下一个停在 `destroying` 的沙箱。
       if (retained !== null) {
         await this.projectFacade.registerRetainedVolume({
           projectId: sandbox.projectId,
           sandboxId: id,
+          sandboxName: sandbox.name,
           workspacePath: retained.hostPath,
           source: 'manual-destroy',
+          ...input.retained,
         });
       }
-      this.advance(sandbox, 'destroyed', 'user');
-      // 03 §3「失败时回滚已登记配额」的正常那一半：实例没了 ⇒ 它占的那份必须回池，
-      // 否则一台机器跑上几十次销毁之后，账本会说满了而实际一个容器都没有。
-      //
-      // ⚠️ **保留下来的目录不回池**（§1/§7.7：它已脱离 sandbox 生命周期，改为治理视角
-      // 展示）—— 而登记的是 sandbox 的占用，`keepVolume` 与否都要释放；留下的那块盘由
-      // 「保留卷占用」横幅去说，不由资源池去记。
+      const current = await this.repo.findById(sandbox.id);
+      if (current && current.status !== 'destroyed') this.advance(current, 'destroyed', 'user');
+    } catch (error) {
+      const current = await this.repo.findById(sandbox.id);
+      if (current?.status === 'destroying') {
+        // A rule scheduler may observe this only after cleanup. Preserve the original
+        // pre-run failure signal (especially resource exhaustion) through retries.
+        if (
+          current.sourceAutomationId &&
+          current.automationFinishedAt &&
+          current.failureOperation === 'provision'
+        )
+          this.advance(current, 'failed', 'user');
+        else this.recordFailure(current, error, 'destroy');
+      }
+      throw this.mapProviderError(error);
+    } finally {
       await this.resources.release(sandbox.id);
-    } catch (e) {
-      this.tryAdvance(sandbox, 'failed', 'user');
-      // 销毁半途炸了 ⇒ 沙箱落 `failed`，它不会再跑任何东西了，配额同样必须回池。
-      await this.resources.release(sandbox.id);
-      throw this.mapProviderError(e);
     }
+  }
+
+  private async stopForTeardown(
+    provider: SandboxProvider,
+    handle: SandboxHandle,
+    force: AbortSignal,
+  ): Promise<void> {
+    if (force.aborted) return;
+    // Stop is a courtesy; removal is authoritative. A stuck stop must not keep a
+    // revoked token alive, and escalation can interrupt this wait immediately.
+    await new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        force.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, 20_000);
+      force.addEventListener('abort', finish, { once: true });
+      void provider.stop(handle).then(finish, finish);
+    });
+  }
+
+  private recordFailure(
+    sandbox: Sandbox,
+    error: unknown,
+    operation: SandboxFailureOperation,
+  ): void {
+    const raw = error instanceof SandboxProviderError ? error.code : undefined;
+    const code = raw !== undefined && isSandboxFailureCode(raw) ? raw : INTERNAL_ERROR_CODE;
+    sandbox.failWith(
+      { code, message: error instanceof Error ? error.message : String(error), operation },
+      'user',
+      this.clock.now(),
+    );
+    this.persist(sandbox);
   }
 
   private handleOf(sandbox: Sandbox): SandboxHandle | null {
@@ -786,14 +946,6 @@ export class SandboxApplicationService {
   private advance(sandbox: Sandbox, to: SandboxStatus, by: TriggeredBy): void {
     sandbox.transitionTo(to, by, this.clock.now());
     this.persist(sandbox);
-  }
-
-  private tryAdvance(sandbox: Sandbox, to: SandboxStatus, by: TriggeredBy): void {
-    try {
-      this.advance(sandbox, to, by);
-    } catch {
-      // best-effort failure marking; ignore illegal-transition from a terminal state
-    }
   }
 
   private persist(sandbox: Sandbox): void {

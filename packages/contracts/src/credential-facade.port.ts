@@ -47,6 +47,8 @@ export interface RuntimeSettingsWriter {
  * env references and MUST be called by the consumer in a `try/finally`.
  */
 export interface GitAuthContext {
+  /** Persist observed SSH host fingerprints only after the clone/sync succeeded. */
+  recordSuccessfulClone?: () => Promise<void>;
   /** Assembled injection env (GIT_TOKEN + GIT_CONFIG_* credential.helper for HTTPS). */
   env: Record<string, string>;
   /** SSH `GIT_SSH_COMMAND` pointing at this clone's keyfile (SSH only). */
@@ -82,7 +84,9 @@ export interface CredentialFacade {
    * this path — it structurally CANNOT. The platform-only full auth file is served by
    * `prepareForRefresh` below, to exactly one caller.
    */
-  prepareRuntimeCredential(runtimeId: string): Promise<InjectableRuntimeCredential>;
+  prepareRuntimeCredential(
+    runtimeId: string,
+  ): Promise<InjectableRuntimeCredential & { credentialId: string }>;
 
   /**
    * Runtime REFRESH out-口 (05 §4.3 / §5.1) — the ONLY out-口 that carries the real
@@ -101,7 +105,12 @@ export interface CredentialFacade {
    * `credentialId`); the orchestration side passes only the `sandboxId` it holds.
    * Idempotent; a no-op when no active credential is configured.
    */
-  recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void>;
+  recordRuntimeInjection(
+    runtimeId: string,
+    sandboxId: string,
+    credentialId: string,
+  ): Promise<boolean>;
+  isRuntimeCredentialUsable(runtimeId: string, credentialId: string): Promise<boolean>;
 
   /**
    * Resolve + materialize the effective git credential for `(kind, host, scheme)`

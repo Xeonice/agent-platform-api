@@ -84,6 +84,8 @@ export interface CloneRequest {
   env?: Record<string, string>;
   /** SSH `GIT_SSH_COMMAND` from `GitAuthContext.gitSshCommand` (SSH only). */
   gitSshCommand?: string;
+  /** Persist public host fingerprints only after a successful authenticated clone. */
+  recordSuccessfulClone?: () => Promise<void>;
 }
 
 /** Sanitized clone failure (03 §7.5): URL userinfo/password already stripped. */

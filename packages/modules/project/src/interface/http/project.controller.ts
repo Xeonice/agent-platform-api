@@ -9,7 +9,12 @@ import {
 } from '@nestjs/swagger';
 import type { ProjectBranches, ProjectDto } from '@platform/contracts';
 import { ProjectApplicationService } from '../../application/project-application.service';
-import { CreateProjectDto, DeleteProjectDto, ProjectResponseDto } from './dto/project.dto';
+import {
+  CreateProjectDto,
+  DeleteProjectDto,
+  ProjectResponseDto,
+  ProjectDeletionPreviewResponseDto,
+} from './dto/project.dto';
 
 /**
  * REST protocol shell for projects (02 §5.1, shared/10 §6). Thin adapter over the
@@ -96,5 +101,12 @@ export class ProjectController {
   @ApiNoContentResponse()
   delete(@Param('id') id: string, @Body() body: DeleteProjectDto): Promise<void> {
     return this.app.delete(id, body ?? {});
+  }
+
+  @Get(':id/deletion-preview')
+  @ApiOperation({ summary: 'Read authoritative project deletion blockers and consequence counts' })
+  @ApiOkResponse({ type: ProjectDeletionPreviewResponseDto })
+  deletionPreview(@Param('id') id: string) {
+    return this.app.deletionPreview(id);
   }
 }

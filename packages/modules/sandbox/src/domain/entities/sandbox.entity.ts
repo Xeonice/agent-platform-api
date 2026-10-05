@@ -8,6 +8,8 @@ import { SandboxCreated, SandboxStateChanged } from '../events/sandbox-events';
 import { InitialTask } from '../value-objects/initial-task.vo';
 import { deriveDefaultTaskName } from '../services/task-name.policy';
 
+export type SandboxFailureOperation = 'provision' | 'start' | 'stop' | 'destroy';
+
 export interface SandboxProps {
   id: SandboxId;
   projectId: ProjectId;
@@ -48,6 +50,11 @@ export interface SandboxProps {
   failureCode: string | null;
   /** Free-text detail paired with `failureCode` — debugging aid, never UI copy. */
   failureReason: string | null;
+  failureOperation?: SandboxFailureOperation | null;
+  sourceAutomationId?: string | null;
+  sourceAutomationName?: string | null;
+  artifactRetentionDays?: 3 | 7 | 30 | null;
+  automationFinishedAt?: Date | null;
   version: number;
   transitions: StateTransition[];
 }
@@ -68,6 +75,8 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   private _injectedRuntimes: string[];
   private _failureCode: string | null;
   private _failureReason: string | null;
+  private _failureOperation: SandboxFailureOperation | null;
+  private _automationFinishedAt: Date | null;
   private _name: string;
   private _version: number;
   private readonly _transitions: StateTransition[];
@@ -83,6 +92,9 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   readonly provider: string;
   readonly imageRef: string;
   readonly headless: boolean;
+  readonly sourceAutomationId: string | null;
+  readonly sourceAutomationName: string | null;
+  readonly artifactRetentionDays: 3 | 7 | 30 | null;
 
   private constructor(props: SandboxProps) {
     super(props.id);
@@ -96,6 +108,11 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._initialTask = props.initialTask;
     this._failureCode = props.failureCode;
     this._failureReason = props.failureReason;
+    this._failureOperation = props.failureOperation ?? null;
+    this._automationFinishedAt = props.automationFinishedAt ?? null;
+    this.sourceAutomationId = props.sourceAutomationId ?? null;
+    this.sourceAutomationName = props.sourceAutomationName ?? null;
+    this.artifactRetentionDays = props.artifactRetentionDays ?? null;
     this._status = props.status;
     this._timeoutMinutes = props.timeoutMinutes;
     this._idleTimeoutSec = props.idleTimeoutSec;
@@ -174,6 +191,9 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     initialPrompt?: string;
     timeoutMinutes: number | null;
     idleTimeoutSec: number;
+    sourceAutomationId?: string;
+    sourceAutomationName?: string;
+    artifactRetentionDays?: 3 | 7 | 30;
     now: Date;
   }): Sandbox {
     const firstTransition: StateTransition = {
@@ -209,6 +229,9 @@ export class Sandbox extends AggregateRoot<SandboxId> {
       initialTask,
       failureCode: null,
       failureReason: null,
+      sourceAutomationId: input.sourceAutomationId ?? null,
+      sourceAutomationName: input.sourceAutomationName ?? null,
+      artifactRetentionDays: input.artifactRetentionDays ?? null,
       version: 0,
       transitions: [firstTransition],
     });
@@ -232,6 +255,24 @@ export class Sandbox extends AggregateRoot<SandboxId> {
   }
   get failureReason(): string | null {
     return this._failureReason;
+  }
+  get failureOperation(): SandboxFailureOperation | null {
+    return this._failureOperation;
+  }
+  get hasRun(): boolean {
+    return this._transitions.some((transition) => transition.to === 'running');
+  }
+  get createdAt(): Date | undefined {
+    return this._transitions[0]?.at;
+  }
+  get updatedAt(): Date | undefined {
+    return this._transitions[this._transitions.length - 1]?.at;
+  }
+  get automationFinishedAt(): Date | null {
+    return this._automationFinishedAt;
+  }
+  recordAutomationFinished(at: Date): void {
+    this._automationFinishedAt ??= at;
   }
   get timeoutMinutes(): number | null {
     return this._timeoutMinutes;
@@ -288,9 +329,14 @@ export class Sandbox extends AggregateRoot<SandboxId> {
    * the only way a failure reaches the user is this record and its projection, and a
    * UI that had to regex a code out of prose would break on the first reworded message.
    */
-  failWith(failure: { code: string; message: string }, triggeredBy: TriggeredBy, now: Date): void {
+  failWith(
+    failure: { code: string; message: string; operation?: SandboxFailureOperation },
+    triggeredBy: TriggeredBy,
+    now: Date,
+  ): void {
     this._failureCode = failure.code;
     this._failureReason = failure.message;
+    this._failureOperation = failure.operation ?? 'provision';
     this.transitionTo('failed', triggeredBy, now);
   }
 
@@ -314,6 +360,11 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     this._transitions.push(transition);
     this._pendingTransitions.push(transition);
     this._status = next;
+    if (next !== 'failed' && next !== 'destroying' && next !== 'destroyed') {
+      this._failureCode = null;
+      this._failureReason = null;
+      this._failureOperation = null;
+    }
     this.raise(
       new SandboxStateChanged(
         this.id,

@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { toExecFn } from '@platform/contracts';
 import type { SandboxExecFn } from '@platform/contracts';
 import type {
@@ -30,8 +30,6 @@ import type { HelperContainerAccess } from './helper-container.session';
  */
 @Injectable()
 export class ContainerAuthHelper implements AuthHelper {
-  private readonly logger = new Logger('ContainerAuthHelper');
-
   // ⚠️ 注入的是具体类（Nest 要一个运行期 token），但**类型收成窄口子** ——
   //    helper 只用得上 `require()`，其余生命周期的事与它无关。
   constructor(@Inject(HelperContainerSession) private readonly session: HelperContainerAccess) {}
@@ -70,12 +68,13 @@ export class ContainerAuthHelper implements AuthHelper {
         homeDir,
         readFile: (relPath) => this.readOne(exec, homeDir, relPath),
         dispose: async () => {
-          await pty.kill().catch(() => undefined);
-          // ⚠️ 即便容器整个没了这里也不该抛 —— `dispose` 跑在 `finally` 里，
-          //    它自己失败会盖掉真正的那个错。
-          await exec(['rm', '-rf', homeDir]).catch((e: unknown) =>
-            this.logger.warn(`helper 内临时 HOME 未能删除 ${homeDir}：${msgOf(e)}`),
-          );
+          try {
+            await pty.kill('SIGKILL');
+          } finally {
+            // ⚠️ 即便容器整个没了这里也不该抛 —— `dispose` 跑在 `finally` 里，
+            //    它自己失败会盖掉真正的那个错。
+            await exec(['rm', '-rf', homeDir]);
+          }
         },
       };
     } catch (e) {
@@ -162,8 +161,4 @@ export class ContainerAuthHelper implements AuthHelper {
       throw new Error(`helper 容器里写不进种子文件 '${f.relPath}'（exit=${String(r.exitCode)}）`);
     }
   }
-}
-
-function msgOf(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }

@@ -112,7 +112,11 @@ export type TaskErrorCode = z.infer<typeof TaskErrorCodeSchema>;
 
 export const RunAgentTaskSchema = z.object({
   /** 指令正文。上限与 `initialPrompt` 同(10 §7.3「≤8000 字符」),两处必须同步。 */
-  prompt: z.string().min(1).max(8000),
+  prompt: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((value) => [...value].length <= 8000, '任务指令最多 8000 个字符'),
   timeoutMinutes: TaskTimeoutMinutesSchema.optional(),
   /**
    * 上一轮的会话引用(`RuntimeTaskSpec.resumeFrom`)。给了就是接着上次聊。

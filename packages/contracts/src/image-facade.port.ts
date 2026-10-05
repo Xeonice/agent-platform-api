@@ -133,6 +133,9 @@ export interface ImageFacade {
    */
   findTaskImage(manifestId: string): Promise<TaskImageSelection | null>;
 
+  /** Frozen task-image metadata only. Never decrypts or returns run parameters. */
+  findTaskImageSummary(manifestId: string): Promise<RegisteredImageSummary | null>;
+
   /**
    * 诊断用（P21-5 §9A 第 4 步）：按**仓库坐标**查平台库里那一行，**不判断可不可选**。
    *

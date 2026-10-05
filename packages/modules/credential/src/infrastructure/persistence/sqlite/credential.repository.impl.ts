@@ -6,7 +6,10 @@ import type { CredentialId, Tx } from '@platform/shared-kernel';
 import { Credential } from '../../../domain/entities/credential.entity';
 import { EncryptedBlob, Erased } from '../../../domain/value-objects/encrypted-blob.vo';
 import { MaskedIdentifier } from '../../../domain/value-objects/masked-identifier.vo';
-import type { CredentialMetadata } from '../../../domain/value-objects/credential-metadata.vo';
+import type {
+  CredentialMetadata,
+  KnownHostEntry,
+} from '../../../domain/value-objects/credential-metadata.vo';
 import type { ObtainedVia, RuntimeMode } from '../../../domain/value-objects/obtained-via.vo';
 import { isEncrypted } from '../../../domain/value-objects/encrypted-blob.vo';
 import type { CredentialRepository } from '../../../domain/repositories/credential.repository';
@@ -154,6 +157,34 @@ export class SqliteCredentialRepository implements CredentialRepository {
 
   touchLastUsedSync(_tx: Tx, id: CredentialId, at: Date): void {
     this.db.update(credentials).set({ lastUsedAt: at }).where(eq(credentials.id, id)).run();
+  }
+
+  recordGitKnownHostsSync(
+    _tx: Tx,
+    id: CredentialId,
+    entries: Omit<KnownHostEntry, 'firstSeenAt'>[],
+    at: Date,
+  ): void {
+    const row = this.db.select().from(credentials).where(eq(credentials.id, id)).get();
+    if (!row || row.obtainedVia !== 'git-ssh-key' || row.revokedAt !== null) return;
+    const metadata = row.metadata ?? {};
+    const knownHosts = [...(metadata.knownHosts ?? [])];
+    for (const entry of entries) {
+      if (
+        !knownHosts.some(
+          (saved) =>
+            saved.host === entry.host &&
+            saved.keyType === entry.keyType &&
+            saved.fingerprint === entry.fingerprint,
+        )
+      )
+        knownHosts.push({ ...entry, firstSeenAt: at.toISOString() });
+    }
+    this.db
+      .update(credentials)
+      .set({ metadata: { ...metadata, knownHosts } })
+      .where(eq(credentials.id, id))
+      .run();
   }
 
   refreshSync(

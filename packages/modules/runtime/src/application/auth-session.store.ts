@@ -39,6 +39,18 @@ export class AuthSessionStore {
    */
   private readonly outcomes = new Map<string, AuthOutcome>();
 
+  entries(): AuthSessionEntry[] {
+    return [...this.sessions.values()];
+  }
+  findPending(runtimeId: string, method: string): AuthSessionEntry | undefined {
+    return this.entries().find(
+      (entry) =>
+        entry.runtimeId === runtimeId &&
+        entry.challenge.method === method &&
+        entry.status === 'pending',
+    );
+  }
+
   put(entry: AuthSessionEntry): void {
     this.sessions.set(entry.challengeRef, entry);
   }

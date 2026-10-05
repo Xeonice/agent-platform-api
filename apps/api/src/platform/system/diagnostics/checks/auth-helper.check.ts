@@ -41,9 +41,7 @@ export class AuthHelperCheck implements DiagnoseCheck {
       return {
         status: 'ok',
         headline: '帐号登录可用',
-        detailText:
-          'auth helper 容器已就绪 —— 「帐号登录」会在它里面跑官方 CLI，' +
-          '与任务沙箱用同一张镜像（因此 CLI 版本一致）。',
+        detailText: '帐号登录环境已就绪，会在独立环境中运行官方 CLI。',
       };
     }
 
@@ -52,7 +50,7 @@ export class AuthHelperCheck implements DiagnoseCheck {
         status: 'info',
         headline: '登录环境准备中',
         detailText:
-          'auth helper 容器正在创建 —— 首次通常是在拉那张预制镜像（约 4GB）。' +
+          '帐号登录环境正在创建，首次可能需要下载镜像。' +
           '这期间「帐号登录」会失败，API Key 不受影响。',
         nextStep: '等它拉完再点「帐号登录」；想看进度就看 api 容器的日志。',
       };
@@ -62,8 +60,8 @@ export class AuthHelperCheck implements DiagnoseCheck {
       status: 'warn',
       headline: '帐号登录暂不可用',
       detailText:
-        `auth helper 容器没起来${s.lastError === null ? '' : `：${s.lastError}`}。` +
-        '⚠️ 只影响「帐号登录」这一条路 —— API Key 那条不碰 helper，已配好凭证的任务也照跑。',
+        `帐号登录环境没起来${s.lastError === null ? '' : `：${s.lastError}`}。` +
+        '只影响「帐号登录」这一条路，API Key 不受影响，已配好凭证的任务也照常运行。',
       nextStep: '多半是预制镜像还没拉下来或这台机器拉不动；先看上面那项「预制镜像就绪」。',
       errorCode: 'PROVIDER_UNAVAILABLE',
     };

@@ -176,3 +176,51 @@ export function trySchedule(
 function fmt(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 }
+
+/** Default-image, empty-project estimate. Actual occupied quotas may differ. */
+export function capacityOf(
+  quota: ResourceQuota,
+  pool: ResourcePoolSnapshot,
+  availableDiskBytes: number | null,
+  policy: SchedulingPolicy,
+  registeredTasks: number,
+): { remainingTasks: number; registeredTasks: number; maxTasks: number; basis: string } {
+  const dimensions = [
+    { label: 'CPU', total: pool.totalCores, used: pool.usedCores, need: quota.cores, unit: '核' },
+    { label: '内存', total: pool.totalRamMb, used: pool.usedRamMb, need: quota.ramMb, unit: 'MB' },
+    {
+      label: '磁盘',
+      total: pool.totalDiskMb,
+      used: pool.usedDiskMb,
+      need: quota.diskMb,
+      unit: 'MB',
+    },
+  ];
+  const remaining = dimensions.map((dimension) =>
+    Math.max(0, Math.floor((dimension.total - dimension.used) / dimension.need)),
+  );
+  const maxTasks = Math.max(
+    0,
+    Math.floor(Math.min(...dimensions.map((dimension) => dimension.total / dimension.need))),
+  );
+  const verdict = trySchedule(quota, pool, availableDiskBytes, policy);
+  const exhausted = dimensions.find(
+    (dimension) => dimension.used + dimension.need > dimension.total,
+  );
+  const limiting = dimensions[remaining.indexOf(Math.min(...remaining))]!;
+  const prefix = `按默认镜像与空项目配额（${fmt(quota.cores)} 核 CPU、${fmt(quota.ramMb)} MB 内存、${fmt(quota.diskMb)} MB 磁盘）`;
+  let reason: string;
+  if (exhausted) {
+    reason = `${exhausted.label}登记余量不足：已登记 ${fmt(exhausted.used)} ${exhausted.unit}，调度上限 ${fmt(exhausted.total)} ${exhausted.unit}，新任务需 ${fmt(exhausted.need)} ${exhausted.unit}`;
+  } else if (!verdict.ok) {
+    reason = `数据目录磁盘可用空间 ${fmt((availableDiskBytes ?? 0) / MIB)} MB，低于最低余量 ${fmt(policy.minFreeDiskBytes / MIB)} MB`;
+  } else {
+    reason = `当前瓶颈为${limiting.label}登记余量（${fmt(limiting.total - limiting.used)} ${limiting.unit}）；项目代码较大时磁盘配额另按基线体积计算`;
+  }
+  return {
+    remainingTasks: verdict.ok ? Math.max(1, Math.min(...remaining)) : 0,
+    registeredTasks,
+    maxTasks,
+    basis: `${prefix}；${reason}`,
+  };
+}

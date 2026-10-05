@@ -11,7 +11,6 @@ import {
   ID_GENERATOR,
   UNIT_OF_WORK,
   asCredentialId,
-  defaultHostFor,
   isBlockedGitHost,
 } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
@@ -162,14 +161,14 @@ export class CredentialApplicationService {
    */
   async testGitCredential(input: GitTestRequestInput): Promise<GitTestResult> {
     const resolved = await this.resolveTestSource(input);
-    const { kind, allowedHosts, blob, platform } = resolved;
+    const { kind, allowedHosts, blob } = resolved;
 
-    const target = resolveTestTarget(input.repoUrl, kind, allowedHosts, platform);
+    const target = resolveTestTarget(input.repoUrl);
     if (!target) {
       return {
         ok: false,
         errorCode: 'CLONE_FAILED_NETWORK',
-        message: 'unsupported or missing repo URL',
+        message: '没有可用来测试的仓库，请指定白名单内的真实仓库地址。',
       };
     }
 
@@ -328,15 +327,11 @@ function normalizeHosts(hosts: string[], kind: GitObtainedVia): string[] {
 }
 
 /**
- * Resolve the probe target `{ host, url }`. With a repoUrl, use its host + the URL
- * verbatim (the credential's kind still drives materialize); without one, derive a
- * default loop-back probe from allowedHosts[0] or the platform host (03 §7.4).
+ * A host root is not a repository. Tests require a real selected project URL;
+ * the frontend explains missing targets instead of probing a SaaS root.
  */
 function resolveTestTarget(
   repoUrl: string | undefined,
-  kind: GitObtainedVia,
-  allowedHosts: string[],
-  platform: GitPlatform | undefined,
 ): { host: string; url: string; scheme: GitTargetScheme; canonicalHost: string } | null {
   if (repoUrl) {
     const parsed = parseGitTarget(repoUrl);
@@ -349,16 +344,5 @@ function resolveTestTarget(
         }
       : null;
   }
-  // allowedHosts[0] is already a canonical authority (may carry a non-default port).
-  const host = allowedHosts.length > 0 ? allowedHosts[0] : defaultHostFor(platform);
-  if (!host) return null;
-  // No repoUrl → default probe. A derived token probe assumes https (the safe default
-  // for a bare authority); an SSH probe assumes ssh.
-  const isToken = kind === 'git-https-token';
-  const url = isToken ? `https://${host}/` : `ssh://git@${host}/`;
-  // Re-parse the derived probe URL to recover the bare canonical host for the SSRF
-  // blocklist (strips any :port); fall back to the authority if the probe URL is not
-  // parseable (e.g. a bare IPv6 authority) so a whitelisted host is not wrongly blocked.
-  const canonicalHost = parseGitTarget(url)?.canonicalHost ?? host;
-  return { host, url, scheme: isToken ? 'https' : 'ssh', canonicalHost };
+  return null;
 }

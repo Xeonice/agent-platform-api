@@ -1,0 +1,263 @@
+{
+  "node": "v22.23.3",
+  "files": 41,
+  "tests": 160,
+  "passed": 160,
+  "failed": 0,
+  "skipped": 0,
+  "runtimeMatcherEvaluations": 674,
+  "runtimeMatcherMeaning": "Actual Vitest matcher calls in each completed test; polling retry evaluations count too. This is distinct from test count and source clauses.",
+  "sourceExpectationSites": 605,
+  "expectationSitesMeaning": "Static source clauses; parameterized execution may evaluate a clause multiple times. This is not a runtime assertion count.",
+  "boundaries": "Actual production SQLite/services/Nest/HTTP/MCP/WS, synthetic external provider/vendor fixture, native child stdout and local Git smart HTTP. No real OAuth account or dedicated Docker/BoxLite provider claimed.",
+  "sourceHashes": {
+    "acceptance/acc/protocol/protected-resource-attempts.spec.ts": "1223cecf0e5ea4b9a51449623cf4005a07b673e47ef5df30416e994ff315dc07",
+    "acceptance/acc/protocol/session-rotation.spec.ts": "4fdef9762f0c37126f8a1e4a50f6aa71351e4316f7a37658daaa8825d9a671d4",
+    "acceptance/acc/sqlite/first-access.spec.ts": "b513609fccdc5f40aea6dd962fb0190647c9d96973204289b94d48115d6b746e",
+    "acceptance/aut/protocol/attention.spec.ts": "1170089b02cecd3d062546e85d4ba32e78ae100b1a59f617358c5d38f150db6d",
+    "acceptance/aut/pure/scheduling-policy.spec.ts": "7430a9752b9902f959b7af784b45e64486927574505f493930a5feac19f2b8f1",
+    "acceptance/aut/service/attention-limits.spec.ts": "fbc03ccc2568c7ac29a3468fc7fba056a3c4b527a23468da8fbc8c8ed17b2ddb",
+    "acceptance/aut/sqlite/artifact-recovery.spec.ts": "5060f0433d7827c5913daeef62d14cb84a51ebfb995f026dcee81809d6622a62",
+    "acceptance/auth/pure/challenge-byte-parsing.spec.ts": "18935c8a110b2147259bf95bf10af4dc60119eb56b5ab7de997729c9751da5ab",
+    "acceptance/auth/service/session-lifecycle.spec.ts": "503d13e2748b5a8cf98da0b2f4ce242ce069918ebbfc039149500b930e4f523c",
+    "acceptance/crd/protocol/git-real-target.spec.ts": "db8c43b442df67d501e11f9b685a3096e8d529055fbbf46cfa697591cfd7a907",
+    "acceptance/crd/pure/masked-credential.spec.ts": "367d0f7b7cdd504b14fe4c7d73482632fdf3ec70515a679731055c6f0f9ce605",
+    "acceptance/crd/service/affected-tasks.spec.ts": "f61b79cf88532c000eca28ed2e5753aa9862a8d95bf0bae02bb3108d4cb81d42",
+    "acceptance/crd/service/clone-host-recording.spec.ts": "c484dc92576d4bae0944e38f1aa0743ee785f48a4671075c85d215e8e8e73cd1",
+    "acceptance/crd/sqlite/injection-revocation.spec.ts": "1354a01eb6988159c9aca8d4017129874d0e07235f776688863f245bf65202ff",
+    "acceptance/crd/sqlite/revocation-cleanup.spec.ts": "50d190f38abab948aa2e2975d5d7e12624bec603298f5902f06c6faa1c3f8a41",
+    "acceptance/crd/sqlite/ssh-tofu.spec.ts": "1fb8aee98a00362f32acae2acbbdac9210138a969c94ad47b9e08bd4ea1f7619",
+    "acceptance/dep/service/initialization-evidence.spec.ts": "53c4b662cade2362b63cb25befbec2cc32d7e2117803adfce9ea2b3753674346",
+    "acceptance/img/pure/environment-policy.spec.ts": "5ccb0ec455bc9bc259ad293caed8a2d5ada81915914299a481d27224fab18698",
+    "acceptance/img/service/preview-and-preflight.spec.ts": "d8af8c8b7fe40417efdeaa29b2b9926169ab784ba809ab40c77f78d357c26c7e",
+    "acceptance/img/sqlite/deletion-references.spec.ts": "cd1948d5e032132f5308abb6fc216933a1eec3155f03effa382321c87983ae01",
+    "acceptance/img/sqlite/deletion-transaction.spec.ts": "b9cdd5b390faab2a8a70c8ff96b42a1282d9d2af83682e2d6a2e703efde955b4",
+    "acceptance/img/sqlite/environment-inheritance.spec.ts": "c5eb4deee864717024107b76081414ef8c8cb34bd3f7ad57f7d0c8190441fbab",
+    "acceptance/lch/pure/prompt-boundaries.spec.ts": "a8b3f2a42c02f45a41d2dab5e5a190faa78b080a6d674a4d1bcbfbca28f0c6d4",
+    "acceptance/lch/service/image-snapshot.spec.ts": "0d40950d2310cd4ac052a5f19e514554c73446ab6077311ab36a616f75d443f2",
+    "acceptance/prj/protocol/project-creation-recovery.spec.ts": "befca2cc8e2491831e9c3e0508b54ef1387ccd4d15b8b3e0011eec873959035b",
+    "acceptance/prj/service/clone-queue-cancellation.spec.ts": "08345ecbf5ea9ceab77d34be9ee4c9fa72a87c74a18dee751a6c25cca828b3b3",
+    "acceptance/prj/sqlite/deletion-transaction.spec.ts": "2e81d069bea700da99d432fdaafd128db2249ef61a0807a7b125a1cf21b69e8a",
+    "acceptance/prj/sqlite/post-commit-task-cleanup.spec.ts": "1d335f73411781ba3260a449d27b5a2874460c2645e37283e08ace331eb7f6a9",
+    "acceptance/sbx/protocol/task-lifecycle.spec.ts": "4cd174d32b06508a4bd2b166c52bdf5bce753daaaedf7f44deb0758a2f0c91f2",
+    "acceptance/sbx/service/lifecycle-races.spec.ts": "73fc431cd7c0630359d91a24ff8749524cb00e91c26597490599addd08364e2b",
+    "acceptance/sbx/sqlite/delete-write-conflict.spec.ts": "487e98d450459e7e714ccf3ce7c4b190970a69f1e1388739daa6c627287bbf33",
+    "acceptance/sbx/sqlite/retained-task-artifacts.spec.ts": "fb428da6014c8fbcfe20ade28d738ed66a49cd9d553283c195c526051843bfbd",
+    "acceptance/sys/service/auth-helper-diagnosis.spec.ts": "1d33ff52fc30df98683cc9b17d3877bc315275ae72d44bcb5e45510ac6d5c06c",
+    "acceptance/sys/service/environment-verdicts.spec.ts": "03467ac952c2dab913150d32272b3a98b34d428bc74dc6e43e962178c6f02ed9",
+    "acceptance/sys/service/instance-recovery.spec.ts": "1150d9655a8dbdd9d5928094e29114a7679d0dcd604a0b3b3b8f6f035f5f2364",
+    "acceptance/sys/service/provider-log.spec.ts": "0741af3c95b47dd52033f425bb06a6b03fc1d4fdaf1f896c5d37d68b6bc0d348",
+    "acceptance/sys/service/task-capacity.spec.ts": "5eda8a843a0e14ce82a7b5df67aeb9bffc037f25a1961be01e38f0800ba96cc4",
+    "acceptance/sys/sqlite/audit-query-export.spec.ts": "7dbdc1da82567e7f0524acc6554c6809be386ead42f44360b79b388af0978d80",
+    "acceptance/wb/protocol/waiting-input.spec.ts": "da056d0898e59ea3c25fbf62acfd62cf4bd075125932da645ad6ff7041b928a6",
+    "acceptance/wb/pure/prompt-heuristic.spec.ts": "c59458eef6ba8201bfa5c9f1fc570376bbc92d89c0295defe3ebe709c9a593bb",
+    "acceptance/wb/service/waiting-detection.spec.ts": "a4fc01de86ac8e4b50d55c513d0cc8f8b78cc18200071f37727355cf1457c224"
+  },
+  "executions": [
+    {
+      "file": "acceptance/aut/pure/scheduling-policy.spec.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "acceptance/auth/pure/challenge-byte-parsing.spec.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "acceptance/crd/pure/masked-credential.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/img/pure/environment-policy.spec.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "acceptance/lch/pure/prompt-boundaries.spec.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "acceptance/wb/pure/prompt-heuristic.spec.ts",
+      "status": "passed",
+      "tests": 15
+    },
+    {
+      "file": "acceptance/aut/service/attention-limits.spec.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "acceptance/auth/service/session-lifecycle.spec.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "acceptance/crd/service/affected-tasks.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/crd/service/clone-host-recording.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/dep/service/initialization-evidence.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/img/service/preview-and-preflight.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/prj/service/clone-queue-cancellation.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/sbx/service/lifecycle-races.spec.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "acceptance/sys/service/auth-helper-diagnosis.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/sys/service/environment-verdicts.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/sys/service/instance-recovery.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/sys/service/provider-log.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/sys/service/task-capacity.spec.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "acceptance/lch/service/image-snapshot.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/wb/service/waiting-detection.spec.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "acceptance/acc/sqlite/first-access.spec.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "acceptance/crd/sqlite/injection-revocation.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/crd/sqlite/revocation-cleanup.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/crd/sqlite/ssh-tofu.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/img/sqlite/deletion-references.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/img/sqlite/deletion-transaction.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/img/sqlite/environment-inheritance.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/aut/sqlite/artifact-recovery.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/sbx/sqlite/delete-write-conflict.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/sbx/sqlite/retained-task-artifacts.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/sys/sqlite/audit-query-export.spec.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "acceptance/prj/sqlite/deletion-transaction.spec.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "acceptance/prj/sqlite/post-commit-task-cleanup.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/acc/protocol/protected-resource-attempts.spec.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "acceptance/acc/protocol/session-rotation.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/aut/protocol/attention.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/crd/protocol/git-real-target.spec.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "acceptance/prj/protocol/project-creation-recovery.spec.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "acceptance/sbx/protocol/task-lifecycle.spec.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "acceptance/wb/protocol/waiting-input.spec.ts",
+      "status": "passed",
+      "tests": 2
+    }
+  ]
+}

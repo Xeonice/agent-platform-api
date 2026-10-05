@@ -1,0 +1,30 @@
+{
+  "node": "v22.23.3",
+  "commands": [
+    "pnpm --dir api build",
+    "pnpm --dir api typecheck",
+    "pnpm --dir api lint",
+    "pnpm --dir api openapi:emit",
+    "copy api/openapi.json to web/openapi.json",
+    "pnpm --dir web generate:api",
+    "node api/scripts/check-wire-snapshots.mjs"
+  ],
+  "generationStable": true,
+  "apiWebOpenApiByteEqual": true,
+  "before": {
+    "api/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+    "web/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+    "web/src/types/generated/openapi.d.ts": "75d05c2eae6d8064c33921a4b8903e0b3dd2d6df300c64bef084857f885640b1"
+  },
+  "after": {
+    "api/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+    "web/openapi.json": "bf18ebd4ddb4cf5e0a5660737b6257ac413eed880513cb1798eda404b67b99e2",
+    "web/src/types/generated/openapi.d.ts": "75d05c2eae6d8064c33921a4b8903e0b3dd2d6df300c64bef084857f885640b1"
+  },
+  "wireDeclarationPairs": 5,
+  "wireEvidence": "acceptance/wire-snapshots.json",
+  "browserEvidence": "../artifacts/migration-audit/cross-execution-report.json",
+  "browserScenario": "../e2e-contract/acceptance/task-lifecycle.spec.ts",
+  "scope": "Rest DTO generation and declared protocol canonical/hash parity; runtime HTTP/WS/MCP/browser results remain separate execution evidence.",
+  "checkedAt": "2026-10-05T10:35:47.773366+00:00"
+}

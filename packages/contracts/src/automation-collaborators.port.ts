@@ -25,6 +25,9 @@ export interface AutomationTaskLaunchInput {
   timeoutMinutes: TimeoutMinutes;
   /** 起这一发的规则。用于日志与溯源，不改变创建语义。 */
   automationId: string;
+  /** Immutable cleanup metadata, retained even if the rule and run history are deleted. */
+  automationName?: string;
+  artifactRetentionDays?: 3 | 7 | 30;
 }
 
 /** 终态 Task 的结果面。`logPath` 是**可直接按字节区间读的文件**，不是目录。 */
@@ -94,6 +97,16 @@ export interface AutomationTaskLauncher {
   startTask(sandboxId: string, input: AutomationTaskLaunchInput): Promise<void>;
   /** 每轮扫描的观测点。沙箱不存在 ⇒ `{kind:'gone'}`（**不抛**）。 */
   phaseOf(sandboxId: string): Promise<AutomationTaskPhase>;
+  /** Idempotent standard teardown. Preserve the code copy and release the task quota. */
+  finishTask(
+    sandboxId: string,
+    input: {
+      automationId: string;
+      automationName: string;
+      retentionDays: 3 | 7 | 30;
+      finishedAt: Date;
+    },
+  ): Promise<void>;
 }
 
 /**

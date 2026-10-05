@@ -257,7 +257,9 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
           });
           continue;
         }
+        await this.finishTask(automation, run);
         this.applyOutcome(automation, run, run.status as AutomationOutcome);
+        this.notify(this.notifier.afterRunFinished(automation, run));
         applied += 1;
       } catch (e) {
         // ⚠️ 跳过它 = **留到下一轮**，不丢账：`outcome_applied` 保持 false，下一轮照样扫得
@@ -368,6 +370,11 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
           ...(phase.errorMessage !== undefined ? { errorMessage: phase.errorMessage } : {}),
           outputSummary: await this.notifier.summarize(run.logPath),
         });
+        // Persist the result before external teardown. If teardown fails or the
+        // process stops, outcome-pending recovery retries it without losing the
+        // original success/failure or its retention start time.
+        this.uow.run((tx) => this.runs.saveSync(tx, run));
+        await this.finishTask(automation, run);
         this.applyOutcome(automation, run, phase.status);
         this.notify(this.notifier.afterRunFinished(automation, run));
         return 1;
@@ -384,6 +391,16 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         return 1;
       }
     }
+  }
+
+  private async finishTask(automation: Automation, run: AutomationRun): Promise<void> {
+    if (run.sandboxId === null || run.completedAt === null) return;
+    await this.launcher.finishTask(run.sandboxId, {
+      automationId: automation.id,
+      automationName: automation.name,
+      retentionDays: automation.retentionDays,
+      finishedAt: run.completedAt,
+    });
   }
 
   /**
@@ -619,6 +636,8 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       await this.launcher.startTask(run.sandboxId, launchInput(automation));
     } catch (e) {
       run.finalize('failed', this.clock.now(), { errorMessage: (e as Error).message });
+      this.persistRun(run);
+      await this.finishTask(automation, run);
       this.applyOutcome(automation, run, 'failed');
       this.notify(this.notifier.afterRunFinished(automation, run));
     }
@@ -709,6 +728,8 @@ function launchInput(automation: Automation): AutomationTaskLaunchInput {
     prompt: automation.prompt,
     timeoutMinutes: automation.timeoutMinutes as TimeoutMinutes,
     automationId: automation.id,
+    automationName: automation.name,
+    artifactRetentionDays: automation.retentionDays,
   };
 }
 

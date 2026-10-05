@@ -5,11 +5,19 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { create as tarCreate } from 'tar';
-import { CLOCK, availableBytesFor, fromEpochMs, shiftMs } from '@platform/shared-kernel';
+import {
+  CLOCK,
+  availableBytesFor,
+  fromEpochMs,
+  shiftMs,
+  toIsoInstant,
+} from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
 import { RUNTIME_LOG_READER, type RuntimeLogReader } from '../logging';
 import { env } from '../config/env';
 import { AuditRepository } from './audit.repository';
+import { DiagnosticSnapshotService } from './diagnostic-snapshot.service';
+import { redactAuditDetail } from './audit-redaction';
 
 /** P21-5 §10.3：取「最近 24h」与「50MB」中先到的那个。 */
 export const EXPORT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -57,6 +65,7 @@ export class AuditExportService {
     @Optional()
     @Inject(RUNTIME_LOG_READER)
     private readonly runtimeLog?: RuntimeLogReader,
+    @Optional() private readonly diagnostics?: DiagnosticSnapshotService,
   ) {}
 
   async pack(): Promise<AuditExportResult> {
@@ -173,14 +182,14 @@ export class AuditExportService {
       };
     }
     const budget = EXPORT_MAX_BYTES - Math.floor(EXPORT_MAX_BYTES * AUDIT_BUDGET_RATIO);
-    let stream: NodeJS.ReadableStream | null;
+    let stream: ReturnType<RuntimeLogReader['read']>;
     try {
       stream = this.runtimeLog.read({ from, to, maxBytes: budget });
     } catch (e) {
       this.logger.warn(`runtime log reader threw: ${(e as Error).message}`);
       return {
         included: false,
-        omittedReason: `读取运行日志失败：${(e as Error).message}`,
+        omittedReason: '读取运行日志失败，已省略这一份；审计与诊断快照仍包含在包内。',
       };
     }
     if (!stream) {
@@ -190,24 +199,37 @@ export class AuditExportService {
       };
     }
     const target = join(dir, 'runtime.log');
-    await pipeline(stream, createWriteStream(target));
+    try {
+      await pipeline(stream, createWriteStream(target));
+    } catch (error) {
+      this.logger.warn(`runtime log stream failed: ${(error as Error).message}`);
+      return {
+        included: false,
+        omittedReason: '读取运行日志失败，已省略这一份；审计与诊断快照仍包含在包内。',
+      };
+    }
     const size = (await stat(target)).size;
-    return { included: true, bytes: size, truncated: size >= budget };
+    if (size === 0)
+      return { included: false, bytes: 0, omittedReason: '所选时间范围内没有运行日志内容。' };
+    return { included: true, bytes: size, truncated: stream.truncated === true || size >= budget };
   }
 
   /**
    * `diagnose.json` —— 导出时刻的快照 + 版本 / 资源水位（P21-5 §10.3 第 3 份）。
    *
-   * ⚠️ **`POST /api/system/diagnose`（02 §5.3 的 SSE 逐项检查）尚未落地**，所以这里
-   * **不假装跑过一轮检查**：`checks` 是空数组并附一句 `checksUnavailable` 说明。
-   * 编一份"全绿"的诊断快照，比没有诊断快照坏得多 —— 读者会据此排除掉本该查的方向。
+   * 取本进程最近一轮真实诊断，包括尚在运行或已中断的部分结果。
+   * 从未诊断时声明原因；导出不会额外运行检查，也不会编造全绿结论。
    */
   private async writeDiagnose(dir: string, now: Date): Promise<{ checks: number }> {
+    const diagnosis = this.diagnostics?.latest();
     const dataRoot = env.dataRoot;
     const free = await availableBytesFor(dataRoot).catch(() => Number.POSITIVE_INFINITY);
     const snapshot = {
       at: now.toISOString(),
       platform: {
+        version: env.appVersion,
+        commit: env.appCommit,
+        builtAt: toIsoInstant(env.appBuiltAt) ?? null,
         node: process.version,
         os: `${os.type()} ${os.release()} ${os.arch()}`,
         uptimeSec: Math.floor(process.uptime()),
@@ -221,13 +243,21 @@ export class AuditExportService {
         dataRoot,
         dataRootFreeBytes: Number.isFinite(free) ? free : null,
       },
-      checks: [] as unknown[],
-      checksUnavailable:
-        'POST /api/system/diagnose（02 §5.3 的逐项检查）尚未落地，本快照因此不含检查结果。' +
-        '这里刻意留空而不是填一份"全绿"——编造的诊断会让读者排除掉本该查的方向。',
+      checks: diagnosis?.checks.map((check) => redactAuditDetail({ ...check })) ?? [],
+      ...(diagnosis === undefined
+        ? {
+            checksUnavailable:
+              '本进程尚未运行诊断。请在系统状态页点 [重新诊断]；导出不会另外运行一轮检查。',
+          }
+        : {
+            diagnostics: redactAuditDetail({ ...diagnosis, checks: undefined }),
+            checksNotReturned: diagnosis.start.checks
+              .filter((check) => !diagnosis.checks.some((row) => row.id === check.id))
+              .map((check) => check.id),
+          }),
     };
     await writeFile(join(dir, 'diagnose.json'), `${JSON.stringify(snapshot, null, 2)}\n`);
-    return { checks: 0 };
+    return { checks: diagnosis?.checks.length ?? 0 };
   }
 }
 

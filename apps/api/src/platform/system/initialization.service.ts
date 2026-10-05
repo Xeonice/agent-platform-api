@@ -91,7 +91,7 @@ export class InitializationService {
     acknowledged: boolean,
   ): void {
     const modelApis = connectivity.filter((r) => r.modelApi);
-    const offline = modelApis.length > 0 && modelApis.every((r) => !r.ok);
+    const offline = modelApis.length > 0 && modelApis.every((r) => !r.ok && r.timedOut !== true);
     if (!offline || acknowledged) return;
     throw new ConflictException({
       code: 'OFFLINE_NOT_ACKNOWLEDGED',

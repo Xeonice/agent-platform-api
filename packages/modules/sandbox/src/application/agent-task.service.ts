@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { asAgentTaskId, asSandboxId } from '@platform/shared-kernel';
@@ -28,6 +29,8 @@ import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import type { AgentTask } from '../domain/entities/agent-task.entity';
 import type { Sandbox } from '../domain/entities/sandbox.entity';
+import { WORKSPACE_ARTIFACT_READER } from '../domain/ports/workspace-artifact-reader.port';
+import type { WorkspaceArtifactReader } from '../domain/ports/workspace-artifact-reader.port';
 import {
   RunAgentTaskWorkflow,
   TASK_ARTIFACT_DIR,
@@ -71,6 +74,9 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
     @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
     private readonly workflow: RunAgentTaskWorkflow,
+    @Optional()
+    @Inject(WORKSPACE_ARTIFACT_READER)
+    private readonly retainedArtifacts?: WorkspaceArtifactReader,
   ) {}
 
   /**
@@ -202,6 +208,14 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
     }
     const sandbox = await this.requireSandbox(sandboxId);
     try {
+      if (sandbox.status === 'destroyed') {
+        const artifact =
+          !task.isRunning && sandbox.workspacePath
+            ? await this.retainedArtifacts?.open(sandbox.workspacePath, safe)
+            : null;
+        if (!artifact) throw new NotFoundException(`artifact '${safe}' is no longer retained`);
+        return { name: safe, ...artifact };
+      }
       const provider = this.providers.get(sandbox.provider);
       const files = provider.files;
       if (!files) {
@@ -294,16 +308,10 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
   /**
    * A Task needs a LIVE instance and a runtime this sandbox can actually run.
    *
-   * ⚠️ **判据 2026-09 从「等于 `sandbox.runtime`」放宽成「在 `injectedRuntimes` 里」。**
-   * 旧注释写的是「provision 只装一个 CLI、只注入一份凭证」——那句话现在是**假话**：
-   * 镜像本来就预装了它声明支持的全部 CLI，而 provision 会把所有已配置的凭证一次性
-   * 注入（03 §4.3 ④）。继续按 `sandbox.runtime` 拒绝，会把一个**真的能跑**的任务
-   * 挡在门外。
-   *
-   * ⛔ 但**不能因此不校验**：一个既没预装 CLI、也没注入凭证的 runtime 到了沙箱里就是
-   * 一个找不到的二进制 —— 30 秒之后一条看不懂的失败，远不如门口一句准确的拒绝。
-   * ⇒ 判据换成那条**落库的记录**（⛔ 不是现算的"镜像支持的 ∩ 现在配了的"，理由见
-   * `SandboxDtoSchema.injectedRuntimes`）。
+   * Approved CRD-003 isolates newly created tasks to their selected Agent. The
+   * persisted injectedRuntimes still describes older tasks that received more than
+   * one credential; admission reads that historical fact plus the selected runtime,
+   * rather than assuming that every CLI present in the image received credentials.
    */
   private assertRunnable(sandbox: Sandbox, runtimeId: string): void {
     if (!this.runtimes.has(runtimeId)) {
@@ -317,8 +325,7 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
     }
     const available = sandbox.availableRuntimes;
     if (!available.includes(runtimeId)) {
-      // ⚠️ 拒绝语要说**真实**的理由。旧文案「它的 CLI 和凭证是唯一装了的」在多 runtime
-      //    之后是假话，而一句假的拒绝语会把排查引向完全错误的方向。
+      // Only recorded delivery makes an additional Agent available in a legacy task.
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
         `sandbox ${sandbox.id} has no usable '${runtimeId}' runtime — ` +

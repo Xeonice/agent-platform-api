@@ -1,4 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
+import { AUTOMATION_PROJECT_CLEANUP } from '@platform/contracts';
+import { SqliteAutomationProjectCleanup } from '../infrastructure/persistence/sqlite/automation-project-cleanup.adapter';
 import { AUTOMATION_REPOSITORY } from '../domain/repositories/automation.repository';
 import { AUTOMATION_RUN_REPOSITORY } from '../domain/repositories/automation-run.repository';
 import { WEBHOOK_SENDER } from '../domain/ports/webhook-sender.port';
@@ -16,13 +18,12 @@ import { ProjectAutomationController } from './http/project-automation.controlle
 /**
  * Composition root for the automation context (01 §2) —— 端口绑定实现的**唯一**一处。
  *
- * ⚠️ **不是 `@Global`**（与 project/sandbox/runtime 那几个相反）：没有任何别的上下文
- * 依赖 automation。它自己需要的三个跨上下文口（`AUTOMATION_TASK_LAUNCHER` /
- * `RUNTIME_CREDENTIAL_STATE_READER` / `ACCESS_GATE_READER`）由那三个 @Global 模块提供，
- * 方向是**单向进来**的 —— 所以本模块必须装配在它们**之后**（见 `app.module.ts`）。
+ * 对外通过全局 AUTOMATION_PROJECT_CLEANUP 端口提供同事务的项目删除能力；
+ * project 不导入 automation 模块或其内部表。调度协作者仍由各自上下文提供。
  *
- * ⛔ **没有 MCP 壳**（27 §11.3「automation 全部（11 个）」不进 MCP）。
+ * automation 不暴露 MCP 壳（27 §11.3）。
  */
+@Global()
 @Module({
   controllers: [ProjectAutomationController, AutomationController],
   providers: [
@@ -33,7 +34,8 @@ import { ProjectAutomationController } from './http/project-automation.controlle
     { provide: AUTOMATION_RUN_REPOSITORY, useClass: SqliteAutomationRunRepository },
     { provide: WEBHOOK_SENDER, useClass: HttpWebhookSender },
     { provide: AUTOMATION_RUN_LOG_READER, useClass: FsRunLogReader },
+    { provide: AUTOMATION_PROJECT_CLEANUP, useClass: SqliteAutomationProjectCleanup },
   ],
-  exports: [AutomationApplicationService, AutomationScheduler],
+  exports: [AutomationApplicationService, AutomationScheduler, AUTOMATION_PROJECT_CLEANUP],
 })
 export class AutomationModule {}

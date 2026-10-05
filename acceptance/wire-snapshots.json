@@ -1,0 +1,40 @@
+{
+  "scope": "Verified declared WS/SSE canonical strings and handshake hashes; actual runtime frames are separately exercised by protocol and browser acceptance.",
+  "declarations": [
+    {
+      "constant": "WS_PROTOCOL_CANONICAL",
+      "api": "packages/contracts/src/ws-protocol.ts",
+      "web": "../web/src/types/ws-protocol.ts",
+      "value": "terminal.client:input{data},resize{cols,rows},ping,close_shell{shellId}|terminal.server:data{data},exit{code},pong,session{socketSessionKey,shellId?},shells{shells[shellId,runtimeId?]}|events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?,errorCode?},sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},project.clone_progress{projectId,phase,startedAt?,stage?,percent?,objectsDone?,objectsTotal?,receivedBytes?,bytesPerSecond?,errorCode?},runtime-auth.status_changed{runtime},runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?},sandbox.instance_progress{sandboxId,phase,imageStaged?}|tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|tasks.server:event{taskId,seq,event},caught_up{taskId,firstSeq,seq},exit{taskId,status,exitCode?},error{taskId,code},pong",
+      "sha256": "cbad4a7917a0cb4f57cd32cbaca18f67e01282faf625d8ca7e69e139e6ed0949"
+    },
+    {
+      "constant": "SSE_PROTOCOL_CANONICAL",
+      "api": "packages/contracts/src/sse-protocol.ts",
+      "web": "../web/src/types/sse-protocol.ts",
+      "value": "diagnose.server:start{checks[{id,label}],timeoutMs},check{id,label,status,headline,detailText?,nextStep?,command?,step?,errorCode?,detail?,durationMs},done{okCount,infoCount,warnCount,failCount,totalMs}|diagnose.status:ok,info,warn,fail,timeout|diagnose.checks:container-runtime,dev-kvm,disk-space,port-conflict,outbound-network,ws-loopback,data-root-fs,preset-image,auth-helper|diagnose.preset-image.steps:config,registry,lineage,registration,staged|diagnose.preset-image.codes:PRESET_IMAGE_NOT_CONFIGURED,PRESET_IMAGE_NOT_IN_REGISTRY,PRESET_IMAGE_NOT_PLATFORM_BUILT,PRESET_IMAGE_NOT_SEEDED|provision.server:stage{stage,status,message,progress},done{ok,error?}|provision.stages:plan,fetch,verify,load,register|provision.status:running,ok,failed,skipped|provision.codes:PRESET_IMAGE_NOT_PROVISIONABLE,PRESET_IMAGE_PROVISION_IN_FLIGHT",
+      "sha256": "ec806752a7566e08908d1edabc0e334026d0cee7ab5e0813abab120ddb0ad862"
+    },
+    {
+      "constant": "WS_SCHEMA_HASH",
+      "api": "packages/contracts/src/ws-protocol.ts",
+      "web": "../web/src/lib/terminal/terminalSocket.ts",
+      "value": "sb-terminal-v4",
+      "sha256": "a47ef5ad8db222c3bb13194e63fb90539f8d60143035faeaa33faaf0b9e56876"
+    },
+    {
+      "constant": "WS_TASKS_SCHEMA_HASH",
+      "api": "packages/contracts/src/ws-protocol.ts",
+      "web": "../web/src/lib/task/taskSocketConfig.ts",
+      "value": "sb-tasks-v1",
+      "sha256": "2a3c7b7490c7146bffcd752d0f7c537c9478e43691b24272d510aa0e5f55debf"
+    },
+    {
+      "constant": "SSE_DIAGNOSE_SCHEMA_HASH",
+      "api": "packages/contracts/src/sse-protocol.ts",
+      "web": "../web/src/types/sse-protocol.ts",
+      "value": "sb-diagnose-v2",
+      "sha256": "e6aed82272dbe769c63d01b38816227cc3977bf60ed9896c5cc9635285e869a5"
+    }
+  ]
+}

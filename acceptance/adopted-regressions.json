@@ -1,0 +1,127 @@
+[
+  {
+    "origin": "apps/api/test/e2e/access-no-session.e2e-spec.ts",
+    "file": "acceptance/acc/protocol/protected-resource-attempts.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "apps/api/test/e2e/automation-attention.e2e-spec.ts",
+    "file": "acceptance/aut/protocol/attention.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "apps/api/test/unit/access-passcode/passcode-bootstrap.spec.ts",
+    "file": "acceptance/acc/sqlite/first-access.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "apps/api/test/unit/audit/provider-log.service.spec.ts",
+    "file": "acceptance/sys/service/provider-log.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "apps/api/test/unit/system/auth-helper.check.spec.ts",
+    "file": "acceptance/sys/service/auth-helper-diagnosis.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "apps/api/test/unit/system/initialization-connectivity.spec.ts",
+    "file": "acceptance/dep/service/initialization-evidence.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/automation/test/unit/automation-application.spec.ts",
+    "file": "acceptance/aut/service/attention-limits.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/credential/test/integration/git-test-real-target.spec.ts",
+    "file": "acceptance/crd/protocol/git-real-target.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/credential/test/integration/injection-revocation.spec.ts",
+    "file": "acceptance/crd/sqlite/injection-revocation.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/credential/test/integration/ssh-clone-host-recording.spec.ts",
+    "file": "acceptance/crd/sqlite/ssh-tofu.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/project/test/integration/project-deletion-transaction.spec.ts",
+    "file": "acceptance/prj/sqlite/deletion-transaction.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/project/test/unit/clone-cancel-queued.spec.ts",
+    "file": "acceptance/prj/service/clone-queue-cancellation.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/project/test/unit/git-cloner-host-recording.spec.ts",
+    "file": "acceptance/crd/service/clone-host-recording.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/runtime/test/application/auth-session-lifecycle.spec.ts",
+    "file": "acceptance/auth/service/session-lifecycle.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/application/credential-impact.spec.ts",
+    "file": "acceptance/crd/service/affected-tasks.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/application/default-capacity.spec.ts",
+    "file": "acceptance/sys/service/task-capacity.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/application/lifecycle-races.spec.ts",
+    "file": "acceptance/sbx/service/lifecycle-races.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/application/task-image-snapshot.spec.ts",
+    "file": "acceptance/lch/service/image-snapshot.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/integration/image-references.spec.ts",
+    "file": "acceptance/img/sqlite/deletion-references.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/integration/project-cleanup-recovery.spec.ts",
+    "file": "acceptance/prj/sqlite/post-commit-task-cleanup.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/integration/retained-task-artifact.spec.ts",
+    "file": "acceptance/sbx/sqlite/retained-task-artifacts.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/sandbox/test/unit/reconciler-terminal-orphans.spec.ts",
+    "file": "acceptance/sys/service/instance-recovery.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/terminal/test/integration/waiting-input-projection.spec.ts",
+    "file": "acceptance/wb/protocol/waiting-input.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/terminal/test/unit/prompt-heuristic.spec.ts",
+    "file": "acceptance/wb/pure/prompt-heuristic.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  },
+  {
+    "origin": "packages/modules/terminal/test/unit/waiting-input-detector.spec.ts",
+    "file": "acceptance/wb/service/waiting-detection.spec.ts",
+    "basis": "New untracked regression from this design migration, not a renamed HEAD suite."
+  }
+]

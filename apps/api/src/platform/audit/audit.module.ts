@@ -6,6 +6,7 @@ import { AuditProjector } from './audit.projector';
 import { AuditRepository } from './audit.repository';
 import { AuditRetentionJob } from './audit-retention.job';
 import { DbAuditRecorder } from './audit-recorder.impl';
+import { DiagnosticSnapshotService } from './diagnostic-snapshot.service';
 
 /**
  * 平台级审计流的装配（13 §2.8.2）。
@@ -31,7 +32,14 @@ import { DbAuditRecorder } from './audit-recorder.impl';
     AuditProjector,
     AuditRetentionJob,
     AuditExportService,
+    DiagnosticSnapshotService,
   ],
-  exports: [AUDIT_RECORDER, AuditRepository, AuditRetentionJob, AuditExportService],
+  exports: [
+    AUDIT_RECORDER,
+    AuditRepository,
+    AuditRetentionJob,
+    AuditExportService,
+    DiagnosticSnapshotService,
+  ],
 })
 export class AuditModule {}

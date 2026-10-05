@@ -49,8 +49,17 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
   }
 
   private knownSandboxIds(): Set<string> {
-    const rows = this.db.select({ id: sandboxes.id }).from(sandboxes).all();
-    return new Set(rows.map((r) => r.id));
+    const rows = this.db
+      .select({ id: sandboxes.id, handle: sandboxes.providerHandle, status: sandboxes.status })
+      .from(sandboxes)
+      .all();
+    // A creation that crashed before its handle was saved, or an already terminal
+    // task, cannot own a surviving provider instance. Stopped instances stay owned.
+    return new Set(
+      rows
+        .filter((row) => row.handle !== null && !['failed', 'destroyed'].includes(row.status))
+        .map((row) => row.id),
+    );
   }
 
   private async reconcileDocker(known: Set<string>): Promise<number> {

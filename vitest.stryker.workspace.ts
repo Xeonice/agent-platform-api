@@ -24,26 +24,22 @@ const alias = {
   '@platform/image': r('packages/modules/image/src/index.ts'),
 };
 
-// STRYKER_SCOPE=packages/modules/automation 只跑该模块的测试；不设则跑全仓 unit+integration。
-const scope = process.env['STRYKER_SCOPE'] ?? 'packages';
-
+// Mutation runs exercise only the new non-protocol acceptance sources.
 export default defineWorkspace([
   {
-    plugins: [swc.vite({ module: { type: 'es6' } })],
+    plugins: [
+      swc.vite({
+        jsc: {
+          parser: { syntax: 'typescript', decorators: true },
+          transform: { legacyDecorator: true, decoratorMetadata: true },
+        },
+      }),
+    ],
     resolve: { alias },
     test: {
-      name: 'stryker',
+      name: 'mutation',
       environment: 'node',
-      include:
-        scope === 'packages'
-          ? [
-              'packages/**/test/{domain,unit,application}/**/*.spec.ts',
-              // apps/api 的 bootstrap 层也有纯单测（全局 pipe/filter），它们不属于任何
-              // module package 但同样密封可测 —— 漏了它们 `apps/api/src` 的变异体会全是
-              // NoCoverage，基线就会假性偏低。
-              'apps/api/test/unit/**/*.spec.ts',
-            ]
-          : [`${scope}/**/test/{domain,unit,application,integration}/**/*.spec.ts`],
+      include: ['acceptance/*/{pure,service,sqlite}/**/*.spec.ts'],
     },
   },
 ]);

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { setImmediate } from 'node:timers/promises';
-import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { AuditCategory, AuditEventDto, AuditSeverity } from '@platform/contracts';
@@ -183,8 +183,18 @@ function buildConditions(criteria: AuditListCriteria): SQL[] {
   // 「全表没有告警」（10 §6.6.1）。单值 ⇒ `IN ('error')`，与旧行为等价。
   if (criteria.severity !== undefined)
     conditions.push(inArray(auditEvents.severity, [...criteria.severity]));
-  if (criteria.subjectId !== undefined)
-    conditions.push(eq(auditEvents.subjectId, criteria.subjectId));
+  if (criteria.subjectId !== undefined) {
+    // 成果记录对象是成果，但完整任务时间线也应包含它的来源任务。
+    conditions.push(
+      or(
+        eq(auditEvents.subjectId, criteria.subjectId),
+        and(
+          eq(auditEvents.subjectType, 'retained_volume'),
+          sql`json_extract(${auditEvents.detail}, '$.sandboxId') = ${criteria.subjectId}`,
+        ),
+      )!,
+    );
+  }
   return conditions;
 }
 

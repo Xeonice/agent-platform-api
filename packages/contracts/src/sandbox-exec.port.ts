@@ -33,6 +33,8 @@ export interface SandboxRuntimeBinding {
    * matches what is actually inside the box.
    */
   availableRuntimes: readonly string[];
+  /** Headless tasks are excluded from waiting-input hints even if inspected through a TTY. */
+  headless?: boolean;
   /** Working directory inside the sandbox. */
   workdir: string;
 }

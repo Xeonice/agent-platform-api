@@ -13,6 +13,7 @@ import {
   SandboxReconciledAsOrphan,
   AgentTaskStarted,
   AgentTaskFinished,
+  type SandboxStatus,
 } from '@platform/sandbox';
 import { CredentialStored, CredentialRevoked, CredentialInjected } from '@platform/credential';
 import {
@@ -33,6 +34,21 @@ import {
   ImageRegistered,
   ImageValidated,
 } from '@platform/image';
+
+const TASK_STATUS_TEXT: Record<SandboxStatus, string> = {
+  pending: '等待调度',
+  scheduling: '调度中',
+  'preparing-workspace': '准备工作区',
+  creating: '创建中',
+  starting: '准备中',
+  running: '运行中',
+  idle: '空闲',
+  stopping: '停止中',
+  stopped: '已停止',
+  failed: '异常',
+  destroying: '销毁中',
+  destroyed: '已销毁',
+};
 
 /**
  * 审计流的**写入口 ①**（13 §2.8.2「写入语义：两个入口」）：订阅 `EventBus`，把
@@ -81,8 +97,8 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       subjectType: 'sandbox',
       subjectId: e.sandboxId,
       actor: 'user',
-      summary: `创建沙箱 ${e.name}`,
-      detail: { projectId: e.projectId },
+      summary: `创建任务「${e.name}」`,
+      detail: { projectId: e.projectId, name: e.name },
     };
   }
 
@@ -100,7 +116,7 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       // actor 是排障第一个要问的）。经 `transitionActor()` 透传 —— 那是 actor 取值集合
       // 的编译期钉子，见函数注释。
       actor: transitionActor(e.triggeredBy),
-      summary: `沙箱状态 ${e.from} → ${e.to}`,
+      summary: `任务状态 ${TASK_STATUS_TEXT[e.from]} → ${TASK_STATUS_TEXT[e.to]}`,
       detail: { from: e.from, to: e.to },
       outcome: failed ? 'failed' : 'ok',
       ...(e.errorCode === undefined ? {} : { errorCode: e.errorCode }),
@@ -120,7 +136,7 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       // 13 §2.8.2：actor 是排障第一个要问的。对账既不是用户也不是调度器推动的
       // —— `AUDIT_ACTORS` 里对应「平台自己」的那个值是 `system`。
       actor: 'system',
-      summary: `对账判定沙箱 ${e.name} 的实例已不存在，已释放其配额`,
+      summary: `任务「${e.name}」的实例已不存在，已释放其配额`,
       // ⚠️ `status` 记的是**当时**的状态，而这次对账**不会**改它（13 §4 已按实现回填）。
       // 读的人看到 `running` 才明白这条记录在说什么。
       detail: { projectId: e.projectId, status: e.status, reason: e.reason },
@@ -239,10 +255,11 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       actor: 'user',
       // ⛔ summary 里不出现宿主路径（部署布局），也不出现 UUID 之外的定位信息 ——
       // 两个大小才是用户看这一行要的：删掉能拿回多少 / 下载要拉多少。
-      summary: `保留工作区卷（磁盘 ${e.diskBytes} 字节 / 下载 ${e.downloadBytes} 字节）`,
+      summary: `保留成果（磁盘 ${e.diskBytes} 字节 / 下载 ${e.downloadBytes} 字节）`,
       detail: {
         projectId: e.projectId,
         sandboxId: e.sandboxId,
+        ...(e.sandboxName == null ? {} : { name: e.sandboxName }),
         retainUntil: e.retainUntil.toISOString(),
         diskBytes: e.diskBytes,
         downloadBytes: e.downloadBytes,
@@ -265,7 +282,7 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       ...imageSubject(e),
       type: 'image.validated',
       severity: e.status === 'invalid' ? 'error' : e.status === 'warning' ? 'warn' : 'info',
-      summary: `校验镜像 ${e.ref}：${e.status}`,
+      summary: `校验镜像 ${e.ref}：${e.status === 'warning' ? '有警告' : e.status === 'invalid' ? '未通过' : '通过'}`,
       detail: { status: e.status },
       outcome: e.status === 'invalid' ? 'failed' : 'ok',
     };

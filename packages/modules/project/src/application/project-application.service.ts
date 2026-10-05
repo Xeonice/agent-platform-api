@@ -7,16 +7,19 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { CLOCK, ID_GENERATOR, UNIT_OF_WORK, EVENT_BUS, asProjectId } from '@platform/shared-kernel';
 import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-kernel';
-import { SANDBOX_FACADE } from '@platform/contracts';
+import { SANDBOX_FACADE, AUTOMATION_PROJECT_CLEANUP } from '@platform/contracts';
 import type {
   CreateProjectInput,
   DeleteProjectInput,
   ProjectBranches,
   ProjectDto,
   SandboxFacade,
+  AutomationProjectCleanup,
+  ProjectDeletionPreviewDto,
 } from '@platform/contracts';
 import { Project } from '../domain/entities/project.entity';
 import type { CloneErrorCode } from '../domain/entities/project.entity';
@@ -84,6 +87,9 @@ export class ProjectApplicationService {
     @Inject(RETAINED_VOLUME_REPOSITORY) private readonly volumes: RetainedVolumeRepository,
     private readonly cloneWorkflow: CloneProjectWorkflow,
     private readonly syncWorkflow: SyncBaselineWorkflow,
+    @Optional()
+    @Inject(AUTOMATION_PROJECT_CLEANUP)
+    private readonly automationCleanup?: AutomationProjectCleanup,
   ) {}
 
   private dataRoot(): string {
@@ -236,7 +242,7 @@ export class ProjectApplicationService {
       // ⚠️ 只 publish，不 save：取消**不改聚合状态**，落定由 workflow 的失败路径写。
       this.publish(project);
     }
-    return this.toDto(project);
+    return this.toDto(await this.require(id));
   }
 
   /**
@@ -256,28 +262,71 @@ export class ProjectApplicationService {
     // ⚠️ 走 `mapDomainError` 而不是直接抛：领域错误漏出去就是 500，
     //    而这是一次**可预期的拒绝**，用户该拿到 409 和一句能照做的话。
     try {
+      const active = await this.sandboxes.activeByProject(id);
+      if (active.length > 0) {
+        throw new ConflictException({
+          code: 'PROJECT_HAS_ACTIVE_TASKS',
+          message: '项目下还有活跃任务，请先停止这些任务，再删除项目。',
+          retryable: false,
+          sideEffectFree: true,
+        });
+      }
       await this.assertNoLiveRetainedVolumes(id);
     } catch (e) {
       throw this.mapDomainError(e);
     }
     if (project.cloneStatus === 'cloning') this.cloneWorkflow.cancel(id);
     const keptBaseline = input.keepBaseline ?? false;
-    if (!keptBaseline) {
-      await this.baseline.removeDir(project.baselinePath).catch(() => undefined);
-    }
     // ⚠️ 事件在删行**之前**攒好、与删行**同一个事务** publish：审计必须在主体被删除
     // 之后继续存在（13 §2.8.2「为什么 subject_id 不设 FK」），而这条记录本身此前
     // 压根不存在 —— 删掉项目后 `seq` 一点没动。
     project.markDeleted(keptBaseline, this.clock.now());
-    this.uow.run((tx) => {
-      // ⚠️ **必须在删项目之前**：`retained_volumes.project_id` 上是
-      //    `onDelete: 'restrict'`，留着任何一行都会把下面那句顶回来。
-      //    到这里能走过前置检查，说明剩下的全是已清理的墓碑行（见
-      //    `deleteByProjectSync` 的注释：卷的生命周期本身在 `audit_events` 里）。
-      this.volumes.deleteByProjectSync(tx, asProjectId(id));
-      this.repo.deleteSync(tx, asProjectId(id));
-      this.events.publishInTx(tx, project.pullEvents());
-    });
+    let workspaces: string[];
+    try {
+      workspaces = this.uow.run((tx) => {
+        // ⚠️ **必须在删项目之前**：`retained_volumes.project_id` 上是
+        //    `onDelete: 'restrict'`，留着任何一行都会把下面那句顶回来。
+        //    到这里能走过前置检查，说明剩下的全是已清理的墓碑行（见
+        //    `deleteByProjectSync` 的注释：卷的生命周期本身在 `audit_events` 里）。
+        this.volumes.deleteByProjectSync(tx, asProjectId(id));
+        this.automationCleanup?.deleteByProjectSync(tx, id);
+        const paths = this.sandboxes.deleteByProjectSync(tx, id);
+        this.repo.deleteSync(tx, asProjectId(id));
+        this.events.publishInTx(tx, project.pullEvents());
+        return paths;
+      });
+    } catch (error) {
+      if (error instanceof ConflictException) throw error;
+      throw new ConflictException({
+        code: 'PROJECT_DELETE_CONFLICT',
+        message: '没能删除项目：项目数据发生了冲突，请刷新后重试。',
+        retryable: true,
+        sideEffectFree: true,
+      });
+    }
+    // The database is authoritative. A failed transaction must preserve every byte
+    // of the project's code, rules, run history and retained-volume records.
+    if (!keptBaseline) {
+      await this.baseline.removeDir(project.baselinePath).catch(() => undefined);
+    }
+    await this.sandboxes.removeProjectWorkspaces(workspaces);
+  }
+
+  async deletionPreview(id: string): Promise<ProjectDeletionPreviewDto> {
+    await this.require(id);
+    const [activeTasks, volumes, automations, tasks] = await Promise.all([
+      this.sandboxes.activeByProject(id),
+      this.volumes.listByProject(asProjectId(id)),
+      this.automationCleanup?.countsByProject(id) ?? Promise.resolve({ rules: 0, runs: 0 }),
+      this.sandboxes.countByProject([id]),
+    ]);
+    return {
+      activeTasks,
+      retainedVolumeCount: volumes.filter((volume) => volume.deletedAt === null).length,
+      automationCount: automations.rules,
+      automationRunCount: automations.runs,
+      taskCount: tasks[id] ?? 0,
+    };
   }
 
   async get(id: string): Promise<ProjectDto> {

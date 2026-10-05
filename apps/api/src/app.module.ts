@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { McpModule } from '@rekog/mcp-nest';
-import { ProjectModule } from '@platform/project';
-import { SandboxModule } from '@platform/sandbox';
+import { ProjectModule, ProjectMcpTools } from '@platform/project';
+import { SandboxModule, SandboxMcpTools } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
 import { CredentialModule } from '@platform/credential';
 import { RuntimeModule } from '@platform/runtime';
@@ -30,7 +30,9 @@ import { guardProviders } from './bootstrap/guards.setup';
     RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),
     ProjectModule,
+    McpModule.forFeature([ProjectMcpTools], mcpModuleOptions.name),
     SandboxModule,
+    McpModule.forFeature([SandboxMcpTools], mcpModuleOptions.name),
     TerminalModule,
     CredentialModule,
     RuntimeModule,

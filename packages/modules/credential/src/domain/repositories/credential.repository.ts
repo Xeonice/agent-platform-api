@@ -1,6 +1,7 @@
 import type { CredentialId, Tx } from '@platform/shared-kernel';
 import type { Credential } from '../entities/credential.entity';
 import type { EncryptedBlob } from '../value-objects/encrypted-blob.vo';
+import type { KnownHostEntry } from '../value-objects/credential-metadata.vo';
 
 /**
  * CredentialRepository PORT (docs/backend/23 §8.7 — git + runtime). Reads are async;
@@ -21,6 +22,13 @@ export interface CredentialRepository {
   /** I-CRD-3: wipe ciphertext + set revoked_at in ONE statement (no middle state). */
   revokeAndEraseSync(tx: Tx, id: CredentialId, at: Date): void;
   touchLastUsedSync(tx: Tx, id: CredentialId, at: Date): void;
+  /** Metadata-only merge after a successful SSH clone; never rewrites ciphertext. */
+  recordGitKnownHostsSync(
+    tx: Tx,
+    id: CredentialId,
+    entries: Omit<KnownHostEntry, 'firstSeenAt'>[],
+    at: Date,
+  ): void;
   /**
    * Refresh write-back (P2-2, atomic like revokeAndEraseSync): ONE UPDATE overwrites
    * encrypted_blob/iv/auth_tag + expires_at + last_refreshed_at and ZEROES

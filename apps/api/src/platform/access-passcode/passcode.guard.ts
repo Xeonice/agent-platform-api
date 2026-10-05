@@ -2,7 +2,7 @@ import { Injectable, type CanActivate, type ExecutionContext } from '@nestjs/com
 import type { Request, Response } from 'express';
 import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
-import { passcodeLocked, passcodeRequired } from './passcode-errors';
+import { passcodeInvalid, passcodeLocked, passcodeRequired } from './passcode-errors';
 import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
 
 /**
@@ -29,7 +29,7 @@ export class PasscodeGuard implements CanActivate {
     }
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
-    if (this.isExempt(req)) return true;
+    if (this.isExempt(req) || this.passcodes.allowsLoopback(req.socket.remoteAddress)) return true;
 
     const now = Date.now();
     const ip = req.ip ?? 'unknown';
@@ -65,7 +65,11 @@ export class PasscodeGuard implements CanActivate {
       return true;
     }
 
-    this.limiter.recordFailure(ip, now);
+    if (presented !== undefined) {
+      this.limiter.recordFailure(ip, now);
+      throw passcodeInvalid();
+    }
+    // Browsers fetch protected resources before unlocking; only unlock submissions count.
     throw passcodeRequired();
   }
 

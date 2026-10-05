@@ -274,7 +274,7 @@ export class PresetImageProvisioner {
       yield ev(
         'register',
         'running',
-        `正在把 '${ref}' 铺进${plan.to}${sizeNote}（期间没有输出，不是卡死）…`,
+        `正在把镜像 '${ref}' 下载到${plan.to}${sizeNote}（期间没有输出，不是卡死）…`,
       );
       // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
       yield* streamed<ProvisionEvent>((emit) =>
@@ -286,7 +286,7 @@ export class PresetImageProvisioner {
           emit(ev('register', 'running', `已下载 ${mib(done)}${of}`, pct));
         }),
       );
-      yield ev('register', 'ok', `已铺进${plan.to}`);
+      yield ev('register', 'ok', `已下载到${plan.to}`);
       // ⚠️ **不再播种**：这条路一个字节都没进 registry，镜像的注册信息（第 4 步的判据）
       //    原样没动。跑一次 `seed()` 只会白白多一次 registry 往返。
       return;

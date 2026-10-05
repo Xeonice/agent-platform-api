@@ -1,6 +1,15 @@
 import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, real, index, check } from 'drizzle-orm/sqlite-core';
 
+/** Committed project deletion cleanup survives removal of its sandbox records. */
+export const sandboxProjectCleanupJobs = sqliteTable('sandbox_project_cleanup_jobs', {
+  sandboxId: text('sandbox_id').primaryKey(),
+  provider: text('provider').notNull(),
+  providerSandboxId: text('provider_sandbox_id'),
+  providerState: text('provider_state'),
+  workspacePath: text('workspace_path'),
+});
+
 /**
  * Drizzle SQLite schema for the sandbox context (docs/backend/13 §2.1).
  *
@@ -90,6 +99,11 @@ export const sandboxes = sqliteTable(
     failureCode: text('failure_code'),
     /** Free-text detail behind `failure_code`; P22 §1 owns the user-facing sentence. */
     failureReason: text('failure_reason'),
+    failureOperation: text('failure_operation'),
+    sourceAutomationId: text('source_automation_id'),
+    sourceAutomationName: text('source_automation_name'),
+    artifactRetentionDays: integer('artifact_retention_days'),
+    automationFinishedAt: integer('automation_finished_at', { mode: 'timestamp' }),
     version: integer('version').notNull().default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

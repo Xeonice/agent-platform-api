@@ -22,7 +22,8 @@ export class PasscodeTerminalAuthenticator implements TerminalAuthenticator {
   ) {}
 
   authorize(credentials: TerminalHandshakeCredentials): boolean {
-    if (!this.passcodes.enabled) return true; // passcode disabled ⇒ open (dev)
+    if (!this.passcodes.enabled || this.passcodes.allowsLoopback(credentials.remoteAddress))
+      return true;
     const now = this.clock.now().getTime();
     if (
       credentials.sessionToken &&

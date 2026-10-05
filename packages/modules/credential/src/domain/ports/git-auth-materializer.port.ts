@@ -1,5 +1,6 @@
 import type { EncryptedBlob } from '../value-objects/encrypted-blob.vo';
 import type { GitObtainedVia } from '../value-objects/obtained-via.vo';
+import type { KnownHostEntry } from '../value-objects/credential-metadata.vo';
 
 /**
  * Structural equivalent of contracts' `GitAuthContext` (the domain must not import
@@ -10,6 +11,8 @@ export interface MaterializedGitAuth {
   env: Record<string, string>;
   gitSshCommand?: string;
   dispose(): Promise<void>;
+  /** Public fingerprints from this handle's SSH trust file, filtered to its host. */
+  readKnownHosts?: () => Promise<Omit<KnownHostEntry, 'firstSeenAt'>[]>;
 }
 
 /**

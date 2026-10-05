@@ -131,7 +131,7 @@ export class HostAuthHelper implements AuthHelper {
       readFile: (relPath) => readFile(join(homeDir, relPath), 'utf8'),
       dispose: async () => {
         try {
-          child.kill();
+          child.kill('SIGKILL');
         } catch {
           /* already gone */
         }

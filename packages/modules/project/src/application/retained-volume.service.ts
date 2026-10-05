@@ -70,11 +70,18 @@ export class RetainedVolumeService {
     }
 
     const { diskBytes, downloadBytes } = await this.store.measure(command.workspacePath);
-    const now = this.clock.now();
+    const now = command.retainedAt ?? this.clock.now();
     const volume = RetainedVolume.register({
       id: asRetainedVolumeId(this.ids.next()),
       projectId: asProjectId(command.projectId),
       sandboxId: command.sandboxId,
+      ...(command.sandboxName === undefined ? {} : { sandboxName: command.sandboxName }),
+      ...(command.sourceAutomationId === undefined
+        ? {}
+        : { sourceAutomationId: command.sourceAutomationId }),
+      ...(command.sourceAutomationName === undefined
+        ? {}
+        : { sourceAutomationName: command.sourceAutomationName }),
       workspacePath: command.workspacePath,
       source: command.source,
       retentionDays: command.retentionDays ?? DEFAULT_RETENTION_DAYS,
@@ -97,7 +104,10 @@ export class RetainedVolumeService {
       projectId === undefined
         ? await this.repo.listAll()
         : await this.repo.listByProject(asProjectId(projectId));
-    return volumes.map(toDto);
+    return volumes
+      .filter((volume) => !volume.isDeleted)
+      .sort((a, b) => a.retainUntil.getTime() - b.retainUntil.getTime() || a.id.localeCompare(b.id))
+      .map(toDto);
   }
 
   /**
@@ -123,7 +133,7 @@ export class RetainedVolumeService {
       actor: 'user',
       subjectType: 'retained_volume',
       subjectId: volume.id,
-      summary: `清理了保留卷（回收约 ${String(volume.diskBytes ?? 0)} 字节）`,
+      summary: `清理了保留下来的成果（回收约 ${String(volume.diskBytes ?? 0)} 字节）`,
       detail: { projectId: volume.projectId, diskBytes: volume.diskBytes },
       outcome: 'ok',
     });
@@ -176,7 +186,7 @@ export class RetainedVolumeService {
           actor: 'reaper',
           subjectType: 'retained_volume',
           subjectId: volume.id,
-          summary: `保留期到期，已清理保留卷（回收约 ${String(volume.diskBytes ?? 0)} 字节）`,
+          summary: `保留期到期，已清理保留下来的成果（回收约 ${String(volume.diskBytes ?? 0)} 字节）`,
           detail: {
             projectId: volume.projectId,
             retainUntil: volume.retainUntil.toISOString(),
@@ -198,6 +208,13 @@ function toDto(volume: RetainedVolume): RetainedVolumeDto {
     id: volume.id,
     projectId: volume.projectId,
     ...(volume.sandboxId !== null ? { sandboxId: volume.sandboxId } : {}),
+    ...(volume.sandboxName !== null ? { sandboxName: volume.sandboxName } : {}),
+    ...(volume.sourceAutomationId !== null
+      ? { sourceAutomationId: volume.sourceAutomationId }
+      : {}),
+    ...(volume.sourceAutomationName !== null
+      ? { sourceAutomationName: volume.sourceAutomationName }
+      : {}),
     source: volume.source,
     retainedAt: volume.retainedAt.toISOString(),
     retainUntil: volume.retainUntil.toISOString(),

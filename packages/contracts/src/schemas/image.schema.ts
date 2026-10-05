@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { IsoInstantSchema } from './primitives';
+import { SandboxStatusSchema } from './enums';
 
 /**
  * Image wire contracts (docs/backend/27 §6, shared/10 §6.4, 13 §2.4).
@@ -16,6 +17,12 @@ export const IMAGE_VALIDATION_STATUSES = ['pending', 'valid', 'warning', 'invali
 export const ImageValidationStatusSchema = z.enum(IMAGE_VALIDATION_STATUSES);
 export type ImageValidationStatus = z.infer<typeof ImageValidationStatusSchema>;
 
+export const ListImagesQuerySchema = z.object({
+  runtimeId: z.string().optional(),
+  provider: z.string().min(1).optional(),
+});
+export type ListImagesQuery = z.infer<typeof ListImagesQuerySchema>;
+
 /** One locatable finding. `path` points AT the offending item (`env[3].key`). */
 export const ValidationIssueSchema = z.object({
   path: z.string().optional(),
@@ -30,11 +37,29 @@ export type ValidationIssueDto = z.infer<typeof ValidationIssueSchema>;
  * state that says 「能用，但你该知道这件事」.
  */
 export const ValidationOutcomeSchema = z.object({
+  digest: z.string().optional(),
   status: ImageValidationStatusSchema,
   errors: z.array(ValidationIssueSchema),
   warnings: z.array(ValidationIssueSchema),
 });
 export type ValidationOutcomeDto = z.infer<typeof ValidationOutcomeSchema>;
+
+export const ImageDeletionPreviewDtoSchema = z.object({
+  canDelete: z.boolean(),
+  tasks: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      status: SandboxStatusSchema.or(z.literal('waiting_input')),
+      projectId: z.string(),
+      projectName: z.string(),
+    }),
+  ),
+  versions: z.array(
+    z.object({ id: z.string(), version: z.string(), digest: z.string(), isActive: z.boolean() }),
+  ),
+});
+export type ImageDeletionPreviewDto = z.infer<typeof ImageDeletionPreviewDtoSchema>;
 
 /** Outbound env entry — `value` is `''` whenever `secret` (I-IMG-5). */
 export const ImageEnvVarSchema = z.object({
@@ -110,6 +135,10 @@ export const ImageManifestSchema = z.object({
   digest: z.string(),
   entrypointContract: EntrypointContractSchema,
   supportedRuntimes: z.array(z.string()),
+  /** Present when the list is queried with a provider; uses the create-door lineage rule. */
+  providerCompatibility: z.record(z.boolean()).optional(),
+  /** This row has the coordinate configured as the queried provider's default image. */
+  isProviderDefault: z.boolean().optional(),
   resourceDefaults: ResourceDefaultsSchema,
   labelsRequired: z.array(z.string()),
   /**
@@ -166,9 +195,11 @@ export const RegisterImageResultSchema = z.object({
 });
 export type RegisterImageResultDto = z.infer<typeof RegisterImageResultSchema>;
 
-/** `POST /api/images` + `POST /api/images/validate` both take just a reference. */
+/** Registration takes a reference and optional update-config source; preflight reads only ref. */
 export const RegisterImageSchema = z.object({
   ref: z.string().min(1).max(512),
+  /** Copy the source version's stored parameters, including encrypted secrets (REQ-IMG-026). */
+  copyConfigFromId: z.string().min(1).optional(),
 });
 export type RegisterImageInput = z.infer<typeof RegisterImageSchema>;
 

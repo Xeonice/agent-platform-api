@@ -21,6 +21,9 @@ export interface RetainedVolumeProps {
   id: RetainedVolumeId;
   projectId: ProjectId;
   sandboxId: string | null;
+  sandboxName?: string | null;
+  sourceAutomationId?: string | null;
+  sourceAutomationName?: string | null;
   workspacePath: string;
   source: RetainedVolumeSource;
   diskBytes: number | null;
@@ -49,6 +52,9 @@ export interface RetainedVolumeProps {
  */
 export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
   readonly projectId: ProjectId;
+  readonly sandboxName: string | null;
+  readonly sourceAutomationId: string | null;
+  readonly sourceAutomationName: string | null;
   private _sandboxId: string | null;
   readonly workspacePath: string;
   readonly source: RetainedVolumeSource;
@@ -61,6 +67,9 @@ export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
   private constructor(props: RetainedVolumeProps) {
     super(props.id);
     this.projectId = props.projectId;
+    this.sandboxName = props.sandboxName ?? null;
+    this.sourceAutomationId = props.sourceAutomationId ?? null;
+    this.sourceAutomationName = props.sourceAutomationName ?? null;
     this._sandboxId = props.sandboxId;
     this.workspacePath = props.workspacePath;
     this.source = props.source;
@@ -83,6 +92,9 @@ export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
     id: RetainedVolumeId;
     projectId: ProjectId;
     sandboxId?: string;
+    sandboxName?: string;
+    sourceAutomationId?: string;
+    sourceAutomationName?: string;
     workspacePath: string;
     source: RetainedVolumeSource;
     retentionDays: RetentionDays;
@@ -111,6 +123,9 @@ export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
       id: input.id,
       projectId: input.projectId,
       sandboxId: input.sandboxId ?? null,
+      sandboxName: input.sandboxName ?? null,
+      sourceAutomationId: input.sourceAutomationId ?? null,
+      sourceAutomationName: input.sourceAutomationName ?? null,
       workspacePath: input.workspacePath,
       source: input.source,
       diskBytes: input.diskBytes,
@@ -128,6 +143,7 @@ export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
         input.diskBytes,
         input.downloadBytes,
         input.now,
+        input.sandboxName,
       ),
     );
     return volume;

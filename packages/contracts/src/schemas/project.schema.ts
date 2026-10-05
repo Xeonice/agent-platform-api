@@ -139,6 +139,9 @@ export type RetentionDays = z.infer<typeof RetentionDaysSchema>;
  * 用 `id` 就够。它留在库里（UNIQUE，I-RV-3 靠它保证同一目录不被登记两次）。
  */
 export const RetainedVolumeDtoSchema = z.object({
+  sandboxName: z.string().optional(),
+  sourceAutomationId: z.string().optional(),
+  sourceAutomationName: z.string().optional(),
   /** uuid v7 —— **就是 DELETE / 下载用的那个 id**，不是 `sandboxId`。 */
   id: z.string(),
   projectId: z.string(),
@@ -160,3 +163,12 @@ export const ListRetainedVolumesQuerySchema = z.object({
   projectId: z.string().min(1).optional(),
 });
 export type ListRetainedVolumesQuery = z.infer<typeof ListRetainedVolumesQuerySchema>;
+
+export const ProjectDeletionPreviewDtoSchema = z.object({
+  activeTasks: z.array(z.object({ id: z.string(), name: z.string() })),
+  retainedVolumeCount: z.number().int().nonnegative(),
+  automationCount: z.number().int().nonnegative(),
+  automationRunCount: z.number().int().nonnegative(),
+  taskCount: z.number().int().nonnegative(),
+});
+export type ProjectDeletionPreviewDto = z.infer<typeof ProjectDeletionPreviewDtoSchema>;

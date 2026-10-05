@@ -10,6 +10,8 @@
  * hole for the terminal namespace WITHOUT the gateway importing app internals.
  */
 export interface TerminalHandshakeCredentials {
+  /** Transport peer address, read from the socket rather than supplied handshake fields. */
+  remoteAddress?: string;
   /** raw passcode presented on the socket.io handshake (auth / query / header). */
   passcode?: string;
   /** the `ap_session` signed session cookie value, if the browser already has one. */

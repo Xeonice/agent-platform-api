@@ -160,6 +160,11 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     return this.pty.openPty(sandboxId, { ...ptyOpts, cmd });
   }
 
+  /** Headless tasks retain hard-timeout semantics when inspected through a TTY. */
+  async waitingInputEligible(sandboxId: string): Promise<boolean> {
+    return (await this.sandboxes.bindingOf(sandboxId)).headless !== true;
+  }
+
   /**
    * 用户自己开的终端标签：`tmux new-session -A -s platform-shell-<id>`（06 §5）。
    *

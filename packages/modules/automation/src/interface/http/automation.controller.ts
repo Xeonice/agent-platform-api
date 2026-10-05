@@ -20,6 +20,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type {
+  AutomationAttentionItem,
   AutomationDto,
   AutomationRunDto,
   PaginatedAutomationRuns,
@@ -27,7 +28,9 @@ import type {
 } from '@platform/contracts';
 import { AutomationApplicationService } from '../../application/automation-application.service';
 import {
+  AutomationAttentionItemResponseDto,
   AutomationResponseDto,
+  AutomationDeletionPreviewResponseDto,
   AutomationRunResponseDto,
   PaginatedAutomationRunsDto,
   UpdateAutomationDto,
@@ -43,9 +46,7 @@ interface HeaderSettable {
 /**
  * 规则本体 + 运行历史 + webhook 测试（10 §6.5 / 27 §8）。
  *
- * ⚠️ **路由声明顺序有讲究，但不是靠顺序**：`webhook-test` 与 `runs/:runId` 都不会被
- * `:id` 遮住 —— 前者是字面段、后者段数不同。这里按「先具体后通用」排，是为了让读的人
- * 一眼看出哪些路径不是规则 id。
+ * Static overview routes must be registered before `:id`; run paths have additional segments.
  *
  * ⛔ **不进 MCP**（27 §11.3）。
  */
@@ -53,6 +54,23 @@ interface HeaderSettable {
 @Controller('automations')
 export class AutomationController {
   constructor(private readonly app: AutomationApplicationService) {}
+
+  @Get(':id/deletion-preview')
+  @ApiOperation({
+    summary: 'Read authoritative run, artifact and active task deletion consequences',
+  })
+  @ApiOkResponse({ type: AutomationDeletionPreviewResponseDto })
+  deletionPreview(@Param('id') id: string) {
+    return this.app.deletionPreview(id);
+  }
+
+  /** Read all projects in one request, independently of opened automation panels. */
+  @Get('attention')
+  @ApiOperation({ summary: 'List degraded and automatically disabled rules across all projects' })
+  @ApiOkResponse({ type: [AutomationAttentionItemResponseDto] })
+  listAttention(): Promise<AutomationAttentionItem[]> {
+    return this.app.listAttention();
+  }
 
   /**
    * `POST /api/automations/webhook-test` —— 规则表单上的 [测试连接]（03 §8.5）。

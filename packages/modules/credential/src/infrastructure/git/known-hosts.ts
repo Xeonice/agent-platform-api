@@ -1,5 +1,7 @@
-import { mkdirSync, closeSync, openSync, writeFileSync } from 'node:fs';
+import { mkdirSync, closeSync, openSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
 import { resolve } from 'node:path';
+import type { KnownHostEntry } from '../../domain/value-objects/credential-metadata.vo';
 
 /**
  * SSH host-key pinning (docs/backend/03 §7.3 H). Public SaaS hosts
@@ -90,4 +92,42 @@ function sshDir(): string {
   const dir = resolve(dataRoot, '.ssh');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+/** Read only public keys actually trusted for the handle's exact SSH authority. */
+export function readKnownHostFingerprints(
+  path: string,
+  authority: string,
+): Omit<KnownHostEntry, 'firstSeenAt'>[] {
+  const normalized = authority.toLowerCase();
+  const port = /^([^:]+):(\d+)$/.exec(normalized);
+  const target = port ? `[${port[1]}]:${port[2]}` : normalized;
+  const result: Omit<KnownHostEntry, 'firstSeenAt'>[] = [];
+  for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const [hosts, keyType, encoded] = raw.trim().split(/\s+/);
+    if (!hosts || hosts.startsWith('#') || hosts.startsWith('@') || !keyType || !encoded) continue;
+    const matches = hosts.startsWith('|1|')
+      ? matchesHashedHost(hosts, target)
+      : hosts.toLowerCase().split(',').includes(target);
+    if (!matches || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) continue;
+    const key = Buffer.from(encoded, 'base64');
+    // Validate the SSH wire type, rather than fingerprinting arbitrary file text.
+    if (key.length < 4) continue;
+    const typeLength = key.readUInt32BE(0);
+    if (typeLength > key.length - 4 || key.subarray(4, typeLength + 4).toString() !== keyType)
+      continue;
+    const fingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
+    if (!result.some((entry) => entry.keyType === keyType && entry.fingerprint === fingerprint))
+      result.push({ host: normalized, keyType, fingerprint });
+  }
+  return result;
+}
+
+function matchesHashedHost(encoded: string, target: string): boolean {
+  const parts = encoded.split('|');
+  if (parts.length !== 4) return false;
+  return (
+    createHmac('sha1', Buffer.from(parts[2]!, 'base64')).update(target).digest('base64') ===
+    parts[3]
+  );
 }

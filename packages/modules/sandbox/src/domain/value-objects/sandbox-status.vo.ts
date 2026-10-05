@@ -37,17 +37,17 @@ export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
  *   stopped/failed → destroying → destroyed (terminal)
  */
 const TRANSITIONS: Readonly<Record<SandboxStatus, readonly SandboxStatus[]>> = {
-  pending: ['scheduling'],
-  scheduling: ['preparing-workspace', 'failed'],
-  'preparing-workspace': ['creating', 'failed'],
-  creating: ['starting', 'failed'],
-  starting: ['running', 'failed'],
-  running: ['idle', 'stopping', 'failed'],
-  idle: ['running', 'stopping'],
-  stopping: ['stopped', 'failed'],
+  pending: ['scheduling', 'destroying'],
+  scheduling: ['preparing-workspace', 'failed', 'destroying'],
+  'preparing-workspace': ['creating', 'failed', 'destroying'],
+  creating: ['starting', 'failed', 'destroying'],
+  starting: ['running', 'failed', 'destroying'],
+  running: ['idle', 'stopping', 'failed', 'destroying'],
+  idle: ['running', 'stopping', 'failed', 'destroying'],
+  stopping: ['stopped', 'failed', 'destroying'],
   stopped: ['starting', 'destroying'],
   failed: ['scheduling', 'destroying'],
-  destroying: ['destroyed'],
+  destroying: ['destroyed', 'failed'],
   destroyed: [],
 };
 

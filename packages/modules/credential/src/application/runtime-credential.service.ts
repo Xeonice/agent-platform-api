@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import {
   CLOCK,
   EVENT_BUS,
@@ -13,11 +13,14 @@ import {
   CredentialPreparationError,
   RUNTIME_SETTINGS_READER,
   RUNTIME_SETTINGS_WRITER,
+  SANDBOX_FACADE,
 } from '@platform/contracts';
 import type {
   CredentialStatus,
   RuntimeSettingsReader,
   RuntimeSettingsWriter,
+  SandboxFacade,
+  RuntimeCredentialDeletionPreviewDto,
 } from '@platform/contracts';
 import { Credential } from '../domain/entities/credential.entity';
 import { CredentialSandboxBinding } from '../domain/entities/credential-sandbox-binding.entity';
@@ -48,11 +51,14 @@ const EXPIRING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const REFRESH_FAILURE_LIMIT = 3;
 
 export interface StoreRuntimeCredentialInput {
+  /** A login cancelled while encryption was pending must not commit a new credential. */
+  beforeCommit?: () => void;
   runtimeId: string;
   obtainedVia: RuntimeAuthMethod;
   maskedIdentifier: string;
   payload: RuntimeSecretPayload;
   expiresAt?: Date | null;
+  activate?: boolean;
 }
 
 export interface RuntimeCredentialView {
@@ -115,6 +121,9 @@ export class RuntimeCredentialService {
     @Optional()
     @Inject(RUNTIME_SETTINGS_READER)
     private readonly settingsReader?: RuntimeSettingsReader,
+    @Optional()
+    @Inject(forwardRef(() => SANDBOX_FACADE))
+    private readonly sandboxFacade?: SandboxFacade,
   ) {}
 
   /**
@@ -140,23 +149,24 @@ export class RuntimeCredentialService {
         now,
         expiresAt: input.expiresAt ?? null,
       });
-      const existing = (await this.repo.listByRuntime(input.runtimeId, false)).find(
-        (c) => c.mode === mode && !c.isRevoked(),
-      );
-      // I-RTS-3: `active_auth_method` is seeded ONLY on FIRST config (no settings row
-      // yet). A re-store / refresh of a credential must NOT silently flip the effective
-      // mode back — the ONLY switch entry point is `PUT /auth-mode` (I-RTS-2, with 409).
-      // `activeAuthMethod` returns null iff the runtime has no settings row (the port
-      // contract), so a non-null answer means "already configured → leave it alone".
-      const alreadyConfigured =
-        this.settingsReader !== undefined &&
-        (await this.settingsReader.activeAuthMethod(input.runtimeId)) !== null;
+      const candidates = await this.repo.listByRuntime(input.runtimeId, false);
+      const existing = candidates.find((c) => c.mode === mode && !c.isRevoked());
+      // Keep a healthy selected mode. First configuration or replacement of an
+      // unavailable selected mode becomes effective immediately (REQ-CRD-011).
+      const activeMode = (await this.settingsReader?.activeAuthMethod(input.runtimeId)) ?? null;
+      const activeId = activeMode
+        ? CredentialSelectionService.forRuntime(input.runtimeId, activeMode, candidates)
+        : null;
+      const active = candidates.find((candidate) => candidate.id === activeId);
+      const shouldActivate =
+        input.activate === true || !active || this.deriveStatus(active, now) === 'expired';
       this.uow.run((tx) => {
+        input.beforeCommit?.();
         if (existing) this.repo.revokeAndEraseSync(tx, existing.id, now);
         this.repo.saveSync(tx, cred);
-        // First-config only: seed the effective mode to this credential's mode — SAME
-        // tx (R-1 ②). Once a row exists we never re-write it here (I-RTS-3).
-        if (!alreadyConfigured) this.settingsWriter?.saveSync(tx, input.runtimeId, mode, now);
+        if (existing) this.bindings.migrateCredentialSync(tx, existing.id, cred.id);
+        // Selection and credential storage commit together.
+        if (shouldActivate) this.settingsWriter?.saveSync(tx, input.runtimeId, mode, now);
         this.events.publishInTx(tx, cred.pullEvents());
       });
       return { maskedIdentifier: input.maskedIdentifier };
@@ -174,7 +184,7 @@ export class RuntimeCredentialService {
   async prepareActive(
     runtimeId: string,
     activeMode: RuntimeMode,
-  ): Promise<MaterializedRuntimeCredential> {
+  ): Promise<MaterializedRuntimeCredential & { credentialId: string }> {
     const candidates = await this.repo.listByRuntime(runtimeId, false);
     const id = CredentialSelectionService.forRuntime(runtimeId, activeMode, candidates);
     if (!id) {
@@ -189,7 +199,7 @@ export class RuntimeCredentialService {
     );
     const out = await this.materializer.materializeForInjection(this.materializeInputFor(cred));
     this.touchLastUsed(cred);
-    return out;
+    return Object.assign(out, { credentialId: cred.id as string });
   }
 
   /**
@@ -237,6 +247,30 @@ export class RuntimeCredentialService {
     } catch {
       /* best-effort */
     }
+  }
+
+  async deletionPreview(
+    runtimeId: string,
+    credentialId: string,
+  ): Promise<RuntimeCredentialDeletionPreviewDto> {
+    const cred = await this.repo.findById(asCredentialId(credentialId));
+    if (!cred || cred.kind !== 'runtime' || cred.runtimeId !== runtimeId)
+      throw new NotFoundException('凭证已不存在。');
+    if (!this.sandboxFacade) throw new Error('Sandbox credential impact reader unavailable');
+    const bound = await this.bindings.listByCredential(cred.id);
+    return this.sandboxFacade.credentialImpact(
+      runtimeId,
+      bound.map((binding) => binding.sandboxId as string),
+    );
+  }
+
+  async pendingTeardownCount(runtimeId: string): Promise<number> {
+    const [credentials, pending] = await Promise.all([
+      this.repo.listByRuntime(runtimeId, true),
+      this.bindings.listPendingRevocations(),
+    ]);
+    const ids = new Set(credentials.map((credential) => credential.id));
+    return pending.filter((binding) => ids.has(binding.credentialId)).length;
   }
 
   /** Read-model for `GET /api/runtimes` (27 §4) — the ACTIVE credential's status. */
@@ -307,28 +341,34 @@ export class RuntimeCredentialService {
   }
 
   /** Record an injection into a sandbox (facade `recordRuntimeInjection`, I-CSB-1). */
+  async isUsable(runtimeId: string, credentialId: string): Promise<boolean> {
+    const cred = await this.repo.findById(asCredentialId(credentialId));
+    return (
+      !!cred &&
+      cred.kind === 'runtime' &&
+      cred.runtimeId === runtimeId &&
+      !cred.isRevoked() &&
+      this.deriveStatus(cred, this.clock.now()) !== 'expired'
+    );
+  }
+
   async recordInjection(
     runtimeId: string,
-    activeMode: RuntimeMode | null,
     sandboxId: string,
-  ): Promise<void> {
-    if (!activeMode) return;
-    const candidates = await this.repo.listByRuntime(runtimeId, false);
-    const id = CredentialSelectionService.forRuntime(runtimeId, activeMode, candidates);
-    if (!id) return;
-    const sid = asSandboxId(sandboxId);
-    const existing = await this.bindings.findActive(sid, id);
-    if (existing) return; // idempotent (I-CSB-1)
+    credentialId: string,
+  ): Promise<boolean> {
     const now = this.clock.now();
+    const id = asCredentialId(credentialId);
     const binding = CredentialSandboxBinding.record({
       id: this.ids.next(),
       credentialId: id,
-      sandboxId: sid,
+      sandboxId: asSandboxId(sandboxId),
       now,
     });
-    this.uow.run((tx) => {
-      this.bindings.saveSync(tx, binding);
+    return this.uow.run((tx) => {
+      if (!this.bindings.saveIfUsableSync(tx, binding, runtimeId, now)) return false;
       this.events.publishInTx(tx, [new CredentialInjected(id, sandboxId, now)]);
+      return true;
     });
   }
 
