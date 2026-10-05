@@ -19,14 +19,16 @@
  * ⛔ 代码兜底（`alpine:3.20`）**不参与本检查**：它的作用正是「让『没配』被看见」，
  * 与前两者是不同性质的值。检查的是**两条真实部署入口**是否一致。
  *
- * ── ④ 出厂坐标必须真的有人发布（2026-09-07 补）────────────────────────────────
+ * ── ④ 出厂坐标必须与 Jenkins 发布配置一致 ──────────────────────────────────
  * ⚠️ 这条修的是**本次改动自己引入的同款风险**。原病灶是 `.env.example` 指向
  * `localhost:5001/platform/sandbox:v2` —— 一张**从没被任何 CI 推送过**的镜像。修法是
- * 改成 `ghcr.io/<owner>/agent-platform-*`，但那张也得真有 workflow 去推它才行；
- * **改了表忘了改 workflow（或反过来），出厂默认就又指向了一张不存在的镜像** —— 一模一样
+ * 改成 `ghcr.io/<owner>/agent-platform-*`，但发布作业也得使用同一组坐标；
+ * **改了表忘了改发布配置（或反过来），出厂默认就又指向了一张不存在的镜像** —— 一模一样
  * 的病，只是坐标换了个样子。
  *
- * ⇒ 把「表里写的」与「workflow 真推的」焊死在一起。⛔ 解析不出矩阵时**判失败而不是跳过**：
+ * ⇒ 本门禁对账出厂表与固定 Jenkins 发布作业消费的 config/sandbox-publish.json。
+ * 它验证配置一致性；实际匿名拉取、digest 与双架构由发布作业在推送后验证。
+ * ⛔ 解析不出矩阵时**判失败而不是跳过**：
  * 一个悄悄不检查的检查，正是当年让 `localhost:5001` 活到出厂的那种东西。
  */
 import { readFileSync } from 'node:fs';
@@ -101,26 +103,33 @@ for (const [provider, ref] of published) {
   }
 }
 
-// ── ④ 出厂坐标必须真的是那条发布 workflow 会推出去的镜像 ──────────────────
-// 「表里一份、workflow 里一份」是**两处各写一遍**，而这次改动的病根正是它。
-const WF = '.github/workflows/publish-sandbox-image.yml';
-const wf = read(WF);
-// ⚠️ 依赖 include 条目的键序 tier → context → image。改了键序这里会**判失败**
-//    （不是静默放过），照着报错改这条正则即可。
-const matrix = [
-  ...wf.matchAll(/-\s*tier:\s*(\S+)\s*\n\s*context:\s*(\S+)\s*\n\s*image:\s*(\S+)/g),
-].map((m) => ({ tier: m[1], context: m[2], image: m[3] }));
-// ⚠️ **按条目数对账，而不是「有解析出东西就算数」**：键序只改了一条时，正则会漏掉那条、
-//    其余照常解析，于是报错会变成「矩阵里没有 tier: aio」—— 而 aio 明明在，只是键序变了。
-//    **报错指错方向和不报错一样贵**，所以先把「没解析全」这件事单独说清楚。
-const declaredTiers = [...wf.matchAll(/^\s*-?\s*tier:\s*\S+\s*$/gm)].length;
-if (matrix.length !== declaredTiers) {
-  problems.push(
-    `${WF} 的发布矩阵解析不全：文件里有 ${declaredTiers} 条 tier，只解析出 ${matrix.length} 条。\n` +
-      `  ⇒ include 条目必须按 tier → context → image 的键序写（这条正则依赖它）。\n` +
-      `    改了键序就照着改本脚本 —— 解析不出就判失败，不静默跳过。`,
-  );
-}
+// ── ④ Jenkins 发布脚本与本门禁消费同一份发布配置 ──────────────────────────
+const WF = 'config/sandbox-publish.json';
+const publish = JSON.parse(read(WF));
+const matrix = Array.isArray(publish.images) ? publish.images : [];
+const expectedTiers = {
+  aio: { context: 'images/platform-sandbox', image: 'agent-platform-sandbox' },
+  boxlite: { context: 'images/platform-boxlite', image: 'agent-platform-boxlite' },
+};
+if (
+  publish.version !== 1 ||
+  publish.registry !== 'ghcr.io' ||
+  publish.owner !== 'xeonice' ||
+  publish.defaultTag !== 'latest' ||
+  publish.tagPrefix !== 'sandbox-image-' ||
+  JSON.stringify(publish.platforms) !== JSON.stringify(['linux/amd64', 'linux/arm64']) ||
+  matrix.length !== 2 ||
+  new Set(matrix.map((entry) => entry.tier)).size !== 2 ||
+  matrix.some(
+    (entry) =>
+      !['aio', 'boxlite'].includes(entry.tier) ||
+      typeof entry.image !== 'string' ||
+      !/^agent-platform-[a-z-]+$/.test(entry.image) ||
+      entry.context !== expectedTiers[entry.tier]?.context ||
+      entry.image !== expectedTiers[entry.tier]?.image,
+  )
+)
+  problems.push(`${WF} 必须完整声明两档固定 GHCR 坐标和 linux/amd64、linux/arm64 平台`);
 
 const tagOf = (ref) => /:([^/:]+)$/.exec(ref)?.[1] ?? 'latest';
 for (const [provider, ref] of published) {
@@ -133,7 +142,7 @@ for (const [provider, ref] of published) {
     );
     continue;
   }
-  // 表里写的仓库名要与 workflow 推的那个逐字相同（比对末段，registry/owner 由 workflow 拼）
+  // 出厂仓库名逐字对账发布配置；下面另校验完整 registry/owner/image/tag。
   const repo = repoPath(ref).split('/').pop();
   if (repo !== entry.image) {
     problems.push(
@@ -141,14 +150,18 @@ for (const [provider, ref] of published) {
         `    而 ${WF} 推的是 \`${entry.image}\`。两处各写一遍，改一处就指向了一张没人发布的镜像。`,
     );
   }
-  // 表里用哪个 tag，workflow 就得推哪个 tag
+  // 出厂 tag 必须列入发布配置。
   const tag = tagOf(ref);
-  if (!new RegExp(`\\$\\{\\{\\s*matrix\\.image\\s*\\}\\}:${tag}\\b`).test(wf)) {
+  if (tag !== publish.defaultTag) {
     problems.push(
       `${provider} 档：出厂坐标用的是 \`:${tag}\`，但 ${WF} 的 tags 里没有推这个 tag。\n` +
         `  ⇒ 镜像推上去了，出厂默认那一行仍然 404。`,
     );
   }
+  if (ref !== `${publish.registry}/${publish.owner}/${entry.image}:${publish.defaultTag}`)
+    problems.push(
+      `${provider} 档出厂坐标 ${ref} 与 Jenkins 发布配置的 registry/owner/image/tag 不一致`,
+    );
   // ⛔ **坐标必须全小写** —— OCI 仓库名的硬约束，GHCR 也照办。本仓库 owner 是 `Xeonice`，
   //    照抄大小写会让 buildx 在推之前就拒：`repository name must be lowercase`。
   //    这条在本地就拦得住，不必等 CI 跑 40 分钟再说。
@@ -164,7 +177,7 @@ for (const [provider, ref] of published) {
     read(`${entry.context}/Dockerfile`);
   } catch {
     problems.push(
-      `${provider} 档的构建上下文 ${entry.context}/Dockerfile 不存在 —— 那条 workflow 跑不起来。`,
+      `${provider} 档的构建上下文 ${entry.context}/Dockerfile 不存在 —— Jenkins 发布作业跑不起来。`,
     );
   }
 
@@ -180,7 +193,7 @@ for (const [provider, ref] of published) {
     );
   }
 }
-// 反向：workflow 推了一张没人当出厂默认用的镜像（不致命，但同样是两处不同步）
+// 反向：配置了一张没人当出厂默认用的镜像（同样是两处不同步）。
 for (const m of matrix) {
   if (!published.some(([provider]) => provider === m.tier)) {
     problems.push(
@@ -196,7 +209,7 @@ if (problems.length > 0) {
   process.exit(1);
 }
 console.log(
-  '✔ 出厂镜像坐标：两条部署入口都留空（按机器自动选），按档发布坐标全在血统白名单里，且都由发布 workflow 真推',
+  '✔ 出厂镜像坐标：两条部署入口都留空（按机器自动选），血统白名单与 Jenkins 两档双架构发布配置一致',
 );
 for (const [pv, rf] of published) {
   const e = matrix.find((m) => m.tier === pv);

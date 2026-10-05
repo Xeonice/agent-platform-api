@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "registry": "ghcr.io",
+  "owner": "xeonice",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "defaultTag": "latest",
+  "tagPrefix": "sandbox-image-",
+  "images": [
+    {
+      "tier": "aio",
+      "context": "images/platform-sandbox",
+      "image": "agent-platform-sandbox"
+    },
+    {
+      "tier": "boxlite",
+      "context": "images/platform-boxlite",
+      "image": "agent-platform-boxlite"
+    }
+  ]
+}
