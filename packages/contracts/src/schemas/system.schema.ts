@@ -230,10 +230,27 @@ export type ConnectivityResult = z.infer<typeof ConnectivityResultSchema>;
 
 /** 代理配置（13 §2.8.3 `proxy_config`）。三项都是可选的，全空 = 不走代理。 */
 export const ProxyConfigSchema = z.object({
-  httpProxy: z.string().max(2048).optional(),
-  httpsProxy: z.string().max(2048).optional(),
+  httpProxy: z
+    .string()
+    .max(2048)
+    .refine(validHttpProxy, 'HTTP_PROXY 要以 http:// 或 https:// 开头')
+    .optional(),
+  httpsProxy: z
+    .string()
+    .max(2048)
+    .refine(validHttpProxy, 'HTTPS_PROXY 要以 http:// 或 https:// 开头')
+    .optional(),
   noProxy: z.string().max(2048).optional(),
 });
+function validHttpProxy(value: string): boolean {
+  if (value === '') return true;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname !== '';
+  } catch {
+    return false;
+  }
+}
 export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
 
 /**
@@ -339,6 +356,7 @@ export type UpdateSystemSettingsRequest = z.infer<typeof UpdateSystemSettingsReq
  */
 export const AccessPasscodeActionSchema = z.object({
   action: z.enum(['enable', 'regenerate', 'disable']),
+  invalidateSessions: z.boolean().optional(),
 });
 export type AccessPasscodeAction = z.infer<typeof AccessPasscodeActionSchema>;
 
@@ -377,6 +395,14 @@ export type ResourceLevel = z.infer<typeof ResourceLevelSchema>;
  * **clone 写到最后 ENOSPC**、镜像拉一半失败 —— 后者既更常见也更难自我解释。
  */
 export const SystemResourcesDtoSchema = z.object({
+  capacity: z
+    .object({
+      remainingTasks: z.number().int().nonnegative(),
+      registeredTasks: z.number().int().nonnegative(),
+      maxTasks: z.number().int().nonnegative(),
+      basis: z.string(),
+    })
+    .optional(),
   cpu: z.object({
     cores: z.number().positive(),
     /** 1 分钟平均负载。Linux/macOS 有，某些容器里恒 0 —— 恒 0 时 `level` 只能是 `ok`。 */
@@ -492,8 +518,16 @@ export const SystemProvidersDtoSchema = z.object({
   imageSpecs: z.array(ImageSpecHealthDtoSchema),
   /** 失败率的统计窗口（ms），让前端能照实说「最近 1h」而不是硬编码一个数字。 */
   healthWindowMs: z.number().int().positive(),
+  healthWarnRate: z.number().min(0).max(1),
+  healthErrorRate: z.number().min(0).max(1),
 });
 export type SystemProvidersDto = z.infer<typeof SystemProvidersDtoSchema>;
+
+export const ProviderLogsDtoSchema = z.object({
+  lines: z.array(z.string()),
+  unavailableReason: z.string().optional(),
+});
+export type ProviderLogsDto = z.infer<typeof ProviderLogsDtoSchema>;
 
 /**
  * `GET /api/system/version` —— 运行中的实例报出自己是哪一版（10 §6.6）。

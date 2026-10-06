@@ -21,6 +21,7 @@ import {
 import type {
   CheckImageUpdateDto,
   ImageManifestDto,
+  ImageDeletionPreviewDto,
   RegisterImageResultDto,
   RevalidateOutcomeDto,
   ValidationOutcomeDto,
@@ -29,6 +30,8 @@ import { ImageApplicationService } from '../../application/image-application.ser
 import {
   CheckImageUpdateResponseDto,
   ImageManifestResponseDto,
+  ImageDeletionPreviewResponseDto,
+  ListImagesQueryDto,
   PatchImageDto,
   RegisterImageDto,
   RegisterImageResponseDto,
@@ -54,14 +57,15 @@ export class ImageController {
   @Get()
   @ApiOperation({
     summary:
-      'List image manifests. `runtimeId` filters to the wizard-selectable set ' +
-      '(is_active ∧ not invalid ∧ supports that runtime); without it the management ' +
-      'page gets history too.',
+      'List image manifests. `runtimeId` alone returns selectable versions. ' +
+      '`provider` returns history with compatibility and the configured default, ' +
+      'including disabled and invalid versions for the task-image selector.',
   })
-  @ApiQuery({ name: 'runtimeId', required: false })
+  @ApiQuery({ name: 'runtimeId', required: false, type: String })
+  @ApiQuery({ name: 'provider', required: false, type: String })
   @ApiOkResponse({ type: ImageManifestResponseDto, isArray: true })
-  list(@Query('runtimeId') runtimeId?: string): Promise<ImageManifestDto[]> {
-    return mapImageErrors(() => this.app.listImages(runtimeId));
+  list(@Query() query: ListImagesQueryDto): Promise<ImageManifestDto[]> {
+    return mapImageErrors(() => this.app.listImages(query.runtimeId, query.provider));
   }
 
   /**
@@ -79,7 +83,9 @@ export class ImageController {
     @Body() dto: RegisterImageDto,
     @Res({ passthrough: true }) res: StatusSettable,
   ): Promise<RegisterImageResultDto> {
-    const result = await mapImageErrors(() => this.app.registerImage(dto.ref));
+    const result = await mapImageErrors(() =>
+      this.app.registerImage(dto.ref, { copyConfigFromId: dto.copyConfigFromId }),
+    );
     res.status(result.created ? 201 : 200);
     // `created` stays OFF the wire: the status code already carries it, and an
     // undocumented extra field is a second source for the same fact.
@@ -97,6 +103,15 @@ export class ImageController {
   @ApiOkResponse({ type: ValidationOutcomeResponseDto })
   validate(@Body() dto: RegisterImageDto): Promise<ValidationOutcomeDto> {
     return mapImageErrors(() => this.app.validateImage(dto.ref));
+  }
+
+  @Get(':id/deletion-preview')
+  @ApiOperation({
+    summary: 'Read versions and non-destroyed task references before deleting one image manifest',
+  })
+  @ApiOkResponse({ type: ImageDeletionPreviewResponseDto })
+  deletionPreview(@Param('id') id: string): Promise<ImageDeletionPreviewDto> {
+    return mapImageErrors(() => this.app.deletionPreview(id));
   }
 
   @Post(':id/validate')

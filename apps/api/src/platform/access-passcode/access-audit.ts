@@ -134,10 +134,13 @@ export function lockedAttemptRecord(lockedForSec: number): AuditRecordInput {
  */
 export function passcodeChangedRecord(
   action: 'enable' | 'regenerate' | 'disable',
+  invalidateSessions = false,
 ): AuditRecordInput {
   const summary = {
     enable: '已启用访问口令（新口令仅在本次响应中回显一次）',
-    regenerate: '已重新生成访问口令，旧口令即刻失效（已通过的会话不受影响）',
+    regenerate: invalidateSessions
+      ? '已重新生成访问口令，旧口令及已登录浏览器的会话已失效'
+      : '已重新生成访问口令，旧口令即刻失效（已通过的会话不受影响）',
     disable: '已关闭访问口令，此后任何人可访问本实例',
   }[action];
   return {
@@ -146,7 +149,7 @@ export function passcodeChangedRecord(
     severity: action === 'disable' ? 'error' : 'info',
     actor: 'user',
     summary,
-    detail: { action },
+    detail: { action, ...(invalidateSessions ? { invalidateSessions: true } : {}) },
     outcome: 'ok',
   };
 }

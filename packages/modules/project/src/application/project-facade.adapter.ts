@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { asProjectId } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel';
 import { ProjectAccessError } from '@platform/contracts';
 import type {
   ProjectFacade,
@@ -30,6 +31,20 @@ export class ProjectFacadeAdapter implements ProjectFacade {
     private readonly retainedVolumes: RetainedVolumeService,
   ) {}
 
+  /** Close the create/delete race after asynchronous capacity checks (REQ-PRJ-041). */
+  assertCanCreateTaskSync(tx: Tx, projectId: string): void {
+    const project = this.repo.findByIdSync(tx, asProjectId(projectId));
+    if (!project)
+      throw new ProjectAccessError('PROJECT_NOT_FOUND', `project ${projectId} not found`);
+    try {
+      project.assertCanAcceptTask();
+    } catch (error) {
+      if (error instanceof ProjectStateError)
+        throw new ProjectAccessError('PROJECT_NOT_READY', error.message);
+      throw error;
+    }
+  }
+
   /**
    * `RegisterRetainedVolumeCommand`（24 §3）—— sandbox 上下文销毁完 keepVolume 之后
    * 把目录登记进 project 侧的账本。
@@ -47,6 +62,9 @@ export class ProjectFacadeAdapter implements ProjectFacade {
         `failed to register retained volume for sandbox ${command.sandboxId ?? '(unknown)'}: ` +
           `${(e as Error).message}. The directory is kept; startup reconciliation will pick it up.`,
       );
+      // Automation owns a durable retry loop. It must not mark an outcome as
+      // cleaned up while the artifact is still missing from the project ledger.
+      if (command.source === 'automation-artifact') throw e;
     }
   }
 

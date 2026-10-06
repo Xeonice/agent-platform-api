@@ -413,7 +413,7 @@ export default tseslint.config(
   },
   // Tests may use wall-clock time and cross layers freely — but NOT `as unknown as`.
   {
-    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/test/**/*.ts'],
+    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', 'acceptance/**/*.ts'],
     rules: {
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS],
       'boundaries/element-types': 'off',
@@ -423,7 +423,7 @@ export default tseslint.config(
   },
   // e2e 另加一条：app 装配必须走共用函数（见 NO_HANDROLLED_APP_SETUP 的注释）。
   {
-    files: ['apps/api/test/e2e/**/*.ts'],
+    files: ['acceptance/support/platform-app.ts', 'acceptance/*/protocol/**/*.ts'],
     rules: {
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS, ...NO_HANDROLLED_APP_SETUP],
     },

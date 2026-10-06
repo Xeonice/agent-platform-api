@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Optional } from '@nestjs/common';
 import {
   CLOCK,
   EVENT_BUS,
@@ -9,10 +9,13 @@ import {
   type IdGenerator,
   type UnitOfWork,
   builtinImageDeclaresTmux,
+  builtinImageRefFor,
   explainKnownTmuxRepositories,
 } from '@platform/shared-kernel';
 import {
   IMAGE_BASE_REQUIRED,
+  SANDBOX_FACADE,
+  ImageDeletionPreviewDtoSchema,
   IMAGE_SPEC_REGISTRY,
   IMAGE_TMUX_MISSING,
   ImageSpecError,
@@ -24,6 +27,8 @@ import {
 } from '@platform/contracts';
 import type {
   CheckImageUpdateDto,
+  ImageDeletionPreviewDto,
+  SandboxFacade,
   ImageConfigInput,
   ImageManifestDto,
   ImageSpecRegistry,
@@ -46,6 +51,7 @@ import type { ImageManifestRepository } from '../domain/repositories/image-manif
 import { ENV_SECRET_CIPHER } from '../domain/ports/env-secret.cipher.port';
 import type { EnvSecretCipher } from '../domain/ports/env-secret.cipher.port';
 import { ImageMapper } from './dto/image.mapper';
+import { imageProviderCompatibility } from './image-provider-compatibility';
 
 /** `POST /api/images` answers 200 for a re-registration and 201 for a new row (27 §6). */
 export interface RegisterImageResult {
@@ -111,6 +117,9 @@ export class ImageApplicationService {
     @Inject(EVENT_BUS) private readonly events: EventBus,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
+    @Optional()
+    @Inject(forwardRef(() => SANDBOX_FACADE))
+    private readonly sandboxes?: Pick<SandboxFacade, 'imageReferences'>,
   ) {}
 
   /**
@@ -122,17 +131,33 @@ export class ImageApplicationService {
    * image is not hidden from a runtime it merely has not preinstalled — lineage
    * guarantees it can install one (see `listSelectable`). The parameter is kept
    * because the two questions are genuinely different, and because the wizard already
-   * sends the runtime it is configuring.
+   * sends the runtime it is configuring. `provider` selects the new task-form contract:
+   * history stays visible so disabled/invalid images can explain why they cannot be
+   * chosen, with compatibility and the exact configured default projected per row.
    */
-  async listImages(runtimeId?: string): Promise<ImageManifestDto[]> {
+  async listImages(runtimeId?: string, provider?: string): Promise<ImageManifestDto[]> {
     const manifests =
-      runtimeId === undefined
+      runtimeId === undefined || provider !== undefined
         ? await this.manifests.listAll()
         : await this.manifests.listSelectable();
     const images = new Map((await this.images.list()).map((i) => [i.id, i]));
+    const compatible =
+      provider === undefined
+        ? undefined
+        : await imageProviderCompatibility(this.images, this.manifests, provider);
+    const defaultRef =
+      provider === undefined ? undefined : parseImageRef(builtinImageRefFor(provider));
     return manifests.flatMap((m) => {
       const image = images.get(m.imageId);
-      return image ? [ImageMapper.toDto(m, image)] : [];
+      if (!image) return [];
+      const dto = ImageMapper.toDto(m, image);
+      if (provider !== undefined && compatible !== undefined && defaultRef !== undefined) {
+        dto.providerCompatibility = { [provider]: compatible(m) };
+        dto.isProviderDefault =
+          image.name === defaultRef.name &&
+          m.version === (defaultRef.digest ?? defaultRef.tag ?? 'latest');
+      }
+      return [dto];
     });
   }
 
@@ -149,7 +174,10 @@ export class ImageApplicationService {
    * waits for an explicit `activate`, because swapping which bits every future Task
    * runs is not something a re-paste should do behind the user's back.
    */
-  async registerImage(ref: string, opts: { builtin?: boolean } = {}): Promise<RegisterImageResult> {
+  async registerImage(
+    ref: string,
+    opts: { builtin?: boolean; copyConfigFromId?: string } = {},
+  ): Promise<RegisterImageResult> {
     const resolved = await this.resolveAndJudge(ref);
     const parsed = parseImageRef(resolved.ref);
     const now = this.clock.now();
@@ -168,10 +196,23 @@ export class ImageApplicationService {
         createdAt: now,
       });
 
+    const inheritedConfig =
+      opts.copyConfigFromId === undefined
+        ? null
+        : await this.configForUpdate(opts.copyConfigFromId, image.id, resolved.manifest.version);
     const known = existingImage
       ? await this.manifests.findByDigest(image.id, resolved.digest)
       : null;
     if (known) {
+      // A retry may find a row created by an earlier registration. Preserve any
+      // parameters already configured on that version; inherit only into an empty row.
+      if (known.config === null && inheritedConfig !== null) {
+        known.updateConfig(inheritedConfig, formatImageRef(image.name, known.version), now);
+        this.uow.run((tx) => {
+          this.manifests.saveSync(tx, known);
+          this.events.publishInTx(tx, known.pullEvents());
+        });
+      }
       return {
         manifest: ImageMapper.toDto(known, image),
         validation: ImageMapper.outcome(resolved.outcome),
@@ -212,7 +253,7 @@ export class ImageApplicationService {
         diffIds: resolved.manifest.diffIds,
         derivedFromDigest,
         validation: resolved.outcome,
-        config: null,
+        config: inheritedConfig,
         isActive: !tagHasLiveRow,
         registeredAt: now,
       },
@@ -232,6 +273,19 @@ export class ImageApplicationService {
     };
   }
 
+  private async configForUpdate(
+    sourceId: string,
+    imageId: string,
+    version: string,
+  ): Promise<ImageConfigVO | null> {
+    const source = await this.mustFindManifest(sourceId);
+    if (source.imageId !== imageId || source.version !== version) {
+      throw new ImageStateError('运行参数只能从同一镜像、同一 tag 的版本继承。');
+    }
+    // Copy ciphertext in the server. Neither decryption nor the masked wire DTO is involved.
+    return source.config === null ? null : structuredClone(source.config);
+  }
+
   /**
    * `POST /api/images/validate` — pre-flight. Resolves, judges, stores NOTHING.
    *
@@ -248,7 +302,10 @@ export class ImageApplicationService {
     const result = spec.validate(resolved.manifest);
     const { finding } = await this.lineageVerdict(resolved);
     const errors = finding === null ? result.errors : [...result.errors, finding];
-    return ImageMapper.outcome(ValidationOutcome.from(errors, result.warnings ?? []));
+    return {
+      ...ImageMapper.outcome(ValidationOutcome.from(errors, result.warnings ?? [])),
+      digest: resolved.digest,
+    };
   }
 
   /**
@@ -376,6 +433,25 @@ export class ImageApplicationService {
     }
   }
 
+  /** Read-only affected-task list. A missing source is an error, never a guessed empty list. */
+  async deletionPreview(id: string): Promise<ImageDeletionPreviewDto> {
+    const manifest = await this.mustFindManifest(id);
+    const image = await this.mustFindImage(manifest.imageId);
+    if (this.sandboxes === undefined) throw new Error('任务引用清单服务未配置');
+    const tasks = await this.sandboxes.imageReferences(id);
+    const versions = (await this.manifests.listByImage(image.id)).map((row) => ({
+      id: row.id,
+      version: row.version,
+      digest: row.digest,
+      isActive: row.isActive,
+    }));
+    return ImageDeletionPreviewDtoSchema.parse({
+      canDelete: !image.isBuiltin && tasks.length === 0,
+      tasks,
+      versions,
+    });
+  }
+
   /** `DELETE /api/images/:id` — hard delete of ONE manifest row. */
   async deleteImage(id: string): Promise<void> {
     const manifest = await this.mustFindManifest(id);
@@ -392,8 +468,8 @@ export class ImageApplicationService {
     if (referencing > 0) {
       throw new ImageDeleteRefusedError(
         // ⛔ 不写 `PATCH { isActive: false }`：那是接口写法，用户手上只有一颗按钮。
-        `还有 ${String(referencing)} 个任务在用这个版本，删掉会让它们指向一张不存在的镜像；` +
-          '请改为在这张镜像上点 [禁用] —— 禁用之后它不再出现在新任务的下拉里，已有任务不受影响。',
+        `还有 ${String(referencing)} 个任务（含已停止）在用这个版本，删掉会让它们指向一张不存在的镜像；` +
+          '请改为在这张镜像上点 [禁用] —— 禁用之后新任务不能再选用它，已有任务不受影响。',
       );
     }
     const siblings = await this.manifests.listByImage(image.id);

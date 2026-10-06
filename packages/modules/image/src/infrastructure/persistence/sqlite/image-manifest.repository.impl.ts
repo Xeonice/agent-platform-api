@@ -4,6 +4,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { Tx } from '@platform/shared-kernel';
 import { formatImageRef } from '@platform/contracts';
+import { ImageStateError } from '../../../domain/errors/image-errors';
 import { ImageManifest } from '../../../domain/entities/image-manifest.entity';
 import { ValidationOutcome } from '../../../domain/value-objects/validation-outcome.vo';
 import type { ImageValidationStatus } from '../../../domain/value-objects/validation-outcome.vo';
@@ -175,6 +176,17 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
   }
 
   deleteSync(_tx: Tx, id: string): void {
+    const live = this.db.get<{ n: number }>(
+      sql`select count(*) as n from sandboxes where image_ref = ${id} and status <> 'destroyed'`,
+    );
+    if ((live?.n ?? 0) > 0)
+      throw new ImageStateError(
+        `还有 ${String(live?.n)} 个任务（含已停止）在用这个版本，请改为在这张镜像上点 [禁用]。`,
+      );
+    // Destroyed records are hidden task history; their FK must not make the manifest undeletable forever.
+    this.db.run(
+      sql`update sandboxes set image_ref = null where image_ref = ${id} and status = 'destroyed'`,
+    );
     this.db.delete(imageManifests).where(eq(imageManifests.id, id)).run();
   }
 
@@ -190,7 +202,7 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
    */
   async countReferencingSandboxes(manifestId: string): Promise<number> {
     const row = this.db.get<{ n: number }>(
-      sql`select count(*) as n from sandboxes where image_ref = ${manifestId}`,
+      sql`select count(*) as n from sandboxes where image_ref = ${manifestId} and status <> 'destroyed'`,
     );
     return row?.n ?? 0;
   }

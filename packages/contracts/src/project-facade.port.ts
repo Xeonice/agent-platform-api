@@ -1,3 +1,4 @@
+import type { Tx } from '@platform/shared-kernel';
 import type {
   ProjectSourceType,
   RetainedVolumeSource,
@@ -45,6 +46,10 @@ export interface ProjectRuntimeContext {
  * （I-RV-3）保证不会重复登记 —— 所以实现必须把「已登记」当**成功**，不是冲突。
  */
 export interface RegisterRetainedVolumeCommand {
+  retainedAt?: Date;
+  sandboxName?: string;
+  sourceAutomationId?: string;
+  sourceAutomationName?: string;
   projectId: string;
   /** 来源 Task。弱引用：sandbox 记录归档后会被置空，卷仍可管理（13 §2.2.2）。 */
   sandboxId?: string;
@@ -56,6 +61,7 @@ export interface RegisterRetainedVolumeCommand {
 }
 
 export interface ProjectFacade {
+  assertCanCreateTaskSync(tx: Tx, projectId: string): void;
   /**
    * Resolve the runtime context for a NEW task, asserting the project exists and
    * is ready (I-PRJ). Throws `ProjectAccessError` otherwise — the sandbox
@@ -75,7 +81,9 @@ export interface ProjectFacade {
    * ⚠️ **幂等**：同一个 `workspacePath` 登记两次是 no-op，不是错误（见
    * {@link RegisterRetainedVolumeCommand} 的事务注释）。
    *
-   * ⚠️ **永不抛给销毁流程**。销毁已经走到「实例没了、目录留下了」这一步，此时因为
+   * Manual retention failures do not fail teardown. Automation retention failures
+   * propagate so its persistent finish marker can retry registration after restart.
+   * ⚠️ **手动保留不抛给销毁流程**。销毁已经走到「实例没了、目录留下了」这一步，此时因为
    * 账本没记上而把整个 destroy 判失败，换来的是一个停在 `destroying` 的沙箱 + 一个
    * 谁也管不到的目录 —— 比「目录在、账本暂缺」坏。目录是事实、表是索引，两者不一致
    * 时以目录为准（03 §7.7），启动对账会补。

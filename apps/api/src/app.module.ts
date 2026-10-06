@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { McpModule } from '@rekog/mcp-nest';
-import { ProjectModule } from '@platform/project';
-import { SandboxModule } from '@platform/sandbox';
+import { ProjectModule, ProjectMcpTools } from '@platform/project';
+import { SandboxModule, SandboxMcpTools } from '@platform/sandbox';
 import { TerminalModule } from '@platform/terminal';
 import { CredentialModule } from '@platform/credential';
 import { RuntimeModule } from '@platform/runtime';
@@ -15,6 +15,7 @@ import { RealtimeModule } from './platform/events/realtime.module';
 import { LoggingModule } from './platform/logging';
 import { mcpModuleOptions } from './bootstrap/mcp.setup';
 import { guardProviders } from './bootstrap/guards.setup';
+import { DeploymentModule } from './platform/deployment/deployment.module';
 
 /**
  * Root module (01 §2): assembles the @Global platform, the MCP transport, the
@@ -30,7 +31,9 @@ import { guardProviders } from './bootstrap/guards.setup';
     RealtimeModule,
     McpModule.forRoot(mcpModuleOptions),
     ProjectModule,
+    McpModule.forFeature([ProjectMcpTools], mcpModuleOptions.name),
     SandboxModule,
+    McpModule.forFeature([SandboxMcpTools], mcpModuleOptions.name),
     TerminalModule,
     CredentialModule,
     RuntimeModule,
@@ -43,6 +46,7 @@ import { guardProviders } from './bootstrap/guards.setup';
     //    （provider / runtime adapter / image spec）与 `IMAGE_FACADE`，它们由那几个
     //    @Global 模块提供 —— 装配顺序与图上的可读性一致，省得下一个人去猜。
     SystemModule,
+    DeploymentModule,
   ],
   providers: [...guardProviders],
 })

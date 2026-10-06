@@ -491,6 +491,37 @@
         ]
       }
     },
+    "/api/projects/{id}/deletion-preview": {
+      "get": {
+        "operationId": "ProjectController_deletionPreview",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDeletionPreviewResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read authoritative project deletion blockers and consequence counts",
+        "tags": [
+          "project"
+        ]
+      }
+    },
     "/api/retained-volumes": {
       "get": {
         "operationId": "RetainedVolumeController_list",
@@ -1293,6 +1324,38 @@
         ]
       }
     },
+    "/api/runtimes/{rt}/auth/sessions/{challengeRef}": {
+      "delete": {
+        "operationId": "RuntimeController_cancelAuth",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "challengeRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "summary": "Cancel an interactive login and reclaim its helper process and temporary files",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
     "/api/runtimes/{rt}/auth/status": {
       "get": {
         "operationId": "RuntimeController_pollStatus",
@@ -1455,6 +1518,45 @@
         ]
       }
     },
+    "/api/runtimes/{rt}/credentials/{credentialId}/deletion-preview": {
+      "get": {
+        "operationId": "RuntimeController_deletionPreview",
+        "parameters": [
+          {
+            "name": "rt",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "credentialId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeCredentialDeletionPreviewResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List tasks actually bound to this credential and tasks still preparing, without decrypting secrets",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
     "/api/runtimes/{rt}/credentials/{credentialId}": {
       "delete": {
         "operationId": "RuntimeController_revoke",
@@ -1492,6 +1594,14 @@
         "operationId": "ImageController_list",
         "parameters": [
           {
+            "name": "provider",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "runtimeId",
             "required": false,
             "in": "query",
@@ -1515,7 +1625,7 @@
             }
           }
         },
-        "summary": "List image manifests. `runtimeId` filters to the wizard-selectable set (is_active ∧ not invalid ∧ supports that runtime); without it the management page gets history too.",
+        "summary": "List image manifests. `runtimeId` alone returns selectable versions. `provider` returns history with compatibility and the configured default, including disabled and invalid versions for the task-image selector.",
         "tags": [
           "image"
         ]
@@ -1588,6 +1698,37 @@
           }
         },
         "summary": "Pre-flight validate a reference — never persists a manifest",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/api/images/{id}/deletion-preview": {
+      "get": {
+        "operationId": "ImageController_deletionPreview",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageDeletionPreviewResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read versions and non-destroyed task references before deleting one image manifest",
         "tags": [
           "image"
         ]
@@ -1823,6 +1964,62 @@
           }
         },
         "summary": "Create an automation rule (timezone is snapshotted here)",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/{id}/deletion-preview": {
+      "get": {
+        "operationId": "AutomationController_deletionPreview",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationDeletionPreviewResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read authoritative run, artifact and active task deletion consequences",
+        "tags": [
+          "automation"
+        ]
+      }
+    },
+    "/api/automations/attention": {
+      "get": {
+        "operationId": "AutomationController_listAttention",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AutomationAttentionItemResponseDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "List degraded and automatically disabled rules across all projects",
         "tags": [
           "automation"
         ]
@@ -2327,7 +2524,7 @@
             }
           }
         },
-        "summary": "启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成不影响已通过的 session",
+        "summary": "启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成默认保留会话，invalidateSessions=true 使旧会话失效并为发起浏览器签发新会话",
         "tags": [
           "system"
         ]
@@ -2399,6 +2596,37 @@
         ]
       }
     },
+    "/api/system/providers/{id}/logs": {
+      "get": {
+        "operationId": "SystemController_getProviderLogs",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLogsResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "读取指定沙箱环境最近20行运行日志；不可用时返回原因",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/system/diagnose": {
       "post": {
         "operationId": "SystemController_diagnose",
@@ -2415,7 +2643,7 @@
             }
           }
         },
-        "summary": "逐项诊断，SSE 流式（帧类型手写于两仓 sse-protocol.ts）。各项并行、单项超时 5s，整轮 ≈ 最慢那项；断连即中止剩余检查",
+        "summary": "逐项诊断，SSE 流式（帧类型见两仓 sse-protocol.ts）。各项并行、单项时限由 PARAM.DIAG_ITEM_TIMEOUT_MS 与首帧 timeoutMs 给出，整轮约等于最慢那项；断连即中止剩余检查",
         "tags": [
           "system"
         ]
@@ -2438,6 +2666,28 @@
           }
         },
         "summary": "把预制镜像搬到位（只搬不建）：本机 docker 库已有 ⇒ 直接推；发布资产清单命中 ⇒ 校验 sha256 后装载再推。搬不了返 409，已在搬返 409（两个码）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/deployment/status": {
+      "get": {
+        "operationId": "DeploymentController_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read-only deployment barrier, idle blockers and DB/SDK/image-registration readiness (no VM probe)",
         "tags": [
           "system"
         ]
@@ -2669,9 +2919,68 @@
           }
         }
       },
+      "ProjectDeletionPreviewResponseDto": {
+        "type": "object",
+        "properties": {
+          "activeTasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            }
+          },
+          "retainedVolumeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "automationCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "automationRunCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "taskCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "activeTasks",
+          "retainedVolumeCount",
+          "automationCount",
+          "automationRunCount",
+          "taskCount"
+        ]
+      },
       "RetainedVolumeResponseDto": {
         "type": "object",
         "properties": {
+          "sandboxName": {
+            "type": "string"
+          },
+          "sourceAutomationId": {
+            "type": "string"
+          },
+          "sourceAutomationName": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -2740,8 +3049,7 @@
             "type": "string"
           },
           "initialPrompt": {
-            "type": "string",
-            "maxLength": 8000
+            "type": "string"
           },
           "headless": {
             "type": "boolean"
@@ -2817,6 +3125,18 @@
           "provider": {
             "type": "string"
           },
+          "image": {
+            "type": "string"
+          },
+          "imageId": {
+            "type": "string"
+          },
+          "imageDigest": {
+            "type": "string"
+          },
+          "imageIsBuiltin": {
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -2880,6 +3200,32 @@
           },
           "failureCode": {
             "type": "string"
+          },
+          "failureOperation": {
+            "type": "string",
+            "enum": [
+              "provision",
+              "start",
+              "stop",
+              "destroy"
+            ]
+          },
+          "sourceAutomationId": {
+            "type": "string"
+          },
+          "sourceAutomationName": {
+            "type": "string"
+          },
+          "hasRun": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
           },
           "failureMessage": {
             "type": "string"
@@ -2975,8 +3321,7 @@
         "properties": {
           "prompt": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 8000
+            "minLength": 1
           },
           "timeoutMinutes": {
             "oneOf": [
@@ -3428,6 +3773,11 @@
       "RuntimeResponseDto": {
         "type": "object",
         "properties": {
+          "pendingTeardownCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
           "id": {
             "type": "string"
           },
@@ -3694,6 +4044,75 @@
           "activeAuthMethod"
         ]
       },
+      "RuntimeCredentialDeletionPreviewResponseDto": {
+        "type": "object",
+        "properties": {
+          "affectedTasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "runtime": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "headless": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "runtime",
+                "status",
+                "headless"
+              ]
+            }
+          },
+          "preparingTasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "runtime": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "headless": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "runtime",
+                "status",
+                "headless"
+              ]
+            }
+          }
+        },
+        "required": [
+          "affectedTasks",
+          "preparingTasks"
+        ]
+      },
       "ImageManifestResponseDto": {
         "type": "object",
         "properties": {
@@ -3750,6 +4169,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "providerCompatibility": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "isProviderDefault": {
+            "type": "boolean"
           },
           "resourceDefaults": {
             "type": "object",
@@ -3889,6 +4317,10 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512
+          },
+          "copyConfigFromId": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -3954,6 +4386,15 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "providerCompatibility": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "boolean"
+                }
+              },
+              "isProviderDefault": {
+                "type": "boolean"
               },
               "resourceDefaults": {
                 "type": "object",
@@ -4089,6 +4530,9 @@
           "validation": {
             "type": "object",
             "properties": {
+              "digest": {
+                "type": "string"
+              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -4156,6 +4600,9 @@
       "ValidationOutcomeResponseDto": {
         "type": "object",
         "properties": {
+          "digest": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -4214,9 +4661,105 @@
           "warnings"
         ]
       },
+      "ImageDeletionPreviewResponseDto": {
+        "type": "object",
+        "properties": {
+          "canDelete": {
+            "type": "boolean"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "status": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "scheduling",
+                        "preparing-workspace",
+                        "creating",
+                        "starting",
+                        "running",
+                        "idle",
+                        "stopping",
+                        "stopped",
+                        "failed",
+                        "destroying",
+                        "destroyed"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "waiting_input"
+                      ]
+                    }
+                  ]
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "projectName": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "status",
+                "projectId",
+                "projectName"
+              ]
+            }
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string"
+                },
+                "isActive": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "version",
+                "digest",
+                "isActive"
+              ]
+            }
+          }
+        },
+        "required": [
+          "canDelete",
+          "tasks",
+          "versions"
+        ]
+      },
       "RevalidateOutcomeResponseDto": {
         "type": "object",
         "properties": {
+          "digest": {
+            "type": "string"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -4358,6 +4901,9 @@
               "validation": {
                 "type": "object",
                 "properties": {
+                  "digest": {
+                    "type": "string"
+                  },
                   "status": {
                     "type": "string",
                     "enum": [
@@ -4723,6 +5269,81 @@
           "timezone",
           "timeoutMinutes",
           "artifactRetentionDays"
+        ]
+      },
+      "AutomationDeletionPreviewResponseDto": {
+        "type": "object",
+        "properties": {
+          "runCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "artifactCount": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "runningTasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "runCount",
+          "artifactCount",
+          "runningTasks"
+        ]
+      },
+      "AutomationAttentionItemResponseDto": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "autoDisabled",
+              "degraded"
+            ]
+          },
+          "consecutiveFailures": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "projectId",
+          "projectName",
+          "id",
+          "name",
+          "status",
+          "consecutiveFailures"
         ]
       },
       "WebhookTestRequestDto": {
@@ -5235,6 +5856,9 @@
               "regenerate",
               "disable"
             ]
+          },
+          "invalidateSessions": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -5258,6 +5882,35 @@
       "SystemResourcesResponseDto": {
         "type": "object",
         "properties": {
+          "capacity": {
+            "type": "object",
+            "properties": {
+              "remainingTasks": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "registeredTasks": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "maxTasks": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "basis": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "remainingTasks",
+              "registeredTasks",
+              "maxTasks",
+              "basis"
+            ]
+          },
           "cpu": {
             "type": "object",
             "properties": {
@@ -5592,18 +6245,163 @@
             "type": "integer",
             "minimum": 0,
             "exclusiveMinimum": true
+          },
+          "healthWarnRate": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "maximum": 1,
+            "exclusiveMaximum": false
+          },
+          "healthErrorRate": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "maximum": 1,
+            "exclusiveMaximum": false
           }
         },
         "required": [
           "providers",
           "runtimes",
           "imageSpecs",
-          "healthWindowMs"
+          "healthWindowMs",
+          "healthWarnRate",
+          "healthErrorRate"
+        ]
+      },
+      "ProviderLogsResponseDto": {
+        "type": "object",
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unavailableReason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lines"
+        ]
+      },
+      "DeploymentStatusDto": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "idle": {
+            "type": "boolean"
+          },
+          "readiness": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "type": "boolean"
+              },
+              "provider": {
+                "type": "boolean"
+              },
+              "image": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "database",
+              "provider",
+              "image"
+            ]
+          },
+          "inFlightHTTP": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "activeWS": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "credentialAuth": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "blockers": {
+            "type": "object",
+            "properties": {
+              "sandboxes": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "agentTasks": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "automationRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "enabledAutomations": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "resourceAllocations": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "cloningProjects": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "projectCleanupJobs": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              }
+            },
+            "required": [
+              "sandboxes",
+              "agentTasks",
+              "automationRuns",
+              "enabledAutomations",
+              "resourceAllocations",
+              "cloningProjects",
+              "projectCleanupJobs"
+            ]
+          }
+        },
+        "required": [
+          "ready",
+          "draining",
+          "idle",
+          "readiness",
+          "inFlightHTTP",
+          "activeWS",
+          "credentialAuth",
+          "blockers"
         ]
       },
       "ErrorEnvelope": {
         "type": "object",
         "properties": {
+          "retryAfterSec": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
           "code": {
             "type": "string"
           },

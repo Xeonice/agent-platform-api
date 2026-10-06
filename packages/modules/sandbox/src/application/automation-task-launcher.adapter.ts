@@ -1,7 +1,16 @@
-import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
-import { asSandboxId } from '@platform/shared-kernel';
+import {
+  HttpException,
+  Inject,
+  Injectable,
+  Logger,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from '@nestjs/common';
+import { asSandboxId, CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/shared-kernel';
+import type { Clock, EventBus, UnitOfWork } from '@platform/shared-kernel';
 import {
   AutomationResourceExhausted,
+  PROJECT_FACADE,
   SandboxProviderError,
   SandboxProviderErrorCode,
 } from '@platform/contracts';
@@ -9,6 +18,7 @@ import type {
   AutomationTaskLauncher,
   AutomationTaskLaunchInput,
   AutomationTaskPhase,
+  ProjectFacade,
 } from '@platform/contracts';
 import { SandboxApplicationService } from './sandbox-application.service';
 import { AgentTaskApplicationService } from './agent-task.service';
@@ -34,7 +44,12 @@ import type { AgentTask } from '../domain/entities/agent-task.entity';
  * ready 了再 POST」，整条链路的状态全在库里，进程重启接着走。
  */
 @Injectable()
-export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
+export class AutomationTaskLauncherAdapter
+  implements AutomationTaskLauncher, OnApplicationBootstrap, OnModuleDestroy
+{
+  private timer: NodeJS.Timeout | undefined;
+  private readonly finishing = new Set<string>();
+  private readonly retentionConfirmed = new Set<string>();
   private readonly logger = new Logger('AutomationTaskLauncherAdapter');
 
   constructor(
@@ -42,6 +57,10 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
     private readonly tasks: AgentTaskApplicationService,
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(AGENT_TASK_REPOSITORY) private readonly taskRepo: AgentTaskRepository,
+    @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
+    @Inject(EVENT_BUS) private readonly events: EventBus,
+    @Inject(PROJECT_FACADE) private readonly projects: ProjectFacade,
   ) {}
 
   /**
@@ -84,6 +103,9 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
         // ⚠️ **prompt 同时落 `initial_prompt`**：headless 路径不消费它（见上），但它是
         // 这一发到底要跑什么的**唯一落库副本**，排障时没有它就只能去猜。
         initialPrompt: input.prompt,
+        sourceAutomationId: input.automationId,
+        sourceAutomationName: input.automationName,
+        artifactRetentionDays: input.artifactRetentionDays ?? 30,
       });
       return { sandboxId: dto.id };
     } catch (e) {
@@ -102,6 +124,105 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
     }
   }
 
+  async finishTask(
+    sandboxId: string,
+    input: {
+      automationId: string;
+      automationName: string;
+      retentionDays: 3 | 7 | 30;
+      finishedAt: Date;
+    },
+  ): Promise<void> {
+    const sandbox = await this.repo.findById(asSandboxId(sandboxId));
+    if (!sandbox || this.retentionConfirmed.has(sandboxId)) return;
+    const task = await this.latestTask(sandboxId);
+    if (sandbox.status === 'destroyed') {
+      // A crash or an older best-effort registration may leave the retained
+      // directory without its ledger row. The persisted completion snapshot, not
+      // the rule/run (which can be deleted), supplies its original expiration.
+      if (!sandbox.automationFinishedAt || !task || task.isRunning || !sandbox.workspacePath)
+        return;
+      await this.projects.registerRetainedVolume({
+        projectId: sandbox.projectId,
+        sandboxId,
+        sandboxName: sandbox.name,
+        workspacePath: sandbox.workspacePath,
+        source: 'automation-artifact',
+        sourceAutomationId: sandbox.sourceAutomationId ?? input.automationId,
+        sourceAutomationName: sandbox.sourceAutomationName ?? input.automationName,
+        retentionDays: sandbox.artifactRetentionDays ?? input.retentionDays,
+        retainedAt: sandbox.automationFinishedAt,
+      });
+      this.retentionConfirmed.add(sandboxId);
+      return;
+    }
+    sandbox.recordAutomationFinished(input.finishedAt);
+    this.uow.run((tx) => this.repo.saveSync(tx, sandbox));
+    await this.sandboxes.destroy(sandboxId, {
+      keepVolume: task !== null,
+      retained: {
+        source: 'automation-artifact',
+        sourceAutomationId: input.automationId,
+        sourceAutomationName: input.automationName,
+        retentionDays: input.retentionDays,
+        retainedAt: sandbox.automationFinishedAt ?? input.finishedAt,
+      },
+    });
+    this.retentionConfirmed.add(sandboxId);
+  }
+
+  onApplicationBootstrap(): void {
+    this.events.subscribe((batch) => {
+      if (batch.some((event) => event.type === 'AgentTaskFinished'))
+        void this.reconcileFinished().catch((error: unknown) =>
+          this.logger.error(`automation cleanup scan failed: ${String(error)}`),
+        );
+    });
+    this.timer = setInterval(() => {
+      void this.reconcileFinished().catch((error: unknown) =>
+        this.logger.error(`automation cleanup scan failed: ${String(error)}`),
+      );
+    }, 10_000);
+    this.timer.unref();
+    void this.reconcileFinished().catch((error: unknown) =>
+      this.logger.error(`automation cleanup scan failed: ${String(error)}`),
+    );
+  }
+
+  /** Rule/run rows may have been deleted; the sandbox's snapshot owns cleanup. */
+  async reconcileFinished(): Promise<void> {
+    for (const sandbox of await this.repo.findAll()) {
+      if (
+        !sandbox.sourceAutomationId ||
+        this.retentionConfirmed.has(sandbox.id) ||
+        this.finishing.has(sandbox.id)
+      )
+        continue;
+      const task = await this.latestTask(sandbox.id);
+      if (sandbox.status === 'destroyed' && !sandbox.automationFinishedAt) continue;
+      if (task?.isRunning || (!task && sandbox.status !== 'failed')) continue;
+      this.finishing.add(sandbox.id);
+      try {
+        await this.finishTask(sandbox.id, {
+          automationId: sandbox.sourceAutomationId,
+          automationName: sandbox.sourceAutomationName ?? sandbox.sourceAutomationId,
+          retentionDays: sandbox.artifactRetentionDays ?? 30,
+          finishedAt: sandbox.automationFinishedAt ?? task?.finishedAt ?? this.clock.now(),
+        });
+      } catch (error) {
+        this.logger.error(
+          `automation task cleanup pending for ${sandbox.id}: ${(error as Error).message}`,
+        );
+      } finally {
+        this.finishing.delete(sandbox.id);
+      }
+    }
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+
   /**
    * 每轮扫描的观测点。**永不抛**：一条查不到的沙箱是 `gone`，不是一个能把整轮扫描
    * 打断的异常。
@@ -113,6 +234,19 @@ export class AutomationTaskLauncherAdapter implements AutomationTaskLauncher {
     const latest = await this.latestTask(sandboxId);
     if (latest !== null && !latest.isRunning) return this.finished(latest);
 
+    if (
+      sandbox.sourceAutomationId &&
+      sandbox.automationFinishedAt &&
+      sandbox.failureCode &&
+      !latest
+    ) {
+      return {
+        kind: 'finished',
+        status: 'failed',
+        errorCode: sandbox.failureCode,
+        errorMessage: sandbox.failureReason ?? 'sandbox failed before the task could run',
+      };
+    }
     switch (sandbox.status) {
       case 'pending':
       case 'scheduling':

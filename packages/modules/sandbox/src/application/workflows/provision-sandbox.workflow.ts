@@ -32,12 +32,13 @@ import type {
   WorkspacePreparer,
   WorkspaceSource,
 } from '@platform/contracts';
-import type { Sandbox } from '../../domain/entities/sandbox.entity';
+import type { Sandbox, SandboxFailureOperation } from '../../domain/entities/sandbox.entity';
 import type { SandboxStatus } from '../../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../../domain/entities/state-transition.entity';
 import { SANDBOX_REPOSITORY } from '../../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../../domain/repositories/sandbox.repository';
 import { ResourceAllocator } from '../resource-allocator';
+import { withTeardownDeadline } from '../teardown-deadline';
 
 /**
  * 兜底 quota —— **只在账本里查不到这条 sandbox 的活跃登记时**才用。
@@ -48,7 +49,16 @@ import { ResourceAllocator } from '../resource-allocator';
 /** 一份备好的、还没落进沙箱的 runtime 凭证（03 §4.3 ④）。 */
 interface PreparedRuntimeCredential {
   runtimeId: string;
-  credential: InjectableRuntimeCredential;
+  credential: InjectableRuntimeCredential & { credentialId: string };
+}
+
+class SandboxProvisionCancelled extends Error {}
+
+class RuntimeCredentialRevokedError extends Error {
+  readonly code = 'AUTH_REJECTED';
+  constructor() {
+    super('任务启动期间凭证已删除，请重新配置凭证后发起。');
+  }
 }
 
 /**
@@ -110,6 +120,8 @@ const FALLBACK_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
 @Injectable()
 export class ProvisionSandboxWorkflow {
   private readonly logger = new Logger('ProvisionSandboxWorkflow');
+  private readonly cancelled = new Set<string>();
+  private readonly active = new Map<string, Promise<void>>();
 
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
@@ -157,9 +169,43 @@ export class ProvisionSandboxWorkflow {
   }
 
   async run(sandbox: Sandbox, provider: SandboxProvider, source: WorkspaceSource): Promise<void> {
+    return this.track(sandbox.id, () => this.provision(sandbox, provider, source));
+  }
+
+  /** Stop at the next IO boundary and wait for any late provider handle to be recorded. */
+  cancel(sandboxId: string): Promise<void> {
+    this.cancelled.add(sandboxId);
+    return this.active.get(sandboxId) ?? Promise.resolve();
+  }
+
+  private track(sandboxId: string, work: () => Promise<void>): Promise<void> {
+    const existing = this.active.get(sandboxId);
+    if (existing) return existing;
+    let settle!: () => void;
+    const idle = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.active.set(sandboxId, idle);
+    return work().finally(() => {
+      this.active.delete(sandboxId);
+      settle();
+    });
+  }
+
+  private assertActive(sandboxId: string): void {
+    if (this.cancelled.has(sandboxId)) throw new SandboxProvisionCancelled();
+  }
+
+  private async provision(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    source: WorkspaceSource,
+  ): Promise<void> {
     // hoisted so the failure path can tear down a container that WAS created (e.g. a
     // later `start`/install failure) — otherwise it orphans (S1 audit P1-2).
     let handle: SandboxHandle | undefined;
+    let workspacePath: string | undefined;
+    let bound = false;
     // ── 阶段计时（03 §7.8 `sandbox.provision.stage`）────────────────────────────
     // 「启动 237s→4s 无历史可比」是这几行存在的全部理由：状态流转本身已经在
     // `sandbox_state_transitions` 里，缺的是**每一段花了多久**。
@@ -185,6 +231,8 @@ export class ProvisionSandboxWorkflow {
       // create door, so the checkout inside `prepare` is a local operation expected to
       // succeed; a failure here is a real fault and lands as WORKSPACE_PREPARE_FAILED.
       const ws = await this.workspace.prepare(sandbox.id, source);
+      workspacePath = ws.hostPath;
+      this.assertActive(sandbox.id);
       done();
       this.recordWorkspacePrepared(sandbox, ws);
 
@@ -198,12 +246,14 @@ export class ProvisionSandboxWorkflow {
       // post-start `injectCredential` — resolving it twice would decrypt twice for no
       // gain. Credentials are written LAST into the env map so a same-named user
       // variable can never win (05 §4.1 "凭证永远赢，靠顺序而非黑名单").
-      const credentials = await this.prepareCredentials(sandbox, image.spec);
+      const credentials = await this.prepareCredentials(sandbox);
       // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
       // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
       // 超分配」防的是一个与真实占用无关的数。
       const quota = (await this.resources.reservedQuotaOf(sandbox.id)) ?? FALLBACK_QUOTA;
       try {
+        const usable = await this.reserveInjection(sandbox, credentials);
+        this.assertActive(sandbox.id);
         handle = await provider.create({
           sandboxId: sandbox.id,
           quota,
@@ -213,7 +263,7 @@ export class ProvisionSandboxWorkflow {
           // credential LAST, so a user-defined variable can never shadow a credential
           // — and `EnvVarSet` already refuses the credential NAMES at save time, which
           // makes this belt and braces rather than either alone.
-          env: { ...image.env, ...mergeCredentialEnv(credentials) },
+          env: { ...image.env, ...mergeCredentialEnv(usable) },
           volumes: [
             {
               source: ws.hostPath,
@@ -224,6 +274,7 @@ export class ProvisionSandboxWorkflow {
           ],
           labels: { 'platform.sandboxId': sandbox.id },
         });
+        this.assertActive(sandbox.id);
         sandbox.bindRuntime({
           providerSandboxId: handle.providerSandboxId,
           workspacePath: ws.hostPath,
@@ -233,6 +284,7 @@ export class ProvisionSandboxWorkflow {
           providerState: handle.providerState ?? null,
         });
         this.persist(sandbox); // save handle (no new transition/event)
+        bound = true;
         done();
 
         this.advance(sandbox, 'starting', 'scheduler');
@@ -243,14 +295,7 @@ export class ProvisionSandboxWorkflow {
         // ② 失败路径同样拿得到它。`provider.start()` 炸在铺 13GB 镜像的中途,与炸在
         //    一个早就 staged 的镜像上,是两个不同的故障,下一步动作也不同。
         stageDetail = await this.imageStagedOf(provider, image.spec);
-        await this.runStartingSteps(
-          sandbox,
-          provider,
-          handle,
-          image.spec,
-          credentials,
-          stageDetail,
-        );
+        await this.runStartingSteps(sandbox, provider, handle, image.spec, usable, stageDetail);
         done();
       } finally {
         for (const c of credentials) c.credential.zeroize();
@@ -259,6 +304,40 @@ export class ProvisionSandboxWorkflow {
       this.advance(sandbox, 'running', 'scheduler');
       this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
     } catch (e) {
+      if (this.cancelled.has(sandbox.id)) {
+        // A create can finish after cancellation. Teardown owns the late handle;
+        // never resume starting or overwrite the deleting row with the old aggregate.
+        const current = await this.repo.findById(sandbox.id);
+        if (handle && !bound && workspacePath) {
+          if (current?.status === 'destroying') {
+            current.bindRuntime({
+              providerSandboxId: handle.providerSandboxId,
+              providerState: handle.providerState,
+              workspacePath,
+            });
+            this.uow.run((tx) => this.repo.saveSync(tx, current));
+          } else {
+            await withTeardownDeadline(provider.destroy(handle), sandbox.id).catch(
+              (error: unknown) =>
+                this.logger.error(
+                  `late cancelled instance cleanup pending for ${sandbox.id}: ${String(error)}`,
+                ),
+            );
+          }
+        }
+        // A bounded deletion may already have failed or the project transaction
+        // may have removed its row while a copy/create was suspended. Initial
+        // preparation has no user成果 to preserve; its late directory must go.
+        if (!bound && workspacePath && current?.status !== 'destroying')
+          await this.workspace
+            .cleanup(sandbox.id, { keep: false })
+            .catch((error: unknown) =>
+              this.logger.error(
+                `late cancelled workspace cleanup failed for ${sandbox.id}: ${String(error)}`,
+              ),
+            );
+        return;
+      }
       // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
       // 多久才看见失败）回答的是两个不同的问题，而失败路径上聚合**不 publish 任何
       // 领域事件** —— projector 一条都收不到，这里不记就永远没有记录（13 §2.8.2）。
@@ -309,15 +388,19 @@ export class ProvisionSandboxWorkflow {
   }
 
   async restart(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    return this.track(sandbox.id, () => this.restartInstance(sandbox, provider));
+  }
+
+  private async restartInstance(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
     const handle = this.handleOf(sandbox);
     const startedAt = this.clock.now().getTime();
     let stageDetail: Record<string, unknown> = {};
     try {
-      this.advance(sandbox, 'starting', 'scheduler');
+      if (sandbox.status !== 'starting') this.advance(sandbox, 'starting', 'scheduler');
       const spec = (await this.imageSpecOf(sandbox)).spec;
-      // ⚠️ 重启同样**重新备齐全部**凭证：用户在两次启动之间加/删过的凭证，重启之后
+      // 重启重新验证任务所选 Agent 的凭证：用户可能已在停止后删除或替换凭证，重启之后
       //    盒子里的事实就变了，`injectedRuntimes` 必须跟着覆盖（见实体上的注释）。
-      const credentials = await this.prepareCredentials(sandbox, spec);
+      const credentials = await this.prepareCredentials(sandbox);
       try {
         // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
         // 而用户对「重启」的时间预期比「新建」短得多。
@@ -329,8 +412,9 @@ export class ProvisionSandboxWorkflow {
       this.advance(sandbox, 'running', 'scheduler');
       this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
     } catch (e) {
+      if (this.cancelled.has(sandbox.id)) return;
       this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
-      this.compensate(sandbox, e);
+      this.compensate(sandbox, e, 'start');
       // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
       await this.resources.release(sandbox.id);
       throw e;
@@ -363,7 +447,9 @@ export class ProvisionSandboxWorkflow {
       phase: 'starting',
       ...imageStaged,
     });
+    this.assertActive(sandbox.id);
     await provider.start(handle);
+    this.assertActive(sandbox.id);
     this.broadcaster.broadcast({
       event: 'sandbox.instance_progress',
       sandboxId: sandbox.id,
@@ -379,14 +465,17 @@ export class ProvisionSandboxWorkflow {
       image,
       exec,
     });
+    this.assertActive(sandbox.id);
 
     // ③.5 落 runtime 启动前需要的文件。**刻意排在 ④ 之前、且与 ④ 无关**:
     // ④ 只在有凭证时才跑,而这一步要处理的闸门(codex 的目录信任提示)在**没有凭证时
     // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
     await this.seedStartupFiles(sandbox, exec);
+    this.assertActive(sandbox.id);
 
     // ④ materialise the credentials inside the sandbox（复数，2026-09）。
     await this.injectCredentials(sandbox, credentials, exec);
+    this.assertActive(sandbox.id);
 
     // ⑤ start the agent session — this is what makes "the agent starts working the
     // moment the task starts" true for a user who closed the browser, and for MCP
@@ -496,33 +585,11 @@ export class ProvisionSandboxWorkflow {
    * a task before authorising a runtime, and the agent itself will say it is not logged
    * in. What must never happen is a SILENT half-state, so it is logged loudly.
    */
-  /**
-   * 这个沙箱里**能用上**哪几份 runtime 凭证（03 §4.3 ④，2026-09 从单数改成复数）。
-   *
-   * ── 为什么是复数 ──────────────────────────────────────────────────────────
-   * 用户要能在终端里随手开 Codex / Claude Code / 纯终端（P21-1 §6）。CLI 本来就预装在
-   * 镜像里（`supportedRuntimes`），**真正的拦路虎是凭证**：env 形态的凭证（claude 的
-   * `CLAUDE_CODE_OAUTH_TOKEN`、api-key）**只能在建实例时给** —— 按调用传 `env` 会在
-   * 沙箱里被 `ps` 看见（04 §2.3★ 第 2 条），而已经起来的进程加不了 env。
-   * ⇒ 「点了 claude 标签再注入 claude 凭证」这条路对 env 形态根本走不通，只能在
-   * **建实例前**把所有已配置的一次性备齐。用户已裁决接受这个凭证面扩大，代价是
-   * 一个 Codex 任务的沙箱里也会有 Claude 的令牌 —— 所以注入了哪几份**必须落审计**。
-   *
-   * ⚠️ **候选集是镜像声明支持的那些**，不是注册表全集：往一个没装 claude CLI 的镜像里
-   * 注入 claude 凭证，只会让下拉里多出一个点开就失败的选项。`supportedRuntimes` 未声明
-   * （第三方镜像可以不声明）⇒ 只试 `sandbox.runtime` 那一个，与本切片之前的行为一致。
-   *
-   * ⚠️ `sandbox.runtime` **排第一**：它是这个沙箱的默认 runtime，排前面让审计与列表
-   * 读起来与「这个任务是为谁建的」一致。
-   */
-  private async prepareCredentials(
-    sandbox: Sandbox,
-    image: ResolvedImageSpec,
-  ): Promise<PreparedRuntimeCredential[]> {
-    const declared = image.supportedRuntimes ?? [];
-    const candidates = [sandbox.runtime, ...declared.filter((id) => id !== sandbox.runtime)].filter(
-      (id) => this.runtimes.has(id),
-    );
+  /** Select only the Task's Agent credential (AC-CRD-003.1). */
+  private async prepareCredentials(sandbox: Sandbox): Promise<PreparedRuntimeCredential[]> {
+    // A Task owns its selected Agent's credential, regardless of what other CLIs
+    // the image happens to include (CRD-003.1).
+    const candidates = [sandbox.runtime];
 
     const prepared: PreparedRuntimeCredential[] = [];
     for (const runtimeId of candidates) {
@@ -536,7 +603,7 @@ export class ProvisionSandboxWorkflow {
   private async prepareOneCredential(
     sandbox: Sandbox,
     runtimeId: string,
-  ): Promise<InjectableRuntimeCredential | null> {
+  ): Promise<(InjectableRuntimeCredential & { credentialId: string }) | null> {
     try {
       return await this.credentials.prepareRuntimeCredential(runtimeId);
     } catch (e) {
@@ -574,6 +641,29 @@ export class ProvisionSandboxWorkflow {
       }
       throw e;
     }
+  }
+
+  /** Register the actual credential before any env is delivered to provider.create. */
+  private async reserveInjection(
+    sandbox: Sandbox,
+    credentials: PreparedRuntimeCredential[],
+  ): Promise<PreparedRuntimeCredential[]> {
+    const usable: PreparedRuntimeCredential[] = [];
+    for (const prepared of credentials) {
+      this.assertActive(sandbox.id);
+      const { runtimeId, credential } = prepared;
+      if (!(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)))
+        continue;
+      if (
+        await this.credentials.recordRuntimeInjection(
+          runtimeId,
+          sandbox.id,
+          credential.credentialId,
+        )
+      )
+        usable.push(prepared);
+    }
+    return usable;
   }
 
   /**
@@ -622,11 +712,26 @@ export class ProvisionSandboxWorkflow {
   ): Promise<void> {
     const injected: string[] = [];
     for (const { runtimeId, credential } of credentials) {
+      this.assertActive(sandbox.id);
+      if (
+        !(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)) ||
+        !(await this.credentials.recordRuntimeInjection(
+          runtimeId,
+          sandbox.id,
+          credential.credentialId,
+        ))
+      ) {
+        throw new RuntimeCredentialRevokedError();
+      }
       try {
         await this.runtimes.get(runtimeId).injectCredential(credential, exec);
-        await this.credentials.recordRuntimeInjection(runtimeId, sandbox.id);
+        this.assertActive(sandbox.id);
+        if (!(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)))
+          throw new RuntimeCredentialRevokedError();
         injected.push(runtimeId);
       } catch (e) {
+        if (e instanceof RuntimeCredentialRevokedError || e instanceof SandboxProvisionCancelled)
+          throw e;
         this.logger.warn(
           `sandbox ${sandbox.id}: injecting '${runtimeId}' credential failed ` +
             `(${(e as Error).message}); it will not be offered as a terminal tab`,
@@ -713,7 +818,11 @@ export class ProvisionSandboxWorkflow {
    * machine's point of view: land `failed` with a HUMAN-READABLE reason (13 §2.1.1
    * `failure_reason`; the frontend renders that sentence per P22 §1, not the code).
    */
-  private compensate(sandbox: Sandbox, error: unknown): void {
+  private compensate(
+    sandbox: Sandbox,
+    error: unknown,
+    operation: SandboxFailureOperation = 'provision',
+  ): void {
     try {
       const failure = splitFailure(error);
       if (failure.rejected !== undefined) {
@@ -723,7 +832,7 @@ export class ProvisionSandboxWorkflow {
         );
       }
       sandbox.failWith(
-        { code: failure.code, message: failure.message },
+        { code: failure.code, message: failure.message, operation },
         'scheduler',
         this.clock.now(),
       );
@@ -810,11 +919,13 @@ export class ProvisionSandboxWorkflow {
   }
 
   private advance(sandbox: Sandbox, to: SandboxStatus, by: TriggeredBy): void {
+    this.assertActive(sandbox.id);
     sandbox.transitionTo(to, by, this.clock.now());
     this.persist(sandbox);
   }
 
   private persist(sandbox: Sandbox): void {
+    this.assertActive(sandbox.id);
     this.uow.run((tx) => {
       this.repo.saveSync(tx, sandbox);
       this.events.publishInTx(tx, sandbox.pullEvents());

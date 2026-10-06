@@ -9,7 +9,13 @@ import type {
   MaterializeGitAuthInput,
 } from '../../domain/ports/git-auth-materializer.port';
 import type { SecretMaterial } from '../../domain/value-objects/secret-material.vo';
-import { isPinnedHost, pinnedKnownHostsPath, platformKnownHostsPath } from './known-hosts';
+import {
+  isPinnedHost,
+  pinnedKnownHostsPath,
+  platformKnownHostsPath,
+  readKnownHostFingerprints,
+} from './known-hosts';
+import type { MaterializedGitAuth } from '../../domain/ports/git-auth-materializer.port';
 import { gitKeysBaseDir } from './keyfile-dir';
 
 /**
@@ -42,7 +48,7 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
 
   constructor(@Inject(CRYPTO_SERVICE) private readonly crypto: CryptoService) {}
 
-  async materialize(input: MaterializeGitAuthInput): Promise<GitAuthContext> {
+  async materialize(input: MaterializeGitAuthInput): Promise<MaterializedGitAuth> {
     const secret = await this.crypto.decrypt(input.secret); // throws DecryptionError
     try {
       return input.obtainedVia === 'git-ssh-key'
@@ -53,7 +59,7 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     }
   }
 
-  private async materializeSsh(secret: SecretMaterial, host: string): Promise<GitAuthContext> {
+  private async materializeSsh(secret: SecretMaterial, host: string): Promise<MaterializedGitAuth> {
     const base = gitKeysBaseDir();
     await mkdir(base, { recursive: true, mode: 0o700 });
     const dir = await mkdtemp(join(base, 'k-'));
@@ -96,6 +102,7 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     return {
       env: {},
       gitSshCommand,
+      readKnownHosts: async () => readKnownHostFingerprints(knownHosts, host),
       dispose: async () => {
         await rm(dir, { recursive: true, force: true });
       },

@@ -107,6 +107,7 @@ export type RuntimeCredentialSummary = z.infer<typeof RuntimeCredentialSummarySc
 
 /** Aggregate runtime row (`GET /api/runtimes`, 27 §4). */
 export const RuntimeDtoSchema = z.object({
+  pendingTeardownCount: z.number().int().nonnegative().optional(),
   id: z.string(),
   displayName: z.string(),
   vendor: z.string(),
@@ -185,3 +186,18 @@ export const RuntimeSettingsDtoSchema = z.object({
   activeAuthMethod: RuntimeAuthModeSchema,
 });
 export type RuntimeSettingsDto = z.infer<typeof RuntimeSettingsDtoSchema>;
+
+const CredentialImpactTaskSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  runtime: z.string(),
+  status: z.string(),
+  headless: z.boolean(),
+});
+export const RuntimeCredentialDeletionPreviewDtoSchema = z.object({
+  affectedTasks: z.array(CredentialImpactTaskSchema),
+  preparingTasks: z.array(CredentialImpactTaskSchema),
+});
+export type RuntimeCredentialDeletionPreviewDto = z.infer<
+  typeof RuntimeCredentialDeletionPreviewDtoSchema
+>;

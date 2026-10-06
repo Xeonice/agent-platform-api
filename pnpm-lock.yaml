@@ -14,6 +14,12 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.10.0
         version: 1.30.0(zod@4.5.4)
+      '@nestjs/common':
+        specifier: ^11.0.0
+        version: 11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/testing':
+        specifier: ^11.0.0
+        version: 11.1.29(@nestjs/common@11.1.29(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.29)(@nestjs/platform-express@11.1.29)
       '@stryker-mutator/core':
         specifier: ^10.0.0
         version: 10.0.0(@types/node@22.20.1)
@@ -23,12 +29,21 @@ importers:
       '@swc/core':
         specifier: ^1.7.0
         version: 1.15.47
+      '@types/better-sqlite3':
+        specifier: ^7.6.11
+        version: 7.6.13
       '@types/node':
         specifier: ^22.7.0
         version: 22.20.1
       '@types/supertest':
         specifier: ^6.0.2
         version: 6.0.3
+      better-sqlite3:
+        specifier: ^11.5.0
+        version: 11.10.0
+      drizzle-orm:
+        specifier: ^0.36.0
+        version: 0.36.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)
       eslint:
         specifier: ^9.12.0
         version: 9.39.5
@@ -44,6 +59,15 @@ importers:
       prettier:
         specifier: ^3.3.3
         version: 3.9.6
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
+      simple-git:
+        specifier: ^3.27.0
+        version: 3.36.0
+      socket.io-client:
+        specifier: ^4.8.0
+        version: 4.8.3
       supertest:
         specifier: ^7.0.0
         version: 7.2.2

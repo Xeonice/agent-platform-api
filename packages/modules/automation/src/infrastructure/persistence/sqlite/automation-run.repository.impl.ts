@@ -43,6 +43,16 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
     return row ? toDomain(row) : null;
   }
 
+  async countByAutomation(automationId: AutomationId): Promise<number> {
+    return (
+      this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(automationRuns)
+        .where(eq(automationRuns.automationId, automationId))
+        .get()?.n ?? 0
+    );
+  }
+
   async listByAutomation(automationId: AutomationId, cursor: RunCursor): Promise<RunSlice> {
     // ⚠️ 游标而非 offset：排序键是 `(triggered_at DESC, id DESC)`，游标要用**同一个键**
     //    做「严格早于」比较，否则同一毫秒内的多条会漏或重。id 是 uuid v7、本身时间有序，

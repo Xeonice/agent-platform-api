@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { Inject, Logger } from '@nestjs/common';
+import { Inject, Logger, type OnModuleDestroy } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -31,6 +31,8 @@ import {
   TerminalSessionService,
   type TerminalTarget,
 } from '../../application/terminal-session.service';
+import { WaitingInputService } from '../../application/waiting-input.service';
+import { TerminalOutputBatcher } from './frame-batcher';
 
 interface Attachment {
   stream: ProcessStream;
@@ -38,6 +40,7 @@ interface Attachment {
   sandboxId: string;
   /** 这条连接连的是哪一个 tmux 会话（06 §5）。`agent` = `platform-agent`。 */
   target: TerminalTarget;
+  batcher: TerminalOutputBatcher;
 }
 
 /**
@@ -54,13 +57,16 @@ interface Attachment {
  *     disconnect; `?socketSessionKey=` is accepted for the future reuse path.
  */
 @WebSocketGateway({ namespace: '/terminal' })
-export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+export class TerminalGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+{
   private readonly logger = new Logger('TerminalGateway');
   private readonly attachments = new Map<string, Attachment>();
 
   constructor(
     private readonly sessions: TerminalSessionService,
     @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
+    private readonly waiting: WaitingInputService,
   ) {}
 
   /**
@@ -206,9 +212,20 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       // agent 那一支：ALWAYS attach the session provision already started
       // (26 §8 / 裁决 D-15) —— 网关不判断「是不是第一个连接」、不调 buildStartCommand。
       // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
+      const detectWaiting = await this.sessions.waitingInputEligible(sandboxId);
       const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse, target });
+      if (client.disconnected === true) {
+        stream.detach();
+        return;
+      }
       const socketSessionKey = randomBytes(16).toString('hex'); // 128-bit, server-generated
-      this.attachments.set(client.id, { stream, socketSessionKey, sandboxId, target });
+      const batcher = new TerminalOutputBatcher((data) => {
+        if (this.attachments.get(client.id)?.stream !== stream) return;
+        this.waiting.output(socketSessionKey, data);
+        this.send(client, { type: 'data', data });
+      });
+      this.attachments.set(client.id, { stream, socketSessionKey, sandboxId, target, batcher });
+      if (detectWaiting) this.waiting.attach(socketSessionKey, sandboxId);
 
       // ⚠️ `shellId` **只在 shell 那一支带上**。agent 连接上给一个空串会让前端多出一条
       //    「有 shellId 但它是空的」的分支 —— 缺席才是「这条连的是 agent」。
@@ -222,8 +239,11 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
       // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
       if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
 
-      stream.onData((chunk) => this.send(client, { type: 'data', data: chunk.toString('utf8') }));
+      stream.onData((chunk) => batcher.write(chunk));
       stream.onExit((code) => {
+        if (this.attachments.get(client.id)?.stream !== stream) return;
+        batcher.flush();
+        this.removeAttachment(client.id);
         this.send(client, { type: 'exit', code: code ?? -1 });
         client.disconnect(true);
       });
@@ -277,11 +297,20 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
    * 重画窗口,首字节丢了,于是 shell 收到的是 `xit`——**恰恰是这个丢字节救了会话**,
    * 否则 shell 早就退干净了,现象会变成"刷新一下任务就没了"。
    */ handleDisconnect(client: Socket): void {
-    const att = this.attachments.get(client.id);
-    if (att) {
-      att.stream.detach();
-      this.attachments.delete(client.id);
-    }
+    this.removeAttachment(client.id, true);
+  }
+
+  private removeAttachment(clientId: string, detach = false): void {
+    const att = this.attachments.get(clientId);
+    if (!att) return;
+    this.attachments.delete(clientId);
+    att.batcher?.close();
+    this.waiting.detach(att.socketSessionKey);
+    if (detach) att.stream.detach();
+  }
+
+  onModuleDestroy(): void {
+    for (const clientId of this.attachments.keys()) this.removeAttachment(clientId, true);
   }
 
   @SubscribeMessage('frame')
@@ -290,6 +319,8 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     if (!att) return;
     switch (frame.type) {
       case 'input':
+        att.batcher?.flush();
+        this.waiting.input(att.socketSessionKey);
         att.stream.write(frame.data);
         break;
       case 'resize':
@@ -348,6 +379,14 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
   private async closeShell(sandboxId: string, shellId: string): Promise<void> {
     try {
       await this.sessions.closeShellSession(sandboxId, shellId);
+      for (const [clientId, att] of this.attachments) {
+        if (
+          att.sandboxId === sandboxId &&
+          att.target.kind !== 'agent' &&
+          att.target.shellId === shellId
+        )
+          this.removeAttachment(clientId, true);
+      }
     } catch (e) {
       this.logger.error(
         `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${
@@ -376,7 +415,11 @@ export class TerminalGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     const authz = client.handshake.headers.authorization;
     const fromBearer = authz?.startsWith('Bearer ') ? authz.slice('Bearer '.length) : undefined;
     const passcode = fromAuth ?? fromHeader ?? fromBearer ?? this.readQuery(client, 'passcode');
-    return { passcode, sessionToken: this.readCookie(client, 'ap_session') };
+    return {
+      passcode,
+      sessionToken: this.readCookie(client, 'ap_session'),
+      remoteAddress: client.request.socket.remoteAddress,
+    };
   }
 
   private readCookie(client: Socket, name: string): string | undefined {

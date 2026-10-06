@@ -378,7 +378,7 @@ export function stageNextStep(
   //    重试的向导步。⇒ 能自己下就在向导里下（用户 2026-09-10 明确要求）。
   if (canProvisionNow) {
     return {
-      nextStep: `现在就可以下：点 [准备镜像]，平台自己去拉一次，不必等第一个任务 —— 那时你已经写完指令，等待落在最差的时机。${needsRegistry}`,
+      nextStep: `现在就可以下：在镜像管理 › 预制镜像卡点 [准备镜像]，平台自己去拉一次，不必等第一个任务。${needsRegistry}`,
     };
   }
   if (tier === 'boxlite') {
@@ -428,7 +428,7 @@ function registryNextStep(
     const size =
       plan.sizeBytes === null ? '' : `，约 ${String(Math.round(plan.sizeBytes / 1024 / 1024))} MB`;
     return {
-      nextStep: `在初始化向导或系统状态页点 [准备镜像]，平台自己把它搬到位（${plan.from} → ${plan.to}${size}）。`,
+      nextStep: `在镜像管理 › 预制镜像卡点 [准备镜像]，平台自己把它搬到位（${plan.from} → ${plan.to}${size}）。初始化向导中也可直接准备。`,
     };
   }
   if (isPublishedImageRef(ref)) {
@@ -442,7 +442,7 @@ function registryNextStep(
   }
   return {
     nextStep:
-      '用平台的构建脚本构建再推上去。内网镜像仓库需要凭证或走代理时，先在系统设置里配好代理再重新诊断。',
+      '用平台的构建脚本构建再推上去。镜像仓库需要凭证或代理时，在镜像下载环境中配置后重新诊断。',
     command: `docker build -t ${ref} ${buildScriptFor(tier)} && docker push ${ref}`,
   };
 }

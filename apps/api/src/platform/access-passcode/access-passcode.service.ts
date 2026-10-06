@@ -40,6 +40,15 @@ export class AccessPasscodeService {
       );
     }
 
+    if (input.invalidateSessions && input.action !== 'regenerate') {
+      throw this.conflict('只有重新生成口令时可以同时让已登录的浏览器失效。');
+    }
+    if (input.invalidateSessions && this.passcodes.sessionSecretPinned) {
+      throw this.conflict(
+        '会话签名密钥由部署配置 PASSCODE_COOKIE_SECRET 固定。要让已登录的浏览器失效，请更改该变量后重启；口令没有改变。',
+      );
+    }
+
     if (input.action === 'disable') {
       // idempotent: the target state is 「关」, and reaching it twice is not a conflict
       // (unlike `POST /api/system/init`, where the second call would rewrite a
@@ -65,8 +74,8 @@ export class AccessPasscodeService {
     }
 
     const plain = PasscodeService.generatePasscode();
-    this.passcodes.setStoredPasscode(plain, this.clock.now());
-    this.audit.record(passcodeChangedRecord(input.action));
+    this.passcodes.setStoredPasscode(plain, this.clock.now(), input.invalidateSessions === true);
+    this.audit.record(passcodeChangedRecord(input.action, input.invalidateSessions === true));
     // ⚠️ THE ONLY TIME THE PLATFORM EVER SAYS THIS STRING. Nothing logs it, nothing
     // caches it, and `GET /api/system/settings` answers a boolean forever after.
     return { enabled: true, passcode: plain };

@@ -1,4 +1,14 @@
-import { Body, ConflictException, Controller, Get, HttpCode, Post, Put, Res } from '@nestjs/common';
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Put,
+  Res,
+} from '@nestjs/common';
 import {
   ApiCreatedResponse,
   ApiOkResponse,
@@ -13,6 +23,7 @@ import {
   AccessPasscodeResultSchema,
   InitRequestSchema,
   InitStatusDtoSchema,
+  ProviderLogsDtoSchema,
   SystemProvidersDtoSchema,
   SystemResourcesDtoSchema,
   SystemSettingsDtoSchema,
@@ -22,6 +33,7 @@ import {
 import type {
   AccessPasscodeResult,
   InitStatusDto,
+  ProviderLogsDto,
   SystemProvidersDto,
   SystemResourcesDto,
   SystemSettingsDto,
@@ -32,8 +44,12 @@ import { InitializationService } from './initialization.service';
 import { SystemSettingsService } from './system-settings.service';
 import { SystemResourcesService } from './system-resources.service';
 import { SystemProvidersService } from './system-providers.service';
+import { ProviderLogService } from '../audit/provider-log.service';
 import { SystemVersionService } from './system-version.service';
 import { DiagnosticsService } from './diagnostics/diagnostics.service';
+import type { Response } from 'express';
+import { PasscodeService } from '../access-passcode/passcode.service';
+import { setSessionCookie } from '../access-passcode/session-cookie';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
 import { PRESET_IMAGE_NOT_PROVISIONABLE } from '@platform/contracts';
 import { SseWriter, type SseResponse } from './diagnostics/sse-writer';
@@ -44,6 +60,7 @@ export class SystemSettingsResponseDto extends createZodDto(SystemSettingsDtoSch
 export class UpdateSystemSettingsDto extends createZodDto(UpdateSystemSettingsRequestSchema) {}
 export class SystemResourcesResponseDto extends createZodDto(SystemResourcesDtoSchema) {}
 export class SystemProvidersResponseDto extends createZodDto(SystemProvidersDtoSchema) {}
+export class ProviderLogsResponseDto extends createZodDto(ProviderLogsDtoSchema) {}
 export class SystemVersionResponseDto extends createZodDto(SystemVersionDtoSchema) {}
 export class AccessPasscodeRequestDto extends createZodDto(AccessPasscodeActionSchema) {}
 export class AccessPasscodeResponseDto extends createZodDto(AccessPasscodeResultSchema) {}
@@ -68,6 +85,8 @@ export class SystemController {
     private readonly providers: SystemProvidersService,
     private readonly diagnostics: DiagnosticsService,
     private readonly passcodes: AccessPasscodeService,
+    private readonly sessions: PasscodeService,
+    private readonly providerLogs: ProviderLogService,
   ) {}
 
   @Get('init-status')
@@ -130,11 +149,17 @@ export class SystemController {
   @Put('access-passcode')
   @ApiOperation({
     summary:
-      '启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成不影响已通过的 session',
+      '启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成默认保留会话，invalidateSessions=true 使旧会话失效并为发起浏览器签发新会话',
   })
   @ApiOkResponse({ type: AccessPasscodeResponseDto })
-  setAccessPasscode(@Body() body: AccessPasscodeRequestDto): AccessPasscodeResult {
-    return this.passcodes.apply(body);
+  setAccessPasscode(
+    @Body() body: AccessPasscodeRequestDto,
+    @Res({ passthrough: true }) res: Response,
+  ): AccessPasscodeResult {
+    const result = this.passcodes.apply(body);
+    if (body.invalidateSessions && result.enabled)
+      setSessionCookie(res, this.sessions.issueCurrentSessionToken());
+    return result;
   }
 
   @Get('resources')
@@ -162,6 +187,13 @@ export class SystemController {
   @ApiOkResponse({ type: SystemProvidersResponseDto })
   getProviders(): Promise<SystemProvidersDto> {
     return this.providers.overview();
+  }
+
+  @Get('providers/:id/logs')
+  @ApiOperation({ summary: '读取指定沙箱环境最近20行运行日志；不可用时返回原因' })
+  @ApiOkResponse({ type: ProviderLogsResponseDto })
+  getProviderLogs(@Param('id') id: string): Promise<ProviderLogsDto> {
+    return this.providerLogs.read(id);
   }
 
   /**
@@ -196,7 +228,7 @@ export class SystemController {
   })
   @ApiOperation({
     summary:
-      '逐项诊断，SSE 流式（帧类型手写于两仓 sse-protocol.ts）。各项并行、单项超时 5s，整轮 ≈ 最慢那项；断连即中止剩余检查',
+      '逐项诊断，SSE 流式（帧类型见两仓 sse-protocol.ts）。各项并行、单项时限由 PARAM.DIAG_ITEM_TIMEOUT_MS 与首帧 timeoutMs 给出，整轮约等于最慢那项；断连即中止剩余检查',
   })
   async diagnose(@Res() res: SseResponse): Promise<void> {
     const writer = new SseWriter(res);

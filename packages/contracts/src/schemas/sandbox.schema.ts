@@ -54,7 +54,11 @@ export const CreateSandboxSchema = z.object({
    * `POST .../tasks` 8000 截断。它会原样落进 `sandboxes.initial_prompt`,再被
    * `buildStartCommand` 拼进 argv;门口不收,后面每一层都只能替它承担。
    */
-  initialPrompt: z.string().max(8000).optional(),
+  initialPrompt: z
+    .string()
+    .trim()
+    .refine((value) => [...value].length <= 8000, '任务指令最多 8000 个字符')
+    .optional(),
   headless: z.boolean().optional(),
   timeoutMinutes: TimeoutMinutesSchema.optional(),
   /**
@@ -223,6 +227,11 @@ export const SandboxDtoSchema = z.object({
    * a feature check.
    */
   provider: z.string(),
+  /** Frozen image coordinate and manifest identity; absent for legacy unlinked rows. */
+  image: z.string().optional(),
+  imageId: z.string().optional(),
+  imageDigest: z.string().optional(),
+  imageIsBuiltin: z.boolean().optional(),
   /**
    * Task display name. The DEFAULT is derived BY THE BACKEND at create time from
    * `initialPrompt` (first non-blank line, first 20 UTF-8 code points, + `…`;
@@ -254,6 +263,12 @@ export const SandboxDtoSchema = z.object({
    * The free-text detail rides in `failureMessage` and is a debugging aid, not copy.
    */
   failureCode: z.string().optional(),
+  failureOperation: z.enum(['provision', 'start', 'stop', 'destroy']).optional(),
+  sourceAutomationId: z.string().optional(),
+  sourceAutomationName: z.string().optional(),
+  hasRun: z.boolean().optional(),
+  createdAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime().optional(),
   /** Free-text detail behind `failureCode` (never the user-facing sentence). */
   failureMessage: z.string().optional(),
   /**

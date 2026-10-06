@@ -155,6 +155,20 @@
       "when": 1789114075274,
       "tag": "0021_same_stephen_strange",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1791185646188,
+      "tag": "0022_hot_iron_patriot",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1791186166640,
+      "tag": "0023_exotic_stingray",
+      "breakpoints": true
     }
   ]
 }

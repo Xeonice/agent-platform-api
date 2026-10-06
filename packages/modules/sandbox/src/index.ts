@@ -8,6 +8,7 @@ export {
   sandboxStateTransitions,
 } from './infrastructure/persistence/schema/sandbox.sqlite';
 export { agentTasks } from './infrastructure/persistence/schema/agent-task.sqlite';
+export { assertBoxliteSdkAvailable } from './infrastructure/providers/boxlite/boxlite-runtime';
 // domain re-export kept minimal; tests import from ./domain via source paths.
 export { SandboxStatusVO } from './domain/value-objects/sandbox-status.vo';
 export type { SandboxStatus } from './domain/value-objects/sandbox-status.vo';

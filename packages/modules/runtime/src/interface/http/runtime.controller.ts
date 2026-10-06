@@ -6,7 +6,10 @@ import type {
   MaskedCredentialResult,
   RuntimeDto,
   RuntimeSettingsDto,
+  RuntimeCredentialDeletionPreviewDto,
 } from '@platform/contracts';
+import { createZodDto } from 'nestjs-zod';
+import { RuntimeCredentialDeletionPreviewDtoSchema } from '@platform/contracts';
 import { RuntimeApplicationService } from '../../application/runtime-application.service';
 import {
   AuthChallengeResponseDto,
@@ -19,6 +22,10 @@ import {
   SetAuthModeDto,
   SubmitSecretDto,
 } from './dto/runtime.dto';
+
+export class RuntimeCredentialDeletionPreviewResponseDto extends createZodDto(
+  RuntimeCredentialDeletionPreviewDtoSchema,
+) {}
 
 /**
  * REST shell for the runtime auth/credential endpoints (docs/backend/27 §4, 05 §3).
@@ -51,6 +58,16 @@ export class RuntimeController {
   @ApiOkResponse({ type: AuthChallengeResponseDto })
   beginAuth(@Param('rt') rt: string, @Body() dto: BeginAuthDto): Promise<AuthChallengeDto> {
     return this.app.beginAuth(rt, dto.method);
+  }
+
+  @Delete(':rt/auth/sessions/:challengeRef')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Cancel an interactive login and reclaim its helper process and temporary files',
+  })
+  @ApiNoContentResponse()
+  cancelAuth(@Param('rt') rt: string, @Param('challengeRef') challengeRef: string): Promise<void> {
+    return this.app.cancelAuth(rt, challengeRef);
   }
 
   @Get(':rt/auth/status')
@@ -95,6 +112,19 @@ export class RuntimeController {
   @ApiOkResponse({ type: RuntimeSettingsResponseDto })
   setAuthMode(@Param('rt') rt: string, @Body() dto: SetAuthModeDto): Promise<RuntimeSettingsDto> {
     return this.app.setAuthMode(rt, dto.method);
+  }
+
+  @Get(':rt/credentials/:credentialId/deletion-preview')
+  @ApiOperation({
+    summary:
+      'List tasks actually bound to this credential and tasks still preparing, without decrypting secrets',
+  })
+  @ApiOkResponse({ type: RuntimeCredentialDeletionPreviewResponseDto })
+  deletionPreview(
+    @Param('rt') rt: string,
+    @Param('credentialId') credentialId: string,
+  ): Promise<RuntimeCredentialDeletionPreviewDto> {
+    return this.app.credentialDeletionPreview(rt, credentialId);
   }
 
   @Delete(':rt/credentials/:credentialId')

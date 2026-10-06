@@ -8,6 +8,8 @@ import type { Project } from '../entities/project.entity';
  */
 export interface ProjectRepository {
   findById(id: ProjectId): Promise<Project | null>;
+  /** Recheck readiness in the caller's reservation transaction before creating a task. */
+  findByIdSync(tx: Tx, id: ProjectId): Project | null;
   findByName(name: string): Promise<Project | null>;
   findAll(): Promise<Project[]>;
   count(): Promise<number>;

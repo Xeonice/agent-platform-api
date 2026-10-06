@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, isNull, lte } from 'drizzle-orm';
+import { and, asc, eq, isNull, isNotNull, lte } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { ProjectId, RetainedVolumeId, Tx } from '@platform/shared-kernel';
@@ -38,7 +38,7 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
       .select()
       .from(retainedVolumes)
       .where(where)
-      .orderBy(asc(retainedVolumes.retainedAt))
+      .orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id))
       .all()
       .map(toDomain);
   }
@@ -46,8 +46,11 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
   async listAll(includeDeleted = false): Promise<RetainedVolume[]> {
     const q = this.db.select().from(retainedVolumes);
     const rows = includeDeleted
-      ? q.orderBy(asc(retainedVolumes.retainedAt)).all()
-      : q.where(isNull(retainedVolumes.deletedAt)).orderBy(asc(retainedVolumes.retainedAt)).all();
+      ? q.orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id)).all()
+      : q
+          .where(isNull(retainedVolumes.deletedAt))
+          .orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id))
+          .all();
     return rows.map(toDomain);
   }
 
@@ -70,7 +73,12 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
   deleteByProjectSync(_tx: Tx, projectId: ProjectId): void {
     this.db
       .delete(retainedVolumes)
-      .where(eq(retainedVolumes.projectId, projectId as string))
+      .where(
+        and(
+          eq(retainedVolumes.projectId, projectId as string),
+          isNotNull(retainedVolumes.deletedAt),
+        ),
+      )
       .run();
   }
 
@@ -79,6 +87,9 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
       id: volume.id as string,
       projectId: volume.projectId as string,
       sandboxId: volume.sandboxId,
+      sandboxName: volume.sandboxName,
+      sourceAutomationId: volume.sourceAutomationId,
+      sourceAutomationName: volume.sourceAutomationName,
       workspacePath: volume.workspacePath,
       source: volume.source,
       diskBytes: volume.diskBytes,
@@ -110,6 +121,9 @@ function toDomain(row: RetainedVolumeRow): RetainedVolume {
     id: row.id as RetainedVolumeId,
     projectId: row.projectId as ProjectId,
     sandboxId: row.sandboxId,
+    sandboxName: row.sandboxName,
+    sourceAutomationId: row.sourceAutomationId,
+    sourceAutomationName: row.sourceAutomationName,
     workspacePath: row.workspacePath,
     source: row.source as RetainedVolumeSource,
     diskBytes: row.diskBytes,

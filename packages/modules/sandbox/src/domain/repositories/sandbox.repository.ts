@@ -18,8 +18,35 @@ export interface SandboxRepository {
   findAll(): Promise<Sandbox[]>;
   /** live (non-destroyed) sandbox count per project id, in ONE grouped query. */
   countActiveByProject(projectIds: string[]): Promise<Record<string, number>>;
+  /** Read-only projection for the image deletion guard, including the actual project name. */
+  findImageReferences(manifestId: string): Promise<SandboxImageReference[]>;
+  /** Same-transaction live recheck followed by inactive-record removal. */
+  deleteByProjectSync(tx: Tx, projectId: ProjectId): DeletedProjectSandbox[];
+  listPendingProjectCleanup(): Promise<DeletedProjectSandbox[]>;
+  completeProjectCleanupSync(tx: Tx, sandboxId: string): void;
   /** upsert the sandbox row + append pending transitions, inside `tx`. */
   saveSync(tx: Tx, sandbox: Sandbox): void;
 }
 
 export const SANDBOX_REPOSITORY = Symbol('SandboxRepository');
+
+export interface SandboxImageReference {
+  id: string;
+  name: string;
+  status: string;
+  projectId: string;
+  projectName: string;
+  headless: boolean;
+}
+
+export interface DeletedProjectSandbox {
+  id: string;
+  provider: string;
+  providerSandboxId: string | null;
+  providerState: Record<string, unknown> | null;
+  workspacePath: string | null;
+}
+
+export function isProjectTaskActive(status: string): boolean {
+  return !['stopped', 'failed', 'destroyed'].includes(status);
+}

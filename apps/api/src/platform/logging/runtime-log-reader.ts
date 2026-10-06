@@ -22,8 +22,9 @@ export interface RuntimeLogReadOptions {
  * 写过日志」与「时间范围内没有内容」，前者在导出包里应当注明，后者只是空文件。
  */
 export interface RuntimeLogReader {
-  read(opts: RuntimeLogReadOptions): NodeJS.ReadableStream | null;
+  read(opts: RuntimeLogReadOptions): RuntimeLogReadStream | null;
 }
+export type RuntimeLogReadStream = NodeJS.ReadableStream & { truncated?: boolean };
 
 /** DI token。导出端 `@Inject(RUNTIME_LOG_READER)` 拿到上面的接口。 */
 export const RUNTIME_LOG_READER = Symbol('RUNTIME_LOG_READER');
@@ -44,7 +45,7 @@ interface ReadPlanEntry {
 export class FileRuntimeLogReader implements RuntimeLogReader {
   constructor(private readonly writer: RuntimeLogWriter) {}
 
-  read(opts: RuntimeLogReadOptions): NodeJS.ReadableStream | null {
+  read(opts: RuntimeLogReadOptions): RuntimeLogReadStream | null {
     const paths = this.writer.existingPaths(); // 从旧到新
     if (paths.length === 0) return null;
 
@@ -53,7 +54,19 @@ export class FileRuntimeLogReader implements RuntimeLogReader {
 
     const fromMs = opts.from?.getTime();
     const toMs = opts.to?.getTime();
-    return Readable.from(emit(plan, fromMs, toMs, opts.maxBytes), { objectMode: false });
+    const stream: RuntimeLogReadStream = Readable.from(emit(plan, fromMs, toMs, opts.maxBytes), {
+      objectMode: false,
+    });
+    const totalBytes = paths.reduce((total, path) => {
+      try {
+        return total + statSync(path).size;
+      } catch {
+        return total;
+      }
+    }, 0);
+    const metadata = { truncated: totalBytes > opts.maxBytes };
+    Object.defineProperty(stream, 'truncated', { get: () => metadata.truncated });
+    return stream;
   }
 }
 

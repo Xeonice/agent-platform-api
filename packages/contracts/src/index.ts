@@ -30,6 +30,7 @@ export * from './project-facade.port';
 export * from './image-facade.port';
 export * from './credential-facade.port';
 export * from './terminal-auth.port';
+export * from './waiting-input-query.port';
 export * from './workspace-preparer.port';
 export * from './automation-collaborators.port';
 export * from './sandbox-failure-codes';
@@ -39,3 +40,5 @@ export * from './sse-protocol';
 // NOTE: ./testkit is intentionally NOT re-exported here — it is a test-only
 // subpath (`@platform/contracts/testkit`) and must not pull vitest into the
 // production bundle.
+
+export * from './automation-project-cleanup.port';

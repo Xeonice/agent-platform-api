@@ -8,6 +8,8 @@ import {
   Logger,
   NotFoundException,
   ServiceUnavailableException,
+  type OnModuleInit,
+  type OnModuleDestroy,
   UnauthorizedException,
 } from '@nestjs/common';
 import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK, shiftMs } from '@platform/shared-kernel';
@@ -23,12 +25,13 @@ import type {
   RuntimeDto,
   RuntimeSecretMethod,
   RuntimeSettingsDto,
+  RuntimeCredentialDeletionPreviewDto,
 } from '@platform/contracts';
 import { RuntimeCredentialService } from '@platform/credential';
 import type { RuntimeSecretPayload } from '@platform/credential';
 import { AUTH_HELPER } from '../domain/ports/auth-helper.port';
 import type { AuthHelper, AuthHelperSession } from '../domain/ports/auth-helper.port';
-import { AuthSessionStore } from './auth-session.store';
+import { AuthSessionStore, type AuthSessionEntry } from './auth-session.store';
 import type { AuthOutcomeStatus } from './auth-session.store';
 import { AuthChallenge } from '../domain/value-objects/auth-challenge.vo';
 import { RuntimeSettings } from '../domain/entities/runtime-settings.entity';
@@ -51,7 +54,98 @@ import type { RuntimeSettingsRepository } from '../domain/repositories/runtime-s
 const DEVICE_CODE_TTL_MS = 15 * 60_000;
 
 @Injectable()
-export class RuntimeApplicationService {
+export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy {
+  private readonly beginning = new Map<string, Promise<AuthChallengeDto>>();
+  private readonly retiring = new Map<
+    string,
+    {
+      entry: Pick<AuthSessionEntry, 'runtimeId' | 'challengeRef' | 'session'>;
+      work?: Promise<void>;
+    }
+  >();
+  private readonly disposedSessions = new WeakSet<AuthHelperSession>();
+  private shuttingDown = false;
+  private sweepTimer?: ReturnType<typeof setInterval>;
+
+  /** Operational read-only count includes opening and failed-disposal resources. */
+  activeAuthCount(): number {
+    const sessions = new Set([
+      ...this.sessions.entries().map((entry) => entry.challengeRef),
+      ...this.retiring.keys(),
+    ]);
+    return this.beginning.size + sessions.size;
+  }
+
+  onModuleInit(): void {
+    this.sweepTimer = setInterval(() => {
+      void this.sweepAuthSessions();
+    }, 30_000);
+    this.sweepTimer.unref?.();
+  }
+  async onModuleDestroy(): Promise<void> {
+    this.shuttingDown = true;
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    await Promise.all(
+      this.sessions.entries().map((entry) => this.cancelAuth(entry.runtimeId, entry.challengeRef)),
+    );
+    await Promise.all([...this.retiring.values()].map(({ entry }) => this.disposeSession(entry)));
+  }
+  async sweepAuthSessions(): Promise<void> {
+    const now = this.clock.now();
+    await Promise.all(
+      this.sessions
+        .entries()
+        .filter((entry) => entry.expiresAt <= now)
+        .map((entry) => this.cancelAuth(entry.runtimeId, entry.challengeRef)),
+    );
+    this.sessions.sweepOutcomes(now);
+    await Promise.all([...this.retiring.values()].map(({ entry }) => this.disposeSession(entry)));
+  }
+  async cancelAuth(runtimeId: string, challengeRef: string): Promise<void> {
+    const entry = this.sessions.get(challengeRef);
+    if (!entry || entry.runtimeId !== runtimeId) {
+      const cleanup = this.retiring.get(challengeRef);
+      if (cleanup?.entry.runtimeId === runtimeId) await this.disposeSession(cleanup.entry);
+      return;
+    }
+    this.sessions.delete(challengeRef);
+    await this.disposeSession(entry);
+  }
+
+  private async disposeSession(
+    entry: Pick<AuthSessionEntry, 'runtimeId' | 'challengeRef' | 'session'>,
+  ): Promise<void> {
+    if (this.disposedSessions.has(entry.session)) return;
+    const current = this.retiring.get(entry.challengeRef);
+    if (current?.work) return current.work;
+    const cleanup: {
+      entry: Pick<AuthSessionEntry, 'runtimeId' | 'challengeRef' | 'session'>;
+      work?: Promise<void>;
+    } = current ?? { entry };
+    this.retiring.set(entry.challengeRef, cleanup);
+    const work = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          entry.session.dispose(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('login cleanup timed out')), 10_000);
+            timer.unref?.();
+          }),
+        ]);
+        this.disposedSessions.add(entry.session);
+        this.retiring.delete(entry.challengeRef);
+      } catch {
+        this.logger.warn('登录会话清理未完成，将在下一次清扫时重试。');
+      } finally {
+        if (timer) clearTimeout(timer);
+        delete cleanup.work;
+      }
+    })();
+    cleanup.work = work;
+    return work;
+  }
+
   private readonly logger = new Logger('RuntimeApplicationService');
 
   constructor(
@@ -78,9 +172,10 @@ export class RuntimeApplicationService {
   private async toRuntimeDto(adapter: RuntimeAdapter): Promise<RuntimeDto> {
     const settings = await this.settings.findByRuntime(adapter.id);
     const mode = settings?.activeAuthMethod ?? null;
-    const [view, credentials] = await Promise.all([
+    const [view, credentials, pendingTeardownCount] = await Promise.all([
       this.credentials.view(adapter.id, mode),
       this.credentials.listSummaries(adapter.id),
+      this.credentials.pendingTeardownCount(adapter.id),
     ]);
     // ⛔ NO FILTER. This line used to be
     //    `.filter((m) => m !== 'access-token-paste')` — the application layer deleting a
@@ -99,14 +194,43 @@ export class RuntimeApplicationService {
       credentialStatus: view.credentialStatus,
       maskedIdentifier: view.maskedIdentifier,
       expiresAt: view.expiresAt,
-      activeAuthMethod: mode ?? undefined,
+      activeAuthMethod: view.credentialStatus === 'none' ? undefined : (mode ?? undefined),
       // per-mode parallel cards (P21-3 §3); each row carries its own credentialId
       credentials,
+      pendingTeardownCount,
     };
   }
 
   /** POST .../auth/begin — start the login in the auth helper (05 §3). */
   async beginAuth(runtimeId: string, method: RuntimeAuthMethod): Promise<AuthChallengeDto> {
+    this.assertAcceptingAuth();
+    const key = `${runtimeId}:${method}`;
+    const inflight = this.beginning.get(key);
+    if (inflight) return inflight;
+    const existing = this.sessions.findPending(runtimeId, method);
+    if (existing && existing.expiresAt > this.clock.now()) return existing.challenge.toDto();
+    const limit = Math.max(1, Number(process.env.AUTH_SESSION_MAX ?? 2) || 2);
+    if (this.sessions.entries().length + this.beginning.size + this.retiring.size >= limit) {
+      throw new ConflictException({
+        code: 'AUTH_SESSION_CAPACITY',
+        message: '同时进行的登录太多了，请先完成或取消另一处登录。',
+        retryable: true,
+        sideEffectFree: true,
+      });
+    }
+    const work = this.beginAuthSession(runtimeId, method);
+    this.beginning.set(key, work);
+    try {
+      return await work;
+    } finally {
+      this.beginning.delete(key);
+    }
+  }
+
+  private async beginAuthSession(
+    runtimeId: string,
+    method: RuntimeAuthMethod,
+  ): Promise<AuthChallengeDto> {
     const adapter = this.adapter(runtimeId);
     try {
       AuthMethodPolicy.assertSupported(method, adapter.getAuthMethods());
@@ -144,6 +268,7 @@ export class RuntimeApplicationService {
     }
 
     try {
+      this.assertAcceptingAuth();
       const raw = await adapter.beginAuth(method, {
         pty: session.pty,
         homeDir: session.homeDir,
@@ -151,6 +276,7 @@ export class RuntimeApplicationService {
         challengeRef,
         deviceCodeExpiresAt: method === 'oauth-device' ? deviceCodeExpiresAt : undefined,
       });
+      this.assertAcceptingAuth();
       const challenge = AuthChallenge.create(raw);
       const expiresAt = shiftMs(this.clock.now(), DEVICE_CODE_TTL_MS);
       this.sessions.put({
@@ -178,8 +304,19 @@ export class RuntimeApplicationService {
       }
       return challenge.toDto();
     } catch (e) {
-      await session.dispose();
+      await this.disposeSession({ runtimeId, challengeRef, session });
       throw this.mapAdapterError(e);
+    }
+  }
+
+  private assertAcceptingAuth(): void {
+    if (this.shuttingDown) {
+      throw new ServiceUnavailableException({
+        code: 'PROVIDER_UNAVAILABLE',
+        message: '平台正在关闭，暂时没法开始登录。',
+        retryable: true,
+        sideEffectFree: true,
+      });
     }
   }
 
@@ -193,6 +330,7 @@ export class RuntimeApplicationService {
     if (entry && entry.runtimeId === runtimeId) {
       // still live: a pending challenge past its TTL reads as `expired`.
       if (entry.status === 'pending' && entry.expiresAt.getTime() <= now.getTime()) {
+        await this.cancelAuth(runtimeId, challengeRef);
         return { status: 'expired' };
       }
       return { status: entry.status, maskedIdentifier: entry.maskedIdentifier };
@@ -241,12 +379,9 @@ export class RuntimeApplicationService {
       }
       throw new NotFoundException(`challenge ${challengeRef} expired or unknown`);
     } catch (e) {
-      const live = this.sessions.get(challengeRef);
-      if (live) {
-        live.status = 'error';
-        await live.session.dispose();
-        this.sessions.delete(challengeRef);
-      }
+      // A rejected paste can be corrected in the same live session.
+      if (adapterAuthErrorCodeOf(e) === 'AUTH_CHALLENGE_EXPIRED')
+        await this.cancelAuth(runtimeId, challengeRef);
       throw this.mapAdapterError(e);
     }
   }
@@ -318,14 +453,17 @@ export class RuntimeApplicationService {
     }
     entry.status = 'success'; // ← 同步翻位，这就是那把锁
     const work = (async (): Promise<string> => {
-      const maskedIdentifier = await this.storeCredential(this.adapter(runtimeId), cred);
-      await entry.session.dispose();
+      const maskedIdentifier = await this.storeCredential(this.adapter(runtimeId), cred, () => {
+        if (this.sessions.get(challengeRef) !== entry)
+          throw new NotFoundException('login session cancelled');
+      });
       this.sessions.settle(challengeRef, {
         runtimeId,
         status: 'success',
         maskedIdentifier,
         evictAt: entry.expiresAt,
       });
+      await this.disposeSession(entry);
       return maskedIdentifier;
     })();
     this.settling.set(challengeRef, work);
@@ -355,7 +493,9 @@ export class RuntimeApplicationService {
           deviceCodeExpiresAt: entry.challenge.expiresAt,
         },
       );
-      maskedIdentifier = await this.storeCredential(adapter, cred);
+      const masked = await this.finishChallenge(runtimeId, challengeRef, cred);
+      if (masked === null) return;
+      maskedIdentifier = masked;
       status = 'success';
     } catch (e) {
       // an expired challenge surfaces as a distinct `expired` terminal (vs generic error)
@@ -366,15 +506,16 @@ export class RuntimeApplicationService {
       status = adapterAuthErrorCodeOf(e) === 'AUTH_CHALLENGE_EXPIRED' ? 'expired' : 'error';
       this.logger.warn(`device login ${challengeRef} failed: ${(e as Error).message}`);
     } finally {
-      await entry.session.dispose();
+      await this.disposeSession(entry);
       // Drop the heavy live entry (releasing the pty session) and retain only the tiny
       // terminal tombstone for subsequent polls (P2 memory leak fix).
-      this.sessions.settle(challengeRef, {
-        runtimeId,
-        status,
-        maskedIdentifier,
-        evictAt: entry.expiresAt,
-      });
+      if (this.sessions.get(challengeRef))
+        this.sessions.settle(challengeRef, {
+          runtimeId,
+          status,
+          maskedIdentifier,
+          evictAt: entry.expiresAt,
+        });
       // opportunistically drop any tombstones the frontend never polled (bounds growth).
       this.sessions.sweepOutcomes(this.clock.now());
     }
@@ -470,6 +611,14 @@ export class RuntimeApplicationService {
     return { runtimeId, activeAuthMethod: settings.activeAuthMethod };
   }
 
+  async credentialDeletionPreview(
+    runtimeId: string,
+    credentialId: string,
+  ): Promise<RuntimeCredentialDeletionPreviewDto> {
+    this.adapter(runtimeId);
+    return this.credentials.deletionPreview(runtimeId, credentialId);
+  }
+
   /** DELETE .../credentials/:id — revoke (05 §4; triggers sandbox revoke coordination). */
   async revokeCredential(runtimeId: string, credentialId: string): Promise<void> {
     this.adapter(runtimeId);
@@ -477,7 +626,11 @@ export class RuntimeApplicationService {
   }
 
   /** Build the store input from an adapter credential + compute expiry, then store. */
-  private async storeCredential(adapter: RuntimeAdapter, cred: RuntimeCredential): Promise<string> {
+  private async storeCredential(
+    adapter: RuntimeAdapter,
+    cred: RuntimeCredential,
+    beforeCommit?: () => void,
+  ): Promise<string> {
     try {
       // The adapter already SPLIT the material at birth (05 §4.3 ②): `credentialFiles`
       // holds the sanitized injectable form, `authFile` the platform-only complete one.
@@ -490,6 +643,7 @@ export class RuntimeApplicationService {
         authFile: cred.authFile,
       };
       const { maskedIdentifier } = await this.credentials.storeRuntimeCredential({
+        ...(beforeCommit === undefined ? {} : { beforeCommit }),
         runtimeId: adapter.id,
         obtainedVia: cred.obtainedVia,
         // ⛔ 回落**不能是 `adapter.id`**：卡片上那一格是「这是哪个帐号」，

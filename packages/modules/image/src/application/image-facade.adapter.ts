@@ -12,6 +12,7 @@ import { EnvVarSet } from '../domain/value-objects/env-var-set.vo';
 import { mergeEnv } from '../domain/services/env-merge.domain-service';
 import type { ImageManifest } from '../domain/entities/image-manifest.entity';
 import type { Image } from '../domain/entities/image.entity';
+import { imageProviderCompatibility } from './image-provider-compatibility';
 
 /**
  * Implements the cross-context `ImageFacade` so the `sandbox` context can enforce
@@ -125,16 +126,9 @@ export class ImageFacadeAdapter implements ImageFacade {
     provider: string,
     wanted: string,
   ): Promise<TaskImageSelection> {
+    const compatible = await imageProviderCompatibility(this.images, this.manifests, provider);
+    if (compatible(manifest)) return selection;
     const anchorRef = builtinImageRefFor(provider);
-    const anchorImage = await this.images.findByName(parseImageRef(anchorRef).name);
-    if (anchorImage === null) return selection; // 证明不了不兼容 ⇒ 不拦（见注释）
-    if (manifest.imageId === anchorImage.id) return selection; // 就是这一档的锚点本身
-    const anchorDigests = new Set(
-      (await this.manifests.listByImage(anchorImage.id)).map((m) => m.digest),
-    );
-    if (manifest.derivedFromDigest !== null && anchorDigests.has(manifest.derivedFromDigest)) {
-      return selection;
-    }
     throw new ImageAccessError(
       'IMAGE_PROVIDER_MISMATCH',
       `镜像 '${wanted}' 跑不在 '${provider}' 档上：它不是从这一档的预制镜像 ` +
@@ -183,6 +177,22 @@ export class ImageFacadeAdapter implements ImageFacade {
     const image = await this.images.findById(manifest.imageId);
     if (!image) return null;
     return { ...this.toSelection(manifest, image), env: this.envOf(manifest) };
+  }
+
+  async findTaskImageSummary(manifestId: string): Promise<RegisteredImageSummary | null> {
+    const manifest = await this.manifests.findById(manifestId);
+    if (!manifest) return null;
+    const image = await this.images.findById(manifest.imageId);
+    if (!image) return null;
+    return {
+      manifestId: manifest.id,
+      ref: formatImageRef(image.name, manifest.version),
+      digest: manifest.digest,
+      validationStatus: manifest.validation.status,
+      isActive: manifest.isActive,
+      isBuiltin: image.isBuiltin,
+      entrypoint: manifest.entrypointContract.entrypoint,
+    };
   }
 
   /**

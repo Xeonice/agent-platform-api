@@ -6,9 +6,11 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
 import { AppModule } from '../app.module';
 import { ErrorEnvelope } from '../bootstrap/error-envelope.dto';
+import { applyUnicodeLengthConstraints } from '../bootstrap/openapi-constraints';
 
 async function main(): Promise<void> {
   process.env.DATABASE_URL = ':memory:';
+  process.env.ACCESS_PASSCODE_AUTO_GENERATE = 'false';
   patchNestJsSwagger();
   // ⚠️ **`abortOnError: false` + 一个真的 catch**（2026-09-05 补）。此前是
   //    `NestFactory.create(AppModule, { logger: false })`：装配一旦失败，Nest 默认
@@ -21,15 +23,25 @@ async function main(): Promise<void> {
   const document = SwaggerModule.createDocument(app, config, {
     extraModels: [ErrorEnvelope],
   });
+  applyUnicodeLengthConstraints(document);
   const out = resolve(process.cwd(), 'openapi.json');
   writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`);
   await app.close();
   console.log(`wrote ${out}`);
 }
 
-void main().catch((e: unknown) => {
-  // ⚠️ `void main()` 单独用会把 rejection 变成 unhandled，配合上面那个 abort 就是静默。
-  console.error(`emit-openapi 失败：${(e as Error).message}`);
-  console.error((e as Error).stack ?? '');
+const emitDeadline = setTimeout(() => {
+  console.error('emit-openapi 失败：应用依赖装配在30秒内未完成。');
   process.exitCode = 1;
-});
+}, 30_000);
+
+void main()
+  .catch((e: unknown) => {
+    // ⚠️ `void main()` 单独用会把 rejection 变成 unhandled，配合上面那个 abort 就是静默。
+    console.error(`emit-openapi 失败：${(e as Error).message}`);
+    console.error((e as Error).stack ?? '');
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    clearTimeout(emitDeadline);
+  });

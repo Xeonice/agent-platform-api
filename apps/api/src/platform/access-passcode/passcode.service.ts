@@ -51,7 +51,25 @@ export class PasscodeService {
 
   constructor(@Inject(DATABASE) private readonly db: Db) {
     this.envPasscode = env.accessPasscode;
+    const fresh = this.row() === undefined;
     this.reload();
+    if (fresh && this.envPasscode === '' && process.env.ACCESS_PASSCODE_AUTO_GENERATE !== 'false') {
+      const plain = PasscodeService.generatePasscode();
+      this.setStoredPasscode(plain, new Date());
+      // A dedicated stdout channel: never pass the plaintext through the persisted logger.
+      process.stdout.write(
+        [
+          '\n=== 首次启动访问口令 ===',
+          plain,
+          '请现在保存：平台只存哈希，之后的页面、接口和日志不再回显。',
+          '同一浏览器解锁后 7 天内免输。忘了口令可设 ACCESS_PASSCODE 后重启。',
+          '换口令：设置 ACCESS_PASSCODE 后重启，或解锁后 PUT /api/system/access-passcode {"action":"regenerate"}。',
+          '同时让已登录浏览器失效：接口加 "invalidateSessions":true；或更改 PASSCODE_COOKIE_SECRET 后重启。',
+          'docker 的 json-file 日志驱动会保留 stdout，docker logs 可查本次输出。',
+          '========================\n',
+        ].join('\n'),
+      );
+    }
     if (this.enabled) {
       this.logger.log(
         `access passcode ENABLED via ${this.source} ` +
@@ -72,6 +90,16 @@ export class PasscodeService {
   get source(): PasscodeSource {
     if (this.envPasscode.length > 0) return 'env';
     return this.storedHash === null ? 'none' : 'stored';
+  }
+
+  get sessionSecretPinned(): boolean {
+    return (process.env.PASSCODE_COOKIE_SECRET ?? '') !== '';
+  }
+
+  allowsLoopback(address: string | undefined): boolean {
+    if (process.env.ACCESS_PASSCODE_ALLOW_LOOPBACK !== 'true' || !address) return false;
+    const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
+    return normalized === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
   }
 
   /** When the stored passcode was last written — `undefined` for env / never set. */
@@ -116,20 +144,27 @@ export class PasscodeService {
    * passcode itself, which would have made every rotation a fleet-wide logout — the
    * kind of behaviour nobody notices until the day they rotate.
    */
-  setStoredPasscode(plain: string | null, now: Date): void {
+  setStoredPasscode(plain: string | null, now: Date, invalidateSessions = false): void {
+    const secret = invalidateSessions ? randomBytes(32).toString('hex') : undefined;
     this.ensureRow();
     this.db
       .update(systemSettings)
       .set({
         accessPasscodeHash: plain === null ? null : hashPasscode(plain),
         accessPasscodeUpdatedAt: plain === null ? null : now,
+        ...(secret !== undefined ? { accessPasscodeSessionSecret: secret } : {}),
       })
       .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
       .run();
+    if (secret !== undefined) this.sessionSecret = secret;
     this.reload();
   }
 
   /** `${expiresAt}.${hmac}` — verified without server-side session state. */
+  issueCurrentSessionToken(): string {
+    return this.issueSessionToken(Date.now());
+  }
+
   issueSessionToken(now: number): string {
     const expiresAt = now + COOKIE_TTL_MS;
     return `${expiresAt}.${this.sign(String(expiresAt))}`;

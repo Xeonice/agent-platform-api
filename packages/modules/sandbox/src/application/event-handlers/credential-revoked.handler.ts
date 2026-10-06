@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from '@nestjs/common';
 import { CLOCK, EVENT_BUS, UNIT_OF_WORK, asCredentialId } from '@platform/shared-kernel';
 import type { Clock, DomainEvent, EventBus, UnitOfWork } from '@platform/shared-kernel';
 import { CREDENTIAL_SANDBOX_BINDING_REPOSITORY } from '@platform/credential';
@@ -10,8 +16,8 @@ import { SANDBOX_REPOSITORY } from '../../domain/repositories/sandbox.repository
 import type { SandboxRepository } from '../../domain/repositories/sandbox.repository';
 import { SandboxApplicationService } from '../sandbox-application.service';
 
-/** Sandbox statuses for which a revoked credential is still "in use" (live). */
-const LIVE = new Set(['running', 'idle', 'starting']);
+// A stopped or failed provider instance still contains its injected environment.
+// Only a removed instance is safe to consider cleared.
 
 /** Graceful teardown budget before we escalate a single binding to a force destroy (05 §4). */
 const GRACEFUL_DESTROY_TIMEOUT_MS = 20_000;
@@ -38,18 +44,20 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 /**
  * Sandbox-side revoke coordination (docs/backend/05 §4 P0-4, 23 §8.6). Subscribes to
  * `CredentialRevoked`; for each `credential_sandbox_bindings` row of that credential,
- * the ONLY reliable action against a LIVE sandbox is a FORCE destroy — an injected
+ * the reliable action against a bound provider instance is a FORCE destroy — an injected
  * env var cannot be `unset` from outside the process (deleting a file only helps a
  * CLI that re-reads per call). Bindings are cleared CONCURRENTLY (one wedged container
  * never blocks the others); each teardown has a graceful budget that, on timeout,
  * escalates to a force destroy (05 §4 "exec 清除失败兜底"). A binding is marked cleared
- * (I-CSB-2) ONLY when its sandbox was actually torn down (or is already gone/non-live);
+ * (I-CSB-2) ONLY when its sandbox was actually torn down (or is already destroyed/gone);
  * a destroy that fails even under force KEEPS the binding for retry (P1-b) rather than
  * silently clearing it while a revoked credential is still live. A `git` revoke hits
  * ZERO bindings — that is normal and NOT an error (I3).
  */
 @Injectable()
-export class CredentialRevokedHandler implements OnApplicationBootstrap {
+export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModuleDestroy {
+  private retry: NodeJS.Timeout | undefined;
+  private readonly clearing = new Set<string>();
   private readonly logger = new Logger('CredentialRevokedHandler');
 
   constructor(
@@ -65,9 +73,31 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap {
   onApplicationBootstrap(): void {
     this.events.subscribe((batch) => {
       for (const e of batch) {
-        if (e.type === 'CredentialRevoked') void this.onRevoked(e);
+        if (e.type === 'CredentialRevoked')
+          void this.onRevoked(e).catch((error: unknown) =>
+            this.logger.error(`credential revoke scan failed: ${String(error)}`),
+          );
       }
     });
+    this.retry = setInterval(() => {
+      void this.retryPending().catch((error: unknown) =>
+        this.logger.error(`credential cleanup retry failed: ${String(error)}`),
+      );
+    }, 15_000);
+    this.retry.unref();
+    void this.retryPending().catch((error: unknown) =>
+      this.logger.error(`credential cleanup recovery failed: ${String(error)}`),
+    );
+  }
+
+  onModuleDestroy(): void {
+    if (this.retry) clearInterval(this.retry);
+  }
+
+  async retryPending(): Promise<void> {
+    await Promise.allSettled(
+      (await this.bindings.listPendingRevocations()).map((binding) => this.clearBinding(binding)),
+    );
   }
 
   async onRevoked(event: DomainEvent): Promise<void> {
@@ -87,15 +117,22 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap {
    * marking it "cleared" while a revoked credential is still injected in a live process.
    */
   private async clearBinding(b: CredentialSandboxBinding): Promise<void> {
-    const cleared = await this.destroyBound(b);
-    if (!cleared) return; // keep the binding for retry — do NOT mark cleared
-    const now = this.clock.now();
-    this.uow.run((tx) => this.bindings.markClearedSync(tx, b.id, now));
+    if (this.clearing.has(b.id)) return;
+    this.clearing.add(b.id);
+    try {
+      const cleared = await this.destroyBound(b);
+      if (!cleared) return;
+      this.uow.run((tx) => this.bindings.markClearedSync(tx, b.id, this.clock.now()));
+    } catch (error) {
+      this.logger.error(`credential cleanup pending for ${b.sandboxId}: ${String(error)}`);
+    } finally {
+      this.clearing.delete(b.id);
+    }
   }
 
   /**
-   * Destroy a bound sandbox if it is still live. Returns `true` when the binding may be
-   * marked cleared: either the sandbox is gone / non-live (nothing to do), or a destroy
+   * Destroy any residual bound instance. Returns `true` when the binding may be
+   * marked cleared: either the sandbox is gone / destroyed (nothing to do), or a destroy
    * succeeded. A graceful destroy that times out (05 §4 "exec 清除失败兜底") escalates to
    * a FORCE destroy (skip graceful stop → container `remove({force:true})`); only if THAT
    * also fails/times out do we return `false` so the binding survives for a later retry.
@@ -111,7 +148,7 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap {
       );
       return false;
     }
-    if (!sandbox || !LIVE.has(sandbox.status)) return true; // nothing live to tear down
+    if (!sandbox || sandbox.status === 'destroyed') return true;
 
     try {
       await withTimeout(

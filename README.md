@@ -55,17 +55,17 @@ interface ──▶ application ──▶ domain ◀── infrastructure（实�
 
 ## Harness 门禁（从第一个 commit 起强制）
 
-| 机制                         | 落点                                                                                                                   | 作用                                                                                                     |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **分层边界**                 | `eslint.config.mjs` boundaries                                                                                         | domain/application/interface/infrastructure 越界即 error                                                 |
-| **时间/随机可控化**          | `no-restricted-syntax` 禁 `new Date()`/`Date.now()`/`randomUUID()`；仅 `platform/time`、`access-passcode` 豁免         | 统一走 Clock / IdGenerator 端口，消除 flaky                                                              |
-| **同步事务**                 | `UnitOfWork.run((tx)=>T): T`、`saveSync(tx,agg): void`                                                                 | 类型层堵死事务内 `await`（P0-2）                                                                         |
-| **zod 单源 + OpenAPI**       | `contracts` zod → `createZodDto` → `patchNestJsSwagger()`；`setGlobalPrefix('api')` + `jsonDocumentUrl:'openapi.json'` | 一份 schema 出 REST DTO + Swagger + MCP inputSchema                                                      |
-| **contract-testkit**         | `@platform/contracts/testkit` + `test/contract/*`（CI 必跑）                                                           | 第三方/内建 provider 跑同一套 golden 契约                                                                |
-| **vitest + supertest + MCP** | `test:unit` / `test:integration` / `test:contract` / `test:e2e`                                                        | domain 零 mock、集成真库、e2e 同场景 REST+MCP                                                            |
-| **Drizzle better-sqlite3**   | `schema/*.sqlite.ts`（text+CHECK，不用 pgEnum/.array()，JS Date）+ `./drizzle` 迁移 + 迁移测试                         | 单机零依赖、PG 双方言可迁移                                                                              |
-| **部署 harness**             | `docker-compose.yml`（docker-socket-proxy 限权 + 127.0.0.1 绑定）+ `NoopAuthGuard`/`PasscodeGuard`                     | 容器逃逸面收敛 + 默认回环 + 访问口令骨架                                                                 |
-| **CI 九步**                  | `.github/workflows/ci.yml`                                                                                             | install → typecheck → lint → unit → contract(必跑) → integration → e2e(必跑) → build → openapi.json diff |
+| 机制                         | 落点                                                                                                                   | 作用                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **分层边界**                 | `eslint.config.mjs` boundaries                                                                                         | domain/application/interface/infrastructure 越界即 error                    |
+| **时间/随机可控化**          | `no-restricted-syntax` 禁 `new Date()`/`Date.now()`/`randomUUID()`；仅 `platform/time`、`access-passcode` 豁免         | 统一走 Clock / IdGenerator 端口，消除 flaky                                 |
+| **同步事务**                 | `UnitOfWork.run((tx)=>T): T`、`saveSync(tx,agg): void`                                                                 | 类型层堵死事务内 `await`（P0-2）                                            |
+| **zod 单源 + OpenAPI**       | `contracts` zod → `createZodDto` → `patchNestJsSwagger()`；`setGlobalPrefix('api')` + `jsonDocumentUrl:'openapi.json'` | 一份 schema 出 REST DTO + Swagger + MCP inputSchema                         |
+| **contract-testkit**         | `@platform/contracts/testkit`（外部 provider 契约工具；独立验收）                                                      | 第三方/内建 provider 接口工具；不把内存夹具当真实 provider 通过             |
+| **vitest + supertest + MCP** | `test:pure` / `test:service` / `test:sqlite` / `test:protocol`                                                         | 真实策略、真实服务与当前 SQLite、完整 Nest HTTP/WS/MCP                      |
+| **Drizzle better-sqlite3**   | `schema/*.sqlite.ts`（text+CHECK，不用 pgEnum/.array()，JS Date）+ `./drizzle` 迁移 + 新数据库事务验收                 | 单机零依赖、PG 双方言可迁移                                                 |
+| **部署 harness**             | `docker-compose.yml`（docker-socket-proxy 限权 + 127.0.0.1 绑定）+ `NoopAuthGuard`/`PasscodeGuard`                     | 容器逃逸面收敛 + 默认回环 + 访问口令骨架                                    |
+| **CI 九步**                  | 主仓 `deploy/jenkins/native-ci.groovy`                                                                                 | install → typecheck → lint → format → 验收及执行报告 → build → OpenAPI diff |
 
 ## 命令
 
@@ -73,36 +73,24 @@ interface ──▶ application ──▶ domain ◀── infrastructure（实�
 pnpm typecheck        # tsc -b（project references，全量类型检查 + 产出 dist）
 pnpm lint             # eslint（boundaries + no-restricted-syntax），CI 加 --max-warnings=0
 pnpm format:check     # prettier
-pnpm test             # 全部 vitest 项目
-pnpm test:unit        # 仅 domain 零 mock 单测
-pnpm test:integration # drizzle saveSync 往返 + 迁移测试
-pnpm test:contract    # contract-testkit（必跑）
-pnpm test:e2e         # supertest /api/health + MCP client 冒烟（必跑）
+pnpm test                # 新验收全部四层，协议层串行
+pnpm test:pure           # 真实纯策略与校验
+pnpm test:service        # 真实服务，受控外部资源
+pnpm test:sqlite         # 当前 schema、真实 repository/UoW、竞态与回滚
+pnpm test:protocol       # 完整 Nest + HTTP / WS / MCP
+pnpm test:acceptance:report # 实际运行 JSON 与源哈希，不把 AC 计划当通过
+pnpm check:acceptance    # 在主仓中核对现行规范及场景映射
 pnpm build            # 构建
 pnpm openapi:emit     # 产出 openapi.json（CI diff 入库）
 ```
 
-### 运行时（docker / boxlite）e2e 前置
+### 验收范围
 
-部分 e2e 需真实运行时，缺前置会**响亮 skip**（不假过）：
+测试位于 `acceptance/{domain}/{pure,service,sqlite,protocol}`，依据主仓 `docs/product/requirements` 的 Given/When/Then 验证产品规则，包含并发、SQLite、SSH 和 PTY 回归。SQLite 场景使用当前初始化 schema；生产数据更新仍由部署维护流程保护。
 
-- **docker / aio**：需 Docker daemon（`docker info` 可达）。
-- **boxlite（micro-VM，决策 B）**：需 macOS Apple Silicon 装好 `@boxlite-ai/boxlite` 原生二进制，且**本地 registry 预置 AIO 镜像**（BoxLite 独立 image store 无断点续传，须经中转）：
-  ```bash
-  docker run -d -p 5001:5000 --name local-registry registry:2
-  docker pull ghcr.io/agent-infra/sandbox:latest                                   # arm64
-  docker tag  ghcr.io/agent-infra/sandbox:latest localhost:5001/agent-infra/sandbox:latest
-  docker push localhost:5001/agent-infra/sandbox:latest
-  ```
-  provider 的 `imageRegistries` 已含 `docker.io`（bootstrap base，**必须保留**）+ `localhost:5001`（可用 `SANDBOX_BOXLITE_REGISTRY` 覆盖）。首个 Box 冷启含镜像入 store ~220s、之后热启 ~7s。选型与工程注记见**文档仓 `SANDBOX-RUNTIME-DECISIONS.md`**。
+协议层装配实际 AppModule、repository、guard 和业务服务，HTTP/MCP/WS 经过真实网络协议。外部沙箱/OCI 元数据使用受控资源夹具，终端使用真实子进程字节流，Git 使用本地真实 smart HTTP 仓库；这些结果不代表真实 Docker、BoxLite 或厂商帐号 OAuth 已验收。外部环境验收必须另列条件与实际结果。
 
-## 冒烟切片（本次交付验证的最小闭环）
-
-- `GET /api/health` → `ok`（口令豁免）；`/openapi.json` 暴露。
-- `sandbox` 上下文：`Sandbox` 聚合 + `SandboxStatus` 12 值转移表 + 零 mock domain 单测（`stopped→starting` 合法、`pending→running` 非法）。
-- 同步 `UnitOfWork` + better-sqlite3 迁移 + `SqliteSandboxRepository.saveSync` + 集成测试（写入后读回、CHECK 拦截越界枚举）。
-- 一个 MCP tool + 一个 REST controller 共注入同一 `SandboxApplicationService`；supertest e2e + 真实 MCP client（SDK InMemoryTransport）冒烟。
-- boundaries 越界与 `new Date()` 均能被 lint 拦下（见下）。
+全部 1016 个 AC 保留在 `acceptance/manifest.json`；未映射场景保持 planned。后端支持与整条包含 UI 的 AC 明确分开。实际执行结果由 `acceptance/execution-report.json` 记录，不以文件数、静态断言句数或 AC 总数替代测试通过数。
 
 ### 验证 harness 真能拦
 
@@ -115,3 +103,13 @@ pnpm lint    # → boundaries/element-types: 'application' is not allowed to imp
 # 2) 时间：在任意 domain/application 文件写 new Date() → lint error
 pnpm lint    # → no-restricted-syntax: Use the Clock port — new Date() is banned
 ```
+
+## 访问口令与换口令
+
+全新数据目录默认生成 16 位访问口令，只在首次启动的 stdout 横幅显示一次；平台日志文件与导出日志包不包含明文。请当场保存。Docker 的 json-file 日志驱动会保留 stdout，`docker logs` 仍能查到第一次输出。后续启动只打印启用状态。显式关闭自动生成可设置 `ACCESS_PASSCODE_AUTO_GENERATE=false`；这不关闭已有口令。
+
+忘记口令或从部署侧换口令：设置 `ACCESS_PASSCODE=<新口令>` 后重启。该变量优先于库中口令，存在时接口拒绝修改。已解锁后也可调用 `PUT /api/system/access-passcode`，请求 `{"action":"regenerate"}`，新口令只返回这一次；默认保留已有浏览器会话。
+
+要同时让已登录的浏览器失效，请使用 `{"action":"regenerate","invalidateSessions":true}`。旧会话立即失效，发起操作的浏览器随响应获得新会话。若部署配置固定了 `PASSCODE_COOKIE_SECRET`，接口拒绝此选项且不改变口令；请改为新的 `PASSCODE_COOKIE_SECRET` 后重启。环境变量换口令时也可同时轮换该密钥。浏览器会话固定 7 天，不随访问顺延。
+
+默认回环地址也需要口令。只有显式设置 `ACCESS_PASSCODE_ALLOW_LOOPBACK=true` 时，直接来自 `127.0.0.0/8` 或 `::1` 的 REST 请求免口令；非回环来源仍需要口令。来源取实际 socket 地址，不信任转发头；这个开关不替代 Host / Origin 校验。

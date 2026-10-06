@@ -20,6 +20,7 @@ import {
   DEFAULT_SCHEDULING_POLICY,
   snapshotOf,
   trySchedule,
+  capacityOf,
 } from '../domain/services/resource-pool.domain-service';
 import type {
   ResourcePoolSnapshot,
@@ -220,6 +221,26 @@ export class ResourceAllocator {
     // 把自动化每分钟一次的只读探测算进去，那个数字就开始撒谎 —— 而它存在的全部理由
     // 就是被人读。代价是探测可能读到一个正在被改的池子，而那正是它「不是闸」的含义。
     return this.evaluate(quota);
+  }
+
+  /** Same ledger and host policy as admission; no reservation or queue entry. */
+  async defaultCapacity(quota: ResourceQuota) {
+    const [active, host] = await Promise.all([
+      this.allocations.listActive(this.nodeId),
+      this.host.capacity(),
+    ]);
+    const policy = this.policy;
+    return capacityOf(
+      quota,
+      snapshotOf(
+        active.map((row) => row.quota),
+        host,
+        policy,
+      ),
+      host.diskAvailableBytes,
+      policy,
+      active.length,
+    );
   }
 
   /** 这条 sandbox 当前登记了多少 —— provision 拿它去建实例，账本与实参因此不会分叉。 */

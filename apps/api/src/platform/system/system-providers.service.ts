@@ -24,6 +24,7 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 export const HEALTH_WINDOW_MS = 60 * 60 * 1000;
 /** ❌ 线（P21-5 §3：>1% ⚠️ · >10% ❌）。`healthy` 说的是有没有越过 ❌ 线。 */
 export const UNHEALTHY_FAILURE_RATE = 0.1;
+export const WARNING_FAILURE_RATE = 0.01;
 
 /**
  * `GET /api/system/providers` —— **平台运维看板**（10 §6.6）。
@@ -91,6 +92,8 @@ export class SystemProvidersService {
         .list()
         .map((s) => ({ id: s.name, isDefault: s.name === this.specs.defaultProvider })),
       healthWindowMs: HEALTH_WINDOW_MS,
+      healthWarnRate: WARNING_FAILURE_RATE,
+      healthErrorRate: UNHEALTHY_FAILURE_RATE,
     };
   }
 

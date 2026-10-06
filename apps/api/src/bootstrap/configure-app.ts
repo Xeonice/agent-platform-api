@@ -1,6 +1,12 @@
 import type { INestApplication } from '@nestjs/common';
 import { platformValidationPipe } from './validation.pipe';
 import { ErrorEnvelopeFilter } from './error-envelope.filter';
+import { configurePublicHttp } from './public-origin-policy';
+import { configureDeploymentBarrier } from './deployment.setup';
+import {
+  readPublicNetworkConfig,
+  type PublicNetworkConfig,
+} from '../platform/config/public-network';
 
 /**
  * 平台 app 的全局装配 —— **生产与测试共用这一个函数，这是它存在的全部理由。**
@@ -28,7 +34,12 @@ import { ErrorEnvelopeFilter } from './error-envelope.filter';
  * ⚠️ WS/MCP 专用的 e2e（terminal-gateway、mcp-client 这些）**本来就不装**这三样，
  * 因为它们不走 REST 那条路。那是有意的差异，不在本函数管辖内。
  */
-export function configurePlatformApp(app: INestApplication): void {
+export function configurePlatformApp(
+  app: INestApplication,
+  network: PublicNetworkConfig = readPublicNetworkConfig(),
+): void {
+  configurePublicHttp(app, network);
+  configureDeploymentBarrier(app);
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).
   app.setGlobalPrefix('api');
   // zod single source validation for every createZodDto DTO (02 §3); failures come

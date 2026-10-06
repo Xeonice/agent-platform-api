@@ -82,7 +82,7 @@ export function builtinImageRefFor(provider: string): string {
 }
 
 /**
- * 平台 CI 发布的**按档**预制镜像（`.github/workflows/publish-sandbox-image.yml`）。
+ * 平台 CI 发布的**按档**预制镜像（`主仓 deploy/jenkins/sandbox-images.groovy`）。
  *
  * ⚠️ **只在运维方什么都没配时才用**：显式配了 `SANDBOX_DEFAULT_IMAGE` 或按档覆盖的，
  * 一律以他配的为准 —— 平台不该替他改主意。
@@ -235,7 +235,7 @@ const KNOWN_TMUX_REPOSITORIES = [
   'platform/sandbox',
   'platform/boxlite',
   // ⚠️ **平台 CI 发布的那一张**（2026-09-07，P21-8 §2.2 /
-  //    `.github/workflows/publish-sandbox-image.yml`）。它 `FROM agent-infra/sandbox`，
+  //    `主仓 deploy/jenkins/sandbox-images.groovy`）。它 `FROM agent-infra/sandbox`，
   //    所以 tmux 与上游同源。⚠️ 出厂 `SANDBOX_DEFAULT_IMAGE` **留空**，由
   //    `builtinImageRefFor()` 按宿主档位在两张发布镜像里自动挑 —— 填死任何一张都会让
   //    按档自动选永不生效（`pnpm check:default-image` 守着这条）。

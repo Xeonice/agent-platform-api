@@ -1,8 +1,17 @@
 import { Global, Module } from '@nestjs/common';
-import { AGENT_SESSION_BOOTSTRAP } from '@platform/contracts';
+import { AGENT_SESSION_BOOTSTRAP, WAITING_INPUT_QUERY } from '@platform/contracts';
 import { SandboxModule } from '@platform/sandbox';
 import { TerminalSessionService } from '../application/terminal-session.service';
 import { TerminalGateway } from './gateway/terminal.gateway';
+import { WaitingInputService } from '../application/waiting-input.service';
+import {
+  WAITING_INPUT_OBSERVER,
+  WAITING_INPUT_SETTINGS,
+} from '../domain/ports/waiting-input-observer.port';
+import {
+  WaitingInputDetector,
+  waitingInputSettings,
+} from '../infrastructure/waiting-input/waiting-input.detector';
 
 /**
  * Terminal context module. Imports SandboxModule to consume the cross-context
@@ -21,8 +30,12 @@ import { TerminalGateway } from './gateway/terminal.gateway';
   providers: [
     TerminalSessionService,
     TerminalGateway,
+    WaitingInputService,
+    { provide: WAITING_INPUT_OBSERVER, useClass: WaitingInputDetector },
+    { provide: WAITING_INPUT_SETTINGS, useFactory: waitingInputSettings },
+    { provide: WAITING_INPUT_QUERY, useExisting: WaitingInputService },
     { provide: AGENT_SESSION_BOOTSTRAP, useExisting: TerminalSessionService },
   ],
-  exports: [AGENT_SESSION_BOOTSTRAP],
+  exports: [AGENT_SESSION_BOOTSTRAP, WAITING_INPUT_QUERY],
 })
 export class TerminalModule {}

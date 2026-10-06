@@ -84,6 +84,7 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
     return {
       passcode: fromAuth ?? fromHeader ?? fromBearer ?? fromQuery,
       sessionToken: this.readCookie(client, 'ap_session'),
+      remoteAddress: client.request.socket.remoteAddress,
     };
   }
 

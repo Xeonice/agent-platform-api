@@ -96,8 +96,16 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     }
     // queued-but-not-started: drop it from the queue so it never runs.
     const idx = this.waiting.indexOf(projectId);
-    if (idx >= 0) this.waiting.splice(idx, 1);
-    return false;
+    if (idx < 0) return false;
+    this.waiting.splice(idx, 1);
+    this.mutate(projectId, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+    this.broadcaster.broadcast({
+      event: 'project.clone_progress',
+      projectId,
+      phase: 'failed',
+      errorCode: 'INTERRUPTED',
+    });
+    return true;
   }
 
   private startNext(): void {
@@ -116,6 +124,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
       return;
     }
     const dest = project.baselinePath;
+    // Every frame carries this attempt's real start, including after a browser reload.
+    // Queue time is excluded: runClone is entered only once a slot becomes available.
+    const startedAt = this.clock.now().toISOString();
     const controller = new AbortController();
     this.controllers.set(projectId, controller);
     let timedOut = false;
@@ -152,6 +163,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         event: 'project.clone_progress',
         projectId,
         phase: 'slow',
+        startedAt,
         stage: lastProgress?.stage,
         percent: lastProgress?.percent,
         objectsDone: lastProgress?.objectsDone,
@@ -182,6 +194,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         signal: controller.signal,
         env: auth?.env,
         gitSshCommand: auth?.gitSshCommand,
+        recordSuccessfulClone: auth?.recordSuccessfulClone,
         onProgress: (p: CloneProgress) => {
           lastProgress = p;
           const now = this.clock.now().getTime();
@@ -191,6 +204,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
             event: 'project.clone_progress',
             projectId,
             phase: slow ? 'slow' : 'cloning',
+            startedAt,
             stage: p.stage,
             percent: p.percent,
             objectsDone: p.objectsDone,

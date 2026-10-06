@@ -361,7 +361,11 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     const authz = client.handshake.headers.authorization;
     const fromBearer = authz?.startsWith('Bearer ') ? authz.slice('Bearer '.length) : undefined;
     const passcode = fromAuth ?? fromHeader ?? fromBearer ?? this.readQuery(client, 'passcode');
-    return { passcode, sessionToken: this.readCookie(client, 'ap_session') };
+    return {
+      passcode,
+      sessionToken: this.readCookie(client, 'ap_session'),
+      remoteAddress: client.request.socket.remoteAddress,
+    };
   }
 
   private readCookie(client: Socket, name: string): string | undefined {

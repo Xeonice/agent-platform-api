@@ -62,7 +62,7 @@ export default {
   // 代价：改动的文件**在 unit 层一条相关测试都没有**时（例如只由 e2e 覆盖的 controller /
   // bootstrap service），相关测试集为空 ⇒ Stryker 报 `No tests were executed` 并 exit 1。
   // 那不是「跑挂了」，是「这些文件 unit 层没人管」。CI 的增量 job 认这条日志并翻译成人话，
-  // 不让它变成一个吓人的红叉 —— 见 .github/workflows/mutation.yml。
+  // 不让它变成一个吓人的红叉 —— 见 主仓 deploy/jenkins/mutation.groovy。
   vitest: { configFile: 'vitest.stryker.config.ts' },
   mutate: isChangedOnly
     ? [...changedFiles, ...excludes]

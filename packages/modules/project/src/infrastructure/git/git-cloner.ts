@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { simpleGit } from 'simple-git';
 import type { GitCloner, CloneRequest } from '../../domain/ports/git-cloner.port';
 import { CloneError } from '../../domain/ports/git-cloner.port';
@@ -39,6 +39,7 @@ import { authUnsafe, cleanGitEnv, mergeAuthEnv } from './git-env';
  */
 @Injectable()
 export class SimpleGitCloner implements GitCloner {
+  private readonly logger = new Logger('SimpleGitCloner');
   async clone(req: CloneRequest): Promise<void> {
     await mkdir(dirname(req.destPath), { recursive: true });
     const git = simpleGit({
@@ -66,6 +67,9 @@ export class SimpleGitCloner implements GitCloner {
       // e.g. injected by CI/harness): simple-git rejects them as unsafe, and we do
       // not want ambient git config leaking into project clones anyway.
       await git.env(mergeAuthEnv(cleanGitEnv(), req)).clone(req.repoUrl, req.destPath, args);
+      await req.recordSuccessfulClone?.().catch(() => {
+        this.logger.warn('SSH 主机指纹未能登记，仓库克隆已完成。');
+      });
     } catch (e) {
       if (req.signal.aborted) throw e; // cancel / timeout — the workflow classifies it
       const raw = e instanceof Error ? e.message : String(e);

@@ -17,6 +17,14 @@ export interface CredentialSandboxBindingRepository {
     credentialId: CredentialId,
     includeCleared?: boolean,
   ): Promise<CredentialSandboxBinding[]>;
+  listPendingRevocations(): Promise<CredentialSandboxBinding[]>;
+  migrateCredentialSync(tx: Tx, previousId: CredentialId, nextId: CredentialId): void;
+  saveIfUsableSync(
+    tx: Tx,
+    binding: CredentialSandboxBinding,
+    runtimeId: string,
+    now: Date,
+  ): boolean;
   saveSync(tx: Tx, binding: CredentialSandboxBinding): void;
   /** I-CSB-2: mark a binding cleared (non-null revoked_at, cannot revert). */
   markClearedSync(tx: Tx, id: string, at: Date): void;

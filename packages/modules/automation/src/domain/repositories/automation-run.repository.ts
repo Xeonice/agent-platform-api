@@ -29,6 +29,8 @@ export interface AutomationRunRepository {
   findById(id: string): Promise<AutomationRun | null>;
   /** `PREVIOUS_RUNNING` 判定与「重试到第几次」都读它 —— 按 `triggered_at DESC` 取第一条。 */
   findLatest(automationId: AutomationId): Promise<AutomationRun | null>;
+  /** Authoritative deletion-preview count; unrelated to cursor pagination. */
+  countByAutomation(automationId: AutomationId): Promise<number>;
   listByAutomation(automationId: AutomationId, cursor: RunCursor): Promise<RunSlice>;
   /** 调度器捞待重试项：`status='resource-exhausted' AND retry_at <= now`（`(status, retry_at)` 索引）。 */
   listPendingRetries(now: Date): Promise<AutomationRun[]>;

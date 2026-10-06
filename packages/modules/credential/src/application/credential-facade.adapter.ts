@@ -15,6 +15,7 @@ import { CREDENTIAL_REPOSITORY } from '../domain/repositories/credential.reposit
 import type { CredentialRepository } from '../domain/repositories/credential.repository';
 import { GIT_AUTH_MATERIALIZER } from '../domain/ports/git-auth-materializer.port';
 import type { GitAuthMaterializer } from '../domain/ports/git-auth-materializer.port';
+import type { MaterializedGitAuth } from '../domain/ports/git-auth-materializer.port';
 import { CredentialSelectionService } from '../domain/services/credential-selection.domain-service';
 import { hostAllowed } from '../domain/services/host.util';
 import { DecryptionError } from '../domain/ports/crypto.port';
@@ -49,7 +50,9 @@ export class CredentialFacadeAdapter implements CredentialFacade {
    * INJECTION out-口 (裁决 D-18): returns an `InjectableRuntimeCredential` — no
    * `authFile`, so the real `refresh_token` cannot travel down the injection path.
    */
-  async prepareRuntimeCredential(runtimeId: string): Promise<InjectableRuntimeCredential> {
+  async prepareRuntimeCredential(
+    runtimeId: string,
+  ): Promise<InjectableRuntimeCredential & { credentialId: string }> {
     const mode = (await this.settingsReader?.activeAuthMethod(runtimeId)) ?? null;
     if (!mode) {
       throw new CredentialPreparationError('NO_CREDENTIAL', `no active auth mode for ${runtimeId}`);
@@ -90,9 +93,16 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     return e;
   }
 
-  async recordRuntimeInjection(runtimeId: string, sandboxId: string): Promise<void> {
-    const mode = (await this.settingsReader?.activeAuthMethod(runtimeId)) ?? null;
-    await this.runtimeCredentials.recordInjection(runtimeId, mode, sandboxId);
+  async recordRuntimeInjection(
+    runtimeId: string,
+    sandboxId: string,
+    credentialId: string,
+  ): Promise<boolean> {
+    return this.runtimeCredentials.recordInjection(runtimeId, sandboxId, credentialId);
+  }
+
+  async isRuntimeCredentialUsable(runtimeId: string, credentialId: string): Promise<boolean> {
+    return this.runtimeCredentials.isUsable(runtimeId, credentialId);
   }
 
   async prepareGitAuth(
@@ -131,7 +141,7 @@ export class CredentialFacadeAdapter implements CredentialFacade {
       throw e;
     }
 
-    let context: GitAuthContext;
+    let context: MaterializedGitAuth;
     try {
       context = await this.materializer.materialize({
         // narrowed: `prepareGitAuth` only ever sees git credentials (forKind)
@@ -155,6 +165,21 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     } catch {
       /* ignore */
     }
-    return context;
+    return {
+      env: context.env,
+      gitSshCommand: context.gitSshCommand,
+      dispose: () => context.dispose(),
+      ...(kind !== 'git-ssh-key' || !context.readKnownHosts
+        ? {}
+        : {
+            recordSuccessfulClone: async () => {
+              const entries = await context.readKnownHosts!();
+              if (entries.length > 0)
+                this.uow.run((tx) =>
+                  this.repo.recordGitKnownHostsSync(tx, selectedId, entries, this.clock.now()),
+                );
+            },
+          }),
+    };
   }
 }

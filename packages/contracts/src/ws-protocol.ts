@@ -169,6 +169,8 @@ export type SandboxWsEvent =
       event: 'project.clone_progress';
       projectId: string;
       phase: 'cloning' | 'slow' | 'done' | 'failed';
+      /** Actual start of this clone attempt; lets a refreshed client restore elapsed time. */
+      startedAt?: string;
       /** git 阶段名（03 §7.2★）。`cloning` 之外的 phase 不带它。 */
       stage?: 'enumerating' | 'counting' | 'compressing' | 'receiving' | 'resolving' | 'checkout';
       percent?: number;
@@ -325,7 +327,7 @@ export const WS_PROTOCOL_CANONICAL =
   'shells{shells[shellId,runtimeId?]}|' +
   'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?,errorCode?},' +
   'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
-  'project.clone_progress{projectId,phase,stage?,percent?,objectsDone?,objectsTotal?,' +
+  'project.clone_progress{projectId,phase,startedAt?,stage?,percent?,objectsDone?,objectsTotal?,' +
   'receivedBytes?,bytesPerSecond?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
   'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?},' +

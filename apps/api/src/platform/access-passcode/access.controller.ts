@@ -9,6 +9,8 @@ import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
 import { passcodeInvalid, passcodeLocked } from './passcode-errors';
 import { setSessionCookie } from './session-cookie';
+import { readPublicNetworkConfig } from '../config/public-network';
+import { requestClientIp } from './client-ip';
 import {
   accessLockedRecord,
   lockedAttemptRecord,
@@ -42,6 +44,7 @@ export class UnlockRequestDto extends createZodDto(UnlockSchema) {}
 @ApiTags('access')
 @Controller('access')
 export class AccessController {
+  private readonly network = readPublicNetworkConfig();
   constructor(
     private readonly passcodes: PasscodeService,
     private readonly limiter: PasscodeAttemptLimiter,
@@ -61,7 +64,7 @@ export class AccessController {
     if (!this.passcodes.enabled) return { unlocked: true };
 
     const now = Date.now();
-    const ip = req.ip ?? 'unknown';
+    const ip = requestClientIp(req, this.network);
     const lockedFor = this.limiter.lockedForSec(ip, now);
     if (lockedFor > 0) {
       this.audit.record(lockedAttemptRecord(lockedFor));

@@ -32,6 +32,8 @@ import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/
 import { SqliteResourceAllocationRepository } from '../infrastructure/persistence/sqlite/resource-allocation.repository.impl';
 import { OsHostCapacityProbe } from '../infrastructure/scheduler/host-capacity.probe';
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
+import { FsWorkspaceArtifactReader } from '../infrastructure/tasks/fs-workspace-artifact-reader';
+import { WORKSPACE_ARTIFACT_READER } from '../domain/ports/workspace-artifact-reader.port';
 import { FsWorkspacePreparer } from '../infrastructure/workspace/workspace-preparer';
 import { SandboxProviderRegistry } from '../infrastructure/registry/provider-registry';
 import { SandboxHealthMonitor } from '../application/sandbox-health.monitor';
@@ -76,6 +78,7 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     TasksGateway,
     { provide: TASK_EVENT_BROADCASTER, useExisting: TaskEventHub },
     { provide: TASK_LOG_STORE, useClass: FsTaskLogStore },
+    { provide: WORKSPACE_ARTIFACT_READER, useClass: FsWorkspaceArtifactReader },
     { provide: SANDBOX_REPOSITORY, useClass: SqliteSandboxRepository },
     { provide: AGENT_TASK_REPOSITORY, useClass: SqliteAgentTaskRepository },
     { provide: RESOURCE_ALLOCATION_REPOSITORY, useClass: SqliteResourceAllocationRepository },

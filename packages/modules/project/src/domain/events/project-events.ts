@@ -144,5 +144,6 @@ export class VolumeRetained implements DomainEvent {
     readonly diskBytes: number,
     readonly downloadBytes: number,
     readonly occurredAt: Date,
+    readonly sandboxName?: string | null,
   ) {}
 }

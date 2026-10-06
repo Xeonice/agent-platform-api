@@ -50,6 +50,7 @@ export class SandboxExecAdapter implements SandboxExecPort {
       // ⛔ 读的是聚合上的记录（∪ 默认），不是"现在配了哪些凭证"——
       //    两者在 provision 之后就会分叉，只有记录与盒子里的事实对得上。
       availableRuntimes: sandbox.availableRuntimes,
+      headless: sandbox.headless,
       workdir: SANDBOX_WORKSPACE_MOUNT,
     };
   }

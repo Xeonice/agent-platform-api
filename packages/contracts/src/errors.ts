@@ -7,6 +7,7 @@ import { z } from 'zod';
  * not off the HTTP status code. `code` is NEVER absent (fallback 'INTERNAL').
  */
 export const ErrorEnvelopeSchema = z.object({
+  retryAfterSec: z.number().nonnegative().optional(),
   code: z.string(),
   message: z.string(),
   retryable: z.boolean(),

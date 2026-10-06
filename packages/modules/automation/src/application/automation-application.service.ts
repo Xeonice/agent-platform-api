@@ -18,8 +18,11 @@ import {
   AUDIT_RECORDER,
   AUTOMATION_LIMIT_REACHED,
   AUTOMATION_PER_PROJECT_LIMIT,
+  SANDBOX_FACADE,
 } from '@platform/contracts';
 import type {
+  AutomationAttentionItem,
+  AutomationDeletionPreviewDto,
   AuditRecorder,
   AutomationDto,
   AutomationRunDto,
@@ -27,9 +30,11 @@ import type {
   PaginatedAutomationRuns,
   UpdateAutomationInput,
   WebhookTestResult,
+  SandboxFacade,
 } from '@platform/contracts';
-import { ProjectApplicationService } from '@platform/project';
+import { ProjectApplicationService, RetainedVolumeService } from '@platform/project';
 import { Automation } from '../domain/entities/automation.entity';
+import { FailurePolicy } from '../domain/value-objects/policies.vo';
 import { AUTOMATION_REPOSITORY } from '../domain/repositories/automation.repository';
 import type { AutomationRepository } from '../domain/repositories/automation.repository';
 import { AUTOMATION_RUN_REPOSITORY } from '../domain/repositories/automation-run.repository';
@@ -50,8 +55,7 @@ const DEFAULT_LOG_WINDOW = 64 * 1024;
 const MAX_LOG_WINDOW = 1024 * 1024;
 
 /**
- * automation 的 CRUD 与查询面（27 §8 的 11 个端点里的 10 个；第 11 个
- * `webhook-test` 也在这里，因为它属于同一张表单）。
+ * automation 的 CRUD、删除预检、跨项目关注概览与 Webhook 测试查询面。
  *
  * **协议无关**（02 §1）：REST 控制器注入的就是它。automation 不进 MCP（27 §11.3），
  * 所以这里没有第二层壳。
@@ -69,12 +73,53 @@ export class AutomationApplicationService {
     @Inject(WEBHOOK_SENDER) private readonly webhooks: WebhookSender,
     @Inject(AUTOMATION_RUN_LOG_READER) private readonly logs: RunLogReader,
     private readonly projects: ProjectApplicationService,
+    @Inject(SANDBOX_FACADE) private readonly sandboxes: SandboxFacade,
+    private readonly retainedVolumes: RetainedVolumeService,
   ) {}
 
   /** `GET /api/projects/:id/automations`。 */
   async listByProject(projectId: string): Promise<AutomationDto[]> {
     const rules = await this.repo.listByProject(asProjectId(projectId));
     return rules.map((r) => AutomationMapper.toDto(r));
+  }
+
+  /** Read-only cross-project snapshot (REQ-AUT-004.6 / Q-WB-01 B). */
+  async listAttention(): Promise<AutomationAttentionItem[]> {
+    const [rules, projects] = await Promise.all([
+      this.repo.listAllForSweep(),
+      this.projects.list(),
+    ]);
+    const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+    const items: AutomationAttentionItem[] = [];
+    for (const rule of rules) {
+      // Disabled rules with fewer than ten failures were switched off by the user.
+      const status =
+        !rule.enabled && FailurePolicy.shouldDisable(rule.failureCount)
+          ? 'autoDisabled'
+          : rule.enabled && rule.degraded
+            ? 'degraded'
+            : undefined;
+      if (status === undefined) continue;
+      const projectName = projectNames.get(rule.projectId);
+      if (projectName === undefined) {
+        throw new NotFoundException(`project ${rule.projectId} not found`);
+      }
+      items.push({
+        projectId: rule.projectId,
+        projectName,
+        id: rule.id,
+        name: rule.name,
+        status,
+        consecutiveFailures: rule.failureCount,
+      });
+    }
+    // A stable order makes the banner's first named rule and its action agree.
+    return items.sort(
+      (a, b) =>
+        Number(a.status !== 'autoDisabled') - Number(b.status !== 'autoDisabled') ||
+        a.projectId.localeCompare(b.projectId) ||
+        a.id.localeCompare(b.id),
+    );
   }
 
   /**
@@ -138,6 +183,24 @@ export class AutomationApplicationService {
   /** `GET /api/automations/:id`。 */
   async get(id: string): Promise<AutomationDto> {
     return AutomationMapper.toDto(await this.require(id));
+  }
+
+  async deletionPreview(id: string): Promise<AutomationDeletionPreviewDto> {
+    const rule = await this.require(id);
+    const [runCount, active, tasks, artifacts] = await Promise.all([
+      this.runs.countByAutomation(rule.id),
+      this.runs.listActive(),
+      this.sandboxes.activeByProject(rule.projectId),
+      this.retainedVolumes.list(rule.projectId),
+    ]);
+    const ids = new Set(
+      active.filter((run) => run.automationId === rule.id).map((run) => run.sandboxId),
+    );
+    return {
+      runCount,
+      artifactCount: artifacts.filter((artifact) => artifact.sourceAutomationId === rule.id).length,
+      runningTasks: tasks.filter((task) => ids.has(task.id)),
+    };
   }
 
   /**
@@ -304,10 +367,14 @@ export class AutomationApplicationService {
   }
 
   private async requireProject(projectId: string): Promise<void> {
-    try {
-      await this.projects.get(projectId);
-    } catch {
-      throw new NotFoundException(`project ${projectId} not found`);
+    const project = await this.projects.get(projectId);
+    if (project.cloneStatus !== 'ready') {
+      throw new ConflictException({
+        code: 'PROJECT_NOT_READY',
+        message: '项目尚未就绪，现在不能创建自动化规则。',
+        retryable: false,
+        sideEffectFree: true,
+      });
     }
   }
 

@@ -23,6 +23,9 @@ export const retainedVolumes = sqliteTable(
       .references(() => projects.id, { onDelete: 'restrict' }),
     /** 弱引用，无 FK —— 见文件头。 */
     sandboxId: text('sandbox_id'),
+    sandboxName: text('sandbox_name'),
+    sourceAutomationId: text('source_automation_id'),
+    sourceAutomationName: text('source_automation_name'),
     workspacePath: text('workspace_path').notNull().unique(), // I-RV-3
     source: text('source').notNull(),
     diskBytes: integer('disk_bytes'),

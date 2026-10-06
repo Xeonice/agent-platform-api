@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import {
   AUDIT_RECORDER,
@@ -14,39 +14,15 @@ import type {
   DiagnoseStatus,
 } from '@platform/contracts';
 import { DIAGNOSE_CHECKS, type DiagnoseCheck } from './checks/check.types';
+import { DiagnosticSnapshotService } from '../../audit/diagnostic-snapshot.service';
 
-/** 单项超时预算（02 §5.3「每项超时 5s」）。 */
-/**
- * 单项预算。**8 项是并行跑的**（`Promise.all`），所以这个数是"整轮最坏耗时"，不是求和。
- *
- * ⚠️ **5s → 10s（2026-09-09，用户质疑「这个怎么判断的」之后实测改的）**：出网那一项的
- * 单目标预算是它的 70%，5s 时代 = 3500ms。而同一台机器同一分钟内实测：
- *
- * ```
- * api.openai.com    TLS 握手 2346ms / 2460ms / 10245ms   ← 全部成功，只是慢
- * api.anthropic.com          1375ms / 1383ms /  2040ms
- * ghcr.io                    1033ms / 1064ms /  1440ms
- * ```
- *
- * 用一个只比最慢的成功样本高 7% 的预算去判定，得到的不是"可达性"而是**掷硬币**——
- * 而这一项的结论会一路驱动到「Agent 是否可用」的红条。⇒ 预算要**明显大于**链路的
- * 正常抖动范围，否则这项检查测的是运气。
- *
- * ⚠️ 代价是最坏情况下整轮从 5s 变 10s。可接受：诊断按项流式推送（SSE），慢的那项显示
- * ⏳ 而其余项照常先出结论 —— 用户不是对着一个空白页面等 10 秒。
- */
+/** PARAM.DIAG_ITEM_TIMEOUT_MS：各项并行的单项预算，首帧下发给界面。 */
 export const DIAGNOSE_TIMEOUT_MS = 10_000;
 
 /**
  * 逐项诊断的调度器（02 §5.3 / P21-5 §6）。
  *
- * ── 并行，不是串行 ──────────────────────────────────────────────────────────
- * ⚠️ **整轮耗时 ≈ 最慢那项 ≈ 5s，不是累加的 40s。** 02 §5.3 原文写过「整轮最坏接近
- * 30s」，那是串行假设，与 P21-5 §6「异步并行但展示顺序固定」矛盾（2026-08-28 订正）。
- *
- * ⚠️ **这不削弱流式的必要性，但理由要换对**：不是「省 30s 白屏」，而是「诊断的使用场景
- * 是『系统好像坏了』，此时最可能发生的就是某一项 hang 满 5s —— 逐项出结果让用户立刻
- * 看到其余七项是好的，而不是被一项卡着看不到任何东西」。
+ * 各项并行，整轮耗时约等于最慢检查，卡住一项不延迟其余结果。
  *
  * ── 三条落地纪律 ────────────────────────────────────────────────────────────
  * 1. **顺序固定的是展示，不是执行。** 首帧 `start` 按 `DIAGNOSE_CHECK_IDS` 下发清单，
@@ -63,6 +39,7 @@ export class DiagnosticsService {
     @Inject(DIAGNOSE_CHECKS) private readonly checks: DiagnoseCheck[],
     @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Optional() private readonly snapshots?: DiagnosticSnapshotService,
   ) {}
 
   /**
@@ -89,11 +66,13 @@ export class DiagnosticsService {
 
   async run(emit: (frame: DiagnoseServerFrame) => void, signal: AbortSignal): Promise<void> {
     const checks = this.ordered();
-    emit({
+    const startFrame = {
       event: 'start',
       checks: checks.map((c) => ({ id: c.id, label: c.label })),
       timeoutMs: DIAGNOSE_TIMEOUT_MS,
-    });
+    } as const;
+    const generation = this.snapshots?.begin(startFrame, this.clock.now());
+    emit(startFrame);
 
     const roundStarted = this.clock.now().getTime();
     const frames: DiagnoseCheckFrame[] = [];
@@ -101,14 +80,20 @@ export class DiagnosticsService {
       checks.map(async (check) => {
         const frame = await this.runOne(check, signal);
         frames.push(frame);
-        if (!signal.aborted) emit(frame);
+        if (!signal.aborted) {
+          if (generation !== undefined) this.snapshots?.record(generation, frame);
+          emit(frame);
+        }
       }),
     );
-    if (signal.aborted) return;
+    if (signal.aborted) {
+      if (generation !== undefined) this.snapshots?.abort(generation, this.clock.now());
+      return;
+    }
 
     const statuses = frames.map((f) => f.status);
     const count = (s: DiagnoseStatus): number => statuses.filter((x) => x === s).length;
-    emit({
+    const doneFrame = {
       event: 'done',
       okCount: count('ok'),
       infoCount: count('info'),
@@ -118,7 +103,9 @@ export class DiagnosticsService {
       //    「7 ok / 1 timeout」这种让人以为「没有失败」的读数。
       failCount: count('fail') + count('timeout'),
       totalMs: this.clock.now().getTime() - roundStarted,
-    });
+    } as const;
+    if (generation !== undefined) this.snapshots?.finish(generation, doneFrame, this.clock.now());
+    emit(doneFrame);
 
     this.recordAudit(frames);
   }

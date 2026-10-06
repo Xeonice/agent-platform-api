@@ -7,10 +7,20 @@ import { Sandbox } from '../../../domain/entities/sandbox.entity';
 import { InitialTask } from '../../../domain/value-objects/initial-task.vo';
 import type { SandboxStatus } from '../../../domain/value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../../../domain/entities/state-transition.entity';
-import type { SandboxRepository } from '../../../domain/repositories/sandbox.repository';
+import {
+  isProjectTaskActive,
+  type SandboxRepository,
+  type DeletedProjectSandbox,
+  type SandboxImageReference,
+} from '../../../domain/repositories/sandbox.repository';
+import {
+  SandboxWriteConflictError,
+  SandboxProjectHasActiveTasksError,
+} from '../../../domain/errors/write-conflict.error';
 import {
   sandboxes,
   sandboxStateTransitions,
+  sandboxProjectCleanupJobs,
   type SandboxRow,
   type SandboxTransitionRow,
 } from '../schema/sandbox.sqlite';
@@ -27,6 +37,21 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 export class SqliteSandboxRepository implements SandboxRepository {
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
+  async findImageReferences(manifestId: string): Promise<SandboxImageReference[]> {
+    // A narrow projection via the sandbox application facade, without importing project internals.
+    return this.db
+      .all<SandboxImageReference>(
+        sql`
+      select s.id, s.name, s.status, s.project_id as projectId,
+             coalesce(p.name, '项目已删除') as projectName, s.headless
+      from sandboxes s left join projects p on p.id = s.project_id
+      where s.image_ref = ${manifestId} and s.status != 'destroyed'
+      order by s.created_at, s.id
+    `,
+      )
+      .map((row) => ({ ...row, headless: Boolean(row.headless) }));
+  }
+
   async findById(id: SandboxId): Promise<Sandbox | null> {
     const row = this.db.select().from(sandboxes).where(eq(sandboxes.id, id)).get();
     if (!row) return null;
@@ -34,6 +59,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
       .select()
       .from(sandboxStateTransitions)
       .where(eq(sandboxStateTransitions.sandboxId, id))
+      .orderBy(sql`${sandboxStateTransitions}.rowid`)
       .all();
     return this.toDomain(row, transitions);
   }
@@ -45,6 +71,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         .select()
         .from(sandboxStateTransitions)
         .where(eq(sandboxStateTransitions.sandboxId, row.id))
+        .orderBy(sql`${sandboxStateTransitions}.rowid`)
         .all();
       return this.toDomain(row, transitions);
     });
@@ -57,6 +84,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         .select()
         .from(sandboxStateTransitions)
         .where(eq(sandboxStateTransitions.sandboxId, row.id))
+        .orderBy(sql`${sandboxStateTransitions}.rowid`)
         .all();
       return this.toDomain(row, transitions);
     });
@@ -76,6 +104,57 @@ export class SqliteSandboxRepository implements SandboxRepository {
     return out;
   }
 
+  deleteByProjectSync(_tx: Tx, projectId: ProjectId): DeletedProjectSandbox[] {
+    const rows = this.db.select().from(sandboxes).where(eq(sandboxes.projectId, projectId)).all();
+    const active = rows.filter((row) => isProjectTaskActive(row.status));
+    if (active.length > 0)
+      throw new SandboxProjectHasActiveTasksError(
+        active.map((row) => ({ id: row.id, name: row.name ?? row.id })),
+      );
+    for (const row of rows) {
+      this.db
+        .insert(sandboxProjectCleanupJobs)
+        .values({
+          sandboxId: row.id,
+          provider: row.provider,
+          providerSandboxId: row.providerHandle,
+          providerState: row.providerState,
+          workspacePath: row.workspacePath,
+        })
+        .onConflictDoNothing()
+        .run();
+    }
+    this.db.delete(sandboxes).where(eq(sandboxes.projectId, projectId)).run();
+    return rows.map((row) => ({
+      id: row.id,
+      provider: row.provider,
+      providerSandboxId: row.providerHandle,
+      providerState: decodeProviderState(row.providerState),
+      workspacePath: row.workspacePath,
+    }));
+  }
+
+  async listPendingProjectCleanup(): Promise<DeletedProjectSandbox[]> {
+    return this.db
+      .select()
+      .from(sandboxProjectCleanupJobs)
+      .all()
+      .map((row) => ({
+        id: row.sandboxId,
+        provider: row.provider,
+        providerSandboxId: row.providerSandboxId,
+        providerState: decodeProviderState(row.providerState),
+        workspacePath: row.workspacePath,
+      }));
+  }
+
+  completeProjectCleanupSync(_tx: Tx, sandboxId: string): void {
+    this.db
+      .delete(sandboxProjectCleanupJobs)
+      .where(eq(sandboxProjectCleanupJobs.sandboxId, sandboxId))
+      .run();
+  }
+
   saveSync(_tx: Tx, sandbox: Sandbox): void {
     // The injected connection is already inside the active UnitOfWork transaction
     // (better-sqlite3 is single-connection + synchronous), so we write on it
@@ -89,7 +168,18 @@ export class SqliteSandboxRepository implements SandboxRepository {
     const createdAt = history[0].at;
     const updatedAt = history[history.length - 1].at;
 
-    db.insert(sandboxes)
+    const existing = db
+      .select({ version: sandboxes.version })
+      .from(sandboxes)
+      .where(eq(sandboxes.id, sandbox.id))
+      .get();
+    if (existing && existing.version !== sandbox.version) throw new SandboxWriteConflictError();
+    // A stale aggregate must never reinsert a row already removed with its project.
+    if (!existing && !sandbox.pendingTransitions.some((t) => t.from === null))
+      throw new SandboxWriteConflictError();
+    const version = existing ? sandbox.version + 1 : sandbox.version;
+    const result = db
+      .insert(sandboxes)
       .values({
         id: sandbox.id as string,
         projectId: sandbox.projectId as string,
@@ -113,12 +203,18 @@ export class SqliteSandboxRepository implements SandboxRepository {
         initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
         failureCode: sandbox.failureCode,
         failureReason: sandbox.failureReason,
-        version: sandbox.version,
+        failureOperation: sandbox.failureOperation,
+        sourceAutomationId: sandbox.sourceAutomationId,
+        sourceAutomationName: sandbox.sourceAutomationName,
+        artifactRetentionDays: sandbox.artifactRetentionDays,
+        automationFinishedAt: sandbox.automationFinishedAt,
+        version,
         createdAt,
         updatedAt,
       })
       .onConflictDoUpdate({
         target: sandboxes.id,
+        setWhere: eq(sandboxes.version, sandbox.version),
         set: {
           name: sandbox.name,
           status: sandbox.status,
@@ -135,16 +231,19 @@ export class SqliteSandboxRepository implements SandboxRepository {
           initialPromptConsumedAt: sandbox.initialTask.consumedAt ?? null,
           failureCode: sandbox.failureCode,
           failureReason: sandbox.failureReason,
-          version: sandbox.version,
+          failureOperation: sandbox.failureOperation,
+          automationFinishedAt: sandbox.automationFinishedAt,
+          version,
           updatedAt,
         },
       })
       .run();
 
-    for (const t of sandbox.pendingTransitions) {
+    if (result.changes !== 1) throw new SandboxWriteConflictError();
+    for (const [offset, t] of sandbox.pendingTransitions.entries()) {
       db.insert(sandboxStateTransitions)
         .values({
-          id: `${sandbox.id}-${t.to}-${t.at.getTime()}`,
+          id: `${sandbox.id}-transition-${history.length - sandbox.pendingTransitions.length + offset}`,
           sandboxId: sandbox.id as string,
           fromStatus: t.from,
           toStatus: t.to,
@@ -154,9 +253,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
         .run();
     }
 
-    // NOTE: optimistic-lock version bump is a full-slice TODO (28 §2.2). The
-    // scaffold persists the aggregate's current version as-is.
-    sandbox.markPersisted(sandbox.version);
+    sandbox.markPersisted(version);
   }
 
   private toDomain(row: SandboxRow, transitions: SandboxTransitionRow[]): Sandbox {
@@ -181,6 +278,11 @@ export class SqliteSandboxRepository implements SandboxRepository {
       }),
       failureCode: row.failureCode,
       failureReason: row.failureReason,
+      failureOperation: row.failureOperation as Sandbox['failureOperation'],
+      sourceAutomationId: row.sourceAutomationId,
+      sourceAutomationName: row.sourceAutomationName,
+      artifactRetentionDays: row.artifactRetentionDays as 3 | 7 | 30 | null,
+      automationFinishedAt: row.automationFinishedAt,
       version: row.version,
       transitions: transitions.map((t) => ({
         from: t.fromStatus as SandboxStatus | null,

@@ -2,6 +2,8 @@ import { createZodDto } from 'nestjs-zod';
 import {
   CheckImageUpdateSchema,
   ImageManifestSchema,
+  ImageDeletionPreviewDtoSchema,
+  ListImagesQuerySchema,
   PatchImageSchema,
   RegisterImageResultSchema,
   RegisterImageSchema,
@@ -11,6 +13,7 @@ import {
 
 /** createZodDto wraps the zod single source (02 §3) into Swagger-reflectable DTOs. */
 export class RegisterImageDto extends createZodDto(RegisterImageSchema) {}
+export class ListImagesQueryDto extends createZodDto(ListImagesQuerySchema) {}
 export class PatchImageDto extends createZodDto(PatchImageSchema) {}
 export class ImageManifestResponseDto extends createZodDto(ImageManifestSchema) {}
 export class ValidationOutcomeResponseDto extends createZodDto(ValidationOutcomeSchema) {}
@@ -19,3 +22,5 @@ export class CheckImageUpdateResponseDto extends createZodDto(CheckImageUpdateSc
 
 /** `POST /api/images` returns the row PLUS the verdict that let it in (27 §6). */
 export class RegisterImageResponseDto extends createZodDto(RegisterImageResultSchema) {}
+
+export class ImageDeletionPreviewResponseDto extends createZodDto(ImageDeletionPreviewDtoSchema) {}

@@ -38,12 +38,12 @@ export class InitialTask {
    */
   static create(input: { prompt?: string | null; consumedAt?: Date | null }): InitialTask {
     const raw = input.prompt ?? undefined;
-    const prompt = raw !== undefined && raw.trim() !== '' ? raw : undefined;
+    const prompt = raw !== undefined && raw.trim() !== '' ? raw.trim() : undefined;
     const consumedAt = input.consumedAt ?? undefined;
-    if (prompt !== undefined && prompt.length > INITIAL_PROMPT_MAX_LENGTH) {
+    if (prompt !== undefined && Array.from(prompt).length > INITIAL_PROMPT_MAX_LENGTH) {
       throw new SandboxInvariantViolationError(
         'I-SBX-10',
-        `initialPrompt is ${prompt.length} characters; the limit is ${INITIAL_PROMPT_MAX_LENGTH}`,
+        `initialPrompt is ${Array.from(prompt).length} characters; the limit is ${INITIAL_PROMPT_MAX_LENGTH}`,
       );
     }
     if (consumedAt !== undefined && prompt === undefined) {

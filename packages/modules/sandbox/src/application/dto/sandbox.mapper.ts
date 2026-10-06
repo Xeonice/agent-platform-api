@@ -1,4 +1,4 @@
-import type { SandboxDto, SandboxHealthWire } from '@platform/contracts';
+import type { RegisteredImageSummary, SandboxDto, SandboxHealthWire } from '@platform/contracts';
 import type { Sandbox } from '../../domain/entities/sandbox.entity';
 
 /**
@@ -19,7 +19,12 @@ export const SandboxMapper = {
    * 「平台这一刻没有观测」，而老客户端读不到它时行为与今天完全一致（`status` 仍是
    * `running`）。这正是可选字段相对枚举扩展的全部好处。
    */
-  toDto(agg: Sandbox, waitingInput: boolean, health?: SandboxHealthWire): SandboxDto {
+  toDto(
+    agg: Sandbox,
+    waitingInput: boolean,
+    health?: SandboxHealthWire,
+    image?: RegisteredImageSummary | null,
+  ): SandboxDto {
     return {
       id: agg.id as string,
       projectId: agg.projectId as string,
@@ -30,6 +35,14 @@ export const SandboxMapper = {
       // the registry key the frontend needs to look this sandbox's capabilities up
       // against `GET /api/providers` after a reload.
       provider: agg.provider,
+      ...(image == null
+        ? {}
+        : {
+            image: image.ref,
+            imageId: image.manifestId,
+            imageDigest: image.digest,
+            imageIsBuiltin: image.isBuiltin,
+          }),
       name: agg.name,
       status: agg.status,
       headless: agg.headless,
@@ -38,9 +51,15 @@ export const SandboxMapper = {
       waitingInput,
       version: agg.version,
       // async provisioning has no response left to carry a failure (04 §4), so the
-      // persisted code is what survives a page reload; `undefined` unless failed.
+      // persisted code is what survives a page reload and teardown retries.
       failureCode: agg.failureCode ?? undefined,
       failureMessage: agg.failureReason ?? undefined,
+      failureOperation: agg.failureOperation ?? undefined,
+      hasRun: agg.hasRun,
+      createdAt: agg.createdAt?.toISOString(),
+      updatedAt: agg.updatedAt?.toISOString(),
+      sourceAutomationId: agg.sourceAutomationId ?? undefined,
+      sourceAutomationName: agg.sourceAutomationName ?? undefined,
       ...(health === undefined ? {} : { health }),
     };
   },

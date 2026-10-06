@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, isNotNull, sql, or, gt } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { CredentialId, SandboxId, Tx } from '@platform/shared-kernel';
@@ -9,6 +9,8 @@ import {
   credentialSandboxBindings,
   type CredentialSandboxBindingRow,
 } from '../schema/credential-sandbox-binding.sqlite';
+
+import { credentials } from '../schema/credential.sqlite';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
 
@@ -56,6 +58,67 @@ export class SqliteCredentialSandboxBindingRepository implements CredentialSandb
       .where(where)
       .all()
       .map((r) => this.toDomain(r));
+  }
+
+  async listPendingRevocations(): Promise<CredentialSandboxBinding[]> {
+    return this.db
+      .select({ binding: credentialSandboxBindings })
+      .from(credentialSandboxBindings)
+      .innerJoin(credentials, eq(credentials.id, credentialSandboxBindings.credentialId))
+      .where(and(isNull(credentialSandboxBindings.revokedAt), isNotNull(credentials.revokedAt)))
+      .all()
+      .map((row) => this.toDomain(row.binding));
+  }
+
+  migrateCredentialSync(_tx: Tx, previousId: CredentialId, nextId: CredentialId): void {
+    this.db
+      .update(credentialSandboxBindings)
+      .set({ credentialId: nextId })
+      .where(
+        and(
+          eq(credentialSandboxBindings.credentialId, previousId),
+          isNull(credentialSandboxBindings.revokedAt),
+        ),
+      )
+      .run();
+  }
+
+  saveIfUsableSync(
+    _tx: Tx,
+    binding: CredentialSandboxBinding,
+    runtimeId: string,
+    now: Date,
+  ): boolean {
+    const eligible = this.db
+      .select({ id: credentials.id })
+      .from(credentials)
+      .where(
+        and(
+          eq(credentials.id, binding.credentialId),
+          eq(credentials.runtimeId, runtimeId),
+          eq(credentials.kind, 'runtime'),
+          isNull(credentials.revokedAt),
+          or(isNull(credentials.expiresAt), gt(credentials.expiresAt, now)),
+          sql`${credentials.refreshFailures} < 3`,
+        ),
+      )
+      .get();
+    if (!eligible) return false;
+    this.db
+      .insert(credentialSandboxBindings)
+      .values({
+        id: binding.id,
+        credentialId: binding.credentialId,
+        sandboxId: binding.sandboxId,
+        injectedAt: binding.injectedAt,
+        revokedAt: null,
+      })
+      .onConflictDoUpdate({
+        target: [credentialSandboxBindings.sandboxId, credentialSandboxBindings.credentialId],
+        set: { injectedAt: binding.injectedAt, revokedAt: null },
+      })
+      .run();
+    return true;
   }
 
   saveSync(_tx: Tx, binding: CredentialSandboxBinding): void {

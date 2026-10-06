@@ -143,6 +143,17 @@ export const AutomationDtoSchema = z.object({
 });
 export type AutomationDto = z.infer<typeof AutomationDtoSchema>;
 
+/** Cross-project governance overview; contains only rules that require attention. */
+export const AutomationAttentionItemSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string(),
+  id: z.string(),
+  name: z.string(),
+  status: z.enum(['autoDisabled', 'degraded']),
+  consecutiveFailures: z.number().int().nonnegative(),
+});
+export type AutomationAttentionItem = z.infer<typeof AutomationAttentionItemSchema>;
+
 /**
  * `AutomationRunDto`（10 §7.3）。
  *
@@ -225,3 +236,10 @@ export const AUTOMATION_PER_PROJECT_LIMIT = 20;
 
 /** 超上限时的错误码（10 §6.8）。409，零副作用。 */
 export const AUTOMATION_LIMIT_REACHED = 'AUTOMATION_LIMIT_REACHED';
+
+export const AutomationDeletionPreviewDtoSchema = z.object({
+  runCount: z.number().int().nonnegative(),
+  artifactCount: z.number().int().nonnegative(),
+  runningTasks: z.array(z.object({ id: z.string(), name: z.string() })),
+});
+export type AutomationDeletionPreviewDto = z.infer<typeof AutomationDeletionPreviewDtoSchema>;

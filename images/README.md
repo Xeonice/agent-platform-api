@@ -2,10 +2,10 @@
 
 **两张镜像，两个 Dockerfile** —— 一档一张（ADR 决策 C）。
 
-| 目录                | 给谁        | 平台                                                        | 数据面                  | 实测大小   |
-| ------------------- | ----------- | ----------------------------------------------------------- | ----------------------- | ---------- |
-| `platform-sandbox/` | **aio**     | Linux（boxlite 在 Linux 上用不了，这是 aio 存在的全部理由） | 镜像自带的 HTTP/WS API  | **13GB**   |
-| `platform-boxlite/` | **boxlite** | macOS（Virtualization.framework）                           | BoxLite native exec/PTY | **1.25GB** |
+| 目录                | 给谁        | 平台                       | 数据面                  | 实测大小   |
+| ------------------- | ----------- | -------------------------- | ----------------------- | ---------- |
+| `platform-sandbox/` | **aio**     | Linux（Docker/AIO 数据面） | 镜像自带的 HTTP/WS API  | **13GB**   |
+| `platform-boxlite/` | **boxlite** | macOS；支持 KVM 的 Linux   | BoxLite native exec/PTY | **1.25GB** |
 
 ```
 上游 ghcr.io/agent-infra/sandbox:latest   (13GB，自带 tmux 3.2a / node 22 / codex 0.139.0)
@@ -21,7 +21,7 @@ node:22-bookworm-slim
 而 `.env.example` 出厂指向 `localhost:5001/platform/sandbox:v2`，一个只存在于开发者机器上
 的坐标。**结果是每一个新部署第一次启动都报「找不到沙箱镜像」，一个不漏。**
 
-⇒ `.github/workflows/publish-sandbox-image.yml` 把**两档各构建一张**（矩阵），推到
+⇒ Mac mini Jenkins 的 `agent-platform-sandbox-images` 按 `config/sandbox-publish.json` 把**两档各构建一张**，推到
 `ghcr.io/<owner>/agent-platform-sandbox`（aio 档）与 `…/agent-platform-boxlite`（boxlite 档），
 双架构、匿名可拉。
 

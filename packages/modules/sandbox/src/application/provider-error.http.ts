@@ -6,6 +6,8 @@ import {
   SandboxProviderErrorCode,
   UnknownRuntimeError,
 } from '@platform/contracts';
+import { SandboxWriteConflictError } from '../domain/errors/write-conflict.error';
+import { InvalidSandboxTransitionError } from '../domain/errors/invalid-transition.error';
 
 /**
  * The ONE contract-error → HTTP table (04 §4 interface mapping), shared by every
@@ -37,6 +39,12 @@ export const PROVIDER_HTTP: Record<SandboxProviderErrorCode, number> = {
 /** Map a thrown contract error onto the envelope + status the wire expects. */
 export function mapProviderErrorToHttp(e: unknown): unknown {
   if (e instanceof HttpException) return e;
+  if (e instanceof InvalidSandboxTransitionError || e instanceof SandboxWriteConflictError) {
+    return new HttpException(
+      { code: 'INVALID_STATE', message: '任务状态已经改变，请刷新后再操作。', retryable: false },
+      HttpStatus.CONFLICT,
+    );
+  }
   // 400, NOT 500: an id that is not in the registry is the CALLER's input, and the
   // server is working exactly as designed when it refuses it (04 §4 / 14 §10). It is
   // also not retryable, so the envelope must not invite a [重试] — which is precisely

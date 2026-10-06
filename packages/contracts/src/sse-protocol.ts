@@ -63,7 +63,7 @@ export type DiagnoseCheckId = (typeof DIAGNOSE_CHECK_IDS)[number];
  * 「修法」只有删镜像重推，那会让情况更糟（P21-5 §9A 第 5 步）。
  *
  * ⚠️ **`timeout` 与 `fail` 分开**，因为下一步不同：`fail` 是「查出来是坏的」，
- * `timeout` 是「5s 内没查出来」—— 后者在「系统好像坏了」的场景里恰恰是最常见的一种，
+ * `timeout` 是「PARAM.DIAG_ITEM_TIMEOUT_MS 内没查出来」—— 后者在排障时很常见，
  * 而它**不构成**「这一项是坏的」的结论（02 §5.3：一项卡住不阻塞整轮）。
  */
 export const DIAGNOSE_STATUSES = ['ok', 'info', 'warn', 'fail', 'timeout'] as const;
@@ -115,7 +115,7 @@ export interface DiagnoseStartFrame {
 
 /**
  * 逐项结论。各项**并行**跑，所以到达顺序**不等于** {@link DIAGNOSE_CHECK_IDS} 的顺序
- * —— 前端按 id 归位，不要按到达顺序追加（02 §5.3 订正：整轮 ≈ 最慢那项 ≈ 5s，
+ * —— 前端按 id 归位，不要按到达顺序追加（整轮约等于最慢那项，时限由首帧给出，
  * 不是累加的 40s）。
  */
 export interface DiagnoseCheckFrame {
@@ -333,7 +333,7 @@ export function diagnoseSeverity(statuses: readonly DiagnoseStatus[]): AuditSeve
  * 的话，一个长命平台一天就能堆出上百条「一切正常」，把真正的信号冲掉 —— 纪律与
  * `sandbox.health`「只在状态翻转时记」同源。
  *
- * ⚠️ 「失败项」含 `timeout`：一项 5s 内答不上来，与它答「坏了」对排障是同一件事
+ * ⚠️ 此辅助判据含 `timeout`：一项在首帧时限内答不上来，需要保留供重试，
  * （「上一次说好/说坏是什么时候」这个问题，`timeout` 属于「没说好」）。
  * `warn` 同样计入 —— 它是产品意义上的「⚠️ 有东西要修」。
  */
