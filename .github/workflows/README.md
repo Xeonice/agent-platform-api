@@ -1,9 +1,7 @@
-# Retired GitHub Actions workflows
+# Jenkins CI
 
-Backend CI, mutation reports and sandbox image publication are owned by the local Mac Jenkins jobs. The three `.yml.disabled` files preserve their previous definitions and cannot be discovered as GitHub Actions workflows.
+API 静态检查、真实四层验收和 Linux ARM64 原生依赖检查由 Mac mini 的 `agent-platform-native-ci` 执行。生产镜像、备份、空闲屏障和安全替换由 `agent-platform-api` 作业管理。
 
-- `ci.yml.disabled`: former blocking API checks. The installed controller now performs the full native checks and records same-SHA Jenkins evidence before deployment.
-- `mutation.yml.disabled`: former nightly full and PR changed-file reports. Jenkins runs these on the isolated CI agent; mutation results remain nonblocking.
-- `publish-sandbox-image.yml.disabled`: former two-provider multiarch GHCR publication. Jenkins uses `config/sandbox-publish.json`; the default-image gate consumes that same configuration.
+`agent-platform-mutation` 在隔离构建节点运行 nightly/full 或 PR changed-file 报告，结果保持非阻断。`agent-platform-sandbox-images` 按 `config/sandbox-publish.json` 构建两档、两架构镜像，并验证 GHCR 匿名 digest；默认镜像一致性检查消费同一配置。
 
-Jenkins pipeline sources and their fixed controllers live in the documentation repository under `deploy/jenkins`. Source retirement does not erase GitHub execution history; the operational cutover also disables the former workflows in GitHub.
+流水线与受信发布工具位于主仓 `deploy/jenkins` 和 `deploy/containers`。GitHub 状态由专属 Jenkins App 回写；此目录不包含可执行的 GitHub Actions 工作流。

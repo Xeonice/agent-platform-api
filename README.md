@@ -65,7 +65,7 @@ interface ──▶ application ──▶ domain ◀── infrastructure（实�
 | **vitest + supertest + MCP** | `test:pure` / `test:service` / `test:sqlite` / `test:protocol`                                                         | 真实策略、真实服务与当前 SQLite、完整 Nest HTTP/WS/MCP                      |
 | **Drizzle better-sqlite3**   | `schema/*.sqlite.ts`（text+CHECK，不用 pgEnum/.array()，JS Date）+ `./drizzle` 迁移 + 新数据库事务验收                 | 单机零依赖、PG 双方言可迁移                                                 |
 | **部署 harness**             | `docker-compose.yml`（docker-socket-proxy 限权 + 127.0.0.1 绑定）+ `NoopAuthGuard`/`PasscodeGuard`                     | 容器逃逸面收敛 + 默认回环 + 访问口令骨架                                    |
-| **CI 九步**                  | `.github/workflows/ci.yml`                                                                                             | install → typecheck → lint → format → 验收及执行报告 → build → OpenAPI diff |
+| **CI 九步**                  | 主仓 `deploy/jenkins/native-ci.groovy`                                                                                 | install → typecheck → lint → format → 验收及执行报告 → build → OpenAPI diff |
 
 ## 命令
 
