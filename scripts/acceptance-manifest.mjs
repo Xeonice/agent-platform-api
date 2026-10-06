@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, relative } from 'node:path';
 
 const apiRoot = resolve(import.meta.dirname, '..');
-const sourceRoot = resolve(apiRoot, '../docs/design-v2/gap/product');
+const sourceRoot = resolve(apiRoot, '../docs/product/requirements');
 const domains = ['WB', 'PRJ', 'LCH', 'SBX', 'AUTH', 'CRD', 'IMG', 'AUT', 'SYS', 'ACC', 'DEP'];
 const rows = [];
 for (const domain of domains) {
@@ -57,7 +57,7 @@ for (const mapping of mappings) {
   }
 }
 const manifest = {
-  specification: 'docs/design-v2/gap/product — approved Given/When/Then',
+  specification: 'docs/product/requirements — approved Given/When/Then',
   totalAcceptanceCriteria: rows.length,
   counts: Object.fromEntries(
     domains.map((domain) => [domain, rows.filter((row) => row.domain === domain).length]),

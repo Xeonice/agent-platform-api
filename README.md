@@ -79,14 +79,14 @@ pnpm test:service        # 真实服务，受控外部资源
 pnpm test:sqlite         # 当前 schema、真实 repository/UoW、竞态与回滚
 pnpm test:protocol       # 完整 Nest + HTTP / WS / MCP
 pnpm test:acceptance:report # 实际运行 JSON 与源哈希，不把 AC 计划当通过
-pnpm check:acceptance    # 在设计主仓中核对全部规范及场景映射
+pnpm check:acceptance    # 在主仓中核对现行规范及场景映射
 pnpm build            # 构建
 pnpm openapi:emit     # 产出 openapi.json（CI diff 入库）
 ```
 
 ### 验收范围
 
-新版测试位于 `acceptance/{domain}/{pure,service,sqlite,protocol}`，依据主仓 `docs/design-v2/gap/product` 的 Given/When/Then 重建。项目未上线，只验证当前新数据库，不保留旧数据库升级测试。旧 suite 与旧夹具已退休，本轮新增竞态、SQLite、SSH、PTY 回归保留并重组；清单见 `acceptance/legacy-retirement-plan.json`。
+测试位于 `acceptance/{domain}/{pure,service,sqlite,protocol}`，依据主仓 `docs/product/requirements` 的 Given/When/Then 验证产品规则，包含并发、SQLite、SSH 和 PTY 回归。SQLite 场景使用当前初始化 schema；生产数据更新仍由部署维护流程保护。
 
 协议层装配实际 AppModule、repository、guard 和业务服务，HTTP/MCP/WS 经过真实网络协议。外部沙箱/OCI 元数据使用受控资源夹具，终端使用真实子进程字节流，Git 使用本地真实 smart HTTP 仓库；这些结果不代表真实 Docker、BoxLite 或厂商帐号 OAuth 已验收。外部环境验收必须另列条件与实际结果。
 
