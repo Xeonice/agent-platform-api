@@ -1,9 +1,10 @@
-import { cpus, totalmem } from 'node:os';
+import { availableParallelism, cpus, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import { filesystemStatsFor } from '@platform/shared-kernel';
 import type { HostCapacityProbe } from '../../domain/ports/host-capacity.port';
 import type { HostCapacity } from '../../domain/services/resource-pool.domain-service';
+import { linuxResourceCapacity } from './linux-cgroup-capacity';
 
 const MIB = 1024 * 1024;
 
@@ -11,12 +12,10 @@ const MIB = 1024 * 1024;
  * 03 §1「启动时探测宿主机资源：`os.cpus().length` / `os.totalmem()`」+「探测：
  * `statfs(DATA_ROOT)` 取总量与已用」。
  *
- * ⚠️ **`os.cpus()` / `os.totalmem()` 在容器里会撒谎，所以三个显式覆盖是必需品而不是
- * 装饰。** 平台自己就是以 docker-compose 形态部署的（`docker-compose.yml`），而在容器
- * 内这两个 API 报的是**宿主**的核数与内存，不是 cgroup 给这个容器的限额 —— 一个被限到
- * 2 核 4GB 的 api 容器会以为自己有 64 核 512GB，然后按那个数发配额。
- * `SCHEDULER_HOST_CORES` / `SCHEDULER_HOST_RAM_MB` / `SCHEDULER_HOST_DISK_MB` 让部署方
- * 把真实限额说出来；不填就退回探测（单机裸装时探测是对的）。
+ * Linux 的 CPU/RAM 取宿主事实、CPU affinity、cgroup v1/v2 以及可见祖先限额的最小值。
+ * CPU quota 保留小数；memory.max 是总预算，不把当前已用量与登记账本重复扣除。
+ * SCHEDULER_HOST_CORES / SCHEDULER_HOST_RAM_MB 在 Linux 只能降低探测限额。
+ * Darwin 保留显式覆盖；磁盘仍按实际文件系统测量。
  *
  * ⚠️ **每次问都真的重新量，不缓存。** 缓存一次开机时的读数，在容器里 `DATA_ROOT` 换了
  * 卷、或宿主上别的程序吃掉了半块盘之后，调度就会照着一个几小时前的世界发号施令 ——
@@ -32,9 +31,25 @@ export class OsHostCapacityProbe implements HostCapacityProbe {
   async capacity(): Promise<HostCapacity> {
     const stats = await filesystemStatsFor(dataRoot());
     const diskOverrideMb = positive(process.env.SCHEDULER_HOST_DISK_MB);
+    const overrides = {
+      cores: positive(process.env.SCHEDULER_HOST_CORES),
+      ramMb: positive(process.env.SCHEDULER_HOST_RAM_MB),
+    };
+    const resources =
+      process.platform === 'linux'
+        ? await linuxResourceCapacity(
+            {
+              cores: Math.min(cpus().length, availableParallelism()),
+              ramMb: Math.floor(totalmem() / MIB),
+            },
+            overrides,
+          )
+        : {
+            cores: overrides.cores ?? cpus().length,
+            ramMb: overrides.ramMb ?? Math.floor(totalmem() / MIB),
+          };
     return {
-      cores: positive(process.env.SCHEDULER_HOST_CORES) ?? cpus().length,
-      ramMb: positive(process.env.SCHEDULER_HOST_RAM_MB) ?? Math.floor(totalmem() / MIB),
+      ...resources,
       diskTotalBytes:
         diskOverrideMb !== undefined
           ? diskOverrideMb * MIB
