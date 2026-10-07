@@ -314,7 +314,10 @@ export class BoxliteSandboxProvider implements SandboxProvider {
       const runtime = await this.getRuntime();
       const info = await runtime.getInfo(handle.providerSandboxId);
       if (!info) return { lifecycleState: 'instance_missing' };
-      const execErrorsTotal = await this.execErrorsTotal(handle);
+      // SDK metrics() acquires live state and can implicitly start a stopped VM.
+      // Reconciliation must preserve stopped tasks and their retained registrations.
+      const execErrorsTotal =
+        info.state.running === true ? await this.execErrorsTotal(handle) : undefined;
       const at = info.healthStatus?.lastCheck ?? this.clock?.now().toISOString();
       const reading =
         at === undefined
@@ -349,7 +352,8 @@ export class BoxliteSandboxProvider implements SandboxProvider {
   private async execErrorsTotal(handle: SandboxHandle): Promise<number | undefined> {
     try {
       const box = await this.findBox(handle);
-      if (!box) return undefined;
+      // A concurrent stop may finish between getInfo() and acquiring this fresh handle.
+      if (!box || box.info().state.running !== true) return undefined;
       const metrics = await box.metrics();
       return typeof metrics.execErrorsTotal === 'number' ? metrics.execErrorsTotal : undefined;
     } catch {
