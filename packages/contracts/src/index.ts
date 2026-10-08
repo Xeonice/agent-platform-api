@@ -13,6 +13,7 @@ export * from './validation-envelope';
 export * from './registry.tokens';
 export * from './reserved-env';
 export * from './sandbox-provider.contract';
+export * from './platform-instances';
 export * from './runtime-adapter.contract';
 export * from './adapter-auth.error';
 export * from './image-spec.contract';

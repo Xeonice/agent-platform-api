@@ -7,6 +7,7 @@ import type {
   EnsureRuntimeInstalledInput,
   ImageFacade,
   InjectableRuntimeCredential,
+  PlatformReservation,
   ProjectFacade,
   ProviderRegistry,
   RegisterRetainedVolumeCommand,
@@ -47,6 +48,8 @@ export function harness(
     credential?: InjectableRuntimeCredential;
     hostCapacity?: Partial<HostCapacity>;
     waiting?: WaitingInputQueryPort;
+    /** Platform-resident reservations the runtime module injects in production. */
+    reservations?: readonly PlatformReservation[];
   } = {},
 ) {
   const { sqlite, db, uow } = currentDatabase();
@@ -208,6 +211,7 @@ export function harness(
     clock,
     { next: () => `allocation-${++allocationSerial}` },
     schedulerQueue,
+    options.reservations,
   );
   const installInputs: EnsureRuntimeInstalledInput[] = [];
   const bootstrapInputs: BootstrapAgentSessionInput[] = [];

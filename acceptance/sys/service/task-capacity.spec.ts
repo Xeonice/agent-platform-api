@@ -64,6 +64,34 @@ describe('readonly default task capacity shares the actual admission rules', () 
     });
   });
 
+  it('the resident helper reservation moves the 429 to exactly where the read-only capacity reaches zero', async () => {
+    const reservation = {
+      owner: 'auth-helper',
+      label: '帐号登录环境',
+      quota: { cores: 1, ramMb: 512, diskMb: 0 },
+    };
+    expect((await harness({ hostCapacity: { cores: 3 } }).service.defaultCapacity()).maxTasks).toBe(
+      3,
+    );
+    const h = harness({ hostCapacity: { cores: 3 }, reservations: [reservation] });
+    const initial = await h.service.defaultCapacity();
+    expect(initial).toMatchObject({ remainingTasks: 2, registeredTasks: 0, maxTasks: 2 });
+    expect(initial.basis).toContain('已为平台常驻的帐号登录环境预留 1 核 CPU、512 MB 内存');
+    const ids: string[] = [];
+    for (let n = 0; n < 2; n++) {
+      ids.push((await h.service.create(input)).id);
+      expect(await h.service.defaultCapacity()).toMatchObject({
+        remainingTasks: 1 - n,
+        registeredTasks: n + 1,
+      });
+    }
+    await expect(h.service.create(input)).rejects.toMatchObject({ status: 429 });
+    expect((await h.allocations.listAll()).map((row) => row.sandboxId).sort()).toEqual(
+      [...ids].sort(),
+    );
+    await Promise.all(ids.map((id) => waitForStatus(h.service, id, 'running')));
+  });
+
   it('separates the physical disk floor from the theoretical maximum', async () => {
     process.env.WORKSPACE_MIN_FREE_BYTES = String(1024 ** 3);
     const h = harness({ hostCapacity: { ramMb: 4_096, diskAvailableBytes: 512 * 1024 ** 2 } });

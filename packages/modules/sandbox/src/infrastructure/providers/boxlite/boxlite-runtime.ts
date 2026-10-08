@@ -80,8 +80,12 @@ export function boxliteImageRegistries(): JsImageRegistry[] {
 /**
  * BoxLite 的 home —— 与 SDK 自己的解析口径一致（`BOXLITE_HOME`，缺省 `~/.boxlite`）。
  *
- * ⚠️ 平台只在**量进度**时用它（`imageStageProgress`）。⛔ 不要拿它去读写任何东西：
- * 那是 BoxLite 的私有目录，写进去等于绕过它自己的记账。
+ * ⚠️ 平台只有三处**只读**用途：`boxlite-image-store.ts` 里量拉取进度
+ * （`imageStageProgress`）、读镜像 config 声明了哪些端口（`imageExposedPorts`，决定
+ * `create` 给不给端口映射）；`boxlite-shim-liveness.ts` 里读 `boxes/<id>/shim.pid`，核对
+ * 「记录说 running」的 box 的 shim 进程是否真的还在（`inspect` 用）。⛔ 除此之外不要拿它
+ * 去读写任何东西：那是 BoxLite 的私有目录，写进去等于绕过它自己的记账；布局一变，这三处
+ * 都只会退到「读不到」。
  */
 export function boxliteHome(): string {
   const configured = (process.env['BOXLITE_HOME'] ?? '').trim();

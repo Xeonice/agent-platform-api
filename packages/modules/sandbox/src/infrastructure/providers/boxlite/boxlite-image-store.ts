@@ -1,4 +1,9 @@
-import { parseImageRef, pinnedImageRef, type ResolvedImageSpec } from '@platform/contracts';
+import {
+  isOciDigest,
+  parseImageRef,
+  pinnedImageRef,
+  type ResolvedImageSpec,
+} from '@platform/contracts';
 
 /**
  * The one field of BoxLite's `ImageInfo` this file reads. Narrowed to a structural
@@ -113,48 +118,13 @@ export async function imageStageProgress(
   home: string,
   manifestDigest: string,
   platformArch: string,
-  fs: {
-    readFile(p: string, enc: 'utf8'): Promise<string>;
+  fs: StoreReader & {
     stat(p: string): Promise<{ size: number }>;
   },
   join: (...parts: string[]) => string,
 ): Promise<ImageStageProgress | null> {
-  const manifestPath = (digest: string): string =>
-    join(home, 'images', 'manifests', `${digest.replace(':', '-')}.json`);
-
-  const readManifest = async (digest: string): Promise<Record<string, unknown> | null> => {
-    try {
-      const parsed: unknown = JSON.parse(await fs.readFile(manifestPath(digest), 'utf8'));
-      return typeof parsed === 'object' && parsed !== null
-        ? (parsed as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
-    }
-  };
-
-  let doc = await readManifest(manifestDigest);
+  const doc = await readPlatformManifest(home, manifestDigest, platformArch, fs, join);
   if (doc === null) return null;
-
-  // ⚠️ 多架构 index：顶层只有 `manifests`，真正的层清单在**本机架构**那一份里。
-  //    ⛔ 不许随便取第一个 —— amd64 与 arm64 的层完全不同，取错了分母就是错的。
-  const children = doc['manifests'];
-  if (Array.isArray(children)) {
-    const match = children.find((m): m is Record<string, unknown> => {
-      if (typeof m !== 'object' || m === null) return false;
-      const p = (m as Record<string, unknown>)['platform'];
-      return (
-        typeof p === 'object' &&
-        p !== null &&
-        (p as Record<string, unknown>)['architecture'] === platformArch
-      );
-    });
-    if (match === undefined) return null;
-    const childDigest = match['digest'];
-    if (typeof childDigest !== 'string') return null;
-    doc = await readManifest(childDigest);
-    if (doc === null) return null;
-  }
 
   const layers = doc['layers'];
   if (!Array.isArray(layers) || layers.length === 0) return null;
@@ -182,4 +152,136 @@ export async function imageStageProgress(
     }
   }
   return { have, total };
+}
+
+/** 读 BoxLite 本地库只需要这一只手；注入进来，离线单测才跑得通（与 `imageStageProgress` 同理）。 */
+export interface StoreReader {
+  readFile(p: string, enc: 'utf8'): Promise<string>;
+}
+
+/** 本地库里一份 JSON（manifest / config）：读不到、不是对象 ⇒ `null`。 */
+async function readStoreJson(
+  fs: StoreReader,
+  path: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed: unknown = JSON.parse(await fs.readFile(path, 'utf8'));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 库里的文件按 digest 命名，`:` 换成 `-`（`sha256-<hex>.json`）。 */
+function storeFileName(digest: string): string {
+  return `${digest.replace(':', '-')}.json`;
+}
+
+/**
+ * 按 digest 读出**本机架构**的那份 manifest（层清单 + config 指针）。
+ * 从 `imageStageProgress` 抽出来，供 {@link imageExposedPorts} 共用 —— 下钻规则只该有一份。
+ *
+ * ⚠️ 多架构 index：顶层只有 `manifests`，真正的层清单在**本机架构**那一份里。
+ *    ⛔ 不许随便取第一个 —— amd64 与 arm64 的层完全不同，取错了分母就是错的。
+ */
+export async function readPlatformManifest(
+  home: string,
+  manifestDigest: string,
+  platformArch: string,
+  fs: StoreReader,
+  join: (...parts: string[]) => string,
+): Promise<Record<string, unknown> | null> {
+  const manifestPath = (digest: string): string =>
+    join(home, 'images', 'manifests', storeFileName(digest));
+
+  const doc = await readStoreJson(fs, manifestPath(manifestDigest));
+  if (doc === null) return null;
+
+  const children = doc['manifests'];
+  if (!Array.isArray(children)) return doc;
+  const match = children.find((m): m is Record<string, unknown> => {
+    if (typeof m !== 'object' || m === null) return false;
+    const p = (m as Record<string, unknown>)['platform'];
+    return (
+      typeof p === 'object' &&
+      p !== null &&
+      (p as Record<string, unknown>)['architecture'] === platformArch
+    );
+  });
+  if (match === undefined) return null;
+  const childDigest = match['digest'];
+  if (typeof childDigest !== 'string') return null;
+  return readStoreJson(fs, manifestPath(childDigest));
+}
+
+/** 镜像 config 里 `ExposedPorts` 的一项。 */
+export interface ExposedPort {
+  port: number;
+  protocol: 'tcp' | 'udp';
+}
+
+/**
+ * 镜像自己声明了哪些端口（OCI config 的 `config.ExposedPorts`）—— BoxLite 按的就是这份
+ * 决定自动发布什么（它日志里 `Port mappings: N (image: M, …)` 的 M），读它就是读事实。
+ *
+ * ── 为什么读 BoxLite 的私有目录 ───────────────────────────────────────────────
+ * SDK 0.9.7 的 `images` 只有 `pull` 与 `list`，`ImageInfo` 不带 config；平台注册镜像时
+ * 也没有把 `ExposedPorts` 落库。路径：manifest（多架构时按本机架构下钻）→ `config.digest`
+ * → `images/configs/sha256-<hex>.json`。
+ *
+ * ── 三种答案，⛔ 不许混 ─────────────────────────────────────────────────────────
+ *   · `[]`   —— 镜像**明确没有**声明端口（`config` 或 `ExposedPorts` 缺席 / 为 null）。
+ *   · 非空   —— 声明了这些端口（同一端口写两遍只算一次；不带协议的按 tcp，与 BoxLite 同口径）。
+ *   · `null` —— **读不到**，不等于没有：manifest / config 不在库里、JSON 坏了、index 里
+ *               没有本机架构、或者某个键不是 `<1-65535>[/tcp|/udp]`（`8000-8010/tcp` 这种
+ *               区间写法也算）。不认识的形状一律不猜。
+ */
+export async function imageExposedPorts(
+  home: string,
+  manifestDigest: string,
+  platformArch: string,
+  fs: StoreReader,
+  join: (...parts: string[]) => string,
+): Promise<ExposedPort[] | null> {
+  const manifest = await readPlatformManifest(home, manifestDigest, platformArch, fs, join);
+  if (manifest === null) return null;
+  const pointer = manifest['config'];
+  if (typeof pointer !== 'object' || pointer === null) return null;
+  const configDigest = (pointer as Record<string, unknown>)['digest'];
+  // ⚠️ 校验 digest 形状再拼路径：这个值来自磁盘上的 JSON，不是平台自己算的。
+  if (typeof configDigest !== 'string' || !isOciDigest(configDigest)) return null;
+
+  const blob = await readStoreJson(
+    fs,
+    join(home, 'images', 'configs', storeFileName(configDigest)),
+  );
+  if (blob === null) return null;
+  const config = blob['config'];
+  if (config === undefined || config === null) return [];
+  if (typeof config !== 'object' || Array.isArray(config)) return null;
+  const exposed = (config as Record<string, unknown>)['ExposedPorts'];
+  if (exposed === undefined || exposed === null) return [];
+  if (typeof exposed !== 'object' || Array.isArray(exposed)) return null;
+
+  const ports: ExposedPort[] = [];
+  for (const key of Object.keys(exposed)) {
+    const parsed = parseExposedPortKey(key);
+    if (parsed === null) return null;
+    if (!ports.some((p) => p.port === parsed.port && p.protocol === parsed.protocol)) {
+      ports.push(parsed);
+    }
+  }
+  return ports;
+}
+
+const EXPOSED_PORT_KEY = /^([1-9][0-9]{0,4})(?:\/(tcp|udp))?$/;
+
+function parseExposedPortKey(key: string): ExposedPort | null {
+  const match = EXPOSED_PORT_KEY.exec(key);
+  if (match === null) return null;
+  const port = Number(match[1]);
+  if (port > 65_535) return null;
+  return { port, protocol: match[2] === 'udp' ? 'udp' : 'tcp' };
 }

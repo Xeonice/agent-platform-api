@@ -1,10 +1,13 @@
 import { Global, Module } from '@nestjs/common';
 import {
+  AUTH_HELPER_SANDBOX_ID,
+  PLATFORM_RESERVATIONS,
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_CREDENTIAL_STATE_READER,
   RUNTIME_INSTALL_ORCHESTRATOR,
   RUNTIME_SETTINGS_READER,
   RUNTIME_SETTINGS_WRITER,
+  type PlatformReservation,
 } from '@platform/contracts';
 import { RUNTIME_SETTINGS_REPOSITORY } from '../domain/repositories/runtime-settings.repository';
 import { RUNTIME_INSTALLATION_REPOSITORY } from '../domain/repositories/runtime-installation.repository';
@@ -21,7 +24,10 @@ import { DefaultRuntimeAdapterRegistry } from '../infrastructure/registry/runtim
 import { ReservedEnvNameRegistrar } from '../infrastructure/registry/reserved-env.registrar';
 import { HostAuthHelper } from '../infrastructure/helper/host-auth-helper';
 import { ContainerAuthHelper } from '../infrastructure/helper/container-auth-helper';
-import { HelperContainerSession } from '../infrastructure/helper/helper-container.session';
+import {
+  AUTH_HELPER_QUOTA,
+  HelperContainerSession,
+} from '../infrastructure/helper/helper-container.session';
 import { SqliteRuntimeSettingsRepository } from '../infrastructure/persistence/sqlite/runtime-settings.repository.impl';
 import { RuntimeSettingsReaderWriter } from '../infrastructure/settings/runtime-settings.reader';
 import { CredentialRefreshScanner } from '../infrastructure/refresh/credential-refresh.scanner';
@@ -74,6 +80,25 @@ import { RuntimeController } from './http/runtime.controller';
       useFactory: (container: ContainerAuthHelper, host: HostAuthHelper): unknown =>
         (process.env['AUTH_HELPER_MODE'] ?? 'container') === 'host' ? host : container,
     },
+    {
+      /**
+       * 平台常驻的帐号登录环境在调度池里的预留（03 §1）：sandbox 的 `ResourceAllocator`
+       * 从池子总量里扣掉它，⛔ 不写 `resource_allocations`（理由见契约 `PlatformReservation`）。
+       *
+       * ⚠️ 用常量 `useValue`，⛔ 不注入 `HelperContainerSession`：那会长出
+       *    `ResourceAllocator → HelperContainerSession → SANDBOX_PROVIDER_REGISTRY` 的环。
+       * ⚠️ 磁盘记 0：helper 不挂工作区，provider 也不把 diskMb 交给 BoxLite；真实的磁盘
+       *    余量由调度的 statfs 物理闸兜底。
+       */
+      provide: PLATFORM_RESERVATIONS,
+      useValue: [
+        {
+          owner: AUTH_HELPER_SANDBOX_ID,
+          label: '帐号登录环境',
+          quota: { cores: AUTH_HELPER_QUOTA.cores, ramMb: AUTH_HELPER_QUOTA.ramMb, diskMb: 0 },
+        },
+      ] satisfies readonly PlatformReservation[],
+    },
     { provide: RUNTIME_SETTINGS_REPOSITORY, useClass: SqliteRuntimeSettingsRepository },
     { provide: RUNTIME_INSTALLATION_REPOSITORY, useClass: SqliteRuntimeInstallationRepository },
     { provide: RUNTIME_INSTALL_ORCHESTRATOR, useExisting: RuntimeInstallOrchestratorService },
@@ -95,6 +120,10 @@ import { RuntimeController } from './http/runtime.controller';
     //    `AuthHelperCheck` 的第 0 个参数）。而单测一条都没红：它们把 session
     //    mock 掉了，**DI 接线从来没被执行过**。这类漏接只有真正把模块装起来才看得见。
     HelperContainerSession,
+    // ⚠️ 同一类教训：sandbox 的 `ResourceAllocator` 以 `@Optional()` 注入它 —— 漏了这一行
+    //    api 照样起得来，只是预留**静默消失**。protocol 用例
+    //    `sys/protocol/platform-reservation-wiring.spec.ts` 把整套模块装起来钉住它。
+    PLATFORM_RESERVATIONS,
   ],
 })
 export class RuntimeModule {}

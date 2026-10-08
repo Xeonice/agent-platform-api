@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CLOCK, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type {
   Clock,
@@ -8,8 +8,12 @@ import type {
   Tx,
   UnitOfWork,
 } from '@platform/shared-kernel';
-import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
-import type { ResourceQuota } from '@platform/contracts';
+import {
+  PLATFORM_RESERVATIONS,
+  SandboxProviderError,
+  SandboxProviderErrorCode,
+} from '@platform/contracts';
+import type { PlatformReservation, ResourceQuota } from '@platform/contracts';
 import { ResourceAllocation } from '../domain/entities/resource-allocation.entity';
 import { RESOURCE_ALLOCATION_REPOSITORY } from '../domain/repositories/resource-allocation.repository';
 import type { ResourceAllocationRepository } from '../domain/repositories/resource-allocation.repository';
@@ -71,6 +75,17 @@ export class ResourceAllocator {
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     /** 03 §3 的显式 FIFO —— 互斥、排队与队列深度都归它。 */
     private readonly queue: SchedulerQueue,
+    /**
+     * 平台常驻实例（帐号登录环境）的预留：判定、快照、容量估算都先从池子总量里扣掉它。
+     *
+     * ⚠️ 它**不进账本**（理由见契约 `PlatformReservation`），所以 `registeredTasks` 与
+     *    `/api/deployment/status` 都看不见它 —— 那正是要的。
+     * ⚠️ `@Optional()`：由 runtime 模块提供；没人提供（单测直接 new、或装配里没有 runtime）
+     *    就是不预留。漏接不会让 api 起不来，所以由 protocol 用例钉住接线。
+     */
+    @Optional()
+    @Inject(PLATFORM_RESERVATIONS)
+    private readonly reservations: readonly PlatformReservation[] = [],
   ) {}
 
   /** 单机恒 `'local'`（13 §2.1.3）；多节点时由部署填。 */
@@ -236,10 +251,12 @@ export class ResourceAllocator {
         active.map((row) => row.quota),
         host,
         policy,
+        this.reservations,
       ),
       host.diskAvailableBytes,
       policy,
       active.length,
+      this.reservations,
     );
   }
 
@@ -259,6 +276,7 @@ export class ResourceAllocator {
       active.map((a) => a.quota),
       host,
       this.policy,
+      this.reservations,
     );
   }
 
@@ -277,6 +295,7 @@ export class ResourceAllocator {
       active.map((a) => a.quota),
       host,
       policy,
+      this.reservations,
     );
     return trySchedule(quota, pool, host.diskAvailableBytes, policy);
   }
