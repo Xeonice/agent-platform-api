@@ -1,8 +1,11 @@
-import { createServer } from 'node:net';
+import { createServer, type Server } from 'node:net';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  isOciDigest,
+  isPlatformOwnedSandboxId,
+  parseImageRef,
   pinnedImageRef,
   SandboxProviderError,
   SandboxProviderErrorCode,
@@ -32,8 +35,9 @@ import { BoxliteSandboxFiles } from './boxlite-files';
 import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
 import { runGuestScript } from './boxlite-guest-shell';
-import { imageStageProgress, isImageStaged } from './boxlite-image-store';
+import { imageExposedPorts, imageStageProgress, isImageStaged } from './boxlite-image-store';
 import { readBoxliteHealth } from './boxlite-health';
+import { shimLiveness } from './boxlite-shim-liveness';
 
 /**
  * `boxlite` —— 微 VM provider（04 §2.1、SANDBOX-RUNTIME-DECISIONS 决策 B）。
@@ -68,8 +72,9 @@ import { readBoxliteHealth } from './boxlite-health';
  * 「两边一样」，可一旦那份实现对某个 provider 不适用，「一样」就变成**一起错**。
  *
  * ⚠️ 唯一残留的、与那个 agent 有关的动作是 `withClosedGatewayEnv`，它**不是数据面**：
- * BoxLite 会把镜像 `EXPOSE` 的 `:8080` 自动发布到宿主通配地址且关不掉，所以那扇门必须
- * 上一把没人有钥匙的锁。整段论证与实测见 `boxlite-exposed-port.ts`。
+ * 镜像若 `EXPOSE` 了端口（AIO 的 `:8080`），BoxLite 会把它自动发布到宿主通配地址且关不掉，
+ * 所以那扇门必须上一把没人有钥匙的锁。镜像没声明端口时（平台自己的 platform-boxlite），
+ * `create` 不传映射，什么都不发布。整段论证与实测见 `boxlite-exposed-port.ts`。
  *
  * 镜像经**本地 registry 中转**拉取（ADR 工程注记：BoxLite 自己的 image store 不支持
  * 断点续传，大镜像要经 `localhost:5001` 中转）；`imageRegistries` 里保留 `docker.io`，
@@ -78,6 +83,7 @@ import { readBoxliteHealth } from './boxlite-health';
 @Injectable()
 export class BoxliteSandboxProvider implements SandboxProvider {
   readonly name = 'boxlite';
+  private readonly logger = new Logger('BoxliteSandboxProvider');
 
   /**
    * ⚠️ **`@Optional()` 且只用来盖采样时刻。** 基础设施层禁 `new Date()`（01 §3），而
@@ -140,6 +146,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
   async create(ctx: SandboxProviderContext): Promise<SandboxHandle> {
     return this.guard(async () => {
       const runtime = await this.getRuntime();
+      const ports = await this.publishedPortsFor(ctx.image);
       const box = await runtime.create(
         {
           // 04 §7 时刻④: pull by `ref@digest`, not by tag. Steps ①②③ freeze a
@@ -156,8 +163,8 @@ export class BoxliteSandboxProvider implements SandboxProvider {
           // ⇒ 这也是 `providerState` 能空掉的原因：native 通道没有「地址」这回事，
           //   不像沙箱内 agent 那样要记住转发端口和 bearer token。
           detach: true,
-          // 见 `boxlite-exposed-port.ts`：这不是数据面，是给镜像自动发布出去的 :8080
-          // 上一把没人有钥匙的锁。
+          // 见 `boxlite-exposed-port.ts`：这不是数据面，是给镜像自动发布出去的端口
+          // 上一把没人有钥匙的锁（镜像没有那个网关时它只是一个没人读的环境变量）。
           env: Object.entries(withClosedGatewayEnv(ctx.env)).map(([key, value]) => ({
             key,
             value,
@@ -167,22 +174,68 @@ export class BoxliteSandboxProvider implements SandboxProvider {
             guestPath: v.target,
             readOnly: v.mode === 'ro',
           })),
-          // ⚠️ **这条映射不是数据面，是在给自动发布挪窝——删掉它会让「同时只能起一个
-          // boxlite 沙箱」。** 详细实测见 `boxlite-exposed-port.ts`：BoxLite 会把镜像
-          // `EXPOSE` 的 8080 自动发布到宿主，且**关不掉**；不给映射时它落在**固定的**
-          // `*:8080`，于是第二个 box 直接起不来——
-          // `gvproxy_create failed: ... listen tcp 0.0.0.0:8080: bind: address already in use`
-          // （本仓 e2e 一次跑两个 boxlite 沙箱时真的红过）。给 guest 8080 指定一个
-          // **空闲宿主端口**，自动发布就落到那个唯一端口上，冲突消失。
-          // 端口号**不落库**：没有任何东西会去连它（数据面全在 native 那侧），
-          // 所以它是一次性的、不需要跨重启还原 —— 这正是 `providerState` 能空掉的原因。
-          ports: [{ hostPort: await freeHostPort(), guestPort: IMAGE_EXPOSED_AGENT_PORT }],
+          // ⚠️ **映射只在镜像真的声明了端口时才给**，规则见 `publishedPortsFor`。
+          // ⛔ 不要改回「无条件给 8080 一个随机端口」：镜像没有 EXPOSE 时，正是那一条映射
+          //    让每个 box 都在宿主通配地址上多了一个监听（BoxLite 忽略 hostIp）。
+          ...(ports.length > 0 ? { ports } : {}),
         },
         this.boxName(ctx.sandboxId),
       );
       // providerState 为空：native 通道要的全部信息就是 box id 本身。
       return { provider: this.name, providerSandboxId: box.id };
     });
+  }
+
+  /**
+   * 这个镜像的 box 要给 BoxLite 哪些端口映射 —— **只为让自动发布挪到唯一端口**，不是数据面。
+   *
+   * BoxLite 0.9.7 的规则（实测 + 读过源码 `vmm_spawn.rs::build_network_config`）：镜像
+   * config 里声明的 **tcp** 端口一律自动发布，宿主端口默认等于客体端口；为某个客体端口给一条
+   * 映射只能改宿主那一侧的号，关不掉发布；hostIp 与 protocol 都被忽略 —— 每条映射都是
+   * `0.0.0.0:<hostPort>` 上的一个 TCP 监听。于是按镜像自己的声明分三种情况：
+   *
+   *   · 没声明（`[]`）—— 不给映射，BoxLite 什么都不发布。平台的 platform-boxlite 镜像与
+   *     auth helper 都走这一支：⇒ 宿主上不再有它们的通配监听。
+   *   · 声明了 —— 每个 tcp 端口各挪到一个**互不相同**的空闲宿主端口，多个 box 才能共存
+   *     （不给映射时第二个 box 撞固定端口起不来：`gvproxy_create failed: … bind: address
+   *     already in use`，本仓 e2e 真的红过）。⚠️ 随机端口**不降低暴露**，只避免冲突。
+   *     ⛔ udp 端口不映射：BoxLite 不自动发布 udp，而给它一条映射反倒会多出一个 TCP 监听。
+   *   · 读不到（`null`）—— **不发布**并记 warn。镜像若其实声明了端口，BoxLite 会按原号发布，
+   *     同一镜像的第二个 box 会撞端口**显式失败**；反过来猜「有」就是给每个 box 白开一个
+   *     通配监听。安全优先。
+   *
+   * ⚠️ 刻意**不在这里 `images.pull`**：那会把冷拉从 starting 挪进 creating，向导那条
+   *    「首次要拉镜像」的提示（`imageStaged`）就永远答「已在本机」了。镜像不在库里 ⇒ 读不到。
+   * ⚠️ 端口号**不落库**：没有任何东西会去连它（数据面全在 native 那侧），所以它是一次性的、
+   *    不需要跨重启还原；已经建好的 box 的映射写在 BoxLite 自己的 box_config 里，start 原样复用。
+   */
+  private async publishedPortsFor(
+    image: ResolvedImageSpec,
+  ): Promise<{ hostPort: number; guestPort: number }[]> {
+    const ref = pinnedImageRef(image);
+    const digest = parseImageRef(ref).digest;
+    const exposed =
+      digest === undefined || !isOciDigest(digest)
+        ? null
+        : await imageExposedPorts(
+            boxliteHome(),
+            digest,
+            // 架构名映射照 `stageImage` 那处既有写法（OCI 用 `amd64`，Node 用 `x64`）。
+            process.arch === 'arm64' ? 'arm64' : 'amd64',
+            fsp,
+            join,
+          ).catch(() => null);
+    if (exposed === null) {
+      this.logger.warn(
+        `读不到镜像 ${ref} 声明的端口（BoxLite 本地库里没有它的 config，或格式不认识），本次不发布任何端口；` +
+          '若该镜像其实 EXPOSE 了端口，BoxLite 会按原端口号发布，同一镜像的第二个 box 会因端口冲突而创建失败',
+      );
+      return [];
+    }
+    const tcp = exposed.filter((p) => p.protocol === 'tcp');
+    if (tcp.length === 0) return [];
+    const hostPorts = await allocateHostPorts(tcp.length);
+    return tcp.map((p, i) => ({ hostPort: hostPorts[i]!, guestPort: p.port }));
   }
 
   /**
@@ -289,12 +342,80 @@ export class BoxliteSandboxProvider implements SandboxProvider {
 
   async destroy(handle: SandboxHandle): Promise<void> {
     return this.guard(async () => {
-      const runtime = await this.getRuntime();
-      await runtime.remove(handle.providerSandboxId, true).catch((e: unknown) => {
-        // already gone ⇒ idempotent (04 §2.2)
-        if (!/not found|no such|unknown/i.test((e as Error).message)) throw e;
-      });
+      await this.removeQuietly(handle.providerSandboxId);
     });
+  }
+
+  /**
+   * 按 sandboxId 清掉曾经建过的那个 box（契约 `destroyBySandboxId`）—— auth helper 的
+   * 「先清残留再建」靠它，不再依赖开机对账和模块顺序。
+   *
+   * ⚠️ 名字只在 `boxName` 一处推导（前缀带实例指纹），所以只会删到**本实例**的那一个；
+   *    native `remove` 本来就认 id 或名字。不存在时正常返回（幂等，契约要求）。
+   *
+   * ⚠️⚠️ **还在跑的先礼貌停机，再 force remove**（与任务 teardown 的「先 stop 再 destroy」
+   *    同一条纪律）。BoxLite 0.9.7 的 force remove 只对记录里的外层 bwrap 发 SIGTERM→SIGKILL，
+   *    detached box 的内层 bwrap + shim + VM 要靠该 box 自己 cgroup 的 `cgroup.kill` 兜底；
+   *    而 helper 是每个容器里建的第一个 box，cgroup 委派不生效时它恰好没有这个兜底 ⇒ VM 进程
+   *    留成孤儿，发版探针从此判忙。`stop()` 先做 guest shutdown（BoxLite 自己限 10 秒），VM
+   *    关机后整棵进程树随之退出。停不下来也照删 —— 停机是礼貌，删除才是权威。
+   *    开机时的旧 helper 已被 BoxLite 标成 stopped，这一步直接跳过。
+   */
+  async destroyBySandboxId(sandboxId: string): Promise<void> {
+    return this.guard(async () => {
+      const name = this.boxName(sandboxId);
+      await this.stopBeforeRemoval(name);
+      if (await this.removeQuietly(name)) {
+        this.logger.log(`removed box ${name} (destroyBySandboxId ${sandboxId})`);
+      }
+    });
+  }
+
+  /** {@link destroyBySandboxId} 的礼貌停机：只对还在跑的 box，限时，⛔ 从不抛。 */
+  private async stopBeforeRemoval(name: string): Promise<void> {
+    try {
+      const runtime = await this.getRuntime();
+      const box = await runtime.get(name);
+      if (box === null || box.info().state.running !== true) return;
+      const outcome = await new Promise<'stopped' | 'timed-out'>((resolve, reject) => {
+        const timer = setTimeout(() => resolve('timed-out'), COURTESY_STOP_MS);
+        timer.unref?.();
+        box.stop().then(
+          () => {
+            clearTimeout(timer);
+            resolve('stopped');
+          },
+          (e: unknown) => {
+            clearTimeout(timer);
+            reject(e instanceof Error ? e : new Error(String(e)));
+          },
+        );
+      });
+      if (outcome === 'timed-out') {
+        this.logger.warn(
+          `box ${name} did not stop within ${String(COURTESY_STOP_MS / 1000)}s; force-removing it anyway`,
+        );
+      }
+    } catch (e: unknown) {
+      this.logger.warn(
+        `could not stop box ${name} before removing it (${e instanceof Error ? e.message : String(e)}); force-removing it anyway`,
+      );
+    }
+  }
+
+  /**
+   * force remove；已经不在 ⇒ 幂等返回 `false`（04 §2.2），真删掉了 ⇒ `true`，其余错误照抛。
+   * ⚠️ 返回值只为日志：「box id 为什么变了」事后要能从日志里还原。
+   */
+  private async removeQuietly(idOrName: string): Promise<boolean> {
+    const runtime = await this.getRuntime();
+    try {
+      await runtime.remove(idOrName, true);
+      return true;
+    } catch (e: unknown) {
+      if (!/not found|no such|unknown/i.test((e as Error).message)) throw e;
+      return false;
+    }
   }
 
   /**
@@ -308,22 +429,34 @@ export class BoxliteSandboxProvider implements SandboxProvider {
    *
    * ⚠️ `metrics()` 拿不到就**不带** `execErrorsTotal`（不退化成 0）：0 是「一次都没
    * 错过」这个断言，缺席才是「没问出来」。
+   *
+   * ⚠️ **记录说 running 不等于 VM 还在**：VM 被 `kill -9` 之后 BoxLite 照报 running（0.9.7
+   * 不配 health check 时没有退出监视）。所以 running 的记录先按 shim 进程核一次
+   * （`shimLiveness`，只读 `shim.pid` 与 `/proc`）：确认已不在 ⇒ `instance_dead`，并且
+   * ⛔ 不再碰 `metrics()` —— 那会在新建的 BoxImpl 上去 attach 一个死掉的 shim。核不出来
+   * （没有 procfs、文件认不出来）⇒ 照旧按记录说话。
+   * 读它的有三处：helper 的存活复核与诊断（`instance_dead` ⇒ 失效、重建）、
+   * `SandboxHealthMonitor`（读作异常迹象，交给数据面确认）、`QuotaReconciler`（只认
+   * `instance_missing` 是查无，`instance_dead` 照样占着名额 —— 盘还在）。
    */
   async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
     try {
       const runtime = await this.getRuntime();
       const info = await runtime.getInfo(handle.providerSandboxId);
       if (!info) return { lifecycleState: 'instance_missing' };
+      const shimGone =
+        info.state.running === true && (await shimLiveness(handle.providerSandboxId)) === 'gone';
+      const running = info.state.running === true && !shimGone;
       // SDK metrics() acquires live state and can implicitly start a stopped VM.
       // Reconciliation must preserve stopped tasks and their retained registrations.
-      const execErrorsTotal =
-        info.state.running === true ? await this.execErrorsTotal(handle) : undefined;
+      const execErrorsTotal = running ? await this.execErrorsTotal(handle) : undefined;
       const at = info.healthStatus?.lastCheck ?? this.clock?.now().toISOString();
       const reading =
         at === undefined
           ? null
           : readBoxliteHealth({
-              running: info.state.running,
+              running,
+              ...(shimGone ? { notRunningBecause: SHIM_GONE } : {}),
               state: {
                 state: info.healthStatus?.state ?? 'None',
                 failures: info.healthStatus?.failures ?? 0,
@@ -335,9 +468,15 @@ export class BoxliteSandboxProvider implements SandboxProvider {
               at,
             });
       return {
-        lifecycleState: this.mapState(info.state.status, info.state.running),
+        lifecycleState: shimGone
+          ? 'instance_dead'
+          : this.mapState(info.state.status, info.state.running),
         ...(reading === null ? {} : { health: reading.health }),
-        raw: { ...info, ...(execErrorsTotal === undefined ? {} : { execErrorsTotal }) },
+        raw: {
+          ...info,
+          ...(shimGone ? { shimProcess: 'gone' } : {}),
+          ...(execErrorsTotal === undefined ? {} : { execErrorsTotal }),
+        },
       };
     } catch (e) {
       throw this.toProviderError(e);
@@ -397,7 +536,31 @@ export class BoxliteSandboxProvider implements SandboxProvider {
         `box ${handle.providerSandboxId} not found`,
       );
     }
+    // ⛔ **平台自持的实例（auth helper）停了就该重建，不许经数据面被隐式拉起。** BoxLite 0.9.7
+    //    对 stopped / failed 的 box 做 exec 会直接走 restart 流水线，用旧 rootfs 把它复活（旧
+    //    rootfs 里可能有刷新时短暂落盘的凭证），还绕过了 `start()` 的就绪等待。helper 拿到这个
+    //    INVALID_STATE 会作废句柄、重建一个新的（`ContainerAuthHelper`）。
+    // ⚠️ 只管平台自持的这一类：任务沙箱的数据面今天就依赖这次隐式拉起（例如读一个已停止任务
+    //    的产物），收不收紧是另一件事，不夹带在这里。
+    const info = box.info();
+    if (info.state.running !== true && this.isPlatformOwnedBox(info.name)) {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.INVALID_STATE,
+        `platform box ${info.name ?? handle.providerSandboxId} is ${info.state.status}, not running; ` +
+          'it is recreated rather than revived',
+      );
+    }
     return box;
+  }
+
+  /** 名字是不是「本实例前缀 + 平台自持的固定 sandboxId」（auth helper）。 */
+  private isPlatformOwnedBox(name: string | undefined): boolean {
+    const prefix = boxliteNamePrefix();
+    return (
+      name !== undefined &&
+      name.startsWith(prefix) &&
+      isPlatformOwnedSandboxId(name.slice(prefix.length))
+    );
   }
 
   private async findBox(handle: SandboxHandle): Promise<BoxliteBox | null> {
@@ -501,28 +664,53 @@ const READY_ATTEMPTS = 600;
 const READY_INTERVAL_MS = 500;
 
 /**
- * AIO 镜像 `EXPOSE` 的那个端口。平台**不连它**（数据面全在 native 侧）；写在这里只是
- * 因为 BoxLite 的自动发布认这个号，我们要把它挪到一个唯一的宿主端口上（见 `create`）。
+ * `destroyBySandboxId` 礼貌停机的上限：BoxLite 的 guest shutdown 自己最多等 10 秒，之后
+ * 对外层 bwrap SIGTERM、2 秒后 SIGKILL —— 20 秒把这两段都盖住（与任务 teardown 的
+ * `stopForTeardown` 同一个数）。超时不等，照删。
  */
-const IMAGE_EXPOSED_AGENT_PORT = 8080;
+const COURTESY_STOP_MS = 20_000;
+
+/** `inspect` 核出 shim 已不在时，健康读数里那句原因。 */
+const SHIM_GONE =
+  'BoxLite still records the box as running, but its shim process is gone (shim.pid / /proc)';
 
 /**
- * 占一个空闲的宿主端口号。
+ * 占 `count` 个**互不相同**的空闲宿主端口号。
  *
- * ⚠️ 有一个很小的 TOCTOU 窗口（listen(0) 拿到号 → close → BoxLite 再 bind），这是
- * 「best effort」而不是保证；撞上了 `create()` 会响亮失败，重试即可。用它换来的是
- * 「同一台机器上能同时跑多个 boxlite 沙箱」，而固定 8080 是**必然**冲突。
+ * ⚠️ 先把 `count` 个 `listen(0)` 同时开着、拿到号之后再一起关 —— 逐个「开、取号、关」的话
+ *    内核可以把刚关掉的号再发一次，两条映射撞在同一个宿主端口上。
+ * ⚠️ 取号绑的是 **`0.0.0.0`**，与 gvproxy 真正绑定的地址一致：只在 `127.0.0.1` 上取号，
+ *    拿到的号可能正被别的网卡上的监听占着，gvproxy 绑通配地址时照样撞。
+ * ⚠️ 仍有 TOCTOU 窗口，而且**不小**：号码在 `create()` 时写进 BoxLite 的 box_config，gvproxy
+ *    却要到 `start()` 的 VmmSpawn 才真正 bind —— 中间可能隔着一次冷拉镜像（分钟级），之后
+ *    每次 start 都复用同一个号。这是「best effort」而不是保证；撞上了 start 会响亮失败。
+ *    用它换来的是「同一台机器上能同时跑多个声明了端口的 boxlite 沙箱」，而固定端口是**必然**冲突。
  * ⚠️ 不设 `hostIp`：实测 BoxLite **忽略**这个字段（传 `127.0.0.1` 也照样绑
- * `*:<port>`），写上去只会留下一句与实现不符的注释。
+ *    `*:<port>`），写上去只会留下一句与实现不符的注释。
  */
-function freeHostPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error('could not allocate a host port'))));
-    });
-  });
+async function allocateHostPorts(count: number): Promise<number[]> {
+  const servers: Server[] = [];
+  try {
+    const ports: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const srv = createServer();
+      servers.push(srv);
+      ports.push(
+        await new Promise<number>((resolve, reject) => {
+          srv.once('error', reject);
+          srv.listen(0, '0.0.0.0', () => {
+            const addr = srv.address();
+            const port = typeof addr === 'object' && addr ? addr.port : 0;
+            if (port > 0) resolve(port);
+            else reject(new Error('could not allocate a host port'));
+          });
+        }),
+      );
+    }
+    return ports;
+  } finally {
+    await Promise.all(
+      servers.map((srv) => new Promise<void>((resolve) => srv.close(() => resolve()))),
+    );
+  }
 }

@@ -60,12 +60,30 @@ export interface HelperSeedFile {
   mode?: number;
 }
 
+/**
+ * 帐号登录环境**本身**不可用（helper 建不起来、或重建之后仍执行不了命令）—— 平台基础设施
+ * 的故障，与这一次登录 / 刷新要处理的那份凭证无关。
+ *
+ * ⚠️ 单独成类是为了让调用方能**分类**：刷新扫描器（05 §5.1）的「连续 3 次失败即停刷、
+ * 显示过期」针对的是凭证本身刷新不了；helper 坏掉时把失败记到凭证头上，helper 恢复后那份
+ * 凭证也不会再被自动刷新。⇒ 扫描器见到它只记 warn，不计入 `refresh_failures`。
+ */
+export class HelperUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'HelperUnavailableError';
+  }
+}
+
 export interface AuthHelper {
   /**
    * Mint a fresh isolated HOME, optionally seed files into it (05 §5.1: the refresh
    * scanner writes the current provider auth file so the CLI can refresh it), then
    * spawn `cmd` in a pty with `HOME` — plus every name in `configDirEnvNames` — set to
    * that directory.
+   *
+   * Rejects with {@link HelperUnavailableError} when the helper environment itself is
+   * unavailable (container form only — the host form has no helper to lose).
    *
    * ⚠️ `configDirEnvNames` is a plain `string[]`, not a `RuntimeAdapter`: this port
    * lives in `domain`, which may not import contracts (boundaries §2.2). The caller

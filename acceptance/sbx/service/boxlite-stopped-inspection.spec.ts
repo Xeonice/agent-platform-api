@@ -23,7 +23,19 @@ const native = vi.hoisted(() => ({
   failMetrics: false,
   missing: false,
   stopBeforeHandle: false,
+  /** What the shim process check answers for a box recorded as running. */
+  shim: 'alive' as 'alive' | 'gone' | 'unknown',
+  shimChecks: 0,
 }));
+vi.mock(
+  '../../../packages/modules/sandbox/src/infrastructure/providers/boxlite/boxlite-shim-liveness',
+  () => ({
+    shimLiveness: async () => {
+      native.shimChecks++;
+      return native.shim;
+    },
+  }),
+);
 vi.mock(
   '../../../packages/modules/sandbox/src/infrastructure/providers/boxlite/boxlite-runtime',
   () => ({
@@ -77,6 +89,8 @@ beforeEach(() => {
     failMetrics: false,
     missing: false,
     stopBeforeHandle: false,
+    shim: 'alive',
+    shimChecks: 0,
   });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -158,6 +172,42 @@ describe('BoxLite inspection preserves stopped VMs and their retained task slots
     expect(result.raw).not.toHaveProperty('execErrorsTotal');
     expect(native.metricReads).toBe(1);
   });
+
+  it('a record still saying running whose shim process is gone reads as dead, without touching live state', async () => {
+    native.status = 'running';
+    native.running = true;
+    native.shim = 'gone';
+    const result = await new BoxliteSandboxProvider().inspect(handle);
+    expect(result).toMatchObject({
+      lifecycleState: 'instance_dead',
+      health: { state: 'unhealthy', message: expect.stringContaining('shim process is gone') },
+      raw: { shimProcess: 'gone' },
+    });
+    expect(result.raw).not.toHaveProperty('execErrorsTotal');
+    expect(native).toMatchObject({ shimChecks: 1, handleReads: 0, metricReads: 0 });
+  });
+
+  it('a shim check that cannot conclude keeps the record as it is', async () => {
+    native.status = 'running';
+    native.running = true;
+    native.shim = 'unknown';
+    const result = await new BoxliteSandboxProvider().inspect(handle);
+    expect(result).toMatchObject({
+      lifecycleState: 'instance_running',
+      raw: { execErrorsTotal: 7 },
+    });
+    expect(result.raw).not.toHaveProperty('shimProcess');
+  });
+
+  it.each(['stopped', 'configured', 'failed'])(
+    'a %s record is not checked against any process',
+    async (status) => {
+      native.status = status;
+      native.shim = 'gone';
+      await new BoxliteSandboxProvider().inspect(handle);
+      expect(native.shimChecks).toBe(0);
+    },
+  );
 
   it('does not restart a VM stopped between metadata sampling and acquiring its handle', async () => {
     native.status = 'running';

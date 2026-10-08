@@ -92,6 +92,21 @@ describe('container CPU/RAM limits constrain actual admission rather than host t
     expect(await linuxResourceCapacity(host, {}, root)).toEqual({ cores: 1.5, ramMb: 2048 });
   });
 
+  it('keeps the container ceiling after the entrypoint moves the API into a delegated /api leaf', async () => {
+    // deploy/containers/api-cgroup.mjs moves every root process into /sys/fs/cgroup/api so
+    // the root can enable cpu/memory/pids for BoxLite; the leaf itself has no limit.
+    const root = await fixture({
+      '/proc/self/cgroup': '0::/api\n',
+      '/proc/self/mountinfo': v2,
+      '/sys/fs/cgroup/api/cpu.max': 'max 100000',
+      '/sys/fs/cgroup/api/memory.max': 'max',
+      '/sys/fs/cgroup/cpu.max': '600000 100000',
+      '/sys/fs/cgroup/memory.max': String(14 * 1024 ** 3),
+      '/sys/fs/cgroup/cpuset.cpus.effective': '0-5',
+    });
+    expect(await linuxResourceCapacity(host, {}, root)).toEqual({ cores: 6, ramMb: 14_336 });
+  });
+
   it('recognizes separate v1 CPU, memory and cpuset controller mounts', async () => {
     const root = await fixture({
       '/proc/self/cgroup':

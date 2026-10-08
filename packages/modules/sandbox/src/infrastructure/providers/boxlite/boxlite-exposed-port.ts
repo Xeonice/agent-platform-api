@@ -4,8 +4,9 @@ import { generateKeyPairSync } from 'node:crypto';
  * ══ boxlite 的暴露面加固：与数据面**无关**，纯粹是端口的事 ══════════════════
  *
  * 决策 A 修订里写着「boxlite 不再需要转发端口 ⇒ 该攻击面在这一档直接消失」。
- * **实测把这半句推翻了。** BoxLite 会把镜像 `EXPOSE` 的端口**自动发布到宿主**，
- * 而且是**通配地址**，我们要不要都一样：
+ * **对声明了 `EXPOSE` 的镜像，实测把这半句推翻了。** BoxLite 会把镜像 `EXPOSE` 的端口
+ * **自动发布到宿主**，而且是**通配地址**，我们要不要都一样。下表是用 **AIO 镜像**
+ * （`EXPOSE 8080`）测的：
  *
  * | `JsBoxOptions.ports` | 宿主上新增的监听（`lsof`，同一次 create 前后取差集） |
  * |---|---|
@@ -14,20 +15,23 @@ import { generateKeyPairSync } from 'node:crypto';
  * | `[{ guestPort: 1 }]` | `*:8080` **和** `*:1` —— 给**别的** guest 端口加映射只是**追加** |
  * | `[{ hostPort: 45999, guestPort: 8080, hostIp: '127.0.0.1' }]` | `*:45999` —— 给**同一个** guest 端口加映射会**改掉它的宿主端口**；`hostIp` **被忽略**，根本不是 loopback |
  *
- * 归纳出来的规则（provider 就是按它写的）：**镜像 `EXPOSE` 的每个端口都会被发布，
- * hostPort 默认等于 guestPort；为该 guest 端口显式指定 hostPort 只能改宿主那一侧的
- * 号，不能取消发布。**
+ * 归纳出来的规则（provider 就是按它写的，0.9.7 源码 `build_network_config` 同口径）：
+ * **镜像 `EXPOSE` 的每个 tcp 端口都会被发布，hostPort 默认等于 guestPort；为该 guest 端口
+ * 显式指定 hostPort 只能改宿主那一侧的号，不能取消发布；每条用户映射都是一个 TCP 监听。**
+ * ⚠️ 反过来，**镜像没有声明端口、也不传映射时，BoxLite 什么都不发布** —— 平台自己的
+ * platform-boxlite 镜像（以及用它的 auth helper）就是这样，那里没有任何门可锁。
  *
  * 另有旁证：宿主 8080 被别的进程占着时，一次**没传任何 ports** 的 `create` 直接
  * 失败在 `gvproxy_create failed: cannot add network services: listen tcp
  * 0.0.0.0:8080: bind: address already in use`。⚠️ 这条不只是理论——本仓 e2e 一次跑
  * 两个 boxlite 沙箱时**真的红过**，因为两个 box 都想绑固定的 8080。
- * 所以 `create()` 仍然给 guest 8080 指一个**空闲宿主端口**：不是为了连它，
- * 而是把这个无法关闭的发布从「固定端口」挪到「唯一端口」，让多沙箱能共存。
+ * 所以对声明了端口的镜像，`create()` 给**每个**声明的 tcp 端口各指一个互不相同的空闲
+ * 宿主端口：不是为了连它，而是把这个无法关闭的发布从「固定端口」挪到「唯一端口」，让多
+ * 沙箱能共存（规则与「读不到 config 时怎么办」见 `BoxliteSandboxProvider.publishedPortsFor`）。
  *
  * ⇒ 两条结论，都写进代码而不只是文档：
- *  ① **关不掉。** 这一档没有「不发布」这个选项，所以「换成 native 之后端口攻击面
- *     消失了」是错的；ADR 的那句话需要按本表更正。
+ *  ① **对声明了 `EXPOSE` 的镜像关不掉。** 这一档没有「不发布声明端口」这个选项，所以
+ *     「换成 native 之后端口攻击面消失了」对这类镜像是错的；ADR 的那句话需要按本表更正。
  *  ② **既然关不掉，那扇门就必须上锁。** AIO 镜像自带鉴权网关，只是默认关：
  *     `/opt/gem/entrypoint.sh` 依据 `JWT_PUBLIC_KEY` 是否非空，在
  *     `nginx-server-without-auth.conf` 与 `nginx-server-with-auth.conf` 之间切换。
@@ -42,9 +46,12 @@ import { generateKeyPairSync } from 'node:crypto';
  * 所以 04 §2.2 的「删掉 boxlite 对 agent 的依赖」是成立的：删掉的是**数据面依赖**，
  * 留下的是**对同一张镜像里那个 HTTP 服务的封口**。
  *
- * ⏳ 残留风险（如实登记）：`:8080` 仍然对外可达，只是回 401。真正的收口应该是
- * 「让 BoxLite 别发布」或「给微 VM 加网络策略」，两者当前 SDK 都没给；一旦
- * `@boxlite-ai/boxlite` 提供了抑制自动发布的开关，这一整个文件都该删掉。
+ * ⏳ 残留风险（如实登记，**只对声明了 `EXPOSE` 的镜像成立**）：声明的端口被挪到随机宿主
+ * 端口之后仍然对外可达（AIO 的 `:8080` 回 401）—— 随机端口只避免冲突，不降低暴露。
+ * 读不到镜像 config 时 provider 不传映射：没声明端口的镜像因此什么都不发布，声明了的则按
+ * 原端口号发布（同一镜像的第二个 box 会撞端口显式失败）。真正的收口应该是「让 BoxLite
+ * 别发布」或「给微 VM 加网络策略」，两者当前 SDK 都没给；一旦 `@boxlite-ai/boxlite`
+ * 提供了抑制自动发布的开关，这一整个文件都该删掉。
  */
 
 /** AIO 镜像用来打开自带 nginx 鉴权网关的环境变量。 */

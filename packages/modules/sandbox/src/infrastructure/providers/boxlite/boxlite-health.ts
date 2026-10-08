@@ -26,6 +26,11 @@ import type { HealthStatus } from '@platform/contracts';
  */
 export interface BoxliteHealthInputs {
   running: boolean;
+  /**
+   * `running === false` 的原因，缺席 ⇒ BoxLite 自己说不在跑。⚠️ 也可能是平台核出来的：
+   * 记录还是 running、shim 进程却已经没了（见 `boxlite-shim-liveness.ts`）。
+   */
+  notRunningBecause?: string;
   state: { state: string; failures: number; lastCheck?: string };
   /** `metrics()` 拿不到时缺席 —— 缺席不退化成 0（0 是「一次都没错过」，是个断言）。 */
   execErrorsTotal?: number;
@@ -47,7 +52,7 @@ export function readBoxliteHealth(input: BoxliteHealthInputs): BoxliteHealthRead
       health: {
         state: 'unhealthy',
         lastCheckedAt,
-        message: 'box is not running (info().state.running === false)',
+        message: input.notRunningBecause ?? 'box is not running (info().state.running === false)',
         // VM 不在跑是一次确凿的失败，哪怕 BoxLite 自己的计数器还是 0
         consecutiveFailures: Math.max(failures, 1),
       },

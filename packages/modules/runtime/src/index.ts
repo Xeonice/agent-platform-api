@@ -48,9 +48,14 @@ export { assertSessionRef } from './infrastructure/adapters/session-ref.util';
 export { stripAnsi, extractOsc8Urls } from './infrastructure/adapters/ansi.util';
 /**
  * auth helper 容器的生命周期 —— 导出它**只为一个消费方**：`platform/system` 的
- * 诊断项要读它的就绪状态（11 §1.1「不要等用户点登录才失败」）。
+ * 诊断项要读它的就绪状态（11 §1.1「不要等用户点登录才失败」），以及它的配额（诊断文案
+ * 说明「占用多少、已从调度容量里预留」）。
  *
  * ⛔ 别把 `ContainerAuthHelper` 也导出去。它是 `AUTH_HELPER` 这个端口的实现，
  * 消费方一律经端口拿，导出实现就等于邀请别人绕过端口直接 new 一个。
  */
-export { HelperContainerSession } from './infrastructure/helper/helper-container.session';
+export {
+  AUTH_HELPER_QUOTA,
+  HelperContainerSession,
+} from './infrastructure/helper/helper-container.session';
+export type { HelperObservation } from './infrastructure/helper/helper-container.session';

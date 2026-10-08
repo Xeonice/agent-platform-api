@@ -86,27 +86,53 @@ export function planQuota(input: {
 }
 
 /**
+ * 账本以外、平台自己常驻的一份占用（例如帐号登录环境）—— 契约 `PlatformReservation` 的
+ * 结构孪生（domain 不 import contracts，同 `ResourceQuota` 那条纪律）。
+ */
+export interface PoolReservation {
+  /** 给人看的名字，进容量说明。 */
+  label: string;
+  quota: ResourceQuota;
+}
+
+/**
  * 03 §1/§2 的资源池快照 —— **纯函数**，零 IO（23 §5.5）。
  *
  * `used*` 是**全部未释放登记之和**，不是「实际观测到的占用」。这是账本口径，也是
  * 唯一能在「实例还没建出来」的那一刻回答「还剩多少」的口径 —— 而那一刻正是 TOCTOU
  * 发生的地方。
+ *
+ * ⚠️ `reserved`（平台常驻占用）**从总量里扣**，⛔ 不加到 `used*` 上：那样 `maxTasks` 会把它
+ *    算成「一个任务都没有却已用掉 1 核」，拒绝文案也会这么说；而账本（以及据它判空闲的发版
+ *    流程）只该看见任务。扣到 0 为止，不出负数。
  */
 export function snapshotOf(
   activeQuotas: readonly ResourceQuota[],
   host: HostCapacity,
   policy: SchedulingPolicy,
+  reserved: readonly PoolReservation[] = [],
 ): ResourcePoolSnapshot {
   const usable = 1 - policy.safetyMargin;
+  const held = sumQuotas(reserved.map((r) => r.quota));
   return {
-    totalCores: host.cores * usable * policy.cpuOvercommitRatio,
+    totalCores: Math.max(0, host.cores * usable * policy.cpuOvercommitRatio - held.cores),
     // 内存不超配（防 OOM）、磁盘不超配（超配等于必然写满）——两者都只乘 usable。
-    totalRamMb: Math.floor(host.ramMb * usable),
+    totalRamMb: Math.max(0, Math.floor(host.ramMb * usable) - held.ramMb),
     totalDiskMb:
-      host.diskTotalBytes === null ? Infinity : Math.floor((host.diskTotalBytes / MIB) * usable),
+      host.diskTotalBytes === null
+        ? Infinity
+        : Math.max(0, Math.floor((host.diskTotalBytes / MIB) * usable) - held.diskMb),
     usedCores: activeQuotas.reduce((s, q) => s + q.cores, 0),
     usedRamMb: activeQuotas.reduce((s, q) => s + q.ramMb, 0),
     usedDiskMb: activeQuotas.reduce((s, q) => s + q.diskMb, 0),
+  };
+}
+
+function sumQuotas(quotas: readonly ResourceQuota[]): ResourceQuota {
+  return {
+    cores: quotas.reduce((s, q) => s + q.cores, 0),
+    ramMb: quotas.reduce((s, q) => s + q.ramMb, 0),
+    diskMb: quotas.reduce((s, q) => s + q.diskMb, 0),
   };
 }
 
@@ -177,13 +203,18 @@ function fmt(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 }
 
-/** Default-image, empty-project estimate. Actual occupied quotas may differ. */
+/**
+ * Default-image, empty-project estimate. Actual occupied quotas may differ.
+ *
+ * `reserved` 只用来写说明 —— 扣减已经在 `pool`（{@link snapshotOf}）里做完了，⛔ 别再扣一遍。
+ */
 export function capacityOf(
   quota: ResourceQuota,
   pool: ResourcePoolSnapshot,
   availableDiskBytes: number | null,
   policy: SchedulingPolicy,
   registeredTasks: number,
+  reserved: readonly PoolReservation[] = [],
 ): { remainingTasks: number; registeredTasks: number; maxTasks: number; basis: string } {
   const dimensions = [
     { label: 'CPU', total: pool.totalCores, used: pool.usedCores, need: quota.cores, unit: '核' },
@@ -217,10 +248,16 @@ export function capacityOf(
   } else {
     reason = `当前瓶颈为${limiting.label}登记余量（${fmt(limiting.total - limiting.used)} ${limiting.unit}）；项目代码较大时磁盘配额另按基线体积计算`;
   }
+  const held = sumQuotas(reserved.map((r) => r.quota));
+  const reservedNote =
+    reserved.length === 0
+      ? ''
+      : `；已为平台常驻的${reserved.map((r) => r.label).join('、')}预留 ${fmt(held.cores)} 核 CPU、${fmt(held.ramMb)} MB 内存` +
+        (held.diskMb > 0 ? `、${fmt(held.diskMb)} MB 磁盘` : '');
   return {
     remainingTasks: verdict.ok ? Math.max(1, Math.min(...remaining)) : 0,
     registeredTasks,
     maxTasks,
-    basis: `${prefix}；${reason}`,
+    basis: `${prefix}；${reason}${reservedNote}`,
   };
 }

@@ -5,7 +5,7 @@ import { RUNTIME_ADAPTER_REGISTRY } from '@platform/contracts';
 import type { RuntimeAdapterRegistry } from '@platform/contracts';
 import { RuntimeCredentialService } from '@platform/credential';
 import type { RuntimeRefreshDue, RuntimeSecretPayload } from '@platform/credential';
-import { AUTH_HELPER } from '../../domain/ports/auth-helper.port';
+import { AUTH_HELPER, HelperUnavailableError } from '../../domain/ports/auth-helper.port';
 import type { AuthHelper } from '../../domain/ports/auth-helper.port';
 
 /** Scan cadence + how far ahead of expiry to refresh + the new token TTL (05 §5.1). */
@@ -50,6 +50,12 @@ const REFRESH_CMD_TIMEOUT_MS = 120_000;
  * set, SHARED with any manual trigger, so one credential is never refreshed twice
  * concurrently (avoids the token write-back race that rejected method B). ≥3
  * consecutive failures stop (`recordRefreshFailure` → presented as expired).
+ *
+ * ⚠️ 「连续 3 次失败」数的是**这份凭证刷新不了**，⛔ 不数平台基础设施的故障：helper 本身
+ * 不可用（`HelperUnavailableError`）时只记 warn、不计入 `refresh_failures`，凭证是否过期
+ * 仍以 `expires_at` 为准。此前 helper 一坏，三轮扫描就把凭证判成过期、从此不再自动刷新
+ * —— helper 恢复了也一样。这一轮里剩下的凭证同样跳过（它们只会撞同一个坏掉的 helper，
+ * 每撞一次还要重建一次），下一轮再试。
  */
 @Injectable()
 export class CredentialRefreshScanner implements OnApplicationBootstrap {
@@ -78,12 +84,21 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
     this.running = true;
     try {
       const due = await this.credentials.listRefreshDue(REFRESH_LEAD_MS);
-      for (const item of due) {
+      for (const [index, item] of due.entries()) {
         if (this.inFlight.has(item.credentialId)) continue; // per-cred in-flight dedup
         this.inFlight.add(item.credentialId);
         try {
           await this.refreshOne(item);
         } catch (e) {
+          if (e instanceof HelperUnavailableError) {
+            const skipped = due.length - index - 1;
+            this.logger.warn(
+              `refresh skipped for ${item.credentialId}: ${e.message}（帐号登录环境不可用，不计入刷新失败次数` +
+                (skipped > 0 ? `；本轮其余 ${String(skipped)} 份凭证也跳过` : '') +
+                '，下一轮再试）',
+            );
+            return;
+          }
           this.logger.warn(`refresh failed for ${item.credentialId}: ${(e as Error).message}`);
           await this.credentials.recordRefreshFailure(item.credentialId);
         } finally {
