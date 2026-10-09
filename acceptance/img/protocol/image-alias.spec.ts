@@ -109,7 +109,9 @@ describe('AC-IMG-060.2/060.3/060.4/060.5/060.6 · real Nest alias wire contract'
         retryable: false,
         sideEffectFree: true,
       });
-      expect(response.body.details).toContainEqual(expect.objectContaining({ path: 'alias' }));
+      expect(response.body.details).toContainEqual(
+        expect.objectContaining({ path: 'alias', code: 'custom' }),
+      );
     }
     const conflict = await http()
       .post('/api/images')
@@ -120,7 +122,9 @@ describe('AC-IMG-060.2/060.3/060.4/060.5/060.6 · real Nest alias wire contract'
       retryable: false,
       sideEffectFree: true,
     });
-    expect(conflict.body.details).toContainEqual(expect.objectContaining({ path: 'alias' }));
+    expect(conflict.body.details).toEqual([
+      { path: 'alias', code: 'custom', message: '这张镜像已注册，请在镜像卡片中编辑别名' },
+    ]);
     await http()
       .post('/api/images')
       .send({ ref: 'registry.test/protocol-shared:v1', alias: null })
