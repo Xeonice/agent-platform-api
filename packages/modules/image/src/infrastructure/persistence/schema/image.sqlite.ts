@@ -19,6 +19,7 @@ export const images = sqliteTable('images', {
   id: text('id').primaryKey(),
   /** WITHOUT a version — `ghcr.io/agent-infra/sandbox`, never `…:latest` (13 §2.4.1). */
   name: text('name').notNull().unique(),
+  alias: text('alias'),
   /** Multi-user placeholder; always NULL today. */
   ownerRef: text('owner_ref'),
   isBuiltin: integer('is_builtin', { mode: 'boolean' }).notNull().default(false),

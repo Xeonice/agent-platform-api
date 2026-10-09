@@ -28,6 +28,7 @@ import {
 import { RuntimeAuthModeChanged, RuntimeInstallationStateChanged } from '@platform/runtime';
 import {
   ImageActivated,
+  ImageAliasUpdated,
   ImageConfigUpdated,
   ImageDeactivated,
   ImageDeleted,
@@ -313,6 +314,18 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       summary: `修改镜像 ${e.ref} 的运行参数`,
       // ⛔ env 的键值一律不进：04 §2.3★ 记着 env 会被物化成 `export K=V` 拼进命令串。
       // 这一行只说「改过」，改成什么是 `image_manifests.config` 那一列的事。
+    };
+  }
+
+  if (e instanceof ImageAliasUpdated) {
+    return {
+      category: 'image',
+      type: 'image.alias_updated',
+      subjectType: 'image',
+      subjectId: e.imageId,
+      actor: 'user',
+      summary: `${e.alias === null ? '清除' : '修改'}镜像 ${e.imageName} 的别名`,
+      detail: { imageId: e.imageId, previousAlias: e.previousAlias, alias: e.alias },
     };
   }
 

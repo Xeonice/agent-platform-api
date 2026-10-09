@@ -17,6 +17,7 @@ export const ImageMapper = {
       id: manifest.id,
       imageId: image.id,
       imageName: image.name,
+      imageAlias: image.alias,
       isBuiltin: image.isBuiltin,
       ref: formatImageRef(image.name, manifest.version),
       version: manifest.version,

@@ -169,6 +169,13 @@
       "when": 1791186166640,
       "tag": "0023_exotic_stingray",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1791553553356,
+      "tag": "0024_equal_rocket_raccoon",
+      "breakpoints": true
     }
   ]
 }

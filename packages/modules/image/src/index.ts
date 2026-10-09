@@ -19,6 +19,7 @@ export {
   ImageActivated,
   ImageDeactivated,
   ImageConfigUpdated,
+  ImageAliasUpdated,
   ImageDeleted,
 } from './domain/events/image-events';
 

@@ -1800,7 +1800,7 @@
             }
           }
         },
-        "summary": "Update the two mutable fields (isActive:false | imageConfig). `isActive:true` is refused with 400 pointing at /activate.",
+        "summary": "Update alias on the shared Image, or version fields (isActive:false | imageConfig). `isActive:true` is refused with 400 pointing at /activate.",
         "tags": [
           "image"
         ]
@@ -4125,6 +4125,10 @@
           "imageName": {
             "type": "string"
           },
+          "imageAlias": {
+            "type": "string",
+            "nullable": true
+          },
           "isBuiltin": {
             "type": "boolean"
           },
@@ -4292,6 +4296,7 @@
           "id",
           "imageId",
           "imageName",
+          "imageAlias",
           "isBuiltin",
           "ref",
           "version",
@@ -4321,6 +4326,10 @@
           "copyConfigFromId": {
             "type": "string",
             "minLength": 1
+          },
+          "alias": {
+            "type": "string",
+            "nullable": true
           }
         },
         "required": [
@@ -4341,6 +4350,10 @@
               },
               "imageName": {
                 "type": "string"
+              },
+              "imageAlias": {
+                "type": "string",
+                "nullable": true
               },
               "isBuiltin": {
                 "type": "boolean"
@@ -4509,6 +4522,7 @@
               "id",
               "imageId",
               "imageName",
+              "imageAlias",
               "isBuiltin",
               "ref",
               "version",
@@ -4870,6 +4884,10 @@
             "required": [
               "env"
             ]
+          },
+          "alias": {
+            "type": "string",
+            "nullable": true
           }
         }
       },

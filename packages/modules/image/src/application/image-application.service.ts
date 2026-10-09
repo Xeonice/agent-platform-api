@@ -11,6 +11,8 @@ import {
   builtinImageDeclaresTmux,
   builtinImageRefFor,
   explainKnownTmuxRepositories,
+  normalizeImageAlias,
+  ImageAliasValidationError,
 } from '@platform/shared-kernel';
 import {
   IMAGE_BASE_REQUIRED,
@@ -176,18 +178,21 @@ export class ImageApplicationService {
    */
   async registerImage(
     ref: string,
-    opts: { builtin?: boolean; copyConfigFromId?: string } = {},
+    opts: { builtin?: boolean; copyConfigFromId?: string; alias?: string | null } = {},
   ): Promise<RegisterImageResult> {
+    const alias = opts.alias === undefined ? undefined : normalizeImageAlias(opts.alias);
     const resolved = await this.resolveAndJudge(ref);
     const parsed = parseImageRef(resolved.ref);
     const now = this.clock.now();
 
     const existingImage = await this.images.findByName(parsed.name);
+    this.assertRegistrationAlias(existingImage, alias);
     const image =
       existingImage ??
       Image.create({
         id: this.ids.next(),
         name: parsed.name,
+        alias: alias ?? null,
         ownerRef: null,
         // ⚠️ 只有**启动播种**会传 true（`ImageSeeder`）；REST 注册永远是 false。
         // `isBuiltin` 的唯一效果是 I-IMG-4「预置镜像不可删除，只可禁用」——
@@ -206,15 +211,19 @@ export class ImageApplicationService {
     if (known) {
       // A retry may find a row created by an earlier registration. Preserve any
       // parameters already configured on that version; inherit only into an empty row.
-      if (known.config === null && inheritedConfig !== null) {
-        known.updateConfig(inheritedConfig, formatImageRef(image.name, known.version), now);
-        this.uow.run((tx) => {
+      const currentImage = this.uow.run((tx) => {
+        const current = this.images.findByIdSync(tx, image.id);
+        if (current === null) throw new ImageNotFoundError(image.id);
+        this.assertRegistrationAlias(current, alias);
+        if (known.config === null && inheritedConfig !== null) {
+          known.updateConfig(inheritedConfig, formatImageRef(image.name, known.version), now);
           this.manifests.saveSync(tx, known);
           this.events.publishInTx(tx, known.pullEvents());
-        });
-      }
+        }
+        return current;
+      });
       return {
-        manifest: ImageMapper.toDto(known, image),
+        manifest: ImageMapper.toDto(known, currentImage),
         validation: ImageMapper.outcome(resolved.outcome),
         created: false,
       };
@@ -260,17 +269,27 @@ export class ImageApplicationService {
       manifestRef,
     );
 
-    this.uow.run((tx) => {
+    const currentImage = this.uow.run((tx) => {
+      const current = existingImage === null ? image : this.images.findByIdSync(tx, image.id);
+      if (current === null) throw new ImageNotFoundError(image.id);
+      if (existingImage !== null) this.assertRegistrationAlias(current, alias);
       this.images.saveSync(tx, image);
       this.manifests.saveSync(tx, manifest);
       this.events.publishInTx(tx, [...image.pullEvents(), ...manifest.pullEvents()]);
+      return current;
     });
 
     return {
-      manifest: ImageMapper.toDto(manifest, image),
+      manifest: ImageMapper.toDto(manifest, currentImage),
       validation: ImageMapper.outcome(resolved.outcome),
       created: true,
     };
+  }
+
+  private assertRegistrationAlias(image: Image | null, alias: string | null | undefined): void {
+    if (image !== null && alias !== undefined && alias !== image.alias) {
+      throw new ImageAliasValidationError('这张镜像已注册，请在镜像卡片中编辑别名');
+    }
   }
 
   private async configForUpdate(
@@ -354,16 +373,32 @@ export class ImageApplicationService {
     const ref = formatImageRef(image.name, manifest.version);
 
     if (patch.isActive === true) throw new PatchCannotActivateError(id);
+    const alias = patch.alias === undefined ? undefined : normalizeImageAlias(patch.alias);
+    // Validate/seal the complete request before mutating either aggregate.
+    const config =
+      patch.imageConfig === undefined
+        ? undefined
+        : this.sealConfig(patch.imageConfig, manifest.config);
     if (patch.isActive === false) manifest.deactivate(ref, now);
-    if (patch.imageConfig !== undefined) {
-      manifest.updateConfig(this.sealConfig(patch.imageConfig, manifest.config), ref, now);
+    if (config !== undefined) {
+      manifest.updateConfig(config, ref, now);
     }
 
-    this.uow.run((tx) => {
-      this.manifests.saveSync(tx, manifest);
-      this.events.publishInTx(tx, manifest.pullEvents());
+    const currentImage = this.uow.run((tx) => {
+      const current = this.images.findByIdSync(tx, image.id);
+      if (current === null) throw new ImageNotFoundError(image.id);
+      if (alias !== undefined && current.updateAlias(alias, now)) {
+        this.images.updateAliasSync(tx, current.id, current.alias);
+      }
+      // Alias-only patches never re-save version/config state read before the tx.
+      if (patch.isActive !== undefined || config !== undefined) {
+        this.manifests.saveSync(tx, manifest);
+      }
+      const events = [...manifest.pullEvents(), ...current.pullEvents()];
+      if (events.length > 0) this.events.publishInTx(tx, events);
+      return current;
     });
-    return ImageMapper.toDto(manifest, image);
+    return ImageMapper.toDto(manifest, currentImage);
   }
 
   /**

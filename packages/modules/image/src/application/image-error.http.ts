@@ -1,4 +1,5 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
+import { ImageAliasValidationError } from '@platform/shared-kernel';
 import { MANIFEST_INVALID, ImageSpecError, REF_NOT_FOUND } from '@platform/contracts';
 import { VALIDATION_FAILED_CODE } from '@platform/contracts';
 import {
@@ -34,6 +35,18 @@ import { EnvValidationError, ImageStateError } from '../domain/errors/image-erro
  * it is also side-effect free: the transaction had not started.
  */
 export function toImageHttpError(e: unknown): unknown {
+  if (e instanceof ImageAliasValidationError) {
+    return new HttpException(
+      {
+        code: VALIDATION_FAILED_CODE,
+        message: e.message,
+        retryable: false,
+        sideEffectFree: true,
+        details: [{ path: 'alias', code: 'ALIAS_INVALID', message: e.message }],
+      },
+      HttpStatus.BAD_REQUEST,
+    );
+  }
   if (e instanceof ManifestInvalidError) {
     return new HttpException(
       {
