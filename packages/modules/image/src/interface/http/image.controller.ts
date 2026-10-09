@@ -84,7 +84,7 @@ export class ImageController {
     @Res({ passthrough: true }) res: StatusSettable,
   ): Promise<RegisterImageResultDto> {
     const result = await mapImageErrors(() =>
-      this.app.registerImage(dto.ref, { copyConfigFromId: dto.copyConfigFromId }),
+      this.app.registerImage(dto.ref, { copyConfigFromId: dto.copyConfigFromId, alias: dto.alias }),
     );
     res.status(result.created ? 201 : 200);
     // `created` stays OFF the wire: the status code already carries it, and an
@@ -129,7 +129,7 @@ export class ImageController {
   @Patch(':id')
   @ApiOperation({
     summary:
-      'Update the two mutable fields (isActive:false | imageConfig). `isActive:true` ' +
+      'Update alias on the shared Image, or version fields (isActive:false | imageConfig). `isActive:true` ' +
       'is refused with 400 pointing at /activate.',
   })
   @ApiOkResponse({ type: ImageManifestResponseDto })

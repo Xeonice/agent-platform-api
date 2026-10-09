@@ -1,5 +1,17 @@
 import type { DomainEvent } from '@platform/shared-kernel';
 
+/** A repository-wide display-name change, independent of version/config events. */
+export class ImageAliasUpdated implements DomainEvent {
+  readonly type = 'image.alias_updated';
+  constructor(
+    readonly imageId: string,
+    readonly imageName: string,
+    readonly previousAlias: string | null,
+    readonly alias: string | null,
+    readonly occurredAt: Date,
+  ) {}
+}
+
 /**
  * Image-context domain events (docs/backend/23 §9.6). Written to the outbox in-tx.
  *

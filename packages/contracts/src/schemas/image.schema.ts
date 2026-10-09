@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeImageAlias, ImageAliasValidationError } from '@platform/shared-kernel';
 import { IsoInstantSchema } from './primitives';
 import { SandboxStatusSchema } from './enums';
 
@@ -22,6 +23,19 @@ export const ListImagesQuerySchema = z.object({
   provider: z.string().min(1).optional(),
 });
 export type ListImagesQuery = z.infer<typeof ListImagesQuerySchema>;
+
+/** Raw input uses the same pure rule as Image; normalization occurs in the domain. */
+export const ImageAliasInputSchema = z
+  .string()
+  .nullable()
+  .superRefine((value, context) => {
+    try {
+      normalizeImageAlias(value);
+    } catch (error) {
+      if (!(error instanceof ImageAliasValidationError)) throw error;
+      context.addIssue({ code: z.ZodIssueCode.custom, message: error.message });
+    }
+  });
 
 /** One locatable finding. `path` points AT the offending item (`env[3].key`). */
 export const ValidationIssueSchema = z.object({
@@ -125,6 +139,8 @@ export const ImageManifestSchema = z.object({
   id: z.string(),
   imageId: z.string(),
   imageName: z.string(),
+  /** Display alias shared by every version of the repository; never an image identity. */
+  imageAlias: z.string().nullable(),
   isBuiltin: z.boolean(),
   /** Full repository coordinate (`ghcr.io/x/y:tag` or `…@sha256:…`) — what a provider pulls. */
   ref: z.string(),
@@ -195,16 +211,18 @@ export const RegisterImageResultSchema = z.object({
 });
 export type RegisterImageResultDto = z.infer<typeof RegisterImageResultSchema>;
 
-/** Registration takes a reference and optional update-config source; preflight reads only ref. */
+/** Registration takes a reference, optional new-Image alias and config source; preflight reads ref. */
 export const RegisterImageSchema = z.object({
   ref: z.string().min(1).max(512),
   /** Copy the source version's stored parameters, including encrypted secrets (REQ-IMG-026). */
   copyConfigFromId: z.string().min(1).optional(),
+  /** New Image only; an existing Image must be renamed through PATCH. */
+  alias: ImageAliasInputSchema.optional(),
 });
 export type RegisterImageInput = z.infer<typeof RegisterImageSchema>;
 
 /**
- * `PATCH /api/images/:id` — the ONLY entry point for this row's mutable fields.
+ * `PATCH /api/images/:id` — updates this version's mutable fields and its shared Image alias.
  *
  * ⚠️ `isActive` ACCEPTS ONLY `false`. Enabling a version necessarily retires the
  * current holder of the same tag (`unique(image_id, version) WHERE is_active`), i.e.
@@ -219,6 +237,8 @@ export type RegisterImageInput = z.infer<typeof RegisterImageSchema>;
 export const PatchImageSchema = z.object({
   isActive: z.boolean().optional(),
   imageConfig: ImageConfigInputSchema.optional(),
+  /** Omitted keeps the shared alias; null or trim-blank clears it. */
+  alias: ImageAliasInputSchema.optional(),
 });
 export type PatchImageInput = z.infer<typeof PatchImageSchema>;
 

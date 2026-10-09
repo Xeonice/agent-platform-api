@@ -303,5 +303,36 @@
     "acs": [],
     "purpose": "New authorized deployment preparation: actual file barrier, protected readiness/idle probe, live SSE/WS counters, current SQLite blockers, auth disposal and FK failure. Does not claim provider VM or product initialization readiness.",
     "relation": "operational-deployment"
+  },
+  {
+    "file": "acceptance/img/pure/image-alias.spec.ts",
+    "acs": ["AC-IMG-060.3", "AC-IMG-060.4", "AC-IMG-060.6"],
+    "purpose": "Single production Unicode policy and both Zod input contracts validate raw characters before trim, count Unicode code points, distinguish omission/clear and raise events only on actual changes.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/sqlite/alias-persistence.spec.ts",
+    "acs": ["AC-IMG-060.4", "AC-IMG-060.5", "AC-IMG-060.6"],
+    "purpose": "Actual additive SQLite migration preserves legacy identities with null aliases; fresh repository reads preserve names, duplicate aliases are allowed and stale registration upserts cannot overwrite concurrent edits.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/service/image-alias.spec.ts",
+    "acs": [
+      "AC-IMG-060.2",
+      "AC-IMG-060.3",
+      "AC-IMG-060.4",
+      "AC-IMG-060.5",
+      "AC-IMG-060.6",
+      "AC-IMG-061.4"
+    ],
+    "purpose": "Real service and SQLite preserve aliases across new digests, builtin retries and activations, leave bound task and encrypted config unchanged, reject mixed requests atomically, roll back failed writes and recheck registration aliases after controlled concurrent edits; audit projection logs actual changes only.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/protocol/image-alias.spec.ts",
+    "acs": ["AC-IMG-060.2", "AC-IMG-060.3", "AC-IMG-060.4", "AC-IMG-060.5", "AC-IMG-060.6"],
+    "purpose": "Complete Nest application returns required nullable imageAlias in actual POST/PATCH/GET contracts and list variants, normalizes saves, preserves omitted values, refuses registration rename and invalid mixed writes with field errors and zero changes, and reports missing manifests as 404.",
+    "relation": "complete-api"
   }
 ]

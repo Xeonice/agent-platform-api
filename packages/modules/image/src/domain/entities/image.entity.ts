@@ -1,18 +1,20 @@
-import { AggregateRoot } from '@platform/shared-kernel';
+import { AggregateRoot, normalizeImageAlias } from '@platform/shared-kernel';
 import { ImageNotDeletableError } from '../errors/image-errors';
+import { ImageAliasUpdated } from '../events/image-events';
 
 export interface ImageProps {
   id: string;
   /** Repository name WITHOUT a version (`ghcr.io/agent-infra/sandbox`), UNIQUE. */
   name: string;
+  alias?: string | null;
   ownerRef: string | null;
   isBuiltin: boolean;
   createdAt: Date;
 }
 
 /**
- * `Image` — the light aggregate (23 §9.1 裁决 D-8): a NAMED GROUPING of manifests,
- * nothing more. Cards in the UI aggregate by this row; versions live on
+ * `Image` — the light aggregate (23 §9.1 裁决 D-8): a repository grouping with a
+ * shared optional display alias. Cards aggregate by this row; versions live on
  * `ImageManifest`, which is the root anything outside this context references.
  */
 export class Image extends AggregateRoot<string> {
@@ -20,10 +22,16 @@ export class Image extends AggregateRoot<string> {
   readonly ownerRef: string | null;
   readonly isBuiltin: boolean;
   readonly createdAt: Date;
+  private _alias: string | null;
+
+  get alias(): string | null {
+    return this._alias;
+  }
 
   private constructor(props: ImageProps) {
     super(props.id);
     this.name = props.name;
+    this._alias = normalizeImageAlias(props.alias ?? null);
     this.ownerRef = props.ownerRef;
     this.isBuiltin = props.isBuiltin;
     this.createdAt = props.createdAt;
@@ -35,6 +43,15 @@ export class Image extends AggregateRoot<string> {
 
   static rehydrate(props: ImageProps): Image {
     return new Image(props);
+  }
+
+  updateAlias(value: string | null, now: Date): boolean {
+    const next = normalizeImageAlias(value);
+    if (next === this._alias) return false;
+    const previous = this._alias;
+    this._alias = next;
+    this.raise(new ImageAliasUpdated(this.id, this.name, previous, next, now));
+    return true;
   }
 
   /**

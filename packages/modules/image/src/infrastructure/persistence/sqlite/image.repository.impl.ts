@@ -23,6 +23,11 @@ export class SqliteImageRepository implements ImageRepository {
     return row ? toDomain(row) : null;
   }
 
+  findByIdSync(_tx: Tx, id: string): Image | null {
+    const row = this.db.select().from(images).where(eq(images.id, id)).get();
+    return row ? toDomain(row) : null;
+  }
+
   async findByName(name: string): Promise<Image | null> {
     const row = this.db.select().from(images).where(eq(images.name, name)).get();
     return row ? toDomain(row) : null;
@@ -38,6 +43,7 @@ export class SqliteImageRepository implements ImageRepository {
       .values({
         id: image.id,
         name: image.name,
+        alias: image.alias,
         ownerRef: image.ownerRef,
         isBuiltin: image.isBuiltin,
         createdAt: image.createdAt,
@@ -52,12 +58,17 @@ export class SqliteImageRepository implements ImageRepository {
   deleteSync(_tx: Tx, id: string): void {
     this.db.delete(images).where(eq(images.id, id)).run();
   }
+
+  updateAliasSync(_tx: Tx, imageId: string, alias: string | null): void {
+    this.db.update(images).set({ alias }).where(eq(images.id, imageId)).run();
+  }
 }
 
 function toDomain(row: ImageRow): Image {
   return Image.rehydrate({
     id: row.id,
     name: row.name,
+    alias: row.alias,
     ownerRef: row.ownerRef,
     isBuiltin: row.isBuiltin,
     createdAt: row.createdAt,
