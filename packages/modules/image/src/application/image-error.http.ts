@@ -42,7 +42,9 @@ export function toImageHttpError(e: unknown): unknown {
         message: e.message,
         retryable: false,
         sideEffectFree: true,
-        details: [{ path: 'alias', code: 'ALIAS_INVALID', message: e.message }],
+        // Match ImageAliasInputSchema's custom rule category so field errors have
+        // the same contract whether the DTO or the registration rule rejects them.
+        details: [{ path: 'alias', code: 'custom', message: e.message }],
       },
       HttpStatus.BAD_REQUEST,
     );
