@@ -624,16 +624,25 @@ export class UpgradeInspector {
       '=' +
       encodeURIComponent(this.passcodes.issueSessionToken(this.clock.now().getTime()));
     try {
-      const response = await fetch(loopbackOrigin(origin) + '/api/system/upgrade/status', {
-        headers: { cookie },
-        signal: AbortSignal.timeout(2000),
-      });
+      // A Web outage must not make the independent cookie/capability proof
+      // depend on Catalog, installed-Web or Runtime health. The current
+      // explicitly granted principal has the same instance-administrator actor
+      // as the original accepted request; lookup independently checks that
+      // actor plus instance/request identity and performs no upgrade action.
+      const accepted = this.store.attempt(id);
+      const response = await fetch(
+        loopbackOrigin(origin) + '/api/system/upgrade/requests/' + accepted.requestId,
+        {
+          headers: { cookie },
+          signal: AbortSignal.timeout(2000),
+        },
+      );
       if (!response.ok) return false;
       const actual = (await response.json()) as Json;
       return (
         actual.instanceId === this.store.instanceId &&
-        actual.userScope === challenge.userScope &&
-        (actual.capabilities as Json)?.canUpgradeInstance === true
+        actual.attemptId === accepted.attemptId &&
+        actual.requestId === accepted.requestId
       );
     } catch {
       return false;
