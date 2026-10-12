@@ -6,7 +6,6 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { freemem } from 'node:os';
-import { statfs } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
 import { getHeapStatistics } from 'node:v8';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -35,6 +34,7 @@ import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { writeInstalledBinding } from './upgrade-atomic-file';
+import { sqliteStorageObservation } from './sqlite-storage-budget';
 
 type Json = Record<string, unknown>;
 interface Row {
@@ -194,10 +194,11 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       ? newAuthorityHealthy
       : !migration || (migration.known && migration.oldRepresentationRetained);
     const integrity = this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok';
-    const fs = await statfs(process.env.UPGRADE_INSTALLER_ROOT ?? env.dataRoot),
+    const storage = await sqliteStorageObservation(this.store.sqlite),
       memory = process.memoryUsage();
     const capacity =
-      Number(fs.bavail) * Number(fs.bsize) >= snapshot.plan.policy.minFreeBytes &&
+      storage.availableBytes >= snapshot.plan.policy.minFreeBytes &&
+      storage.walBytes <= snapshot.plan.policy.maxWalBytes &&
       freemem() > memory.rss &&
       getHeapStatistics().heap_size_limit > memory.heapUsed;
     const started = this.clock.now().getTime();

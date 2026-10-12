@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { readFile, statfs, lstat } from 'node:fs/promises';
+import { readFile, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { UpgradeContractPlan } from '@platform/contracts';
@@ -8,6 +8,7 @@ import { SystemClock } from '../time/system-clock';
 import { UpgradeStore } from './upgrade-store';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { registerBusinessTransactionHook } from '../persistence/business-transaction-hooks';
+import { sqliteStorageObservation } from './sqlite-storage-budget';
 
 const Identifier = z.string().regex(/^[a-z][a-z0-9_]{0,80}$/);
 const Field = z
@@ -785,13 +786,9 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     const root = process.env.UPGRADE_INSTALLER_ROOT;
     requireUpgrade(root, 'INSTALLER_ROOT_REQUIRED');
     const policy = snapshot.plan.policy;
-    const fs = await statfs(root);
-    requireUpgrade(
-      Number(fs.bavail) * Number(fs.bsize) >= policy.minFreeBytes,
-      'MIGRATION_DISK_BUDGET',
-    );
-    const wal = await lstat(this.store.sqlite.name + '-wal').catch(() => null);
-    requireUpgrade((wal?.size ?? 0) <= policy.maxWalBytes, 'MIGRATION_WAL_BUDGET');
+    const storage = await sqliteStorageObservation(this.store.sqlite);
+    requireUpgrade(storage.availableBytes >= policy.minFreeBytes, 'MIGRATION_DISK_BUDGET');
+    requireUpgrade(storage.walBytes <= policy.maxWalBytes, 'MIGRATION_WAL_BUDGET');
     if (!row) {
       requireUpgrade(
         input.action === 'prepare' && this.store.step(id, 'package-verify').applied,

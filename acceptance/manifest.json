@@ -14970,6 +14970,11 @@
           "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
           "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/storage-budget-path.spec.ts",
+          "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
@@ -15011,6 +15016,11 @@
         {
           "file": "acceptance/upg/protocol/contract-authorization.spec.ts",
           "purpose": "Actual Nest public controllers/security/current SQLite reject shared-access-only, invalid Origin/CSRF, arbitrary payloads and unqualified independent contract commands; no positive native retirement claim.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/storage-budget-path.spec.ts",
+          "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
           "relation": "backend-support"
         }
       ],
@@ -15179,6 +15189,11 @@
           "file": "acceptance/upg/protocol/auth-continuity-lookup.spec.ts",
           "purpose": "Actual Nest public request lookup, production ordinary-access guard and real SQLite verify original granted actor and independently issued fresh capability cookies without Catalog/Web/SDK dependencies; changed upgrade HMAC or ordinary access-key rotation rejects continuity. Authentication boundary support only, not native upgrade/fallback qualification.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/storage-budget-path.spec.ts",
+          "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
@@ -15205,6 +15220,11 @@
         {
           "file": "acceptance/upg/protocol/runtime-owner.spec.ts",
           "purpose": "Actual Owner HTTP/private SQLite journal/child-process protocol tests exercise single authority and unknown SDK receipt; child fixture does not establish BoxLite VM preservation.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/storage-budget-path.spec.ts",
+          "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
           "relation": "backend-support"
         }
       ],
