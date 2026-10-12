@@ -43,6 +43,7 @@ async function fixture(
     migrationBatchMs?: number;
     rows?: number;
     leaseMs?: number;
+    globalSchemaIncrement?: number;
     planPatch?: Record<string, unknown>;
   } = {},
 ) {
@@ -105,7 +106,7 @@ async function fixture(
     schemaVersion: 1,
     kind: 'expand-shadow',
     fromSchema: schema,
-    targetSchema: schema + 1,
+    targetSchema: schema + (options.globalSchemaIncrement ?? 0),
     maxBatchRows: options.rows && options.rows > 100 ? 1000 : 2,
     oldRepresentationRetained: true,
     newSemanticsEnabled: false,
@@ -155,7 +156,7 @@ async function fixture(
         fromRelease: current.releaseId,
         minSchema: schema,
         maxSchema: schema,
-        targetSchema: schema + 1,
+        targetSchema: schema,
         bridgeReleases: [],
         migrationPlanDigest: migrationDigest,
       },
@@ -279,6 +280,24 @@ async function fixture(
 }
 
 describe('REQ-UPG-006/007/008 — actual online expand/bridge projection, transaction and budgets', () => {
+  it('rejects a package claiming an unqualified global schema increment before any projection DDL or journal change', async () => {
+    // The frozen accepted path remains the actual journal version. Neither a
+    // signed package field nor a new representation read epoch can raise it.
+    const f = await fixture({ globalSchemaIncrement: 1 });
+    const structures = f.sqlite
+      .prepare('SELECT type,name,sql FROM sqlite_master ORDER BY type,name')
+      .all();
+    const journal = f.sqlite.prepare('SELECT * FROM __drizzle_migrations').all();
+    await expect(f.execute()).rejects.toThrow('MIGRATION_PLAN_CHANGED');
+    expect(f.structures()).toEqual([]);
+    expect(
+      f.sqlite.prepare('SELECT type,name,sql FROM sqlite_master ORDER BY type,name').all(),
+    ).toEqual(structures);
+    expect(f.sqlite.prepare('SELECT * FROM __drizzle_migrations').all()).toEqual(journal);
+    expect(f.sqlite.prepare('SELECT count(*) AS n FROM fixture_items').get()).toEqual({ n: 3 });
+    expect(f.runner.schema()).toBe(f.schema);
+    expect(f.store.attempt(f.id).percent).toBeNull();
+  });
   it.each(['wrong-existing-value', 'extra-live-row'])(
     'reconciliation detects %s instead of overwriting its own evidence and claiming healthy new reads',
     async (fault) => {
@@ -354,7 +373,7 @@ describe('REQ-UPG-006/007/008 — actual online expand/bridge projection, transa
       integrityValid: true,
       oldRepresentationRetained: true,
       newSemanticsEnabled: false,
-      schema: f.schema + 1,
+      schema: f.schema,
     });
     expect(f.runner.metrics(f.id)).toMatchObject({
       known: true,

@@ -76,6 +76,8 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
   private readonly logger = new Logger('TasksGateway');
   /** taskId → socketId → subscription. */
   private readonly subscriptions = new Map<string, Map<string, Subscription>>();
+  private namespace?: Namespace;
+  private retiring = false;
 
   constructor(
     private readonly app: AgentTaskApplicationService,
@@ -109,6 +111,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
    * client that would rather not parse prose at all.
    */
   afterInit(server: Namespace): void {
+    this.namespace = server;
     server.use((socket, next) => {
       const rejection = this.rejectHandshake(socket);
       if (rejection) {
@@ -129,6 +132,11 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     if (!this.auth.authorize(this.readCredentials(client))) {
       return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
     }
+    if (this.retiring)
+      return wsHandshakeError(
+        'APPLICATION_WRITER_QUIESCED',
+        'task transport is moving to the active coordinator',
+      );
     // Frame-schema agreement, checked AFTER auth so an unauthenticated client cannot
     // use the distinct rejection codes to fingerprint the server (same order as
     // /terminal). `/tasks` carries its OWN hash: a task-frame change must not
@@ -182,11 +190,31 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     }
   }
 
+  /** Invalidate old replay loops and reattach the same persisted task from its cursor. */
+  prepareHandoff(): number {
+    this.retiring = true;
+    const count = this.activeTransportConnections;
+    for (const subs of this.subscriptions.values())
+      for (const sub of subs.values()) sub.live = false;
+    this.subscriptions.clear();
+    this.namespace?.disconnectSockets(false);
+    return count;
+  }
+
+  resumeAfterHandoff(): void {
+    this.retiring = false;
+  }
+
+  get activeTransportConnections(): number {
+    return this.namespace?.sockets.size ?? 0;
+  }
+
   @SubscribeMessage('frame')
   async onFrame(
     @ConnectedSocket() client: Socket,
     @MessageBody() frame: TaskClientFrame,
   ): Promise<void> {
+    if (this.retiring || !client.connected) return;
     switch (frame.type) {
       case 'subscribe':
         await this.subscribe(client, frame.taskId, frame.fromSeq ?? 0);
@@ -215,6 +243,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
 
   private async subscribe(client: Socket, taskId: string, fromSeq: number): Promise<void> {
     const task = await this.app.findTask(taskId);
+    if (this.retiring || !client.connected) return;
     // The SAME addressing rule as REST's `requireTask`, and now unconditionally: the
     // handshake refuses a socket that did not declare a sandbox, so every socket that
     // reaches here has one and every socket is held to it.
@@ -265,12 +294,14 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
         this.deliver(sub, { type: 'event', taskId, seq, event });
       }
     } catch (e) {
+      if (!sub.live || this.retiring || !client.connected) return;
       this.logger.error(`replay for task ${taskId} failed: ${(e as Error).message}`);
       this.send(client, { type: 'error', taskId, code: 'REPLAY_FAILED' });
     }
 
     // everything after this frame is live (contract wording, and it is literally true:
     // the buffered frames flushed below all post-date the replay).
+    if (!sub.live || this.retiring || !client.connected) return;
     this.send(client, {
       type: 'caught_up',
       taskId,

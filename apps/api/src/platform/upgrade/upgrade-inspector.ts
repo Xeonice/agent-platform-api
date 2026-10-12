@@ -1,7 +1,5 @@
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, readFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import {
@@ -22,6 +20,7 @@ import {
   type JobCompletionReceipts,
 } from '@platform/sandbox';
 import { UpgradeStore } from './upgrade-store';
+import { verifyUpgradeArtifact } from './verify-upgrade-artifact';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { env } from '../config/env';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
@@ -207,59 +206,152 @@ export class UpgradeInspector {
   /** A measured mixed installation is never promoted to a confirmed release.
    * Only installed signed artifacts and a live unique writer may seed a NEW
    * user intent. The last complete release remains the version-chain anchor. */
-  async sourceActual(forRecovery=false): Promise<UpgradeSourceActual | null> {
-    const source = this.store.confirmed(), latest = this.store.latest();
-    if (!source || !latest || !['deferred','failed','reverted','candidate-rejected','activation-confirmed'].includes(latest.state) || (!forRecovery && this.store.recovery()?.state === 'recovering')) return null;
+  async sourceActual(forRecovery = false): Promise<UpgradeSourceActual | null> {
+    const source = this.store.confirmed(),
+      latest = this.store.latest();
+    if (
+      !source ||
+      !latest ||
+      !['deferred', 'failed', 'reverted', 'candidate-rejected', 'activation-confirmed'].includes(
+        latest.state,
+      ) ||
+      (!forRecovery && this.store.recovery()?.state === 'recovering')
+    )
+      return null;
     const binding = await this.entryBinding();
+    // The ordinary confirmed path is read-only live identity probing. Do not
+    // rehash an unchanged multi-gigabyte installation on every status poll.
+    if ((await this.installedProof(source, binding)).qualified === true) return null;
     requireUpgrade(binding.weight === 0 || binding.weight === 100, 'PARTIAL_ROUTE_UNCONFIRMED');
     const api = (binding.weight === 100 ? binding.candidateApi : binding.oldApi) as Json;
-    const identity = await this.controlIdentity(api.origin), web = await this.webBuild(binding), installer = await this.installerIdentity();
-    requireUpgrade(identity.writerFenceValid === true && identity.controlOnly === true && identity.noRuntimeSideEffects === true, 'SOURCE_WRITER_UNCONFIRMED');
-    requireUpgrade(this.store.sqlite.pragma('quick_check', {simple:true}) === 'ok', 'SOURCE_DATABASE_UNCONFIRMED');
+    const identity = await this.controlIdentity(api.origin),
+      web = await this.webBuild(binding),
+      installer = await this.installerIdentity();
+    requireUpgrade(
+      identity.writerFenceValid === true &&
+        identity.controlOnly === true &&
+        identity.noRuntimeSideEffects === true,
+      'SOURCE_WRITER_UNCONFIRMED',
+    );
+    requireUpgrade(
+      this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok',
+      'SOURCE_DATABASE_UNCONFIRMED',
+    );
     requireUpgrade(this.providers instanceof RuntimeOwnerProviderRegistry, 'ACTUAL_OWNER_UNKNOWN');
-    const route = this.providers.installedRoutes().find(r=>r.ownerId === this.providersActiveOwner());
+    const route = this.providers
+      .installedRoutes()
+      .find((r) => r.ownerId === this.providersActiveOwner());
     requireUpgrade(route, 'ACTUAL_OWNER_UNKNOWN');
-    const response = await fetch(loopbackOrigin(route.endpoint)+'/runtime/metadata',{headers:{'x-platform-internal-key':process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '', 'x-platform-instance-id':this.store.instanceId},signal:AbortSignal.timeout(1500)});
-    requireUpgrade(response.ok,'ACTUAL_OWNER_UNKNOWN');
-    const owner=await response.json() as Json;
-    requireUpgrade(owner.instanceId===this.store.instanceId && owner.ownerId===route.ownerId,'ACTUAL_OWNER_UNKNOWN');
-    const installs=this.store.sqlite.prepare('SELECT manifest,plan FROM upgrade_attempts ORDER BY generation DESC').all() as {manifest:string;plan:string}[];
-    const candidates:{root:string;components:ConfirmedServiceRelease['components']}[]=[];
-    if(process.env.UPGRADE_INITIAL_ARTIFACT_ROOT && process.env.UPGRADE_INITIAL_RELEASE_PATH){
-      const raw=JSON.parse(await readFile(process.env.UPGRADE_INITIAL_RELEASE_PATH,'utf8')) as Json;
-      const initial=(raw.release ?? raw) as ConfirmedServiceRelease;
-      candidates.push({root:process.env.UPGRADE_INITIAL_ARTIFACT_ROOT,components:initial.components});
+    const response = await fetch(loopbackOrigin(route.endpoint) + '/runtime/metadata', {
+      headers: {
+        'x-platform-internal-key': process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
+        'x-platform-instance-id': this.store.instanceId,
+      },
+      signal: AbortSignal.timeout(1500),
+    });
+    requireUpgrade(response.ok, 'ACTUAL_OWNER_UNKNOWN');
+    const owner = (await response.json()) as Json;
+    requireUpgrade(
+      owner.instanceId === this.store.instanceId && owner.ownerId === route.ownerId,
+      'ACTUAL_OWNER_UNKNOWN',
+    );
+    const installs = this.store.sqlite
+      .prepare('SELECT manifest,plan FROM upgrade_attempts ORDER BY generation DESC')
+      .all() as { manifest: string; plan: string }[];
+    const candidates: { root: string; components: ConfirmedServiceRelease['components'] }[] = [];
+    if (process.env.UPGRADE_INITIAL_ARTIFACT_ROOT && process.env.UPGRADE_INITIAL_RELEASE_PATH) {
+      const raw = JSON.parse(
+        await readFile(process.env.UPGRADE_INITIAL_RELEASE_PATH, 'utf8'),
+      ) as Json;
+      const initial = (raw.release ?? raw) as ConfirmedServiceRelease;
+      candidates.push({
+        root: process.env.UPGRADE_INITIAL_ARTIFACT_ROOT,
+        components: initial.components,
+      });
     }
-    for(const install of installs){
-      const manifest=JSON.parse(install.manifest) as {manifest:{components:ConfirmedServiceRelease['components']}};
-      const plan=JSON.parse(install.plan) as {package:{digest:string}};
-      candidates.push({root:resolve(process.env.UPGRADE_INSTALLER_ROOT ?? '', 'artifacts',plan.package.digest.slice(7)),components:manifest.manifest.components});
+    for (const install of installs) {
+      const manifest = JSON.parse(install.manifest) as {
+        manifest: { components: ConfirmedServiceRelease['components'] };
+      };
+      const plan = JSON.parse(install.plan) as { package: { digest: string } };
+      candidates.push({
+        root: resolve(
+          process.env.UPGRADE_INSTALLER_ROOT ?? '',
+          'artifacts',
+          plan.package.digest.slice(7),
+        ),
+        components: manifest.manifest.components,
+      });
     }
-    const components:ConfirmedServiceRelease['components']={...source.components};
-    const facts={api:{digest:api.digest,input:identity.inputFingerprint},coordinator:{digest:identity.actualCoordinatorArtifactDigest,input:identity.actualCoordinatorInputFingerprint},web:{digest:(binding.web as Json).digest,revision:web.webRevision},installer:{digest:installer.artifactDigest,input:installer.inputFingerprint},owner:{digest:owner.artifactDigest,input:owner.inputFingerprint}};
-    const verified=new Set<string>();
-    for(const name of ['api','coordinator','web','installer','owner'] as const){
-      const fact=facts[name];
-      const match=candidates.find(c=>{const part=c.components[name] ?? (name==='coordinator'?c.components.api:undefined);return part && part.artifactDigest===fact.digest && (!('input' in fact) || fact.input===part.inputFingerprint) && (!('revision' in fact)||('webRevision' in part && part.webRevision===fact.revision));});
-      requireUpgrade(match,'SOURCE_COMPONENT_UNCONFIRMED');
-      if(!verified.has(match.root)){await this.verifyArtifact(match.root,match.components);verified.add(match.root);}
-      const part=match.components[name] ?? match.components.api;
-      if(name==='web') components.web=match.components.web; else components[name]=part;
+    const components: ConfirmedServiceRelease['components'] = { ...source.components };
+    const facts = {
+      api: { digest: api.digest, input: identity.inputFingerprint },
+      coordinator: {
+        digest: identity.actualCoordinatorArtifactDigest,
+        input: identity.actualCoordinatorInputFingerprint,
+      },
+      web: { digest: (binding.web as Json).digest, revision: web.webRevision },
+      installer: { digest: installer.artifactDigest, input: installer.inputFingerprint },
+      owner: { digest: owner.artifactDigest, input: owner.inputFingerprint },
+    };
+    const verified = new Set<string>();
+    for (const name of ['api', 'coordinator', 'web', 'installer', 'owner'] as const) {
+      const fact = facts[name];
+      const match = candidates.find((c) => {
+        const part = c.components[name] ?? (name === 'coordinator' ? c.components.api : undefined);
+        return (
+          part &&
+          part.artifactDigest === fact.digest &&
+          (!('input' in fact) || fact.input === part.inputFingerprint) &&
+          (!('revision' in fact) || ('webRevision' in part && part.webRevision === fact.revision))
+        );
+      });
+      requireUpgrade(match, 'SOURCE_COMPONENT_UNCONFIRMED');
+      if (!verified.has(match.root)) {
+        await this.verifyArtifact(match.root, match.components);
+        verified.add(match.root);
+      }
+      const part = match.components[name] ?? match.components.api;
+      if (name === 'web') components.web = match.components.web;
+      else components[name] = part;
     }
-    const changed=canonicalUpgrade(components)!==canonicalUpgrade(source.components)||this.schema()!==source.schema;
-    if(!changed) return null;
-    const continuity=await this.continuity(latest.attemptId);
-    requireUpgrade(continuity.qualified===true,'SOURCE_CONTINUITY_UNCONFIRMED');
-    const ownerProof=continuity.owner as Json;
-    const owners=ownerProof.owners as Json[];
-    const protocol=(components.coordinator ?? components.api).protocol;
-    requireUpgrade(owners.length>0 && owners.every(o=>{const p=o.protocol as Json;return Number(p.min)<=protocol.max&&Number(p.max)>=protocol.min;}),'SOURCE_OWNER_PROTOCOL_UNCONFIRMED');
-    requireUpgrade(canonicalUpgrade(persistedBinding(binding))===canonicalUpgrade(persistedBinding(await this.entryBinding())),'SOURCE_BINDING_CHANGED');
-    const measured={schemaVersion:1,qualified:true,partial:true,instanceId:this.store.instanceId,baseConfirmedReleaseId:source.releaseId,activationGeneration:source.activationGeneration,schema:this.schema(),components,observedAt:this.observedAt};
-    return UpgradeSourceActualSchema.parse({...measured,proofDigest:upgradeDigest(measured)});
+    const changed =
+      canonicalUpgrade(components) !== canonicalUpgrade(source.components) ||
+      this.schema() !== source.schema;
+    if (!changed) return null;
+    const continuity = await this.continuity(latest.attemptId);
+    requireUpgrade(continuity.qualified === true, 'SOURCE_CONTINUITY_UNCONFIRMED');
+    const ownerProof = continuity.owner as Json;
+    const owners = ownerProof.owners as Json[];
+    const protocol = (components.coordinator ?? components.api).protocol;
+    requireUpgrade(
+      owners.length > 0 &&
+        owners.every((o) => {
+          const p = o.protocol as Json;
+          return Number(p.min) <= protocol.max && Number(p.max) >= protocol.min;
+        }),
+      'SOURCE_OWNER_PROTOCOL_UNCONFIRMED',
+    );
+    requireUpgrade(
+      canonicalUpgrade(persistedBinding(binding)) ===
+        canonicalUpgrade(persistedBinding(await this.entryBinding())),
+      'SOURCE_BINDING_CHANGED',
+    );
+    const measured = {
+      schemaVersion: 1,
+      qualified: true,
+      partial: true,
+      instanceId: this.store.instanceId,
+      baseConfirmedReleaseId: source.releaseId,
+      activationGeneration: source.activationGeneration,
+      schema: this.schema(),
+      components,
+      observedAt: this.observedAt,
+    };
+    return UpgradeSourceActualSchema.parse({ ...measured, proofDigest: upgradeDigest(measured) });
   }
-  private providersActiveOwner():string {
-    requireUpgrade(this.providers instanceof RuntimeOwnerProviderRegistry,'ACTUAL_OWNER_UNKNOWN');
+  private providersActiveOwner(): string {
+    requireUpgrade(this.providers instanceof RuntimeOwnerProviderRegistry, 'ACTUAL_OWNER_UNKNOWN');
     return this.providers.activeOwnerId;
   }
   async processObserve(input: Json): Promise<Json> {
@@ -361,49 +453,7 @@ export class UpgradeInspector {
     root: string,
     expected: ConfirmedServiceRelease['components'],
   ): Promise<void> {
-    const stat = await lstat(root);
-    requireUpgrade(
-      stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o022) === 0,
-      'INSECURE_ARTIFACT_ROOT',
-    );
-    const bundle = JSON.parse(await readFile(join(root, 'upgrade-artifact.json'), 'utf8')) as Json;
-    requireUpgrade(
-      bundle.schemaVersion === 1 &&
-        bundle.platform === process.platform &&
-        bundle.arch === process.arch &&
-        Array.isArray(bundle.files) &&
-        canonicalUpgrade(bundle.components) === canonicalUpgrade(expected),
-      'INSTALLED_ARTIFACT_METADATA_MISMATCH',
-    );
-    for (const f of bundle.files as Json[]) {
-      requireUpgrade(
-        typeof f.path === 'string' &&
-          !isAbsolute(f.path) &&
-          !f.path.split(/[\\/]/).includes('..') &&
-          typeof f.digest === 'string' &&
-          typeof f.bytes === 'number' &&
-          !f.link,
-        'UNSAFE_ARTIFACT_PATH',
-      );
-      const path = resolve(root, f.path),
-        rel = relative(resolve(root), path);
-      requireUpgrade(!rel.startsWith('..') && !isAbsolute(rel), 'UNSAFE_ARTIFACT_PATH');
-      const s = await lstat(path);
-      requireUpgrade(
-        s.isFile() && !s.isSymbolicLink() && s.size === f.bytes && (s.mode & 0o777) === f.mode,
-        'INSTALLED_ARTIFACT_CHANGED',
-      );
-      const hash = createHash('sha256');
-      for await (const chunk of createReadStream(path)) hash.update(chunk);
-      requireUpgrade('sha256:' + hash.digest('hex') === f.digest, 'INSTALLED_ARTIFACT_CHANGED');
-    }
-    requireUpgrade(
-      upgradeDigest((bundle.files as Json[]).filter((f) => String(f.path).startsWith('api/'))) ===
-        expected.api.artifactDigest &&
-        upgradeDigest((bundle.files as Json[]).filter((f) => String(f.path).startsWith('web/'))) ===
-          expected.web.artifactDigest,
-      'INSTALLED_COMPONENT_DIGEST_MISMATCH',
-    );
+    await verifyUpgradeArtifact(root, expected);
   }
   schema(): number {
     return this.migrations.schema();
@@ -502,7 +552,9 @@ export class UpgradeInspector {
       startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
       artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
       inputFingerprint:
-        (release?.components.coordinator ?? release?.components.api)?.inputFingerprint ?? null,
+        process.env.PLATFORM_COORDINATOR_ACTUAL_INPUT_FINGERPRINT ??
+        (release?.components.coordinator ?? release?.components.api)?.inputFingerprint ??
+        null,
       generation: Number(process.env.COORDINATOR_GENERATION ?? 0),
     };
     const ownerBinding =
@@ -653,8 +705,15 @@ export class UpgradeInspector {
     };
   }
   async continuity(id: string, fence?: number): Promise<Json> {
-    if(fence !== undefined) this.store.assertFence(id, fence);
-    else requireUpgrade(this.store.latest()?.attemptId===id && ['deferred','failed','reverted','candidate-rejected','activation-confirmed'].includes(this.store.attempt(id).state), 'REPAIR_SOURCE_NOT_TERMINAL');
+    if (fence !== undefined) this.store.assertFence(id, fence);
+    else
+      requireUpgrade(
+        this.store.latest()?.attemptId === id &&
+          ['deferred', 'failed', 'reverted', 'candidate-rejected', 'activation-confirmed'].includes(
+            this.store.attempt(id).state,
+          ),
+        'REPAIR_SOURCE_NOT_TERMINAL',
+      );
     const record = this.store.sqlite
       .prepare('SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?')
       .get(id) as { snapshot: string; digest: string } | undefined;
@@ -832,7 +891,7 @@ export class UpgradeInspector {
     } catch {
       reasons.push('OWNER_AUDIT_UNKNOWN');
     }
-    if(fence !== undefined) this.store.assertFence(id, fence);
+    if (fence !== undefined) this.store.assertFence(id, fence);
     return {
       qualified: reasons.length === 0,
       instanceId: this.store.instanceId,

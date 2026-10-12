@@ -8,6 +8,7 @@ import {
   ConfirmedServiceReleaseSchema,
   SignedUpgradeManifestSchema,
   UpgradeManifestSchema,
+  UpgradeSourceActualSchema,
   type ConfirmedServiceRelease,
   type SignedUpgradeManifest,
   type UpgradePlan,
@@ -100,7 +101,7 @@ function target(source: ConfirmedServiceRelease, releaseId = '0.2.1', migration 
         fromRelease: source.releaseId,
         minSchema: source.schema,
         maxSchema: source.schema,
-        targetSchema: source.schema + Number(migration),
+        targetSchema: source.schema,
         bridgeReleases: [],
         migrationPlanDigest: migration ? upgradeDigest({ migration: releaseId }) : null,
       },
@@ -243,6 +244,154 @@ afterEach(() => {
 });
 
 describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and recovery', () => {
+  it('rejects an unqualified global migration version without reserving an attempt or changing the actual journal', () => {
+    const source = store.confirmed()!;
+    const fixture = target(source, '0.2.1', true);
+    const manifest = UpgradeManifestSchema.parse({
+      ...fixture.envelope.manifest,
+      upgradePaths: fixture.envelope.manifest.upgradePaths.map((path) => ({
+        ...path,
+        targetSchema: source.schema + 1,
+      })),
+    });
+    const envelope = {
+      ...fixture.envelope,
+      manifest,
+      manifestDigest: upgradeDigest(manifest),
+      signature: {
+        ...fixture.envelope.signature,
+        value: sign(null, Buffer.from(canonicalUpgrade(manifest)), key.privateKey).toString(
+          'base64',
+        ),
+      },
+    };
+    const before = connection.sqlite.prepare('SELECT * FROM __drizzle_migrations').all();
+    expect(() => freezeUpgradePlan(envelope, source)).toThrow(
+      'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED',
+    );
+    expect(store.latest()).toBeNull();
+    expect(store.confirmed()).toEqual(source);
+    expect(connection.sqlite.prepare('SELECT * FROM __drizzle_migrations').all()).toEqual(before);
+  });
+  it('freezes a separately measured partial tuple for a new explicit repair intent, preserving the last complete release and reusing only the actual Owner/Installer', () => {
+    const original = store.confirmed()!;
+    const first = accept();
+    for (const step of first.plan.steps) {
+      apply(first.id, step);
+      if (step.kind === 'owner-candidate') break;
+    }
+    store.commit(
+      first.id,
+      command(first.id, 'deferred', { reason: 'state-fixture partial installation' }),
+    );
+    const facts = {
+      schemaVersion: 1,
+      qualified: true,
+      partial: true,
+      instanceId: store.instanceId,
+      baseConfirmedReleaseId: original.releaseId,
+      activationGeneration: store.instance().activation_generation,
+      schema: original.schema,
+      components: {
+        ...original.components,
+        owner: first.envelope.manifest.components.owner,
+        installer: first.envelope.manifest.components.installer,
+      },
+      observedAt: clock.now().toISOString(),
+    };
+    const actual = UpgradeSourceActualSchema.parse({ ...facts, proofDigest: upgradeDigest(facts) });
+    const plan = freezeUpgradePlan(first.envelope, {
+      ...original,
+      schema: actual.schema,
+      components: actual.components,
+    });
+    const request = {
+      ...first.request,
+      requestId: randomUUID(),
+      expectedActivationGeneration: actual.activationGeneration,
+    };
+    const accepted = store.accept(
+      'explicit-repair-actor',
+      request,
+      first.envelope,
+      plan,
+      undefined,
+      undefined,
+      actual,
+    );
+    expect(accepted.attemptId).not.toBe(first.id);
+    expect(accepted.generation).toBeGreaterThan(store.attempt(first.id).generation);
+    expect(store.confirmed()).toEqual(original);
+    expect(store.instance().service_state).not.toBe('confirmed');
+    expect(store.snapshot(accepted.attemptId).sourceActual).toEqual(actual);
+    expect(store.snapshot(accepted.attemptId).sourceActivation).toEqual(original);
+    expect(store.plan(accepted.attemptId)).toMatchObject({
+      ownerReused: true,
+      installerReused: true,
+      sourceOwnerDigest: actual.components.owner?.artifactDigest,
+      sourceInstallerDigest: actual.components.installer.artifactDigest,
+    });
+    expect(
+      store
+        .plan(accepted.attemptId)
+        .steps.some((step) => step.kind === 'owner-candidate' || step.kind === 'installer-handoff'),
+    ).toBe(false);
+    expect(
+      store.accept(
+        'explicit-repair-actor',
+        request,
+        first.envelope,
+        plan,
+        undefined,
+        undefined,
+        actual,
+      ).attemptId,
+    ).toBe(accepted.attemptId);
+  });
+  it.each(['proof', 'base', 'generation', 'stale'] as const)(
+    'rejects a partial source with %s mismatch before admitting another instance attempt',
+    (kind) => {
+      const original = store.confirmed()!;
+      const first = accept();
+      store.commit(first.id, command(first.id, 'deferred', { reason: 'state-fixture deferred' }));
+      connection.sqlite
+        .prepare("UPDATE upgrade_instances SET service_state='unknown' WHERE instance_id=?")
+        .run(store.instanceId);
+      const facts = {
+        schemaVersion: 1,
+        qualified: true,
+        partial: true,
+        instanceId: store.instanceId,
+        baseConfirmedReleaseId: original.releaseId,
+        activationGeneration: store.instance().activation_generation,
+        schema: original.schema,
+        components: original.components,
+        observedAt: clock.now().toISOString(),
+      };
+      if (kind === 'base') facts.baseConfirmedReleaseId = '9.9.9';
+      if (kind === 'generation') facts.activationGeneration++;
+      if (kind === 'stale') facts.observedAt = fromEpochMs(time - 5001).toISOString();
+      const actual = UpgradeSourceActualSchema.parse({
+        ...facts,
+        proofDigest: kind === 'proof' ? upgradeDigest({ tampered: true }) : upgradeDigest(facts),
+      });
+      expect(() =>
+        store.accept(
+          'explicit-repair-actor',
+          { ...first.request, requestId: randomUUID() },
+          first.envelope,
+          first.plan,
+          undefined,
+          undefined,
+          actual,
+        ),
+      ).toThrow('REPAIR_SOURCE_UNCONFIRMED');
+      expect(connection.sqlite.prepare('SELECT count(*) n FROM upgrade_attempts').get()).toEqual({
+        n: 1,
+      });
+      expect(store.confirmed()).toEqual(original);
+    },
+  );
   it('commits one accepted intent across lost acknowledgement, reopen and two-actor concurrent admission', async () => {
     const fixture = target(store.confirmed()!);
     const accepted = store.accept('actor-a', fixture.request, fixture.envelope, fixture.plan);
@@ -524,6 +673,101 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     expect(connection.sqlite.prepare('SELECT * FROM state_test_user_data').all()).toEqual([
       { id: 'new-user-data', revision: 2, value: 'after activation' },
     ]);
+  });
+
+  it('a Web-only mixed recovery preserves successful history and latest data without inventing a fully restored A release', () => {
+    const original = store.confirmed()!;
+    const { id } = accept();
+    const installed = activate(id);
+    const success = connection.sqlite
+      .prepare("SELECT * FROM upgrade_events WHERE attempt_id=? AND kind='activation-confirmed'")
+      .all(id);
+    connection.sqlite.exec(
+      'CREATE TABLE state_test_web_data(id TEXT PRIMARY KEY, revision INTEGER, value TEXT)',
+    );
+    connection.sqlite
+      .prepare('INSERT INTO state_test_web_data VALUES(?,?,?)')
+      .run('after-B', 2, 'latest user data');
+    store.commit(
+      id,
+      command(id, 'ready-revoked', {
+        reason: 'state-layer Web fault',
+        evidence: { componentScope: ['web'] },
+      }),
+    );
+    const recoveryInput = {
+      schemaVersion: 1,
+      triggeringAttemptId: id,
+      eligibilityDigest: upgradeDigest({ scope: 'sqlite-state-layer-Web-only' }),
+      api: null,
+      web: {
+        origin: original.productionWebBinding,
+        digest: original.components.web.artifactDigest,
+      },
+      coordinator: null,
+      owner: null,
+      componentScope: ['web'],
+      faultDigest: upgradeDigest({ fault: 'state-layer-Web-only' }),
+    };
+    const fixedRecovery = { ...recoveryInput, planDigest: upgradeDigest(recoveryInput) };
+    store.commit(
+      id,
+      command(id, 'recovery-started', {
+        recoveryPlan: fixedRecovery,
+        reason: 'state-layer exact Web recovery',
+      }),
+    );
+    const mixedFacts = {
+      schemaVersion: 1,
+      qualified: true,
+      partial: true,
+      instanceId: store.instanceId,
+      baseConfirmedReleaseId: installed.releaseId,
+      activationGeneration: installed.activationGeneration,
+      schema: installed.schema,
+      components: { ...installed.components, web: original.components.web },
+      observedAt: clock.now().toISOString(),
+    };
+    // State-layer fixture only: the service/inspector tests separately obtain the
+    // physical mixed tuple. This does not create a native qualification receipt.
+    const mixed = UpgradeSourceActualSchema.parse({
+      ...mixedFacts,
+      proofDigest: upgradeDigest(mixedFacts),
+    });
+    store.commit(id, command(id, 'recovery-confirmed', { actualSource: mixed }), undefined, mixed);
+    expect(store.recovery()).toMatchObject({
+      state: 'recovery-confirmed',
+      sequence: 1,
+      planDigest: fixedRecovery.planDigest,
+    });
+    expect(store.confirmed()).toEqual(installed);
+    expect(store.instance()).toMatchObject({
+      activation_generation: installed.activationGeneration,
+      service_state: 'unknown',
+      ready: 0,
+    });
+    expect(store.attempt(id)).toMatchObject({ state: 'activation-confirmed', percent: 100 });
+    expect(store.snapshot(id).recoveryPlan).toEqual(fixedRecovery);
+    expect(
+      connection.sqlite
+        .prepare("SELECT * FROM upgrade_events WHERE attempt_id=? AND kind='activation-confirmed'")
+        .all(id),
+    ).toEqual(success);
+    expect(connection.sqlite.prepare('SELECT * FROM state_test_web_data').all()).toEqual([
+      { id: 'after-B', revision: 2, value: 'latest user data' },
+    ]);
+    const event = connection.sqlite
+      .prepare(
+        "SELECT payload FROM upgrade_events WHERE attempt_id=? AND kind='recovery-confirmed'",
+      )
+      .get(id) as { payload: string };
+    expect(JSON.parse(event.payload).actualSource.components).toEqual(mixed.components);
+    expect(mixed.components.api).toEqual(installed.components.api);
+    expect(mixed.components.web).toEqual(original.components.web);
+    const before = store.snapshot(id);
+    time += 1000;
+    store.lookup('actor-a', before.attempt.requestId);
+    expect(store.snapshot(id)).toEqual(before);
   });
 
   it('keeps recovery failure unknown without rewriting success or claiming an automatic retry', () => {

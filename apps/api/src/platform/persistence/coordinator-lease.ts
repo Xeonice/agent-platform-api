@@ -2,13 +2,32 @@ import type Database from 'better-sqlite3';
 import type { Clock, IdGenerator } from '@platform/shared-kernel';
 import { UpgradeError } from '../upgrade/upgrade-trust';
 import { finishBusinessTransaction } from './business-transaction-hooks';
+import { currentBusinessWriterEpoch, withBusinessWriterEpoch } from './business-writer-context';
 export const COORDINATOR_WRITER_CONTROL = Symbol('CoordinatorWriterControl');
 export interface CoordinatorWriterControl {
+  readonly instanceId: string;
   assert(): void;
   release(): void;
   reacquire(): number;
   generation: number;
   fence: number;
+}
+/** Capture one actual admitted application epoch, not the process ENV label.
+ * The legacy application mode has no role control; production role assembly
+ * must provide it and fails closed if it is absent. */
+export function withCoordinatorBusinessEpoch<T>(sqlite: Database.Database, work: () => T): T {
+  const actual: unknown = Reflect.get(sqlite, COORDINATOR_WRITER_CONTROL);
+  if (!actual || typeof actual !== 'object') {
+    if (['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? ''))
+      throw new UpgradeError('COORDINATOR_WRITER_CONTROL_REQUIRED');
+    return work();
+  }
+  const control = actual as CoordinatorWriterControl;
+  control.assert();
+  return withBusinessWriterEpoch(
+    { instanceId: control.instanceId, generation: control.generation, fence: control.fence },
+    work,
+  );
 }
 export function coordinatorWriterControl(sqlite: Database.Database): CoordinatorWriterControl {
   const control: unknown = Reflect.get(sqlite, COORDINATOR_WRITER_CONTROL);
@@ -66,6 +85,14 @@ export function fenceCoordinatorConnection(
   process.env.COORDINATOR_GENERATION = String(lease.generation);
   process.env.COORDINATOR_WRITER_FENCE_VALID = 'true';
   const assertWriter = (): void => {
+    const admitted = currentBusinessWriterEpoch();
+    if (
+      admitted &&
+      (admitted.instanceId !== instanceId ||
+        admitted.generation !== lease.generation ||
+        admitted.fence !== lease.fence)
+    )
+      throw new UpgradeError('COORDINATOR_OPERATION_EPOCH_SUPERSEDED');
     const current = read.get() as Lease | undefined;
     if (
       !current ||
@@ -110,6 +137,10 @@ export function fenceCoordinatorConnection(
         return (...args: unknown[]) => {
           if (['run', 'get', 'all', 'iterate'].includes(String(property)) && !target.readonly) {
             assertWriter();
+            // A lazy mutating iterator could execute its first SQLite step only
+            // after this writer released its epoch. Business writes use bounded
+            // run/get/all transactions, never a deferred write capability.
+            if (property === 'iterate') throw new UpgradeError('MUTATING_ITERATOR_NOT_SUPPORTED');
             if (!sqlite.inTransaction && property !== 'iterate')
               return sqlite
                 .transaction(() => {
@@ -127,8 +158,13 @@ export function fenceCoordinatorConnection(
     get(target, property) {
       if (property === COORDINATOR_WRITER_CONTROL)
         return {
-          generation: lease.generation,
-          fence: lease.fence,
+          instanceId,
+          get generation() {
+            return lease.generation;
+          },
+          get fence() {
+            return lease.fence;
+          },
           assert: assertWriter,
           reacquire: () => {
             const next = sqlite

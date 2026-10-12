@@ -41,7 +41,7 @@ export const upgradeAttempts = sqliteTable(
     manifest: text('manifest').notNull(),
     plan: text('plan').notNull(),
     sourceActivation: text('source_activation').notNull(),
-    sourceActual:text('source_actual'),
+    sourceActual: text('source_actual'),
     generation: integer('generation').notNull(),
     sequence: integer('sequence')
       .notNull()

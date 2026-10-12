@@ -1,7 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
-import { RuntimeOwnerProviderRegistry, RunAgentTaskWorkflow } from '@platform/sandbox';
+import {
+  RuntimeOwnerProviderRegistry,
+  RunAgentTaskWorkflow,
+  ProvisionSandboxWorkflow,
+  TasksGateway,
+} from '@platform/sandbox';
+import { EventsGateway } from '../events/events.gateway';
+import { CloneProjectWorkflow } from '@platform/project';
 import { AutomationScheduler } from '@platform/automation';
 import { TerminalGateway } from '@platform/terminal';
 import { join, resolve } from 'node:path';
@@ -37,6 +44,10 @@ export class CoordinatorHandoff {
     private readonly pump: RunAgentTaskWorkflow,
     private readonly terminals: TerminalGateway,
     private readonly automations: AutomationScheduler,
+    private readonly provisions: ProvisionSandboxWorkflow,
+    private readonly clones: CloneProjectWorkflow,
+    private readonly events: EventsGateway,
+    private readonly tasks: TasksGateway,
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly owners: RuntimeOwnerProviderRegistry,
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
@@ -149,6 +160,14 @@ export class CoordinatorHandoff {
           identity.workersStarted === false,
         'READ_ONLY_COORDINATOR_NOT_PREPARED',
       );
+      requireUpgrade(
+        !this.store.sqlite
+          .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+          .get() ||
+          (Array.isArray(identity.supportedDataFormats) &&
+            identity.supportedDataFormats.includes('project-name-v2-authority')),
+        'COORDINATOR_DATA_FORMAT_INCOMPATIBLE',
+      );
       this.store.assertFence(id, fence);
       this.store.sqlite
         .prepare(
@@ -190,14 +209,24 @@ export class CoordinatorHandoff {
           nextOrigin: candidate.businessOrigin,
         });
         await this.applications.quiesce(Math.min(1000, plan.policy.requestDeadlineMs / 2));
+        requireUpgrade(
+          this.provisions.pauseOwnership() && this.clones.pauseOwnership(),
+          'BACKGROUND_WORK_PENDING',
+        );
         this.pump.shutdown();
         this.automations.pauseOwnership();
         this.terminals.prepareHandoff();
+        this.events.prepareHandoff();
+        this.tasks.prepareHandoff();
       } catch (error) {
         await this.binding('ready');
         this.applications.resume();
         this.pump.resumeOwnership();
         this.automations.resumeOwnership();
+        this.provisions.resumeOwnership();
+        this.clones.resumeOwnership();
+        this.events.resumeAfterHandoff();
+        this.tasks.resumeAfterHandoff();
         this.store.sqlite
           .prepare(
             "UPDATE coordinator_handoffs SET stage='prepared',quiesced_at=NULL WHERE attempt_id=?",
@@ -233,6 +262,10 @@ export class CoordinatorHandoff {
         this.applications.resume();
         this.pump.resumeOwnership();
         this.automations.resumeOwnership();
+        this.provisions.resumeOwnership();
+        this.clones.resumeOwnership();
+        this.events.resumeAfterHandoff();
+        this.tasks.resumeAfterHandoff();
         throw error;
       }
       // This durable accepted handoff owns the critical section even if its

@@ -440,17 +440,19 @@ export class TerminalGateway
   prepareHandoff(): number {
     const count = this.attachments.size;
     for (const [clientId, attachment] of this.attachments) {
-      this.namespace
-        ?.to(clientId)
-        .emit('frame', {
-          type: 'connection_state',
-          state: 'restoring',
-          sandboxId: attachment.sandboxId,
-        } satisfies TerminalServerFrame);
+      this.namespace?.to(clientId).emit('frame', {
+        type: 'connection_state',
+        state: 'restoring',
+        sandboxId: attachment.sandboxId,
+      } satisfies TerminalServerFrame);
       this.removeAttachment(clientId, true);
       this.namespace?.to(clientId).disconnectSockets(true);
     }
     return count;
+  }
+
+  get activeTransportConnections(): number {
+    return this.namespace?.sockets.size ?? 0;
   }
 
   @SubscribeMessage('frame')

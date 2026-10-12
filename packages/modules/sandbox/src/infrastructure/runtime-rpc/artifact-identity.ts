@@ -1,7 +1,6 @@
-import { readFile, lstat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { dirname, resolve, isAbsolute, relative } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { verifyInstalledArtifactTree } from '@platform/shared-kernel';
 import { ownerRecord } from './wire-codec';
 export interface OwnerArtifactIdentity {
   artifactDigest: string;
@@ -35,45 +34,7 @@ export async function ownerArtifactIdentity(): Promise<OwnerArtifactIdentity | n
       String(file.path).startsWith('api/'),
   ) as Record<string, unknown>[];
   if (!files.length) throw new Error('OWNER_ARTIFACT_EMPTY');
-  for (const file of files) {
-    if (
-      typeof file.path !== 'string' ||
-      isAbsolute(file.path) ||
-      file.path.split(/[\\/]/).includes('..')
-    )
-      throw new Error('OWNER_ARTIFACT_PATH_INVALID');
-    const path = resolve(root, file.path),
-      rel = relative(root, path),
-      stat = await lstat(path);
-    if (
-      rel.startsWith('..') ||
-      isAbsolute(rel) ||
-      !stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.size !== file.bytes ||
-      (stat.mode & 0o777) !== file.mode
-    )
-      throw new Error('OWNER_ARTIFACT_CHANGED');
-    const hash = createHash('sha256');
-    for await (const chunk of createReadStream(path)) hash.update(chunk);
-    if ('sha256:' + hash.digest('hex') !== file.digest) throw new Error('OWNER_ARTIFACT_CHANGED');
-  }
-  const canonical = (value: unknown): string => {
-    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-    if (value && typeof value === 'object')
-      return (
-        '{' +
-        Object.keys(value)
-          .sort()
-          .map(
-            (key) => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key]),
-          )
-          .join(',') +
-        '}'
-      );
-    return JSON.stringify(value);
-  };
-  const actual = 'sha256:' + createHash('sha256').update(canonical(files)).digest('hex');
+  const actual = await verifyInstalledArtifactTree(root, 'api', files);
   if (
     actual !== component.artifactDigest ||
     (process.env.PLATFORM_ARTIFACT_DIGEST && actual !== process.env.PLATFORM_ARTIFACT_DIGEST)

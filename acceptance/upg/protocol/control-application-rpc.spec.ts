@@ -15,7 +15,10 @@ import {
   SANDBOX_PROVIDER_REGISTRY,
   IMAGE_SPEC_REGISTRY,
   type ProviderRegistry,
+  WS_TASKS_SCHEMA_HASH,
 } from '@platform/contracts';
+import { TasksGateway } from '@platform/sandbox';
+import { EventsGateway } from '../../../apps/api/src/platform/events/events.gateway';
 import { HelperContainerSession } from '@platform/runtime';
 import type Database from 'better-sqlite3';
 import { ProtocolProvider, registryMetadataFixture } from '../../support/protocol-resources';
@@ -585,4 +588,50 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
       socket.disconnect();
     }
   });
+  for (const namespace of ['/events', '/tasks'] as const) {
+    it(`actual ${namespace} handoff closes only transport, refuses stale admission and resumes authenticated access`, async () => {
+      const gateway =
+        namespace === '/events'
+          ? coordinator.app.get(EventsGateway)
+          : coordinator.app.get(TasksGateway);
+      const calls = [...coordinator.provider.calls],
+        commands = [...coordinator.provider.commands];
+      const sockets: ReturnType<typeof io>[] = [];
+      const connect = (): Promise<ReturnType<typeof io>> =>
+        new Promise((ok, fail) => {
+          const socket = io(`${url}${namespace}`, {
+            transports: ['websocket'],
+            reconnection: false,
+            forceNew: true,
+            timeout: 2000,
+            query: { sandboxId: 'transport-only-no-task', xSchemaHash: WS_TASKS_SCHEMA_HASH },
+            extraHeaders: { Origin: ORIGIN, Cookie: cookie },
+          });
+          sockets.push(socket);
+          socket.once('connect', () => ok(socket));
+          socket.once('connect_error', fail);
+        });
+      try {
+        const originalSocket = await connect();
+        const originalId = originalSocket.id;
+        await vi.waitFor(() => expect(gateway.activeTransportConnections).toBe(1));
+        const detached = new Promise<void>((ok) => originalSocket.once('disconnect', () => ok()));
+        expect(gateway.prepareHandoff()).toBe(1);
+        await detached;
+        await vi.waitFor(() => expect(gateway.activeTransportConnections).toBe(0));
+        await expect(connect()).rejects.toMatchObject({
+          data: { code: 'APPLICATION_WRITER_QUIESCED' },
+        });
+        gateway.resumeAfterHandoff();
+        const restored = await connect();
+        expect(restored.id).not.toBe(originalId);
+        expect(restored.connected).toBe(true);
+        expect(coordinator.provider.calls).toEqual(calls);
+        expect(coordinator.provider.commands).toEqual(commands);
+      } finally {
+        gateway.resumeAfterHandoff();
+        for (const socket of sockets) socket.disconnect();
+      }
+    });
+  }
 });

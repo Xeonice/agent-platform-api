@@ -14286,14 +14286,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["I02", "N01"],
+        "layers": ["real-browser-api-controller", "native-runtime"],
         "actualExpected": "原sandbox/provider/VM/PTY/tmux/进程启动身份不变；持续输出且无停止销毁取消",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14313,18 +14307,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F06", "C03", "I02", "N01"],
+        "layers": ["web", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原AgentTask/run/job、initialPrompt消费一次、最新产物不倒退",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14355,16 +14339,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B05",
-          "I04",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B05", "I04", "N02"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原规则启用、occurrence无遗漏／重复，回退前后创建与消费唯一",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14380,20 +14356,18 @@
       "when": "发布等待或达到超时",
       "then": "保留旧版并记录等待原因；不停止任务、不暂停自动化、不清资源占用",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/sqlite/background-handoff.spec.ts",
+          "purpose": "Actual production clone workflow and migrated SQLite refuse handoff while accepted background operation is active; natural completion commits before ownership pause, no operation abort.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B09",
-          "I01",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B09", "I01", "N02"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "旧安全busy门等待／超时保旧、原因可查，未停任务／暂停自动化／释放占用",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14419,15 +14393,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B05",
-          "B09",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "native-runtime"
-        ],
+        "scenarios": ["B05", "B09", "N02"],
+        "layers": ["backend", "native-runtime"],
         "actualExpected": "原owner保持、独立新home只接新任务、stopped不隐式启动",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14453,18 +14420,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B05",
-          "F05",
-          "I02",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "web",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B05", "F05", "I02", "N02"],
+        "layers": ["backend", "web", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "用户stop／自然退出真实原因及actor，邻接任务保活，不伪持续",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14486,21 +14443,17 @@
           "file": "acceptance/upg/protocol/control-application-rpc.spec.ts",
           "purpose": "Actual separate Control API process to production Coordinator HTTP/MCP/WS/SSE with real SQLite/auth/usecases; upgrade swap and native continuity still require mapped shared/native tests.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
+          "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B08",
-          "I02",
-          "N01",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B08", "I02", "N01", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "10Hz／≤2秒／零发布拒绝5xx/readiness gap，合法幂等写一次",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14520,17 +14473,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "B08",
-          "I04",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B04", "B08", "I04", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "候选慢／未ready时旧入口、旧连接与原任务保持，不先下线",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14556,16 +14500,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["C03", "I02", "N01"],
+        "layers": ["contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原有效cookie/session签名身份保持，无重输口令或初始化",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14591,18 +14527,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "backend",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B04", "C03", "I02", "N01"],
+        "layers": ["backend", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "实际控制API替换后owner/连接入口仍活，attach变化不改运行",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14622,16 +14548,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B09",
-          "I01",
-          "N01"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B09", "I01", "N01"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "CD无实例副作用；用户应用时真实API指纹复用、无API/owner重启，三SHA与artifact追溯",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14651,16 +14569,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F06", "I02", "N01"],
+        "layers": ["web", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "`?taskId=`读取原Sandbox／项目，无create/start/provision",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14680,18 +14590,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F06", "C03", "I02", "N01"],
+        "layers": ["web", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原Agent及两个用户标签、选中第二终端、同tmux／公开bookmark，不替代shell",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14711,18 +14611,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F06", "C03", "I02", "N01"],
+        "layers": ["web", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原run保持、fromSeq补齐去重，初始指令零重发",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14742,14 +14632,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F06", "I02"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "详情/inventory临时超时保留URL／树／标签，不清为不存在",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14769,18 +14653,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B03",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "backend",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B03", "C03", "I02", "N01"],
+        "layers": ["backend", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "未确认input/prompt不replay，幂等业务按原请求只读查结果",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14800,17 +14674,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "F06",
-          "C03",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "F06", "C03", "I02"],
+        "layers": ["web", "contract", "real-browser-api-controller"],
         "actualExpected": "真实销毁／exit有正确出路，连接错误不冒充销毁，不替会话",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14830,14 +14695,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "I02"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "未确认运行时原位恢复条，画布／领域状态保持、不无条件报仍运行",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14857,18 +14716,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "C03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F05", "C03", "I02", "N01"],
+        "layers": ["web", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原身份确认才显示持续，attach-ready后收提示",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14888,14 +14737,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "I02"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": ">15秒动作可用，不给新任务／停止假终态；实测未达5秒另列失败",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14915,14 +14758,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F04",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F04", "I03"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "选区/IME/表单/焦点保持，无自开popover／弹阻断／自动reload清屏",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14942,17 +14779,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "C01",
-          "C03",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "C01", "C03", "I02"],
+        "layers": ["web", "contract", "real-browser-api-controller"],
         "actualExpected": "401、不兼容、unknown、exit真实分流，合法解锁/刷新回原会话",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -14972,17 +14800,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "F06",
-          "C02",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "F06", "C02", "I02"],
+        "layers": ["web", "contract", "real-browser-api-controller"],
         "actualExpected": "events与PTY各自标失效，lastknown保留，新快照不被旧响应覆盖",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15002,16 +14821,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F01",
-          "F03",
-          "I01",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F01", "F03", "I01", "I02"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "available无attempt/percent、只读提示/按权限命令；ongoing0–99、installed不同ready才刷新；轻量不抢焦点，no-click零执行",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15031,14 +14842,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F02",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F02", "I03"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "用户+实例本地日暂停跨全部阶段／同日新target／多标签，次日只读核验，不按24h／永久revision",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15060,24 +14865,17 @@
           "file": "acceptance/upg/sqlite/upgrade-store.spec.ts",
           "purpose": "Actual migrated SQLite validates immutable request/CAS/frozen plans, global controller fencing, recovery and retained success history; state-layer receipts are not installer or native qualification.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/upgrade-security.spec.ts",
+          "purpose": "Actual Nest HTTP cookie, independent upgrade capability, exact Origin/CSRF/internal instance key and restart/expiry/key-rotation authorization; fixed controller fixture is only the security boundary.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B02",
-          "B03",
-          "F01",
-          "I02",
-          "I03",
-          "N01"
-        ],
-        "layers": [
-          "backend",
-          "web",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B02", "B03", "F01", "I02", "I03", "N01"],
+        "layers": ["backend", "web", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "真权限/CSRF/CAS单受理、target固定、断网lookup，升级与刷新分开，sameWeb不强刷",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15097,15 +14895,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F03",
-          "F04",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F03", "F04", "I03"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "布局/焦点/输入现场保护、无自动动作或timer进度，用户离开保护不误停任务",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15115,7 +14906,7 @@
       "id": "AC-UPG-006.1",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:145",
+      "source": "../docs/product/requirements/UPG.md:149",
       "level": "协议／跨仓",
       "given": "旧 Web 与新 API 属于兼容范围，hash 不同",
       "when": "握手及接续",
@@ -15125,16 +14916,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F05",
-          "C01",
-          "I04"
-        ],
-        "layers": [
-          "web",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F05", "C01", "I04"],
+        "layers": ["web", "contract", "real-browser-api-controller"],
         "actualExpected": "兼容hash差异仍连接，稍后可用，不以SHA/schema hash一律拒绝",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15144,7 +14927,7 @@
       "id": "AC-UPG-006.2",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:146",
+      "source": "../docs/product/requirements/UPG.md:150",
       "level": "协议／跨仓",
       "given": "Web B 已加载，数据库已有新版接纳的数据且原 owner 仍在服务",
       "when": "验证回退组合并回退 API",
@@ -15154,18 +14937,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B08",
-          "C01",
-          "I04",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B08", "C01", "I04", "N03"],
+        "layers": ["backend", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "最新DB/新写/已加载WebB/全部owner/健康/fence资格成立才回退，缺证据不盲退",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15175,7 +14948,7 @@
       "id": "AC-UPG-006.3",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:147",
+      "source": "../docs/product/requirements/UPG.md:151",
       "level": "真实升级",
       "given": "原始不兼容数据库变更，任务持续新增／更新／删除；旧权威完整且无不可逆新语义",
       "when": "桥接／影子双表示／按版本与游标回填对账／灰度切读，注入中断／重复批次、影子转换错误及持久变更记录提交失败",
@@ -15187,21 +14960,17 @@
           "file": "acceptance/upg/sqlite/online-migration.spec.ts",
           "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
+          "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B06",
-          "B07",
-          "I05",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B06", "B07", "I05", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "单事务双表示、版本游标/增改删对账；受限影子错保旧业务+outbox同事务、仅补投影；共享损坏/outbox失败不吞错；独立contract保窗口",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15211,7 +14980,7 @@
       "id": "AC-UPG-006.4",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:148",
+      "source": "../docs/product/requirements/UPG.md:152",
       "level": "真实升级",
       "given": "删除字段、长 DDL／全表重建、新语义不可无损旧表示或未经证明的 runtime 热接管",
       "when": "预检兼容化／回退资格／连续性预算，并到达独立contract步骤",
@@ -15223,22 +14992,27 @@
           "file": "acceptance/upg/sqlite/online-migration.spec.ts",
           "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
+          "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+          "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/contract-authorization.spec.ts",
+          "purpose": "Actual Nest public controllers/security/current SQLite reject shared-access-only, invalid Origin/CSRF, arbitrary payloads and unqualified independent contract commands; no positive native retirement claim.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B07",
-          "B09",
-          "I05",
-          "N02",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B07", "B09", "I05", "N02", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "优先桥/影子/短epoch；不可逆语义预审forward-only；contract独立用户发起，超预算延期/限功能、残余维护另证",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15248,7 +15022,7 @@
       "id": "AC-UPG-006.5",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:149",
+      "source": "../docs/product/requirements/UPG.md:153",
       "level": "集成／真实升级",
       "given": "候选、旧实例、迁移 runner 及后台 worker 并存",
       "when": "调度／恢复／迁移竞争、控制器重启或旧 generation 返回",
@@ -15280,22 +15054,27 @@
           "file": "acceptance/upg/protocol/control-application-rpc.spec.ts",
           "purpose": "Actual separate Control API process to production Coordinator HTTP/MCP/WS/SSE with real SQLite/auth/usecases; upgrade swap and native continuity still require mapped shared/native tests.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/background-handoff.spec.ts",
+          "purpose": "Actual production clone workflow and migrated SQLite refuse handoff while accepted background operation is active; natural completion commits before ownership pause, no operation abort.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
+          "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+          "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "B05",
-          "I05",
-          "N02",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B04", "B05", "I05", "N02", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "唯一writer/迁移锁/调度/pump/分配，旧fence无续批/切换，竞争立即熔断",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15305,7 +15084,7 @@
       "id": "AC-UPG-006.6",
       "domain": "UPG",
       "requirement": "REQ-UPG-006",
-      "source": "../docs/product/requirements/UPG.md:150",
+      "source": "../docs/product/requirements/UPG.md:154",
       "level": "真实升级",
       "given": "v0.3.8 单容器实例中存在活跃沙箱",
       "when": "首次导入新的分离架构",
@@ -15315,14 +15094,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B09",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "native-runtime"
-        ],
+        "scenarios": ["B09", "N02"],
+        "layers": ["backend", "native-runtime"],
         "actualExpected": "活VM首次迁移保legacy，不热搬VM/抢home/双DB写权或未证移交就终止",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15332,26 +15105,29 @@
       "id": "AC-UPG-007.1",
       "domain": "UPG",
       "requirement": "REQ-UPG-007",
-      "source": "../docs/product/requirements/UPG.md:164",
+      "source": "../docs/product/requirements/UPG.md:168",
       "level": "真实升级",
       "given": "用户命令已接纳，候选／协议失败、硬不变量破坏或统计劣化／缺观测达到固定策略",
       "when": "在本次同意的恢复范围内自动熔断",
       "then": "冻结推进／扩流／新增分配及后续批次；未接流候选可隔离，已切流无合格fallback不清零唯一安全B路由；硬不变量立即触发，健康任务／自动化／owner保持；CD发布／查询不得建立该attempt",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
+          "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/web-recovery-scope.spec.ts",
+          "purpose": "Actual migrated SQLite fault-history reads and production fixed-target guard prevent expanding measured Web-only recovery into API/coordinator/owner actions. No positive native fallback qualification claim.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B08",
-          "I04",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B08", "I04", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "固定硬/软熔断策略，未接流隔离／已切流冻结扩流，无fallback不清安全B；健康任务保持",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15361,7 +15137,7 @@
       "id": "AC-UPG-007.2",
       "domain": "UPG",
       "requirement": "REQ-UPG-007",
-      "source": "../docs/product/requirements/UPG.md:165",
+      "source": "../docs/product/requirements/UPG.md:169",
       "level": "真实升级",
       "given": "实例整体激活确认前失败或 activation-confirmed 后新故障；已有 Web B／新数据，回退健康且兼容／控制权有效",
       "when": "本次用户发起允许范围内，以独立 recoveryAttempt／新 generation 合格回退",
@@ -15388,22 +15164,17 @@
           "file": "acceptance/upg/protocol/automation-launch-recovery.spec.ts",
           "purpose": "Actual Owner HTTP journal plus real business services validate fixed job intent across lost acknowledgement and writer epochs; no native runtime claim.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
+          "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B08",
-          "C02",
-          "I04",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "contract",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B08", "C02", "I04", "N03"],
+        "layers": ["backend", "contract", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "独立recovery/generation/plan合格回退，保最新数据/取消/幂等；确认前failed，确认后历史100不改并撤ready；不退整卷／重放",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15413,7 +15184,7 @@
       "id": "AC-UPG-007.3",
       "domain": "UPG",
       "requirement": "REQ-UPG-007",
-      "source": "../docs/product/requirements/UPG.md:166",
+      "source": "../docs/product/requirements/UPG.md:170",
       "level": "真实升级",
       "given": "共享数据库／owner 故障、租约失效、控制权或回退资格不确定",
       "when": "准备升级／自动回退或恢复失败",
@@ -15429,18 +15200,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "B05",
-          "B08",
-          "I04",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B04", "B05", "B08", "I04", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "共享DB/owner/租约/资格未知不能假退API修好或接管，保可证健康组合与真实占用",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15450,7 +15211,7 @@
       "id": "AC-UPG-007.4",
       "domain": "UPG",
       "requirement": "REQ-UPG-007",
-      "source": "../docs/product/requirements/UPG.md:167",
+      "source": "../docs/product/requirements/UPG.md:171",
       "level": "集成",
       "given": "熔断、只能前进边界或不满足安全回退，之后修复／出现新target",
       "when": "诊断、CD重试、开页检查及有权限用户再次明确发起",
@@ -15462,21 +15223,22 @@
           "file": "acceptance/upg/sqlite/upgrade-store.spec.ts",
           "purpose": "Actual migrated SQLite validates immutable request/CAS/frozen plans, global controller fencing, recovery and retained success history; state-layer receipts are not installer or native qualification.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+          "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/web-recovery-scope.spec.ts",
+          "purpose": "Actual migrated SQLite fault-history reads and production fixed-target guard prevent expanding measured Web-only recovery into API/coordinator/owner actions. No positive native fallback qualification claim.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "B07",
-          "B08",
-          "I01",
-          "I04"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["B04", "B07", "B08", "I01", "I04"],
+        "layers": ["backend", "real-browser-api-controller"],
         "actualExpected": "诊断只读、同attempt不循环，修复/CD重试不新建或改target；用户另发新attempt/contract重过门禁",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15486,7 +15248,7 @@
       "id": "AC-UPG-007.5",
       "domain": "UPG",
       "requirement": "REQ-UPG-007",
-      "source": "../docs/product/requirements/UPG.md:168",
+      "source": "../docs/product/requirements/UPG.md:172",
       "level": "Storybook／跨仓",
       "given": "维护者看到候选失败或发布延后",
       "when": "普通用户继续工作",
@@ -15496,15 +15258,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F01",
-          "F04",
-          "I04"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F01", "F04", "I04"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "工作台无失败阻断卡／停任务指引／自动跳页，原任务仍接入、系统卡可主动查",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15514,7 +15269,7 @@
       "id": "AC-UPG-008.1",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:176",
+      "source": "../docs/product/requirements/UPG.md:180",
       "level": "真实运行环境",
       "given": "持续计数的交互任务、后台任务和启用自动化同时存在",
       "when": "用实际部署入口升级",
@@ -15524,13 +15279,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "N01",
-          "N02"
-        ],
-        "layers": [
-          "native-runtime"
-        ],
+        "scenarios": ["N01", "N02"],
+        "layers": ["native-runtime"],
         "actualExpected": "实际部署受理链及sandbox/box/PID+starttime/tmux/job/工作区证据，零重启停止双执行",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15540,7 +15290,7 @@
       "id": "AC-UPG-008.2",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:177",
+      "source": "../docs/product/requirements/UPG.md:181",
       "level": "跨仓／真实运行环境",
       "given": "升级期间有真实浏览器旧标签页、页面刷新与多终端",
       "when": "自动／手动续接",
@@ -15550,14 +15300,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["I02", "N01"],
+        "layers": ["real-browser-api-controller", "native-runtime"],
         "actualExpected": "旧新标签页/多终端原身份续接、默认与上次选中，无生命周期动作",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15567,7 +15311,7 @@
       "id": "AC-UPG-008.3",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:178",
+      "source": "../docs/product/requirements/UPG.md:182",
       "level": "真实运行环境",
       "given": "任务每秒持久化单调序号，迁移期间有并发新增／更新／删除、取消与自动化记录",
       "when": "在线转换、回填恢复、刷新及失败回退／修复前进",
@@ -15579,20 +15323,17 @@
           "file": "acceptance/upg/sqlite/online-migration.spec.ts",
           "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
+          "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B06",
-          "I05",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B06", "I05", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "原每秒序号与结果/游标/幂等/取消/occurrence不倒退，无丢/重复、不复活删除",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15602,7 +15343,7 @@
       "id": "AC-UPG-008.4",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:179",
+      "source": "../docs/product/requirements/UPG.md:183",
       "level": "真实升级",
       "given": "准备／回填／API 切流／Web 切换／整体确认／退役各阶段注入 readiness、长锁、转换／对账、硬不变量、统计阈值、观测缺失、控制器重启／竞争及恢复再失败",
       "when": "执行熔断、合格回退或修复前进",
@@ -15614,24 +15355,17 @@
           "file": "acceptance/upg/sqlite/online-migration.spec.ts",
           "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
+          "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B04",
-          "B06",
-          "B07",
-          "B08",
-          "I04",
-          "I05",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B04", "B06", "B07", "B08", "I04", "I05", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "全阶段故障、阈值/冻结/资格/独立恢复有真实证据；共享故障不误回退，无循环",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15641,23 +15375,24 @@
       "id": "AC-UPG-008.5",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:180",
+      "source": "../docs/product/requirements/UPG.md:184",
       "level": "真实升级",
       "given": "兼容合法请求及可恢复终端连续探测",
       "when": "正常升级",
       "then": "达到 10 次／秒、HTTP 2 秒、终端恢复 5 秒目标；15 秒升级为可操作提示而非任务终态",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
+          "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "N01",
-          "N03"
-        ],
-        "layers": [
-          "native-runtime"
-        ],
+        "scenarios": ["N01", "N03"],
+        "layers": ["native-runtime"],
         "actualExpected": "正常窗口正式10Hz／HTTP≤2秒／attach≤5秒；>15秒连接提示不伪业务终态",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15667,29 +15402,34 @@
       "id": "AC-UPG-008.6",
       "domain": "UPG",
       "requirement": "REQ-UPG-008",
-      "source": "../docs/product/requirements/UPG.md:181",
+      "source": "../docs/product/requirements/UPG.md:185",
       "level": "CI／真实升级",
       "given": "只有 mock／普通重连通过，运行输入变化，或缺兼容桥／新写数据回退／只能前进恢复和熔断策略证据",
       "when": "请求正式发布或修复后新 attempt",
       "then": "缺对应连续性与恢复证据即阻断；阈值／窗口／控制权／不可逆边界事前固定；归档环境、版本、身份、阶段、迁移对账、触发与实际恢复结果，不复用不对应输入的证据",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/pure/release-trust.spec.ts",
+          "purpose": "Real Ed25519 and exact canonical/frozen-plan validation against actual CD module. Synthetic signed unit-only report values exercise rejection paths; they are not real release/native qualifications.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/pure/installed-artifact.spec.ts",
+          "purpose": "Real physical dependency closure, contained pnpm links, Node DI token identity and rejection of escaping/broken/extra/changed files; no native upgrade claim.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/pure/upgrade-artifact.spec.ts",
+          "purpose": "Whole physical API/Web/installer bundle, component digests and root declaration verification; unlisted executables and altered declaration bytes are rejected. Filesystem layer only.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B01",
-          "B08",
-          "B09",
-          "I01",
-          "N01",
-          "N03"
-        ],
-        "layers": [
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B01", "B08", "B09", "I01", "N01", "N03"],
+        "layers": ["backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "本输入对应native/迁移/回退/forward-only门禁齐全才可交付；skip/替身/陈旧证据阻断，策略事前冻结",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15699,7 +15439,7 @@
       "id": "AC-UPG-009.1",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:205",
+      "source": "../docs/product/requirements/UPG.md:209",
       "level": "Storybook／跨仓",
       "given": "任意页及窄屏，有verified installable available、已接纳进行中或已安装待刷新",
       "when": "查看顶栏／系统卡及无有效状态对照",
@@ -15709,16 +15449,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F01",
-          "F04",
-          "I01",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F01", "F04", "I01", "I03"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "跨页/窄屏CircleArrowUp三态及静态点；系统卡check常驻，page已目标仍显示service available，无自动升级",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15728,7 +15460,7 @@
       "id": "AC-UPG-009.2",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:206",
+      "source": "../docs/product/requirements/UPG.md:210",
       "level": "协议／跨仓",
       "given": "目录published但实例仍vA；之后用户命令已接纳，浏览器可能vA或vB",
       "when": "投影available、真实0–99、部分切换和activation-confirmed／100",
@@ -15744,19 +15476,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F03",
-          "B04",
-          "C02",
-          "I01",
-          "I02"
-        ],
-        "layers": [
-          "web",
-          "backend",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F03", "B04", "C02", "I01", "I02"],
+        "layers": ["web", "backend", "contract", "real-browser-api-controller"],
         "actualExpected": "published/confirmedService/available/fixedTarget/loadedWeb分开；真实0–99/部分切换待确认/activation100对账",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15766,7 +15487,7 @@
       "id": "AC-UPG-009.3",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:207",
+      "source": "../docs/product/requirements/UPG.md:211",
       "level": "组件／跨仓",
       "given": "当日关闭available／进行中／待刷新浮卡或稍后，包括午夜前",
       "when": "用户发起后的阶段变化、同日新版本、跨页／刷新／多标签及次日核验",
@@ -15776,14 +15497,8 @@
       "scenarios": [],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F02",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F02", "I03"],
+        "layers": ["web", "real-browser-api-controller"],
         "actualExpected": "available/ongoing/ready同日关闭贯穿，scope独立多标签同步；次日只读重验原任务/输入不动",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15793,7 +15508,7 @@
       "id": "AC-UPG-009.4",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:208",
+      "source": "../docs/product/requirements/UPG.md:212",
       "level": "协议／组件",
       "given": "候选未核验、实例确认前失败、确认后新故障、延期或部分激活",
       "when": "查看系统卡／关联恢复及目录新published版本",
@@ -15809,19 +15524,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F01",
-          "F03",
-          "B08",
-          "C02",
-          "I04"
-        ],
-        "layers": [
-          "web",
-          "backend",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F01", "F03", "B08", "C02", "I04"],
+        "layers": ["web", "backend", "contract", "real-browser-api-controller"],
         "actualExpected": "未核验/失败/延期/部分激活真实；确认后历史成功100保留+撤ready/recovery，catalog新published不重试或换target",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15831,7 +15535,7 @@
       "id": "AC-UPG-009.5",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:209",
+      "source": "../docs/product/requirements/UPG.md:213",
       "level": "组件／跨仓",
       "given": "目录／实例或recovery观测失败、未知或缓存有版本／百分比",
       "when": "首次／次日核验、只读检查／详情和CI retry",
@@ -15847,19 +15551,8 @@
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F03",
-          "B03",
-          "C02",
-          "I01",
-          "I03"
-        ],
-        "layers": [
-          "web",
-          "backend",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["F03", "B03", "C02", "I01", "I03"],
+        "layers": ["web", "backend", "contract", "real-browser-api-controller"],
         "actualExpected": "catalog/instance/recovery未知标lastseen；查询/关闭/CIretry零command/执行包下载/迁移，提交未知只lookup",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15869,29 +15562,24 @@
       "id": "AC-UPG-009.6",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:210",
+      "source": "../docs/product/requirements/UPG.md:214",
       "level": "跨仓浏览器",
       "given": "available未升级、实例0–99或已确认100；Web artifact相同／不同且缓存可能旧",
       "when": "按状态发起升级或刷新页面",
       "then": "升级权限与刷新动作分开，available仅显式受权命令接纳才执行；100后不同实际ready页面才刷新，API单变／Web复用无强制刷新；只有实载构建才改页面身份，不重启attempt，原任务续接",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/protocol/upgrade-security.spec.ts",
+          "purpose": "Actual Nest HTTP cookie, independent upgrade capability, exact Origin/CSRF/internal instance key and restart/expiry/key-rotation authorization; fixed controller fixture is only the security boundary.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "F06",
-          "B02",
-          "B03",
-          "I02",
-          "N01"
-        ],
-        "layers": [
-          "web",
-          "backend",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["F06", "B02", "B03", "I02", "N01"],
+        "layers": ["web", "backend", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "只有受权明确命令才升级；100后实际不同且ready才刷新，实际Webmanifest才改页号，同Web不强刷，续接原资源",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15901,7 +15589,7 @@
       "id": "AC-UPG-009.7",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:211",
+      "source": "../docs/product/requirements/UPG.md:215",
       "level": "API／跨仓",
       "given": "精确target验证、跨实例／attempt／generation旧响应，多用户并发或重复requestId，另有目录新版本",
       "when": "接纳实例命令并汇总升级／recovery",
@@ -15913,24 +15601,42 @@
           "file": "acceptance/upg/sqlite/upgrade-store.spec.ts",
           "purpose": "Actual migrated SQLite validates immutable request/CAS/frozen plans, global controller fencing, recovery and retained success history; state-layer receipts are not installer or native qualification.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/pure/release-trust.spec.ts",
+          "purpose": "Real Ed25519 and exact canonical/frozen-plan validation against actual CD module. Synthetic signed unit-only report values exercise rejection paths; they are not real release/native qualifications.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/upgrade-security.spec.ts",
+          "purpose": "Actual Nest HTTP cookie, independent upgrade capability, exact Origin/CSRF/internal instance key and restart/expiry/key-rotation authorization; fixed controller fixture is only the security boundary.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/pure/installed-artifact.spec.ts",
+          "purpose": "Real physical dependency closure, contained pnpm links, Node DI token identity and rejection of escaping/broken/extra/changed files; no native upgrade claim.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/pure/upgrade-artifact.spec.ts",
+          "purpose": "Whole physical API/Web/installer bundle, component digests and root declaration verification; unlisted executables and altered declaration bytes are rejected. Filesystem layer only.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+          "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/contract-authorization.spec.ts",
+          "purpose": "Actual Nest public controllers/security/current SQLite reject shared-access-only, invalid Origin/CSRF, arbitrary payloads and unqualified independent contract commands; no positive native retirement claim.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B01",
-          "B02",
-          "B03",
-          "B04",
-          "C02",
-          "I03",
-          "I04"
-        ],
-        "layers": [
-          "backend",
-          "contract",
-          "real-browser-api-controller"
-        ],
+        "scenarios": ["B01", "B02", "B03", "B04", "C02", "I03", "I04"],
+        "layers": ["backend", "contract", "real-browser-api-controller"],
         "actualExpected": "信任/manifest/digest/架构/版本链/schema/权限，CAS与固定target，旧响应100不污染、recovery关联、新attempt仍用户发起",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
@@ -15940,30 +15646,24 @@
       "id": "AC-UPG-009.8",
       "domain": "UPG",
       "requirement": "REQ-UPG-009",
-      "source": "../docs/product/requirements/UPG.md:212",
+      "source": "../docs/product/requirements/UPG.md:216",
       "level": "真实发布／API",
       "given": "CD发布新整体release复用旧API／Web artifact，存量owner原版",
       "when": "发布目录、用户尚未应用及之后显式应用确认",
       "then": "published仅目录事实，未应用实例版本不变；确认后整体release与真实loadedWeb准确，API／Web实际SHA和owner身份保持；每实例Web入口固定，CD不promote共享alias，复用不伪组件换版／多余刷新或重启",
       "responsibility": "shared",
-      "coverage": "planned",
-      "scenarios": [],
+      "coverage": "scenario-defined",
+      "scenarios": [
+        {
+          "file": "acceptance/upg/pure/release-trust.spec.ts",
+          "purpose": "Real Ed25519 and exact canonical/frozen-plan validation against actual CD module. Synthetic signed unit-only report values exercise rejection paths; they are not real release/native qualifications.",
+          "relation": "backend-support"
+        }
+      ],
       "requiredVerification": {
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
-        "scenarios": [
-          "B09",
-          "F03",
-          "I01",
-          "I02",
-          "N01",
-          "N02"
-        ],
-        "layers": [
-          "backend",
-          "web",
-          "real-browser-api-controller",
-          "native-runtime"
-        ],
+        "scenarios": ["B09", "F03", "I01", "I02", "N01", "N02"],
+        "layers": ["backend", "web", "real-browser-api-controller", "native-runtime"],
         "actualExpected": "CD未应用实例仍旧；显式激活后真实release/API/Web/owner身份，实例Web固定无共享promote，复用不伪更新或重启",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."

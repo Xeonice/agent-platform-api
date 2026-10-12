@@ -64,6 +64,7 @@ export interface RuntimeOwnerServerOptions {
   clock: Clock;
   artifactIdentity?: { artifactDigest: string; inputFingerprint: string } | null;
   startIdentity?: string;
+  privateDatabaseIsolation?: true;
 }
 
 /** Stable SDK/PTY owner. HTTP and browser lifetimes never own sandbox lifetimes. */
@@ -124,6 +125,13 @@ export class RuntimeOwnerServer {
       startIdentity: this.options.startIdentity ?? null,
       artifactDigest: this.options.artifactIdentity?.artifactDigest ?? null,
       inputFingerprint: this.options.artifactIdentity?.inputFingerprint ?? null,
+      ...(this.options.privateDatabaseIsolation
+        ? {
+            role: 'runtime-owner' as const,
+            databaseScope: 'owner-private' as const,
+            noBusinessDatabaseAccess: true as const,
+          }
+        : {}),
       lease: this.journal.lease(),
       defaultProvider: this.options.registry.defaultProvider,
       providers: this.options.registry.list().map((provider) => ({

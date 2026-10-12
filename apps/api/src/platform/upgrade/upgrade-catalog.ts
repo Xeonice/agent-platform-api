@@ -2,7 +2,12 @@ import { lstat, readFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
-import type { SignedUpgradeManifest, UpgradeStatus, UpgradePlan, UpgradeSourceActual } from '@platform/contracts';
+import type {
+  SignedUpgradeManifest,
+  UpgradeStatus,
+  UpgradePlan,
+  UpgradeSourceActual,
+} from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
 import { UpgradeInspector } from './upgrade-inspector';
 import {
@@ -45,7 +50,11 @@ export class UpgradeCatalog {
     observedAt: null,
     reason: 'CATALOG_NOT_CHECKED',
   };
-  private verified: { envelope: SignedUpgradeManifest; plan: UpgradePlan; sourceActual: UpgradeSourceActual|null } | null = null;
+  private verified: {
+    envelope: SignedUpgradeManifest;
+    plan: UpgradePlan;
+    sourceActual: UpgradeSourceActual | null;
+  } | null = null;
   private refreshing: Promise<void> | null = null;
   constructor(
     private readonly store: UpgradeStore,
@@ -133,11 +142,25 @@ export class UpgradeCatalog {
       );
       const installed = this.store.confirmed();
       requireUpgrade(installed, 'INSTALLED_RELEASE_UNKNOWN');
-      let sourceActual:UpgradeSourceActual|null=null;
-      try { sourceActual=await this.inspector.sourceActual(); } catch { /* An unqualified partial installation cannot be repaired from metadata alone. */ }
-      if(!sourceActual) requireUpgrade((await this.inspector.installedProof(installed)).qualified===true,'CURRENT_SERVICE_UNCONFIRMED');
-      const planSource=sourceActual?{...installed,schema:sourceActual.schema,components:sourceActual.components}:installed;
-      const targets: { envelope: SignedUpgradeManifest; plan: UpgradePlan; sourceActual:UpgradeSourceActual|null }[] = [];
+      let sourceActual: UpgradeSourceActual | null = null;
+      try {
+        sourceActual = await this.inspector.sourceActual();
+      } catch {
+        /* An unqualified partial installation cannot be repaired from metadata alone. */
+      }
+      if (!sourceActual)
+        requireUpgrade(
+          (await this.inspector.installedProof(installed)).qualified === true,
+          'CURRENT_SERVICE_UNCONFIRMED',
+        );
+      const planSource = sourceActual
+        ? { ...installed, schema: sourceActual.schema, components: sourceActual.components }
+        : installed;
+      const targets: {
+        envelope: SignedUpgradeManifest;
+        plan: UpgradePlan;
+        sourceActual: UpgradeSourceActual | null;
+      }[] = [];
       let incompatibleReason: string | null = null;
       for (const entry of raw.releases) {
         if (!entry || typeof entry !== 'object' || !('envelope' in entry)) continue;
@@ -146,7 +169,17 @@ export class UpgradeCatalog {
         const manifest = envelope.manifest;
         // Separate qualification instances may share a catalog. This only
         // selects the intended signed envelope; verification is still mandatory.
-        if(roots.purpose==='qualification' && manifest && typeof manifest==='object' && 'qualification' in manifest && manifest.qualification && typeof manifest.qualification==='object' && 'instanceId' in manifest.qualification && manifest.qualification.instanceId!==this.store.instanceId) continue;
+        if (
+          roots.purpose === 'qualification' &&
+          manifest &&
+          typeof manifest === 'object' &&
+          'qualification' in manifest &&
+          manifest.qualification &&
+          typeof manifest.qualification === 'object' &&
+          'instanceId' in manifest.qualification &&
+          manifest.qualification.instanceId !== this.store.instanceId
+        )
+          continue;
         if (
           !manifest ||
           typeof manifest !== 'object' ||
@@ -172,9 +205,38 @@ export class UpgradeCatalog {
             entry.manifestDigest === signed.manifestDigest,
           'CATALOG_IDENTITY_MISMATCH',
         );
-        if (!newer(signed.manifest.releaseId, installed.releaseId)) continue;
+        if (
+          !newer(signed.manifest.releaseId, installed.releaseId) &&
+          !(sourceActual && signed.manifest.releaseId === installed.releaseId)
+        )
+          continue;
         try {
-          targets.push({ envelope: signed, plan: freezeUpgradePlan(signed, planSource), sourceActual });
+          const actualSchema = this.inspector.schema();
+          const path = signed.manifest.upgradePaths.find(
+            (p) =>
+              p.fromRelease === installed.releaseId &&
+              actualSchema >= p.minSchema &&
+              actualSchema <= p.maxSchema,
+          );
+          requireUpgrade(path, 'UPGRADE_PATH_INCOMPATIBLE');
+          // Namespace representation epochs do not register a global Drizzle
+          // migration. Until a real online global-DDL executor is qualified,
+          // metadata discovery must not offer that residual step for execution.
+          requireUpgrade(path.targetSchema === actualSchema, 'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED');
+          requireUpgrade(
+            !this.store.sqlite
+              .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+              .get() ||
+              signed.manifest.components.coordinator.dataFormats?.includes(
+                'project-name-v2-authority',
+              ),
+            'TARGET_DATA_FORMAT_INCOMPATIBLE',
+          );
+          targets.push({
+            envelope: signed,
+            plan: freezeUpgradePlan(signed, planSource, this.store.appliedBridges()),
+            sourceActual,
+          });
         } catch (error) {
           if (!(error instanceof UpgradeError)) throw error;
           incompatibleReason = error.code;

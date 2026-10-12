@@ -3,6 +3,8 @@ import { ApiAcceptedResponse, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
+  UpgradeContractRequestSchema,
+  UpgradeContractAttemptSchema,
   UpgradeAccessSchema,
   UpgradeAttemptSchema,
   UpgradeRequestSchema,
@@ -17,7 +19,10 @@ import { UpgradeRoleHandoffs } from './upgrade-role-handoffs';
 import { UpgradeObserver } from './upgrade-observer';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { CoordinatorRecovery } from './coordinator-recovery';
+import { UpgradeContractService } from './upgrade-contract-service';
 
+export class UpgradeContractRequestDto extends createZodDto(UpgradeContractRequestSchema) {}
+export class UpgradeContractAttemptDto extends createZodDto(UpgradeContractAttemptSchema) {}
 export class UpgradeRequestDto extends createZodDto(UpgradeRequestSchema) {}
 export class UpgradeAccessDto extends createZodDto(UpgradeAccessSchema) {}
 export class UpgradeStatusDto extends createZodDto(UpgradeStatusSchema) {}
@@ -77,6 +82,28 @@ export class UpgradeController {
   ) {
     requireUpgrade(z.string().uuid().safeParse(id).success, 'INVALID_REQUEST_ID', 400);
     return this.upgrades.lookup(req, res, id);
+  }
+  @Post('contracts/requests')
+  @HttpCode(202)
+  @ApiAcceptedResponse({ type: UpgradeContractAttemptDto })
+  contractRequest(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() input: UpgradeContractRequestDto,
+  ) {
+    requireUpgrade(this.upgrades.contracts, 'CONTRACT_UNAVAILABLE');
+    return this.upgrades.contracts.request(req, res, input);
+  }
+  @Get('contracts/requests/:requestId')
+  @ApiOkResponse({ type: UpgradeContractAttemptDto })
+  contractLookup(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Param('requestId') id: string,
+  ) {
+    requireUpgrade(z.string().uuid().safeParse(id).success, 'INVALID_REQUEST_ID', 400);
+    requireUpgrade(this.upgrades.contracts, 'CONTRACT_UNAVAILABLE');
+    return this.upgrades.contracts.lookup(req, res, id);
   }
   @Post('probe')
   @HttpCode(200)
@@ -278,5 +305,26 @@ export class UpgradeInternalController {
   ) {
     this.auth(req);
     return this.recovery.resume(id, input);
+  }
+}
+
+@Controller('internal/contracts')
+export class UpgradeContractInternalController {
+  constructor(
+    private readonly contracts: UpgradeContractService,
+    private readonly upgrades: UpgradeService,
+  ) {}
+  @Get(':id') snapshot(@Req() req: Request, @Param('id') id: string) {
+    this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    return this.contracts.store.snapshot(id);
+  }
+  @Post(':id/check') @HttpCode(200) check(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    const body = z.object({ fence: z.number().int().positive() }).strict().parse(raw);
+    return this.contracts.check(id, body.fence);
   }
 }

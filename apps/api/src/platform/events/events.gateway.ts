@@ -22,6 +22,7 @@ import type {
 @WebSocketGateway({ namespace: '/events' })
 export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
   private readonly logger = new Logger('EventsGateway');
+  private retiring = false;
 
   @WebSocketServer()
   private readonly server!: Namespace;
@@ -62,13 +63,38 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
         next(wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode'));
         return;
       }
+      if (this.retiring) {
+        next(
+          wsHandshakeError(
+            'APPLICATION_WRITER_QUIESCED',
+            'events transport is moving to the active coordinator',
+          ),
+        );
+        return;
+      }
       next();
     });
   }
 
   /** Broadcast a projected event to all connected /events sockets. */
   broadcast(event: SandboxWsEvent): void {
-    this.server?.emit('event', event);
+    if (!this.retiring) this.server?.emit('event', event);
+  }
+
+  /** Reconnect only transport; committed state and the original runtime are retained. */
+  prepareHandoff(): number {
+    this.retiring = true;
+    const count = this.activeTransportConnections;
+    this.server?.disconnectSockets(false);
+    return count;
+  }
+
+  resumeAfterHandoff(): void {
+    this.retiring = false;
+  }
+
+  get activeTransportConnections(): number {
+    return this.server?.sockets.size ?? 0;
   }
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {

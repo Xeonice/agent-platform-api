@@ -1,8 +1,21 @@
 import type { Tx } from '@platform/shared-kernel';
-import type { SandboxProviderContext } from '@platform/contracts';
-export interface SandboxCreateIntent { sandboxId: string; operationId: string; requestDigest: string; workspacePath: string; state: 'pending' | 'bound'; createdAt: Date }
+export interface SandboxCreateIntent {
+  sandboxId: string;
+  operationId: string;
+  requestDigest: string;
+  workspacePath: string;
+  state: 'pending' | 'bound';
+  createdAt: Date;
+}
 export interface SandboxCreateIntents {
-  reserveSync(tx: Tx, sandboxId: string, operationId: string, input: SandboxProviderContext, at: Date): SandboxCreateIntent;
+  reserveSync(
+    tx: Tx,
+    sandboxId: string,
+    operationId: string,
+    opaqueInput: Readonly<object>,
+    workspacePath: string,
+    at: Date,
+  ): SandboxCreateIntent;
   completeSync(tx: Tx, sandboxId: string): void;
   finishSync(tx: Tx, sandboxId: string): void;
   pending(): Promise<SandboxCreateIntent[]>;

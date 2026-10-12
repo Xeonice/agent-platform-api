@@ -8,6 +8,7 @@ import {
   Injectable,
   Module,
   Inject,
+  Optional,
   UnauthorizedException,
   BadRequestException,
   HttpException,
@@ -34,9 +35,14 @@ import type { z, ZodTypeAny } from 'zod';
 import { zodToOpenAPI, createZodDto } from 'nestjs-zod';
 import { ApiOkResponse } from '@nestjs/swagger';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
-import { withRuntimeBusinessAuthority } from '@platform/sandbox';
+import { withRuntimeBusinessAuthority, TasksGateway } from '@platform/sandbox';
+import { TerminalGateway } from '@platform/terminal';
+import { EventsGateway } from '../events/events.gateway';
+import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
+import { supportedDataFormats } from '../data-format-capabilities';
 import { PLATFORM_SQLITE } from '../persistence/platform.module';
 import { PasscodeGuard } from '../access-passcode/passcode.guard';
+import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
 import { platformValidationPipe } from '../../bootstrap/validation.pipe';
 import {
   ApplicationRequestSchema,
@@ -140,11 +146,19 @@ export class ControlApplicationRegistry implements OnModuleInit {
   private readonly publicTools: ApplicationCatalog['tools'] = [];
   private accepting = true;
   private activeMutations = 0;
+  private activeRequests = 0;
+  private activeStreams = 0;
   constructor(
     private readonly discovery: DiscoveryService,
     @Inject(PLATFORM_SQLITE) private readonly db: Database.Database,
     @Inject(CLOCK) private readonly clock: Clock,
     private readonly auth: PasscodeGuard,
+    private readonly events: EventsGateway,
+    private readonly tasks: TasksGateway,
+    private readonly terminals: TerminalGateway,
+    @Optional()
+    @Inject(PROJECT_READ_PROJECTION)
+    private readonly projection?: ProjectReadProjection,
   ) {}
   onModuleInit(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
@@ -242,6 +256,15 @@ export class ControlApplicationRegistry implements OnModuleInit {
       startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
       coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION ?? 0),
       writerFenceValid: process.env.COORDINATOR_WRITER_FENCE_VALID === 'true',
+      supportedDataFormats: supportedDataFormats(this.projection),
+      accepting: this.accepting,
+      activeMutations: this.activeMutations,
+      activeRequests: this.activeRequests,
+      activeStreams: this.activeStreams,
+      activeTransportConnections:
+        this.events.activeTransportConnections +
+        this.tasks.activeTransportConnections +
+        this.terminals.activeTransportConnections,
       protocol: { min: 1, max: 2 },
     };
   }
@@ -344,6 +367,26 @@ export class ControlApplicationRegistry implements OnModuleInit {
     return { headers: output.headers };
   }
   async invoke(input: ApplicationRequest, response: Response): Promise<void> {
+    if (!this.accepting)
+      throw new HttpException(
+        {
+          code: 'APPLICATION_WRITER_QUIESCED',
+          message: 'Business handoff is pending',
+          sideEffectFree: true,
+          retryable: true,
+        },
+        425,
+      );
+    this.activeRequests++;
+    try {
+      return await withCoordinatorBusinessEpoch(this.db, () =>
+        this.invokeWithinEpoch(input, response),
+      );
+    } finally {
+      this.activeRequests--;
+    }
+  }
+  private async invokeWithinEpoch(input: ApplicationRequest, response: Response): Promise<void> {
     const binding = this.bindings.get(input.operation),
       tool = this.tools.get(input.operation);
     if (!binding && !tool)
@@ -362,7 +405,13 @@ export class ControlApplicationRegistry implements OnModuleInit {
         425,
       );
     const req = this.request(input);
-    let emitted = false;
+    let emitted = false,
+      streamRegistered = false;
+    const registerStream = (): void => {
+      if (streamRegistered) return;
+      streamRegistered = true;
+      this.activeStreams++;
+    };
     const frame = (value: ApplicationFrame): void => {
       if (!response.headersSent) response.setHeader('content-type', 'application/x-ndjson');
       response.write(JSON.stringify(value) + '\n');
@@ -454,6 +503,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     }
     let bytes = false;
     output.on('data', (data: Buffer) => {
+      registerStream();
       bytes = true;
       frame({ type: 'bytes', data: data.toString('base64') });
     });
@@ -492,6 +542,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
         execute,
       );
       if (value instanceof StreamableFile) {
+        registerStream();
         const headers = value.getHeaders();
         if (headers.type && !output.getHeader('content-type'))
           output.setHeader('content-type', headers.type);
@@ -527,6 +578,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
       }
       throw error;
     } finally {
+      if (streamRegistered) this.activeStreams--;
       if (mutation) this.activeMutations--;
     }
   }

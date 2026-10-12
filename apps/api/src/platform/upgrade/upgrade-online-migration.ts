@@ -2,6 +2,7 @@ import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common'
 import { readFile, statfs, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
+import type { UpgradeContractPlan } from '@platform/contracts';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SystemClock } from '../time/system-clock';
 import { UpgradeStore } from './upgrade-store';
@@ -68,6 +69,393 @@ const sqlValue = (v: unknown): string =>
 @Injectable()
 export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   private projecting = false;
+  private readonly reads = new Map<
+    string,
+    {
+      planDigest: string;
+      sourceTable: string;
+      targetTable: string;
+      sourceColumn: string;
+      targetColumn: string;
+      count: number;
+      lastReadAt: string;
+    }
+  >();
+  private authorityRow(): Row | undefined {
+    return this.store.sqlite
+      .prepare(
+        'SELECT * FROM upgrade_online_migrations WHERE read_epoch=2 ORDER BY rowid DESC LIMIT 1',
+      )
+      .get() as Row | undefined;
+  }
+  projectNameAuthoritative(): boolean {
+    return Boolean(this.authorityRow());
+  }
+  private authorityMapping() {
+    const row = this.authorityRow();
+    requireUpgrade(row, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
+    const projection = this.plan(row).projections.find(
+      (p) => p.sourceTable === 'projects' && p.primaryKey === 'id',
+    );
+    const field = projection?.fields.find((f) => f.source === 'name' && f.type === 'text');
+    requireUpgrade(projection && field, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
+    return { row, projection, field };
+  }
+  projectIdByName(name: string): string | null {
+    const { projection, field } = this.authorityMapping();
+    const row = this.store.sqlite
+      .prepare(
+        'SELECT row_key FROM ' +
+          q(projection.targetTable) +
+          ' WHERE ' +
+          q(field.name) +
+          '=? AND tombstone=0',
+      )
+      .get(name) as { row_key: string } | undefined;
+    return row?.row_key ?? null;
+  }
+  saveProjectName(id: string, name: string): string {
+    requireUpgrade(this.store.sqlite.inTransaction, 'PROJECT_NAME_AUTHORITY_TRANSACTION_REQUIRED');
+    requireUpgrade(
+      [...name].length >= 1 && [...name].length <= 40 && !name.includes('\0'),
+      'PROJECT_NAME_LENGTH_INVALID',
+    );
+    const { projection, field } = this.authorityMapping();
+    this.store.sqlite
+      .prepare(
+        'INSERT INTO ' +
+          q(projection.targetTable) +
+          '(row_key,row_revision,tombstone,' +
+          q(field.name) +
+          ') VALUES(?,0,0,?) ON CONFLICT(row_key) DO UPDATE SET ' +
+          q(field.name) +
+          '=excluded.' +
+          q(field.name) +
+          ',tombstone=0',
+      )
+      .run(id, name);
+    return this.projectAuthoritySlot(id);
+  }
+  private projectAuthoritySlot(id: string): string {
+    const row = this.authorityRow();
+    requireUpgrade(row, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
+    const checkpoint = JSON.parse(row.checkpoint) as Json;
+    requireUpgrade(
+      typeof checkpoint.authorityMarkerPrefix === 'string' &&
+        /^~r[a-f0-9]{8}v[0-9]{1,2}:$/.test(checkpoint.authorityMarkerPrefix),
+      'PROJECT_NAME_AUTHORITY_UNAVAILABLE',
+    );
+    return (
+      checkpoint.authorityMarkerPrefix + (id ? upgradeDigest({ projectId: id }).slice(7, 31) : '')
+    );
+  }
+  projectionReadEvidence() {
+    return [...this.reads.values()].map((value) => ({ ...value }));
+  }
+  private readReceiptKey(planDigest: string): string | null {
+    const code = process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST;
+    return code && /^sha256:[a-f0-9]{64}$/.test(code)
+      ? 'projection-read:' + planDigest + ':' + code
+      : null;
+  }
+  private confirmedBusinessReads(planDigest: string): boolean {
+    if (this.reads.get(planDigest)?.count) return true;
+    const key = this.readReceiptKey(planDigest);
+    if (!key) return false;
+    const receipt = this.store.sqlite
+      .prepare('SELECT result FROM upgrade_migration_operations WHERE operation_id=?')
+      .get(key) as { result: string } | undefined;
+    if (!receipt) return false;
+    const facts = JSON.parse(receipt.result) as Json;
+    return (
+      facts.planDigest === planDigest &&
+      facts.coordinatorArtifactDigest === process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST &&
+      Number(facts.count) > 0
+    );
+  }
+  /** Qualified independent contract intent only. This does not alter Drizzle's global schema. */
+  contractFacts(contract: UpgradeContractPlan) {
+    const row = this.row(contract.expandPlanDigest);
+    requireUpgrade(
+      row && row.stage === 'complete' && !row.degraded && row.read_epoch >= 1,
+      'CONTRACT_EXPAND_UNCONFIRMED',
+    );
+    const projection = this.plan(row).projections.find(
+      (p) =>
+        p.sourceTable === 'projects' &&
+        p.primaryKey === 'id' &&
+        p.targetTable === contract.targetTable,
+    );
+    requireUpgrade(
+      projection &&
+        projection.fields.length === 1 &&
+        projection.fields[0].source === 'name' &&
+        projection.fields[0].name === contract.nameColumn &&
+        projection.fields[0].type === 'text',
+      'CONTRACT_MAPPING_UNQUALIFIED',
+    );
+    const limited = this.store.sqlite
+      .prepare('SELECT id FROM projects LIMIT ?')
+      .all(contract.maxValidationRows + 1);
+    requireUpgrade(
+      limited.length <= contract.maxValidationRows,
+      'CONTRACT_VALIDATION_BUDGET_EXCEEDED',
+    );
+    const targetCount = this.store.sqlite
+      .prepare('SELECT row_key FROM ' + q(contract.targetTable) + ' WHERE tombstone=0 LIMIT ?')
+      .all(contract.maxValidationRows + 1);
+    requireUpgrade(
+      targetCount.length <= contract.maxValidationRows,
+      'CONTRACT_VALIDATION_BUDGET_EXCEEDED',
+    );
+    const missing = this.store.sqlite
+      .prepare(
+        'SELECT p.id FROM projects p LEFT JOIN ' +
+          q(contract.targetTable) +
+          ' s ON s.row_key=p.id WHERE s.row_key IS NULL OR s.tombstone<>0 OR typeof(s.' +
+          q(contract.nameColumn) +
+          ")<>'text'" +
+          (row.read_epoch < 2 ? ' OR s.' + q(contract.nameColumn) + '<>p.name' : '') +
+          ' LIMIT 1',
+      )
+      .get();
+    const extra = this.store.sqlite
+      .prepare(
+        'SELECT s.row_key FROM ' +
+          q(contract.targetTable) +
+          ' s LEFT JOIN projects p ON p.id=s.row_key WHERE s.tombstone=0 AND p.id IS NULL LIMIT 1',
+      )
+      .get();
+    const pending = this.store.sqlite
+      .prepare(
+        'SELECT 1 FROM upgrade_projection_changes WHERE plan_digest=? AND projected=0 LIMIT 1',
+      )
+      .get(contract.expandPlanDigest);
+    const duplicate = this.store.sqlite
+      .prepare(
+        'SELECT ' +
+          q(contract.nameColumn) +
+          ' FROM ' +
+          q(contract.targetTable) +
+          ' WHERE tombstone=0 GROUP BY ' +
+          q(contract.nameColumn) +
+          ' HAVING count(*)>1 LIMIT 1',
+      )
+      .get();
+    requireUpgrade(
+      !missing && !extra && !pending && !duplicate,
+      'CONTRACT_REPRESENTATION_UNCONFIRMED',
+    );
+    return {
+      complete: true as const,
+      readEpoch: row.read_epoch,
+      totalRows: limited.length,
+      newReadsConfirmed: this.confirmedBusinessReads(row.plan_digest),
+    };
+  }
+  activateProjectAuthority(contract: UpgradeContractPlan, assertAuthority: () => void): number {
+    return this.store.sqlite
+      .transaction(() => {
+        assertAuthority();
+        const began = this.clock.now().getTime(),
+          facts = this.contractFacts(contract);
+        if (facts.readEpoch >= 2) return facts.totalRows;
+        const competing = this.store.sqlite
+          .prepare('SELECT plan_digest FROM upgrade_online_migrations WHERE read_epoch=2')
+          .get();
+        requireUpgrade(!competing, 'CONTRACT_AUTHORITY_CONFLICT');
+        // Preserve arbitrary user names, including strings resembling an old
+        // placeholder. Persist an empty internal namespace before ownership changes.
+        let marker: string | undefined;
+        for (let candidate = 0; candidate < 32; candidate++) {
+          const prefix = '~r' + contract.planDigest.slice(7, 15) + 'v' + candidate + ':';
+          if (
+            !this.store.sqlite
+              .prepare('SELECT 1 FROM projects WHERE substr(name,1,?)=? LIMIT 1')
+              .get(prefix.length, prefix)
+          ) {
+            marker = prefix;
+            break;
+          }
+        }
+        requireUpgrade(marker, 'CONTRACT_RESERVED_NAMESPACE_UNAVAILABLE');
+        const before = this.row(contract.expandPlanDigest)!;
+        const checkpoint = { ...JSON.parse(before.checkpoint), authorityMarkerPrefix: marker };
+        this.store.sqlite.exec(
+          'CREATE UNIQUE INDEX ' +
+            q('upg_name_authority_' + contract.planDigest.slice(7, 23)) +
+            ' ON ' +
+            q(contract.targetTable) +
+            '(' +
+            q(contract.nameColumn) +
+            ') WHERE tombstone=0',
+        );
+        this.store.sqlite
+          .prepare(
+            'UPDATE upgrade_online_migrations SET read_epoch=2,checkpoint=? WHERE plan_digest=? AND read_epoch=1',
+          )
+          .run(canonicalUpgrade(checkpoint), contract.expandPlanDigest);
+        requireUpgrade(
+          this.clock.now().getTime() - began <= contract.batchBudgetMs,
+          'CONTRACT_BATCH_BUDGET_EXCEEDED',
+        );
+        assertAuthority();
+        return facts.totalRows;
+      })
+      .immediate();
+  }
+  clearLegacyProjectNames(contract: UpgradeContractPlan, assertAuthority: () => void) {
+    return this.store.sqlite
+      .transaction(() => {
+        assertAuthority();
+        const began = this.clock.now().getTime();
+        requireUpgrade(
+          this.authorityRow()?.plan_digest === contract.expandPlanDigest,
+          'CONTRACT_NEW_AUTHORITY_REQUIRED',
+        );
+        this.contractFacts(contract);
+        const all = this.store.sqlite
+          .prepare('SELECT id,name FROM projects ORDER BY id LIMIT ?')
+          .all(contract.maxValidationRows + 1) as { id: string; name: string }[];
+        requireUpgrade(
+          all.length <= contract.maxValidationRows,
+          'CONTRACT_VALIDATION_BUDGET_EXCEEDED',
+        );
+        const rows = all
+          .filter((row) => row.name !== this.projectAuthoritySlot(row.id))
+          .slice(0, contract.maxBatchRows);
+        const update = this.store.sqlite.prepare('UPDATE projects SET name=? WHERE id=?');
+        for (const row of rows) update.run(this.projectAuthoritySlot(row.id), row.id);
+        this.projectCommittedChanges();
+        requireUpgrade(
+          this.clock.now().getTime() - began <= contract.batchBudgetMs,
+          'CONTRACT_BATCH_BUDGET_EXCEEDED',
+        );
+        assertAuthority();
+        return {
+          cleared: rows.length,
+          complete:
+            rows.length ===
+            all.filter((row) => row.name !== this.projectAuthoritySlot(row.id)).length,
+        };
+      })
+      .immediate();
+  }
+  /** The new Coordinator's production ProjectRepository consumes the confirmed
+   * renamed field. Source A continues to read the retained authority column.
+   * These are real SQL reads, not a private read_epoch success assertion. */
+  projectedProjectName(id: string, authoritativeName: string): string | undefined {
+    const authority = this.authorityRow();
+    if (authority) requireUpgrade(!authority.degraded, 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
+    const rows = authority
+      ? [authority]
+      : (this.store.sqlite
+          .prepare(
+            "SELECT * FROM upgrade_online_migrations WHERE read_epoch=1 AND degraded=0 AND stage='complete' ORDER BY rowid DESC",
+          )
+          .all() as Row[]);
+    for (const row of rows) {
+      const plan = this.plan(row),
+        projection = plan.projections.find(
+          (p) => p.sourceTable === 'projects' && p.primaryKey === 'id',
+        );
+      const field = projection?.fields.find((f) => f.source === 'name' && f.type === 'text');
+      if (!projection || !field) continue;
+      let actual: Json | undefined;
+      try {
+        actual = this.store.sqlite
+          .prepare(
+            'SELECT ' +
+              q(field.name) +
+              ',"tombstone" FROM ' +
+              q(projection.targetTable) +
+              ' WHERE row_key=?',
+          )
+          .get(id) as Json | undefined;
+      } catch (error) {
+        if (row.read_epoch >= 2) throw error;
+        // Only the independently rebuildable shadow is allowed to degrade. A
+        // corrupt shared DB or loss of the authoritative read is never success.
+        if (!(
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          error.code === 'SQLITE_ERROR'
+        ))
+          throw error;
+        this.store.sqlite.prepare('SELECT name FROM projects WHERE id=?').get(id);
+        this.store.sqlite
+          .prepare(
+            "UPDATE upgrade_online_migrations SET read_epoch=0,degraded=1,reason='SHADOW_READ_UNAVAILABLE' WHERE plan_digest=?",
+          )
+          .run(row.plan_digest);
+        return undefined;
+      }
+      if (
+        !actual ||
+        Number(actual.tombstone) !== 0 ||
+        typeof actual[field.name] !== 'string' ||
+        (row.read_epoch < 2 && actual[field.name] !== authoritativeName)
+      ) {
+        requireUpgrade(row.read_epoch < 2, 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
+        this.store.sqlite
+          .prepare(
+            "UPDATE upgrade_online_migrations SET read_epoch=0,degraded=1,reason='SHADOW_READ_UNCONFIRMED' WHERE plan_digest=?",
+          )
+          .run(row.plan_digest);
+        return undefined;
+      }
+      const prior = this.reads.get(row.plan_digest);
+      const receiptKey = this.readReceiptKey(row.plan_digest);
+      if (
+        receiptKey &&
+        process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
+        process.env.COORDINATOR_WRITER_FENCE_VALID === 'true'
+      ) {
+        // A real business reader leaves a bounded, non-sensitive receipt. This
+        // survives restart without altering migration checkpoint/CAS semantics.
+        const requestDigest = upgradeDigest({
+          kind: 'projection-read',
+          planDigest: row.plan_digest,
+          coordinatorArtifactDigest: process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST,
+        });
+        const before = this.store.sqlite
+          .prepare(
+            'SELECT request_digest,result FROM upgrade_migration_operations WHERE operation_id=?',
+          )
+          .get(receiptKey) as { request_digest: string; result: string } | undefined;
+        requireUpgrade(
+          !before || before.request_digest === requestDigest,
+          'PROJECTION_READ_RECEIPT_CONFLICT',
+        );
+        const count = 1;
+        const result = {
+          planDigest: row.plan_digest,
+          coordinatorArtifactDigest: process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST,
+          count,
+          observedAt: this.clock.now().toISOString(),
+        };
+        if (!before)
+          this.store.sqlite
+            .prepare(
+              'INSERT INTO upgrade_migration_operations(operation_id,request_digest,result) VALUES(?,?,?) ON CONFLICT(operation_id) DO UPDATE SET result=excluded.result',
+            )
+            .run(receiptKey, requestDigest, canonicalUpgrade(result));
+      }
+      this.reads.set(row.plan_digest, {
+        planDigest: row.plan_digest,
+        sourceTable: 'projects',
+        targetTable: projection.targetTable,
+        sourceColumn: 'name',
+        targetColumn: field.name,
+        count: (prior?.count ?? 0) + 1,
+        lastReadAt: this.clock.now().toISOString(),
+      });
+      return actual[field.name] as string;
+    }
+    requireUpgrade(!authority, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
+    return undefined;
+  }
   constructor(
     private readonly store: UpgradeStore,
     @Inject(CLOCK) private readonly clock: Clock = new SystemClock(),
@@ -81,20 +469,8 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         n: number;
       }
     ).n;
-    const exists = this.store.sqlite
-      .prepare("SELECT 1 FROM sqlite_master WHERE name='upgrade_schema_epochs'")
-      .get();
-    if (!exists) return count;
-    return Math.max(
-      count,
-      Number(
-        (
-          this.store.sqlite
-            .prepare('SELECT schema_version FROM upgrade_schema_epochs WHERE singleton=1')
-            .get() as { schema_version: number } | undefined
-        )?.schema_version ?? 0,
-      ),
-    );
+    // A representation read epoch is not a committed global SQL migration.
+    return count;
   }
   private row(digest: string): Row | undefined {
     return this.store.sqlite
@@ -107,6 +483,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     return plan;
   }
   private validate(plan: Plan): void {
+    requireUpgrade(plan.targetSchema === this.schema(), 'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED');
     const targets = new Set<string>();
     for (const projection of plan.projections) {
       requireUpgrade(
@@ -225,6 +602,19 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   ): void {
     const fields = ['row_key', 'row_revision', 'tombstone', ...p.fields.map((f) => f.name)];
     const values = [key, revision, tombstone, ...this.projected(p, payload)];
+    const mode = this.row(upgradeDigest(_plan));
+    if (mode && mode.read_epoch >= 2 && p.sourceTable === 'projects') {
+      const field = p.fields.find((f) => f.source === 'name');
+      requireUpgrade(field, 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
+      const current = this.store.sqlite
+        .prepare('SELECT ' + q(field.name) + ' FROM ' + q(p.targetTable) + ' WHERE row_key=?')
+        .get(key) as Json | undefined;
+      requireUpgrade(
+        current && typeof current[field.name] === 'string',
+        'PROJECT_NAME_AUTHORITY_UNCONFIRMED',
+      );
+      values[fields.indexOf(field.name)] = current[field.name];
+    }
     this.store.sqlite
       .prepare(
         'INSERT INTO ' +
@@ -286,6 +676,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
               .get(row.plan_digest) as { n: number }
           ).n;
           if (pending > 0) {
+            requireUpgrade(row.read_epoch < 2, 'PROJECT_NAME_AUTHORITY_BACKLOG');
             this.store.sqlite
               .prepare(
                 "UPDATE upgrade_online_migrations SET read_epoch=0,degraded=1,reason='PROJECTION_BACKLOG' WHERE plan_digest=?",
@@ -295,6 +686,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         } catch (error) {
           this.store.sqlite.exec('ROLLBACK TO upg_projection');
           this.store.sqlite.exec('RELEASE upg_projection');
+          if (row.read_epoch >= 2) throw error;
           const code =
             error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
           const isolated = [
@@ -345,7 +737,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     return {
       known: true,
       differences: pending + Number(row.degraded !== 0),
-      oldRepresentationRetained: this.plan(row).oldRepresentationRetained,
+      oldRepresentationRetained: row.read_epoch < 2 && this.plan(row).oldRepresentationRetained,
       readEpoch: row.read_epoch,
       degraded: row.degraded !== 0,
     };

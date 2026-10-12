@@ -72,10 +72,12 @@ const report = {
   upgradeAcceptance: {
     criteria: 52,
     status: 'partial',
-    meaning: 'This API execution report covers its executed backend and protocol tests only. It does not assert any complete UPG AC passed without its required shared/browser/native layers.',
+    meaning:
+      'This API execution report covers its executed backend and protocol tests only. It does not assert any complete UPG AC passed without its required shared/browser/native layers.',
     requiredLayerManifest: 'acceptance/manifest.json — UPG requiredVerification',
     sharedCommand: 'e2e-contract: pnpm test:upgrade',
-    nativeCommand: 'node e2e-contract/native/verify-upgrade.mjs --report <report> --package-root <verified artifact> --manifest <fixed manifest> --config <private isolated configuration>',
+    nativeCommand:
+      'node e2e-contract/native/verify-upgrade.mjs --report <report> --package-root <verified artifact> --manifest <fixed manifest> --config <private isolated configuration>',
     nativeEvidence: null,
   },
   sourceHashes: Object.fromEntries(

@@ -58,11 +58,31 @@ export type TerminalServerFrame =
    * ⚠️ agent 标签**没有**这个字段（缺席 = 「这条连接连的是 `platform-agent`」），
    * 而不是给一个空串 —— 「没有」和「有一个空的」在前端会走进不同分支。
    */
-  | { type: 'session'; socketSessionKey: string; shellId?: string; sandboxId?: string; terminalIdentity?: string; attachmentId?: string; protocolRevision?: number }
+  | {
+      type: 'session';
+      socketSessionKey: string;
+      shellId?: string;
+      sandboxId?: string;
+      terminalIdentity?: string;
+      attachmentId?: string;
+      protocolRevision?: number;
+    }
   /** Original guest session confirmed; a transport/session frame alone is not this ack. */
-  | { type: 'ready'; sandboxId: string; terminalIdentity: string; runtimeIdentity: string | null; attachmentId: string; protocolRevision: number; existingSession: boolean }
+  | {
+      type: 'ready';
+      sandboxId: string;
+      terminalIdentity: string;
+      runtimeIdentity: string | null;
+      attachmentId: string;
+      protocolRevision: number;
+      existingSession: boolean;
+    }
   | { type: 'connection_state'; state: 'restoring' | 'unconfirmed'; sandboxId: string }
-  | { type: 'error'; code: 'AUTH_EXPIRED' | 'PROTOCOL_INCOMPATIBLE' | 'RUNTIME_UNKNOWN' | 'TERMINAL_GONE'; sandboxId?: string }
+  | {
+      type: 'error';
+      code: 'AUTH_EXPIRED' | 'PROTOCOL_INCOMPATIBLE' | 'RUNTIME_UNKNOWN' | 'TERMINAL_GONE';
+      sandboxId?: string;
+    }
   /**
    * 这个 sandbox 下**已经存在**的用户终端会话清单（06 §5.5）。刷新页面之后，前端凭它
    * 把标签栏重建回来 —— 否则那些 tmux 会话还活着、界面上却没有了，成了只能等沙箱回收
@@ -434,7 +454,12 @@ export const X_SCHEMA_HASH_HEADER = 'x-schema-hash';
  * JSDoc 里，成员列表保持干净。
  */
 export type WsHandshakeRejection =
-  'UNAUTHORIZED' | 'SCHEMA_MISMATCH' | 'SANDBOX_REQUIRED' | 'TERMINAL_TARGET_INVALID' | 'PROTOCOL_INCOMPATIBLE';
+  | 'UNAUTHORIZED'
+  | 'SCHEMA_MISMATCH'
+  | 'SANDBOX_REQUIRED'
+  | 'TERMINAL_TARGET_INVALID'
+  | 'PROTOCOL_INCOMPATIBLE'
+  | 'APPLICATION_WRITER_QUIESCED';
 
 /**
  * Build the `Error` a gateway hands to socket.io's `next(err)`.

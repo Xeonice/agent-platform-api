@@ -22,7 +22,14 @@ import {
   type UpgradeSourceActual,
 } from '@platform/contracts';
 import { PLATFORM_SQLITE } from '../persistence/platform.module';
-import { requireUpgrade, upgradeDigest, canonicalUpgrade, freezeUpgradePlan } from './upgrade-trust';
+import {
+  requireUpgrade,
+  upgradeDigest,
+  canonicalUpgrade,
+  freezeUpgradePlan,
+} from './upgrade-trust';
+
+import { contractActive, contractFenceFloor } from './upgrade-contract-authority';
 
 interface AttemptRow {
   attempt_id: string;
@@ -35,7 +42,7 @@ interface AttemptRow {
   manifest: string;
   plan: string;
   source_activation: string;
-  source_actual: string|null;
+  source_actual: string | null;
   generation: number;
   sequence: number;
   state: UpgradeAttempt['state'];
@@ -111,6 +118,19 @@ export class UpgradeStore {
   confirmed(): ConfirmedServiceRelease | null {
     const value = this.instance().confirmed_release;
     return value ? ConfirmedServiceReleaseSchema.parse(JSON.parse(value)) : null;
+  }
+  appliedBridges(): string[] {
+    const rows = this.sqlite
+      .prepare(
+        "SELECT target_release_id FROM upgrade_attempts WHERE instance_id=? AND state='activation-confirmed'",
+      )
+      .all(this.instanceId) as { target_release_id: string }[];
+    return [
+      ...new Set([
+        ...(this.confirmed() ? [this.confirmed()!.releaseId] : []),
+        ...rows.map((r) => r.target_release_id),
+      ]),
+    ];
   }
   bootstrap(release: ConfirmedServiceRelease): void {
     this.sqlite
@@ -225,7 +245,7 @@ export class UpgradeStore {
     plan: UpgradePlan,
     entryFenceFloor?: number,
     continuityBaseline?: Record<string, unknown>,
-    sourceActual?:UpgradeSourceActual|null,
+    sourceActual?: UpgradeSourceActual | null,
   ): UpgradeAttempt {
     return this.sqlite
       .transaction(() => {
@@ -240,12 +260,31 @@ export class UpgradeStore {
           return this.attempt(prior.attempt_id);
         }
         const installed = this.instance();
-        if(sourceActual){
-          sourceActual=UpgradeSourceActualSchema.parse(sourceActual);
-          const {proofDigest,...facts}=sourceActual;
-          requireUpgrade(upgradeDigest(facts)===proofDigest && sourceActual.instanceId===this.instanceId && sourceActual.activationGeneration===installed.activation_generation && sourceActual.baseConfirmedReleaseId===this.confirmed()?.releaseId && this.now()-Date.parse(sourceActual.observedAt)>=0 && this.now()-Date.parse(sourceActual.observedAt)<=5000,'REPAIR_SOURCE_UNCONFIRMED');
-          const latest=this.latest();
-          requireUpgrade(latest && ['deferred','failed','reverted','candidate-rejected','activation-confirmed'].includes(latest.state),'REPAIR_SOURCE_NOT_TERMINAL');
+        requireUpgrade(!contractActive(this.sqlite, this.instanceId), 'INSTANCE_CONTRACT_ACTIVE');
+        if (sourceActual) {
+          sourceActual = UpgradeSourceActualSchema.parse(sourceActual);
+          const { proofDigest, ...facts } = sourceActual;
+          requireUpgrade(
+            upgradeDigest(facts) === proofDigest &&
+              sourceActual.instanceId === this.instanceId &&
+              sourceActual.activationGeneration === installed.activation_generation &&
+              sourceActual.baseConfirmedReleaseId === this.confirmed()?.releaseId &&
+              this.now() - Date.parse(sourceActual.observedAt) >= 0 &&
+              this.now() - Date.parse(sourceActual.observedAt) <= 5000,
+            'REPAIR_SOURCE_UNCONFIRMED',
+          );
+          const latest = this.latest();
+          requireUpgrade(
+            latest &&
+              [
+                'deferred',
+                'failed',
+                'reverted',
+                'candidate-rejected',
+                'activation-confirmed',
+              ].includes(latest.state),
+            'REPAIR_SOURCE_NOT_TERMINAL',
+          );
         }
         requireUpgrade(
           installed.activation_generation === request.expectedActivationGeneration &&
@@ -261,9 +300,21 @@ export class UpgradeStore {
           plan.sourceActivationGeneration === installed.activation_generation,
           'UPGRADE_ACTIVATION_CONFLICT',
         );
-        const history=this.confirmed();
-        requireUpgrade(history,'INSTALLED_RELEASE_UNKNOWN');
-        requireUpgrade(canonicalUpgrade(plan)===canonicalUpgrade(freezeUpgradePlan(envelope,sourceActual?{...history,schema:sourceActual.schema,components:sourceActual.components}:history)),'FROZEN_SOURCE_PLAN_CONFLICT');
+        const history = this.confirmed();
+        requireUpgrade(history, 'INSTALLED_RELEASE_UNKNOWN');
+        requireUpgrade(
+          canonicalUpgrade(plan) ===
+            canonicalUpgrade(
+              freezeUpgradePlan(
+                envelope,
+                sourceActual
+                  ? { ...history, schema: sourceActual.schema, components: sourceActual.components }
+                  : history,
+                this.appliedBridges(),
+              ),
+            ),
+          'FROZEN_SOURCE_PLAN_CONFLICT',
+        );
         const active = this.sqlite
           .prepare(
             `SELECT attempt_id FROM upgrade_attempts WHERE instance_id=? AND state IN ${ACTIVE}`,
@@ -301,7 +352,15 @@ export class UpgradeStore {
           'ENTRY_FENCE_UNKNOWN',
         );
         const intentFence =
-          entryFenceFloor === undefined ? 0 : Math.max(highFence.n, entryFenceFloor) + 1;
+          entryFenceFloor === undefined
+            ? contractFenceFloor(this.sqlite, this.instanceId) > 0
+              ? Math.max(highFence.n, contractFenceFloor(this.sqlite, this.instanceId)) + 1
+              : 0
+            : Math.max(
+                highFence.n,
+                entryFenceFloor,
+                contractFenceFloor(this.sqlite, this.instanceId),
+              ) + 1;
         this.sqlite
           .prepare(
             `INSERT INTO upgrade_attempts(attempt_id,instance_id,actor_id,request_id,request_digest,target_release_id,target_digest,manifest,plan,source_activation,source_actual,generation,accepted_at,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -317,7 +376,7 @@ export class UpgradeStore {
             JSON.stringify(envelope),
             JSON.stringify(plan),
             installed.confirmed_release,
-            sourceActual?JSON.stringify(sourceActual):null,
+            sourceActual ? JSON.stringify(sourceActual) : null,
             generation,
             now,
             now,
@@ -353,7 +412,10 @@ export class UpgradeStore {
       manifest: (JSON.parse(row.manifest) as SignedUpgradeManifest).manifest,
       plan: this.plan(id),
       sourceActivation: ConfirmedServiceReleaseSchema.parse(JSON.parse(row.source_activation)),
-      sourceActual:row.source_actual?UpgradeSourceActualSchema.parse(JSON.parse(row.source_actual)):null,
+      sourceActual: row.source_actual
+        ? UpgradeSourceActualSchema.parse(JSON.parse(row.source_actual))
+        : null,
+      appliedBridgeReleases: this.appliedBridges(),
       appliedSteps: this.steps(id)
         .filter((s) => s.applied === 1)
         .map((s) => ({
@@ -417,6 +479,11 @@ export class UpgradeStore {
           'COORDINATOR_HANDOFF_CRITICAL',
         );
         const latest = this.latest();
+        requireUpgrade(
+          contractFenceFloor(this.sqlite, this.instanceId) === 0 ||
+            row.fence > contractFenceFloor(this.sqlite, this.instanceId),
+          'UPGRADE_AUTHORITY_SUPERSEDED',
+        );
         requireUpgrade(latest?.attemptId === id, 'UPGRADE_AUTHORITY_SUPERSEDED');
         const recovery = this.recovery();
         requireUpgrade(
@@ -440,7 +507,11 @@ export class UpgradeStore {
         const fence =
           row.controller_id === controllerId && row.lease_expires_at > now
             ? row.fence
-            : Math.max(high.fence, entryFenceFloor) + 1;
+            : Math.max(
+                high.fence,
+                entryFenceFloor,
+                contractFenceFloor(this.sqlite, this.instanceId),
+              ) + 1;
         this.sqlite
           .prepare(
             'UPDATE upgrade_attempts SET controller_id=?,fence=?,lease_expires_at=? WHERE attempt_id=?',
@@ -452,7 +523,12 @@ export class UpgradeStore {
   }
   assertFence(id: string, fence: number, generation?: number): AttemptRow {
     const row = this.row(id);
-    requireUpgrade(this.latest()?.attemptId === id, 'UPGRADE_AUTHORITY_SUPERSEDED');
+    requireUpgrade(
+      this.latest()?.attemptId === id &&
+        (contractFenceFloor(this.sqlite, this.instanceId) === 0 ||
+          row.fence > contractFenceFloor(this.sqlite, this.instanceId)),
+      'UPGRADE_AUTHORITY_SUPERSEDED',
+    );
     requireUpgrade(
       Number.isSafeInteger(fence) &&
         row.fence === fence &&
@@ -508,7 +584,12 @@ export class UpgradeStore {
       evidence: row.evidence ? (JSON.parse(row.evidence) as unknown) : null,
     };
   }
-  commit(id: string, command: UpgradeCommit, confirmed?: ConfirmedServiceRelease, restoredPartial?:UpgradeSourceActual) {
+  commit(
+    id: string,
+    command: UpgradeCommit,
+    confirmed?: ConfirmedServiceRelease,
+    restoredPartial?: UpgradeSourceActual,
+  ) {
     return this.sqlite
       .transaction(() => {
         const digest = upgradeDigest(command);
@@ -716,28 +797,38 @@ export class UpgradeStore {
           );
           if (command.kind === 'recovery-confirmed') {
             requireUpgrade(confirmed || restoredPartial, 'RECOVERY_UNCONFIRMED');
-            if(restoredPartial){
-              restoredPartial=UpgradeSourceActualSchema.parse(restoredPartial);
-              const {proofDigest,...facts}=restoredPartial;
-              requireUpgrade(upgradeDigest(facts)===proofDigest && restoredPartial.instanceId===this.instanceId && restoredPartial.activationGeneration===this.instance().activation_generation && restoredPartial.baseConfirmedReleaseId===this.confirmed()?.releaseId,'RECOVERY_PARTIAL_SOURCE_CONFLICT');
-              this.sqlite.prepare('UPDATE upgrade_instances SET service_state=?,ready=0,updated_at=? WHERE instance_id=?').run('unknown',now,this.instanceId);
-            }else{
-            confirmed = ConfirmedServiceReleaseSchema.parse(confirmed);
-            requireUpgrade(
-              confirmed.activationGeneration > this.instance().activation_generation,
-              'RECOVERY_ACTIVATION_GENERATION_CONFLICT',
-            );
-            this.sqlite
-              .prepare(
-                'UPDATE upgrade_instances SET activation_generation=?,confirmed_release=?,service_state=?,ready=0,updated_at=? WHERE instance_id=?',
-              )
-              .run(
-                confirmed.activationGeneration,
-                JSON.stringify(confirmed),
-                'confirmed',
-                now,
-                this.instanceId,
+            if (restoredPartial) {
+              restoredPartial = UpgradeSourceActualSchema.parse(restoredPartial);
+              const { proofDigest, ...facts } = restoredPartial;
+              requireUpgrade(
+                upgradeDigest(facts) === proofDigest &&
+                  restoredPartial.instanceId === this.instanceId &&
+                  restoredPartial.activationGeneration === this.instance().activation_generation &&
+                  restoredPartial.baseConfirmedReleaseId === this.confirmed()?.releaseId,
+                'RECOVERY_PARTIAL_SOURCE_CONFLICT',
               );
+              this.sqlite
+                .prepare(
+                  'UPDATE upgrade_instances SET service_state=?,ready=0,updated_at=? WHERE instance_id=?',
+                )
+                .run('unknown', now, this.instanceId);
+            } else {
+              confirmed = ConfirmedServiceReleaseSchema.parse(confirmed);
+              requireUpgrade(
+                confirmed.activationGeneration > this.instance().activation_generation,
+                'RECOVERY_ACTIVATION_GENERATION_CONFLICT',
+              );
+              this.sqlite
+                .prepare(
+                  'UPDATE upgrade_instances SET activation_generation=?,confirmed_release=?,service_state=?,ready=0,updated_at=? WHERE instance_id=?',
+                )
+                .run(
+                  confirmed.activationGeneration,
+                  JSON.stringify(confirmed),
+                  'confirmed',
+                  now,
+                  this.instanceId,
+                );
             }
             if (row.state !== 'activation-confirmed')
               this.sqlite

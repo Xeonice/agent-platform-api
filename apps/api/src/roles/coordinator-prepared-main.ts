@@ -4,6 +4,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { NestFactory } from '@nestjs/core';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
 import { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
+import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
+import { supportedDataFormats } from '../platform/data-format-capabilities';
 import { fromEpochMs } from '@platform/shared-kernel';
 import { SystemClock } from '../platform/time/system-clock';
 import { env } from '../platform/config/env';
@@ -40,6 +42,12 @@ export async function startPreparedCoordinator(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
   const store = app.get(UpgradeStore),
     owners = app.get<RuntimeOwnerProviderRegistry>(SANDBOX_PROVIDER_REGISTRY);
+  let projection: ProjectReadProjection | undefined;
+  try {
+    projection = app.get<ProjectReadProjection>(PROJECT_READ_PROJECTION, { strict: false });
+  } catch {
+    projection = undefined;
+  }
   let state: 'prepared' | 'adopting' | 'ready' | 'unknown' = 'prepared';
   let adopting: Promise<Record<string, unknown>> | null = null;
   let adoptedIntent: string | null = null;
@@ -50,6 +58,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
     artifactDigest: physical?.artifactDigest ?? null,
     inputFingerprint: physical?.inputFingerprint ?? null,
+    supportedDataFormats: supportedDataFormats(projection),
     prepared: state === 'prepared',
     writerFenceValid: process.env.COORDINATOR_WRITER_FENCE_VALID === 'true',
     workersStarted: state === 'ready',

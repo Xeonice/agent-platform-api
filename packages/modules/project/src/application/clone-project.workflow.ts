@@ -1,6 +1,11 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
-import { CLOCK, UNIT_OF_WORK, asProjectId } from '@platform/shared-kernel';
-import type { Clock, UnitOfWork } from '@platform/shared-kernel';
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
+import {
+  CLOCK,
+  UNIT_OF_WORK,
+  asProjectId,
+  BUSINESS_WRITER_AUTHORITY,
+} from '@platform/shared-kernel';
+import type { Clock, UnitOfWork, BusinessWriterAuthority } from '@platform/shared-kernel';
 import { CREDENTIAL_FACADE } from '@platform/contracts';
 import type {
   CredentialFacade,
@@ -58,6 +63,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
   private activeCount = 0;
   private readonly waiting: string[] = [];
   private readonly controllers = new Map<string, AbortController>();
+  private ownershipPaused = false;
 
   constructor(
     @Inject(PROJECT_REPOSITORY) private readonly repo: ProjectRepository,
@@ -67,6 +73,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     @Inject(BASELINE_MANAGER) private readonly baseline: BaselineManager,
     @Inject(SANDBOX_EVENT_BROADCASTER) private readonly broadcaster: SandboxEventBroadcaster,
     @Inject(CREDENTIAL_FACADE) private readonly credentials: CredentialFacade,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -79,12 +88,21 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
 
   /** Schedule a background clone for a project already persisted as `cloning`. */
   enqueue(projectId: string): void {
+    if (this.ownershipPaused) throw new Error('BACKGROUND_CLONE_WRITER_QUIESCED');
     if (this.activeCount < MAX_CONCURRENT_CLONES) {
       this.activeCount++;
       void this.runClone(projectId);
     } else {
       this.waiting.push(projectId);
     }
+  }
+  pauseOwnership(): boolean {
+    if (this.activeCount > 0 || this.waiting.length > 0) return false;
+    this.ownershipPaused = true;
+    return true;
+  }
+  resumeOwnership(): void {
+    this.ownershipPaused = false;
   }
 
   /** Abort an in-flight clone; returns true if one was running. */
@@ -98,7 +116,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     const idx = this.waiting.indexOf(projectId);
     if (idx < 0) return false;
     this.waiting.splice(idx, 1);
-    this.mutate(projectId, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+    void this.mutate(projectId, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
     this.broadcaster.broadcast({
       event: 'project.clone_progress',
       projectId,
@@ -215,7 +233,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         },
       });
       const sizeBytes = await this.baseline.directorySizeBytes(dest);
-      this.mutate(projectId, (p) => p.markCloneReady(sizeBytes, this.clock.now()));
+      await this.mutate(projectId, (p) => p.markCloneReady(sizeBytes, this.clock.now()));
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId,
@@ -225,7 +243,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     } catch (e) {
       const code = this.classifyFailure(e, timedOut, controller.signal.aborted);
       await this.baseline.removeDir(dest).catch(() => undefined);
-      this.mutate(projectId, (p) => p.markCloneFailed(code, this.clock.now()));
+      await this.mutate(projectId, (p) => p.markCloneFailed(code, this.clock.now()));
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId,
@@ -271,11 +289,15 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
   }
 
   /** Load → apply → persist in one sync UoW; skip silently on an illegal move (race). */
-  private mutate(projectId: string, apply: (p: Project) => void): void {
-    void this.repo
+  private mutate(projectId: string, apply: (p: Project) => void): Promise<void> {
+    const epoch = this.writer?.epoch?.() ?? 0;
+    return this.repo
       .findById(asProjectId(projectId))
       .then((project) => {
         if (!project) return;
+        this.writer?.assert();
+        if (epoch !== (this.writer?.epoch?.() ?? 0))
+          throw new Error('BACKGROUND_CLONE_WRITER_SUPERSEDED');
         try {
           apply(project);
         } catch {
@@ -292,7 +314,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     const all = await this.repo.findAll();
     for (const project of all) {
       if (project.cloneStatus !== 'cloning') continue;
-      this.mutate(project.id, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+      await this.mutate(project.id, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId: project.id,

@@ -153,6 +153,15 @@ export async function startRuntimeOwnerFromEnvironment(
 ): Promise<{ server: RuntimeOwnerServer; close(): Promise<void> }> {
   if (process.env.PLATFORM_PROCESS_ROLE !== 'runtime-owner')
     throw new Error('Only RuntimeOwner may instantiate SDK providers');
+  for (const key of [
+    'DATABASE_URL',
+    'DATA_ROOT',
+    'PLATFORM_CONTROL_RPC_KEY',
+    'PLATFORM_CONTROLLER_RPC_KEY',
+    'UPGRADE_ADMIN_KEY',
+  ])
+    if (Object.hasOwn(process.env, key))
+      throw new Error('RuntimeOwner may not receive business database or controller authority');
   const instanceId = process.env.PLATFORM_INSTANCE_ID?.trim();
   const ownerId = process.env.RUNTIME_OWNER_ID?.trim();
   const key = process.env.PLATFORM_COORDINATOR_RPC_KEY;
@@ -180,6 +189,7 @@ export async function startRuntimeOwnerFromEnvironment(
     clock,
     artifactIdentity: await ownerArtifactIdentity(),
     startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
+    privateDatabaseIsolation: true,
     journalPath: resolve(home, 'runtime-owner.sqlite'),
     registry: createLocalRuntimeOwnerRegistry(clock),
   });

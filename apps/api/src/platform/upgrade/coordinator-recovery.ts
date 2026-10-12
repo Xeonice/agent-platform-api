@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Optional,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
@@ -10,12 +11,24 @@ import { readFile } from 'node:fs/promises';
 import { getHeapStatistics } from 'node:v8';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
-import { RuntimeOwnerProviderRegistry, RunAgentTaskWorkflow } from '@platform/sandbox';
+import {
+  RuntimeOwnerProviderRegistry,
+  RunAgentTaskWorkflow,
+  ProvisionSandboxWorkflow,
+  TasksGateway,
+} from '@platform/sandbox';
+import { EventsGateway } from '../events/events.gateway';
+import {
+  CloneProjectWorkflow,
+  PROJECT_READ_PROJECTION,
+  type ProjectReadProjection,
+} from '@platform/project';
 import { AutomationScheduler } from '@platform/automation';
 import { TerminalGateway } from '@platform/terminal';
 import { ControlApplicationRegistry } from '../control-rpc/control-rpc.module';
 import { coordinatorWriterControl } from '../persistence/coordinator-lease';
 import { env } from '../config/env';
+import { supportedDataFormats } from '../data-format-capabilities';
 import { UpgradeStore } from './upgrade-store';
 import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
@@ -46,9 +59,16 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     private readonly applications: ControlApplicationRegistry,
     private readonly pump: RunAgentTaskWorkflow,
     private readonly automations: AutomationScheduler,
+    private readonly provisions: ProvisionSandboxWorkflow,
+    private readonly clones: CloneProjectWorkflow,
+    private readonly events: EventsGateway,
+    private readonly tasks: TasksGateway,
     private readonly terminals: TerminalGateway,
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly owners: RuntimeOwnerProviderRegistry,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Optional()
+    @Inject(PROJECT_READ_PROJECTION)
+    private readonly projection?: ProjectReadProjection,
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
@@ -144,8 +164,31 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     const migration = snapshot.plan.migrationPath.migrationPlanDigest
       ? this.migrations.metrics(id)
       : null;
-    const authorityPreserved =
-      !migration || (migration.known && migration.oldRepresentationRetained);
+    const contracted = Boolean(
+      this.store.sqlite
+        .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+        .get(),
+    );
+    const formats = supportedDataFormats(this.projection);
+    let newAuthorityHealthy = false;
+    if (contracted && formats.includes('project-name-v2-authority')) {
+      try {
+        const rows = this.store.sqlite
+          .prepare('SELECT id,name FROM projects LIMIT 10001')
+          .all() as { id: string; name: string }[];
+        newAuthorityHealthy =
+          rows.length <= 10000 &&
+          rows.every((row) => {
+            const name = this.projection!.name(row.id, row.name);
+            return typeof name === 'string' && this.projection!.findIdByName!(name) === row.id;
+          });
+      } catch {
+        /* Missing new authority is never a safe old-data fallback. */
+      }
+    }
+    const authorityPreserved = contracted
+      ? newAuthorityHealthy
+      : !migration || (migration.known && migration.oldRepresentationRetained);
     const integrity = this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok';
     const fs = await statfs(process.env.UPGRADE_INSTALLER_ROOT ?? env.dataRoot),
       memory = process.memoryUsage();
@@ -158,6 +201,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     const eventLoopBounded =
       this.clock.now().getTime() - started <= snapshot.plan.policy.requestDeadlineMs;
     return {
+      supportedDataFormats: formats,
       qualified:
         retainedBinary &&
         columnsCompatible &&
@@ -167,7 +211,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         eventLoopBounded,
       retainedBinary,
       columnsCompatible,
-      oldRepresentationRetained: authorityPreserved,
+      oldRepresentationRetained: !contracted && authorityPreserved,
+      dataRepresentationCompatible: authorityPreserved,
+      migrationCommitKnown:
+        !migration || (migration.known && migration.differences === 0 && !migration.degraded),
       latestDatabaseCompatible: columnsCompatible && authorityPreserved,
       newWritesCompatible: columnsCompatible && authorityPreserved,
       sharedStateHealthy: integrity,
@@ -279,9 +326,15 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         nextOrigin: source.origin,
       });
       await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
+      requireUpgrade(
+        this.provisions.pauseOwnership() && this.clones.pauseOwnership(),
+        'BACKGROUND_WORK_PENDING',
+      );
       this.pump.shutdown();
       this.automations.pauseOwnership();
       this.terminals.prepareHandoff();
+      this.events.prepareHandoff();
+      this.tasks.prepareHandoff();
       await this.owners.releaseBusinessAuthority();
       this.store.sqlite
         .prepare("UPDATE coordinator_recoveries SET stage='releasing' WHERE recovery_attempt_id=?")
@@ -293,6 +346,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.applications.resume();
       this.pump.resumeOwnership();
       this.automations.resumeOwnership();
+      this.provisions.resumeOwnership();
+      this.clones.resumeOwnership();
+      this.events.resumeAfterHandoff();
+      this.tasks.resumeAfterHandoff();
       this.store.sqlite
         .prepare("UPDATE coordinator_recoveries SET stage='quiesced' WHERE recovery_attempt_id=?")
         .run(recovery.recoveryAttemptId);
@@ -381,6 +438,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.applications.resume();
       this.pump.resumeOwnership();
       this.automations.resumeOwnership();
+      this.provisions.resumeOwnership();
+      this.clones.resumeOwnership();
+      this.events.resumeAfterHandoff();
+      this.tasks.resumeAfterHandoff();
       const continuity = await this.inspector.continuity(id, fence);
       await writeInstalledBinding(process.env.PLATFORM_COORDINATOR_BINDING_PATH!, {
         state: 'ready',

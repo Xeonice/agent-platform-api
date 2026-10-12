@@ -14,6 +14,7 @@ import { UpgradeStore } from './upgrade-store';
 import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
 import { requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
+import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
 
 type Json = Record<string, unknown>;
 interface Sample {
@@ -31,7 +32,10 @@ const p95 = (samples: Sample[]): number => {
 @Injectable()
 export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy {
   private timer?: ReturnType<typeof setInterval>;
-  private busy = false;
+  private inFlight = 0;
+  // 20 launches/s leaves headroom above the mandatory 10 Hz floor. A read/write
+  // pair has two independent <=2s HTTP deadlines, hence at most 80 live pairs.
+  private readonly maxInFlight = 80;
   private retired = false;
   constructor(
     private readonly store: UpgradeStore,
@@ -44,7 +48,14 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.timer = setInterval(() => {
-      void this.sample().catch(() => undefined);
+      if (this.retired || process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
+      try {
+        void withCoordinatorBusinessEpoch(this.store.sqlite, () => this.sample()).catch(
+          () => undefined,
+        );
+      } catch {
+        /* A concurrent writer retirement admits no new sample. */
+      }
     }, 50);
     this.timer.unref();
   }
@@ -53,15 +64,21 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     if (this.timer) clearInterval(this.timer);
   }
   private async sample(): Promise<void> {
-    if (this.busy || this.retired || process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
+    if (
+      this.inFlight >= this.maxInFlight ||
+      this.retired ||
+      process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
+    )
+      return;
     const attempt = this.store.latest();
     if (!attempt) return;
     const row = this.store.snapshot(attempt.attemptId);
     if (row.fence < 1 || row.leaseExpiresAt <= this.clock.now().getTime()) return;
-    this.busy = true;
+    this.inFlight++;
     const requestId = this.ids.next(),
       at = this.clock.now().getTime(),
       origin = loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN);
+    let httpLatency = 0;
     let success = false,
       binding: Json | null = null,
       evidence: Json = {};
@@ -73,6 +90,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         'x-platform-instance-id': this.store.instanceId,
       };
       const value = upgradeDigest({ attemptId: attempt.attemptId, requestId });
+      const writeStarted = this.clock.now().getTime();
       const response = await fetch(origin + '/api/system/upgrade/probe', {
         method: 'POST',
         headers,
@@ -80,11 +98,14 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         signal: AbortSignal.timeout(row.plan.policy.requestDeadlineMs),
       });
       const actual = (await response.json()) as Json;
+      httpLatency = this.clock.now().getTime() - writeStarted;
+      const readStarted = this.clock.now().getTime();
       const read = await fetch(origin + '/api/system/upgrade/probe?requestId=' + requestId, {
         headers,
         signal: AbortSignal.timeout(row.plan.policy.requestDeadlineMs),
       });
       const actualRead = (await read.json()) as Json;
+      httpLatency = Math.max(httpLatency, this.clock.now().getTime() - readStarted);
       success =
         response.ok &&
         read.ok &&
@@ -98,13 +119,19 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         readStatus: read.status,
         actual,
         actualRead,
+        pairDurationMs: this.clock.now().getTime() - at,
       };
     } catch {
       evidence = { requestId, code: 'ACTUAL_PROBE_FAILED' };
     } finally {
-      const latency = this.clock.now().getTime() - at;
+      const latency = success
+        ? httpLatency
+        : Math.max(httpLatency, this.clock.now().getTime() - at);
       try {
-        if (!this.retired && process.env.COORDINATOR_WRITER_FENCE_VALID === 'true')
+        if (!this.retired && process.env.COORDINATOR_WRITER_FENCE_VALID === 'true') {
+          // An old async probe may finish after A1->B2->retained A3. The ALS
+          // admitted epoch and durable controller fence both remain mandatory.
+          this.store.assertFence(attempt.attemptId, row.fence);
           this.store.sqlite
             .prepare(
               'INSERT INTO upgrade_observations(attempt_id,weight,route_generation,coordinator_generation,observed_at,latency_ms,success,request_id,evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -120,8 +147,9 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
               requestId,
               upgradeDigest(evidence),
             );
+        }
       } finally {
-        this.busy = false;
+        this.inFlight--;
       }
     }
   }
@@ -289,13 +317,32 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const migration = snapshot.plan.migrationPath.migrationPlanDigest
       ? this.migrations.metrics(id)
       : null;
+    let webHealth: Json;
+    try {
+      const web = await this.inspector.webBuild(binding),
+        actual = binding.web as Json;
+      const expected = [
+        snapshot.sourceActivation.components.web,
+        snapshot.manifest.components.web,
+      ].find((w) => w.artifactDigest === actual.digest);
+      webHealth = {
+        known: true,
+        healthy: Boolean(expected && web.webRevision === expected.webRevision),
+        artifactDigest: actual.digest,
+        observedAt: this.clock.now().toISOString(),
+      };
+    } catch {
+      webHealth = { known: false, healthy: false, observedAt: this.clock.now().toISOString() };
+    }
     return {
+      webHealth,
       observedAt: this.clock.now().toISOString(),
       fenceValid: true,
       ownerGenerationsValid,
       routeGenerationValid: Number(binding.fence) === fence && Number(binding.weight) === weight,
       sharedStateHealthy: integrity,
       continuity,
+      projectionReads: this.migrations.projectionReadEvidence(),
       invariants: {
         unauthorizedStops,
         resourceRebuilds,

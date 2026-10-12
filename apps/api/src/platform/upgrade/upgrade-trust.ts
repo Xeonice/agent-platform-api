@@ -198,10 +198,15 @@ export function verifyUpgradeEnvelope(
 export function freezeUpgradePlan(
   envelope: SignedUpgradeManifest,
   current: ConfirmedServiceRelease,
+  appliedBridges: readonly string[] = [],
 ): UpgradePlan {
   const manifest: UpgradeManifest = envelope.manifest;
+  const repairingSameRelease =
+    manifest.releaseId === current.releaseId &&
+    canonicalUpgrade(manifest.components) !== canonicalUpgrade(current.components);
   requireUpgrade(
-    manifest.channel === current.channel && manifest.releaseId !== current.releaseId,
+    manifest.channel === current.channel &&
+      (manifest.releaseId !== current.releaseId || repairingSameRelease),
     'ALREADY_INSTALLED_OR_WRONG_CHANNEL',
   );
   const pkg = manifest.packages.find(
@@ -215,6 +220,16 @@ export function freezeUpgradePlan(
       current.schema <= p.maxSchema,
   );
   requireUpgrade(path, 'UPGRADE_PATH_NOT_SUPPORTED');
+  // The current bridge executes declarative shadow namespaces only. A future
+  // global SQL version requires a separately qualified capable bridge and the
+  // real fixed migration journal; a supplied read_epoch number is not that proof.
+  requireUpgrade(path.targetSchema === current.schema, 'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED');
+  requireUpgrade(
+    path.bridgeReleases.every(
+      (release) => release === current.releaseId || appliedBridges.includes(release),
+    ),
+    'REQUIRED_BRIDGE_NOT_INSTALLED',
+  );
   for (const name of ['api', 'web', 'installer', 'coordinator', 'owner'] as const) {
     const live = (
       current.components[name] ?? (name === 'coordinator' ? current.components.api : undefined)

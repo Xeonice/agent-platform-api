@@ -147,6 +147,9 @@ export const RuntimeOwnerMetadataSchema = z
     startIdentity: z.string().nullable().optional(),
     artifactDigest: z.string().nullable().optional(),
     inputFingerprint: z.string().nullable().optional(),
+    role: z.literal('runtime-owner').optional(),
+    databaseScope: z.literal('owner-private').optional(),
+    noBusinessDatabaseAccess: z.literal(true).optional(),
     lease: RuntimeOwnerLeaseSchema.nullable(),
     providers: z.array(
       z

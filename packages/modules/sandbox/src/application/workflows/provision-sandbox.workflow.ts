@@ -152,6 +152,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
   private recoveryTimer?: ReturnType<typeof setInterval>;
   private recovering = false;
   private readonly activeEpochs = new Map<string, number>();
+  private ownershipPaused = false;
 
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
@@ -206,7 +207,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     if (this.recoveryTimer) clearInterval(this.recoveryTimer);
   }
   async resumeUnconfirmed(): Promise<void> {
-    if (!this.createIntents || !this.providers || this.recovering) return;
+    if (!this.createIntents || !this.providers || this.recovering || this.ownershipPaused) return;
     const epoch = this.writer?.epoch?.() ?? 0;
     this.assertEpoch(epoch);
     this.recovering = true;
@@ -244,6 +245,19 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       this.recovering = false;
     }
   }
+  /** Never cancel an accepted background create to make a binary handoff fit.
+   * A live slow operation keeps this writer in place until it naturally drains. */
+  pauseOwnership(): boolean {
+    if (this.active.size || this.recovering) return false;
+    this.ownershipPaused = true;
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    return true;
+  }
+  resumeOwnership(): void {
+    this.ownershipPaused = false;
+    if (!this.recoveryTimer) this.onApplicationBootstrap();
+  }
   private isUnconfirmed(error: unknown): boolean {
     if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'false') return true;
     if (error instanceof Error && ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name))
@@ -279,6 +293,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
   }
 
   private track(sandboxId: string, work: () => Promise<void>): Promise<void> {
+    if (this.ownershipPaused) throw new ProvisionOwnershipSuperseded();
     const existing = this.active.get(sandboxId);
     if (existing) return existing;
     const epoch = this.writer?.epoch?.() ?? 0;
@@ -406,6 +421,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
               sandbox.id,
               operation.operationId,
               createInput,
+              ws.hostPath,
               this.clock.now(),
             ),
           );

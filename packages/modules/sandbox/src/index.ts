@@ -24,6 +24,8 @@ export {
 } from './infrastructure/persistence/sqlite/job-completion-receipts.impl';
 export { AgentTaskApplicationService } from './application/agent-task.service';
 export { RunAgentTaskWorkflow } from './application/workflows/run-agent-task.workflow';
+export { ProvisionSandboxWorkflow } from './application/workflows/provision-sandbox.workflow';
+export { TasksGateway } from './interface/gateway/tasks.gateway';
 export { SandboxMcpTools } from './interface/mcp/sandbox.mcp-tools';
 export {
   sandboxes,

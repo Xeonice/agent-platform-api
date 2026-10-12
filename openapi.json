@@ -2806,6 +2806,67 @@
         ]
       }
     },
+    "/api/system/upgrade/contracts/requests": {
+      "post": {
+        "operationId": "UpgradeController_contractRequest",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeContractRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeContractAttemptDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/contracts/requests/{requestId}": {
+      "get": {
+        "operationId": "UpgradeController_contractLookup",
+        "parameters": [
+          {
+            "name": "requestId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeContractAttemptDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
     "/api/system/upgrade/probe": {
       "post": {
         "operationId": "UpgradeController_probe",
@@ -3290,6 +3351,52 @@
         },
         "tags": [
           "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/contracts/{id}": {
+      "get": {
+        "operationId": "UpgradeContractInternalController_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeContractInternal"
+        ]
+      }
+    },
+    "/api/internal/contracts/{id}/check": {
+      "post": {
+        "operationId": "UpgradeContractInternalController_check",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeContractInternal"
         ]
       }
     },
@@ -7175,6 +7282,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7217,6 +7333,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       },
                       "webRevision": {
                         "type": "string",
@@ -7264,6 +7389,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7306,6 +7440,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7348,6 +7491,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7464,6 +7616,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7506,6 +7667,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       },
                       "webRevision": {
                         "type": "string",
@@ -7553,6 +7723,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7595,6 +7774,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7637,6 +7825,15 @@
                           "min",
                           "max"
                         ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -7768,6 +7965,9 @@
                 "type": "boolean"
               },
               "canAuthenticate": {
+                "type": "boolean"
+              },
+              "canContract": {
                 "type": "boolean"
               }
             },
@@ -8028,6 +8228,158 @@
               "observedAt"
             ],
             "nullable": true
+          },
+          "contract": {
+            "type": "object",
+            "properties": {
+              "authority": {
+                "type": "string",
+                "enum": [
+                  "legacy",
+                  "new",
+                  "unknown"
+                ]
+              },
+              "availablePlan": {
+                "type": "object",
+                "properties": {
+                  "planDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "releaseId": {
+                    "type": "string",
+                    "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+                  },
+                  "expandPlanDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "rollbackWindowClosesAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "eligible": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "legacyReaderCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "irreversible": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "planDigest",
+                  "releaseId",
+                  "expandPlanDigest",
+                  "rollbackWindowClosesAt",
+                  "eligible",
+                  "reason",
+                  "legacyReaderCount",
+                  "irreversible"
+                ],
+                "nullable": true
+              },
+              "attempt": {
+                "type": "object",
+                "properties": {
+                  "instanceId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+                  },
+                  "contractAttemptId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "requestId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "targetPlanDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "activationGeneration": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "accepted",
+                      "retiring-readers",
+                      "authority-active",
+                      "clearing",
+                      "completed",
+                      "deferred",
+                      "failed",
+                      "unknown"
+                    ]
+                  },
+                  "stage": {
+                    "type": "string"
+                  },
+                  "completedRows": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "totalRows": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false,
+                    "nullable": true
+                  },
+                  "acceptedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "observedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "instanceId",
+                  "contractAttemptId",
+                  "requestId",
+                  "targetPlanDigest",
+                  "activationGeneration",
+                  "sequence",
+                  "state",
+                  "stage",
+                  "completedRows",
+                  "totalRows",
+                  "acceptedAt",
+                  "observedAt",
+                  "reason"
+                ],
+                "nullable": true
+              }
+            },
+            "required": [
+              "authority",
+              "availablePlan",
+              "attempt"
+            ],
+            "nullable": true
           }
         },
         "required": [
@@ -8192,6 +8544,118 @@
           "completedWork",
           "totalWork",
           "planDigest",
+          "acceptedAt",
+          "observedAt",
+          "reason"
+        ]
+      },
+      "UpgradeContractRequestDto": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetPlanDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "expectedActivationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "acknowledgeRollbackClosure": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "requestId",
+          "targetPlanDigest",
+          "expectedActivationGeneration",
+          "acknowledgeRollbackClosure"
+        ]
+      },
+      "UpgradeContractAttemptDto": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+          },
+          "contractAttemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetPlanDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "activationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "retiring-readers",
+              "authority-active",
+              "clearing",
+              "completed",
+              "deferred",
+              "failed",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "completedRows": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "totalRows": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "nullable": true
+          },
+          "acceptedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "instanceId",
+          "contractAttemptId",
+          "requestId",
+          "targetPlanDigest",
+          "activationGeneration",
+          "sequence",
+          "state",
+          "stage",
+          "completedRows",
+          "totalRows",
           "acceptedAt",
           "observedAt",
           "reason"

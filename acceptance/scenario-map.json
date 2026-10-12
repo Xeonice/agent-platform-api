@@ -1,157 +1,103 @@
 [
   {
     "file": "acceptance/acc/protocol/protected-resource-attempts.spec.ts",
-    "acs": [
-      "AC-ACC-005.1",
-      "AC-ACC-005.2",
-      "AC-ACC-005.5"
-    ],
+    "acs": ["AC-ACC-005.1", "AC-ACC-005.2", "AC-ACC-005.5"],
     "purpose": "Complete Nest HTTP guard separates anonymous requests from explicit guesses; an established cookie remains usable during address lockout.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/acc/sqlite/first-access.spec.ts",
-    "acs": [
-      "AC-ACC-001.1",
-      "AC-ACC-001.2",
-      "AC-ACC-002.3",
-      "AC-ACC-002.4",
-      "AC-ACC-007.3"
-    ],
+    "acs": ["AC-ACC-001.1", "AC-ACC-001.2", "AC-ACC-002.3", "AC-ACC-002.4", "AC-ACC-007.3"],
     "purpose": "Fresh real SQLite bootstrap stores only hash, banner is one-time, fixed signing secret rejects destructive rotation, and WS honors explicit loopback policy.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/aut/protocol/attention.spec.ts",
-    "acs": [
-      "AC-AUT-004.6"
-    ],
+    "acs": ["AC-AUT-004.6"],
     "purpose": "Actual Nest overview endpoint reads cross-project degraded rules without creating records.",
     "relation": "complete-api"
   },
   {
     "file": "acceptance/aut/service/attention-limits.spec.ts",
-    "acs": [
-      "AC-AUT-004.6",
-      "AC-AUT-005.2",
-      "AC-AUT-024.3"
-    ],
+    "acs": ["AC-AUT-004.6", "AC-AUT-005.2", "AC-AUT-024.3"],
     "purpose": "Real application and current SQLite enforce the rule limit, read attention and delete rules/runs without deleting their task.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/aut/pure/scheduling-policy.spec.ts",
-    "acs": [
-      "AC-AUT-011.4",
-      "AC-AUT-027.3",
-      "AC-AUT-027.4"
-    ],
+    "acs": ["AC-AUT-011.4", "AC-AUT-027.3", "AC-AUT-027.4"],
     "purpose": "Real schedule and trigger policies reject unknown zones, evaluate credentials before admission, and bound same-run retries.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/aut/sqlite/artifact-recovery.spec.ts",
-    "acs": [
-      "AC-AUT-025.1",
-      "AC-AUT-025.3",
-      "AC-PRJ-055.4"
-    ],
+    "acs": ["AC-AUT-025.1", "AC-AUT-025.3", "AC-PRJ-055.4"],
     "purpose": "Actual watcher and task repositories recover artifact registration after teardown failure, retaining the original finish time, and do not invent an artifact for failed preparation.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/protocol/git-real-target.spec.ts",
-    "acs": [
-      "AC-CRD-023.7"
-    ],
+    "acs": ["AC-CRD-023.7"],
     "purpose": "Real git smart HTTP fixture demonstrates that the same valid synthetic token succeeds for a repository while the host root fails.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/sqlite/injection-revocation.spec.ts",
-    "acs": [
-      "AC-CRD-003.6",
-      "AC-AUTH-009.2"
-    ],
+    "acs": ["AC-CRD-003.6", "AC-AUTH-009.2"],
     "purpose": "Real conditional SQLite binding writes refuse a revoked credential, and credential replacement migrates only active binding ownership atomically.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/sqlite/ssh-tofu.spec.ts",
-    "acs": [
-      "AC-CRD-022.5"
-    ],
+    "acs": ["AC-CRD-022.5"],
     "purpose": "Real encrypted credential repository and temporary known-host file record first successful SSH host evidence once, preserving ciphertext.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/service/clone-host-recording.spec.ts",
-    "acs": [
-      "AC-CRD-022.5"
-    ],
+    "acs": ["AC-CRD-022.5"],
     "purpose": "Real clone adapter invokes known-host persistence only after successful clone; external git process is controlled.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/service/affected-tasks.spec.ts",
-    "acs": [
-      "AC-CRD-002.1",
-      "AC-CRD-003.1",
-      "AC-CRD-003.3"
-    ],
+    "acs": ["AC-CRD-002.1", "AC-CRD-003.1", "AC-CRD-003.3"],
     "purpose": "Real task records distinguish actual bindings from selected but unbound preparation and unrelated Agents, without provider or database mutation.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/pure/masked-credential.spec.ts",
-    "acs": [
-      "AC-CRD-020.1",
-      "AC-CRD-022.4"
-    ],
+    "acs": ["AC-CRD-020.1", "AC-CRD-022.4"],
     "purpose": "Production DTO mapper returns only approved masked credential fields and never serializes plaintext or encrypted material.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/crd/sqlite/revocation-cleanup.spec.ts",
-    "acs": [
-      "AC-CRD-003.2"
-    ],
+    "acs": ["AC-CRD-003.2"],
     "purpose": "Actual SQLite revocation binding records pending teardown after external removal failure; a fresh handler retries and confirms removal before clearing it.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/prj/service/clone-queue-cancellation.spec.ts",
-    "acs": [
-      "AC-PRJ-013.5"
-    ],
+    "acs": ["AC-PRJ-013.5"],
     "purpose": "Actual project repository and clone queue settle a queued cancellation as failed/INTERRUPTED and publish an event.",
     "relation": "complete-api"
   },
   {
     "file": "acceptance/prj/sqlite/deletion-transaction.spec.ts",
-    "acs": [
-      "AC-PRJ-040.5",
-      "AC-PRJ-041.3",
-      "AC-PRJ-041.4",
-      "AC-PRJ-043.3"
-    ],
+    "acs": ["AC-PRJ-040.5", "AC-PRJ-041.3", "AC-PRJ-041.4", "AC-PRJ-043.3"],
     "purpose": "Real shared SQLite transaction rechecks active tasks, removes inactive task/rule/run records on commit, and rolls back all owned rows on conflict.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/prj/sqlite/post-commit-task-cleanup.spec.ts",
-    "acs": [
-      "AC-PRJ-041.3",
-      "AC-PRJ-043.3"
-    ],
+    "acs": ["AC-PRJ-041.3", "AC-PRJ-043.3"],
     "purpose": "Real filesystem cleanup is commit-only and a durable cleanup job recovers removal failure without rolling back committed data.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/sys/service/provider-log.spec.ts",
-    "acs": [
-      "AC-SYS-031.1"
-    ],
+    "acs": ["AC-SYS-031.1"],
     "purpose": "Production provider log reader filters source, windows and sanitizes records; frontend card placement is a separate responsibility.",
     "relation": "backend-support"
   },
@@ -160,53 +106,35 @@
     "acs": [],
     "purpose": "Production helper diagnosis reads unstarted, ready and unavailable states without creating an authentication helper.",
     "relation": "backend-support",
-    "requirements": [
-      "REQ-DIA-019"
-    ]
+    "requirements": ["REQ-DIA-019"]
   },
   {
     "file": "acceptance/sys/service/task-capacity.spec.ts",
-    "acs": [
-      "AC-SYS-071.1",
-      "AC-SBX-010.3"
-    ],
+    "acs": ["AC-SYS-071.1", "AC-SBX-010.3"],
     "purpose": "Real allocator admission and readonly capacity use the same CPU/RAM/disk policy and count stopped allocations.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/sys/service/instance-recovery.spec.ts",
-    "acs": [
-      "AC-SBX-022.1"
-    ],
+    "acs": ["AC-SBX-022.1"],
     "purpose": "Reconciler verifies external removal rather than treating a tombstone as proof of provider cleanup.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/dep/service/initialization-evidence.spec.ts",
-    "acs": [
-      "AC-DEP-007.3",
-      "AC-DEP-008.4",
-      "AC-SYS-060.4"
-    ],
+    "acs": ["AC-DEP-007.3", "AC-DEP-008.4", "AC-SYS-060.4"],
     "purpose": "Actual initialization application treats timeout as uncertainty, refuses unacknowledged confirmed offline without writes, and validates proxy URL scheme.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/lch/service/image-snapshot.spec.ts",
-    "acs": [
-      "AC-LCH-004.6",
-      "AC-LCH-017.1"
-    ],
+    "acs": ["AC-LCH-004.6", "AC-LCH-017.1"],
     "purpose": "Actual current SQLite task snapshot remains frozen through detail/list/restart when the catalogue current version changes.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/lch/pure/prompt-boundaries.spec.ts",
-    "acs": [
-      "AC-LCH-005.2",
-      "AC-LCH-005.3",
-      "AC-SBX-013.2"
-    ],
+    "acs": ["AC-LCH-005.2", "AC-LCH-005.3", "AC-SBX-013.2"],
     "purpose": "Real HTTP schema and domain count Unicode code points after trimming; initial prompt is immutable and consumed once.",
     "relation": "backend-support"
   },
@@ -225,18 +153,13 @@
   },
   {
     "file": "acceptance/sbx/sqlite/retained-task-artifacts.spec.ts",
-    "acs": [
-      "AC-SBX-034.1",
-      "AC-SBX-034.3"
-    ],
+    "acs": ["AC-SBX-034.1", "AC-SBX-034.3"],
     "purpose": "Actual stored task artifact filesystem streams after teardown and rejects directory escapes; result UI and download buttons require separate scenarios.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/sbx/sqlite/delete-write-conflict.spec.ts",
-    "acs": [
-      "AC-LCH-014.2"
-    ],
+    "acs": ["AC-LCH-014.2"],
     "purpose": "Actual repository conditional write rejects stale provisioning after committed deletion without resurrecting rows or altering history.",
     "relation": "complete-api"
   },
@@ -259,110 +182,67 @@
   },
   {
     "file": "acceptance/wb/pure/prompt-heuristic.spec.ts",
-    "acs": [
-      "AC-WB-050.1",
-      "AC-WB-050.2"
-    ],
+    "acs": ["AC-WB-050.1", "AC-WB-050.2"],
     "purpose": "Real ANSI-stripping prompt policy rejects false positives and recognizes declared terminal patterns; it supports the waiting read model.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/wb/service/waiting-detection.spec.ts",
-    "acs": [
-      "AC-WB-050.1",
-      "AC-WB-050.2",
-      "AC-SBX-010.4"
-    ],
+    "acs": ["AC-WB-050.1", "AC-WB-050.2", "AC-SBX-010.4"],
     "purpose": "Actual detector and batcher aggregate all attached TTYs after silence; input and closing sessions clear waiting state.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/wb/protocol/waiting-input.spec.ts",
-    "acs": [
-      "AC-CRD-002.1",
-      "AC-WB-050.2",
-      "AC-TRM-001.4"
-    ],
+    "acs": ["AC-CRD-002.1", "AC-WB-050.2", "AC-TRM-001.4"],
     "purpose": "Native child stdout passes through real terminal service/gateway/query/DTO/credential-impact without a durable task-state write.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/img/pure/environment-policy.spec.ts",
-    "acs": [
-      "AC-IMG-012.1",
-      "AC-IMG-012.3",
-      "AC-IMG-013.3"
-    ],
+    "acs": ["AC-IMG-012.1", "AC-IMG-012.3", "AC-IMG-013.3"],
     "purpose": "Production environment value object checks reserved keys, UTF8 byte limits, case-sensitive duplicates and 51-entry refusal; UI inline projection and HTTP detail mapping require separate scenarios.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/img/sqlite/deletion-transaction.spec.ts",
-    "acs": [
-      "AC-IMG-034.3",
-      "AC-IMG-034.4"
-    ],
+    "acs": ["AC-IMG-034.3", "AC-IMG-034.4"],
     "purpose": "Real SQLite deletion detaches destroyed snapshots atomically but rejects a newly stopped live reference without side effects.",
     "relation": "complete-api"
   },
   {
     "file": "acceptance/img/service/preview-and-preflight.spec.ts",
-    "acs": [
-      "AC-IMG-006.1",
-      "AC-IMG-033.3",
-      "AC-LCH-004.10"
-    ],
+    "acs": ["AC-IMG-006.1", "AC-IMG-033.3", "AC-LCH-004.10"],
     "purpose": "Real application/repositories return resolved digest and references/version previews readonly; unavailable source and unknown task state never become permission to delete.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/auth/pure/challenge-byte-parsing.spec.ts",
-    "acs": [
-      "AC-AUTH-004.1",
-      "AC-AUTH-006.2"
-    ],
+    "acs": ["AC-AUTH-004.1", "AC-AUTH-006.2"],
     "purpose": "Production parsers extract actual CLI device/link challenge bytes including OSC8 and sanitize refresh metadata.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/auth/service/session-lifecycle.spec.ts",
-    "acs": [
-      "AC-AUTH-003.4",
-      "AC-AUTH-010.1",
-      "AC-AUTH-010.2",
-      "AC-AUTH-010.3",
-      "AC-AUTH-010.4"
-    ],
+    "acs": ["AC-AUTH-003.4", "AC-AUTH-010.1", "AC-AUTH-010.2", "AC-AUTH-010.3", "AC-AUTH-010.4"],
     "purpose": "Actual session store and application enforce per-runtime/process limits, expiration/cancel cleanup, and late asynchronous resources after shutdown.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/img/sqlite/deletion-references.spec.ts",
-    "acs": [
-      "AC-IMG-033.3",
-      "AC-IMG-034.4"
-    ],
+    "acs": ["AC-IMG-033.3", "AC-IMG-034.4"],
     "purpose": "Actual SQLite sandbox reference projection joins project names, retains stopped/failed tasks, excludes destroyed, and reads true waiting state without mutation.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/sys/service/environment-verdicts.spec.ts",
-    "acs": [
-      "AC-DIA-011.1",
-      "AC-DIA-011.2",
-      "AC-DIA-005.2",
-      "AC-DIA-016.1",
-      "AC-DIA-016.2"
-    ],
+    "acs": ["AC-DIA-011.1", "AC-DIA-011.2", "AC-DIA-005.2", "AC-DIA-016.1", "AC-DIA-016.2"],
     "purpose": "Production OS verdict policies distinguish host support, default-provider need and failed filesystem measurements.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/sys/sqlite/audit-query-export.spec.ts",
-    "acs": [
-      "AC-AUD-006.2",
-      "AC-AUD-008.1"
-    ],
+    "acs": ["AC-AUD-006.2", "AC-AUD-008.1"],
     "purpose": "Actual audit repository and export service stream a real tar archive with a declared missing log facility and no recorded credential plaintext; file reader byte budget is verified separately from the full 50MB export AC. Real interrupted diagnostic snapshot is exported without rerunning checks; real partial-line truncation is declared while empty rotation is not.",
     "relation": "backend-support"
   },
@@ -396,29 +276,19 @@
   },
   {
     "file": "acceptance/img/sqlite/environment-inheritance.spec.ts",
-    "acs": [
-      "AC-IMG-026.1",
-      "AC-IMG-024.6"
-    ],
+    "acs": ["AC-IMG-026.1", "AC-IMG-024.6"],
     "purpose": "Actual production application, current SQLite and AES-GCM copy all three runtime variables and exact Secret ciphertext to the new digest; activation is atomic, retry preserves edited target parameters and cross-tag inheritance writes nothing. Card summary remains a separate frontend responsibility.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/prj/pure/name-boundaries.spec.ts",
-    "acs": [
-      "AC-PRJ-002.5"
-    ],
+    "acs": ["AC-PRJ-002.5"],
     "purpose": "Actual creation schema counts Unicode code points consistently for ASCII, CJK, surrogate pairs and combining sequences; 40 are preserved and the 41st is rejected. Form truncation remains frontend evidence.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/acc/protocol/public-origin-and-proxy.spec.ts",
-    "acs": [
-      "AC-ACC-002.3",
-      "AC-ACC-004.4",
-      "AC-ACC-005.1",
-      "AC-ACC-006.1"
-    ],
+    "acs": ["AC-ACC-002.3", "AC-ACC-004.4", "AC-ACC-005.1", "AC-ACC-006.1"],
     "purpose": "Real credentialed HTTP preflight/cookie, origin refusal before writes, Engine.IO websocket admission, per-visitor trusted local CF IP limits and no-Origin MCP/HTTP/WS authentication. Supports access boundaries; production deployment policies are separately authorized operational scope.",
     "relation": "backend-support"
   },
@@ -436,21 +306,13 @@
   },
   {
     "file": "acceptance/img/pure/image-alias.spec.ts",
-    "acs": [
-      "AC-IMG-060.3",
-      "AC-IMG-060.4",
-      "AC-IMG-060.6"
-    ],
+    "acs": ["AC-IMG-060.3", "AC-IMG-060.4", "AC-IMG-060.6"],
     "purpose": "Single production Unicode policy and both Zod input contracts validate raw characters before trim, count Unicode code points, distinguish omission/clear and raise events only on actual changes.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/img/sqlite/alias-persistence.spec.ts",
-    "acs": [
-      "AC-IMG-060.4",
-      "AC-IMG-060.5",
-      "AC-IMG-060.6"
-    ],
+    "acs": ["AC-IMG-060.4", "AC-IMG-060.5", "AC-IMG-060.6"],
     "purpose": "Actual additive SQLite migration preserves legacy identities with null aliases; fresh repository reads preserve names, duplicate aliases are allowed and stale registration upserts cannot overwrite concurrent edits.",
     "relation": "backend-support"
   },
@@ -469,13 +331,7 @@
   },
   {
     "file": "acceptance/img/protocol/image-alias.spec.ts",
-    "acs": [
-      "AC-IMG-060.2",
-      "AC-IMG-060.3",
-      "AC-IMG-060.4",
-      "AC-IMG-060.5",
-      "AC-IMG-060.6"
-    ],
+    "acs": ["AC-IMG-060.2", "AC-IMG-060.3", "AC-IMG-060.4", "AC-IMG-060.5", "AC-IMG-060.6"],
     "purpose": "Complete Nest application returns required nullable imageAlias in actual POST/PATCH/GET contracts and list variants, normalizes saves, preserves omitted values, refuses registration rename and invalid mixed writes with field errors and zero changes, and reports missing manifests as 404.",
     "relation": "complete-api"
   },
@@ -495,64 +351,104 @@
   },
   {
     "file": "acceptance/upg/sqlite/online-migration.spec.ts",
-    "acs": [
-      "AC-UPG-006.3",
-      "AC-UPG-006.4",
-      "AC-UPG-006.5",
-      "AC-UPG-008.3",
-      "AC-UPG-008.4"
-    ],
+    "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-006.5", "AC-UPG-008.3", "AC-UPG-008.4"],
     "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/upg/sqlite/automation-exactly-once.spec.ts",
-    "acs": [
-      "AC-UPG-001.3",
-      "AC-UPG-006.5",
-      "AC-UPG-007.2"
-    ],
+    "acs": ["AC-UPG-001.3", "AC-UPG-006.5", "AC-UPG-007.2"],
     "purpose": "Actual scheduler/application/SQLite writer transitions retain accepted occurrence and launch identities, including retained old-writer late ACK; runtime provider here is an external fixture.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/upg/sqlite/job-completion-receipts.spec.ts",
-    "acs": [
-      "AC-UPG-001.6",
-      "AC-UPG-007.2"
-    ],
+    "acs": ["AC-UPG-001.6", "AC-UPG-007.2"],
     "purpose": "Actual finalization transaction binds observed read-job-exited facts to immutable receipt and original task cursor; receipt failure rolls back terminal event and release.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/upg/protocol/runtime-owner.spec.ts",
-    "acs": [
-      "AC-UPG-001.5",
-      "AC-UPG-006.5",
-      "AC-UPG-007.3"
-    ],
+    "acs": ["AC-UPG-001.5", "AC-UPG-006.5", "AC-UPG-007.3"],
     "purpose": "Actual Owner HTTP/private SQLite journal/child-process protocol tests exercise single authority and unknown SDK receipt; child fixture does not establish BoxLite VM preservation.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/upg/protocol/automation-launch-recovery.spec.ts",
-    "acs": [
-      "AC-UPG-001.3",
-      "AC-UPG-006.5",
-      "AC-UPG-007.2"
-    ],
+    "acs": ["AC-UPG-001.3", "AC-UPG-006.5", "AC-UPG-007.2"],
     "purpose": "Actual Owner HTTP journal plus real business services validate fixed job intent across lost acknowledgement and writer epochs; no native runtime claim.",
     "relation": "backend-support"
   },
   {
     "file": "acceptance/upg/protocol/control-application-rpc.spec.ts",
-    "acs": [
-      "AC-UPG-002.1",
-      "AC-UPG-002.3",
-      "AC-UPG-002.4",
-      "AC-UPG-006.5"
-    ],
+    "acs": ["AC-UPG-002.1", "AC-UPG-002.3", "AC-UPG-002.4", "AC-UPG-006.5"],
     "purpose": "Actual separate Control API process to production Coordinator HTTP/MCP/WS/SSE with real SQLite/auth/usecases; upgrade swap and native continuity still require mapped shared/native tests.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/release-trust.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7", "AC-UPG-009.8"],
+    "purpose": "Real Ed25519 and exact canonical/frozen-plan validation against actual CD module. Synthetic signed unit-only report values exercise rejection paths; they are not real release/native qualifications.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/upgrade-security.spec.ts",
+    "acs": ["AC-UPG-005.3", "AC-UPG-009.6", "AC-UPG-009.7"],
+    "purpose": "Actual Nest HTTP cookie, independent upgrade capability, exact Origin/CSRF/internal instance key and restart/expiry/key-rotation authorization; fixed controller fixture is only the security boundary.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/background-handoff.spec.ts",
+    "acs": ["AC-UPG-001.4", "AC-UPG-006.5"],
+    "purpose": "Actual production clone workflow and migrated SQLite refuse handoff while accepted background operation is active; natural completion commits before ownership pause, no operation abort.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
+    "acs": ["AC-UPG-006.5", "AC-UPG-007.2", "AC-UPG-008.4"],
+    "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
+    "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-008.3"],
+    "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/installed-artifact.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7"],
+    "purpose": "Real physical dependency closure, contained pnpm links, Node DI token identity and rejection of escaping/broken/extra/changed files; no native upgrade claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/upgrade-artifact.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7"],
+    "purpose": "Whole physical API/Web/installer bundle, component digests and root declaration verification; unlisted executables and altered declaration bytes are rejected. Filesystem layer only.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
+    "acs": ["AC-UPG-002.1", "AC-UPG-007.1", "AC-UPG-008.5"],
+    "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+    "acs": ["AC-UPG-006.4", "AC-UPG-006.5", "AC-UPG-007.4", "AC-UPG-009.7"],
+    "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/contract-authorization.spec.ts",
+    "acs": ["AC-UPG-006.4", "AC-UPG-009.7"],
+    "purpose": "Actual Nest public controllers/security/current SQLite reject shared-access-only, invalid Origin/CSRF, arbitrary payloads and unqualified independent contract commands; no positive native retirement claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/web-recovery-scope.spec.ts",
+    "acs": ["AC-UPG-007.1", "AC-UPG-007.4"],
+    "purpose": "Actual migrated SQLite fault-history reads and production fixed-target guard prevent expanding measured Web-only recovery into API/coordinator/owner actions. No positive native fallback qualification claim.",
     "relation": "backend-support"
   }
 ]

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { eq, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
@@ -12,6 +12,10 @@ import type {
 import type { CloneStatus } from '../../../domain/value-objects/project-status.vo';
 import type { ProjectRepository } from '../../../domain/repositories/project.repository';
 import { projects, type ProjectRow } from '../schema/project.sqlite';
+import {
+  PROJECT_READ_PROJECTION,
+  type ProjectReadProjection,
+} from '../../../domain/ports/project-read-projection.port';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
 
@@ -21,7 +25,12 @@ type Db = BetterSQLite3Database<Record<string, never>>;
  */
 @Injectable()
 export class SqliteProjectRepository implements ProjectRepository {
-  constructor(@Inject(DATABASE) private readonly db: Db) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Db,
+    @Optional()
+    @Inject(PROJECT_READ_PROJECTION)
+    private readonly projection?: ProjectReadProjection,
+  ) {}
 
   async findById(id: ProjectId): Promise<Project | null> {
     const row = this.db.select().from(projects).where(eq(projects.id, id)).get();
@@ -34,6 +43,10 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async findByName(name: string): Promise<Project | null> {
+    if (this.projection?.authoritative?.()) {
+      const id = this.projection.findIdByName?.(name);
+      return id ? this.findById(id as ProjectId) : null;
+    }
     const row = this.db.select().from(projects).where(eq(projects.name, name)).get();
     return row ? this.toDomain(row) : null;
   }
@@ -55,9 +68,15 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   saveSync(_tx: Tx, project: Project): void {
+    const authoritative = this.projection?.authoritative?.() ?? false;
+    const authoritySlot = authoritative
+      ? this.projection?.saveNameSync?.(_tx, project.id, project.name)
+      : undefined;
+    if (authoritative && typeof authoritySlot !== 'string')
+      throw new Error('PROJECT_NAME_AUTHORITY_UNAVAILABLE');
     const values = {
       id: project.id as string,
-      name: project.name,
+      name: authoritative ? authoritySlot! : project.name,
       sourceType: project.sourceType,
       repoUrl: project.repoUrl,
       repoBranch: project.repoBranch,
@@ -99,7 +118,7 @@ export class SqliteProjectRepository implements ProjectRepository {
   private toDomain(row: ProjectRow): Project {
     return Project.rehydrate({
       id: row.id as ProjectId,
-      name: row.name,
+      name: this.projection?.name(row.id, row.name) ?? row.name,
       sourceType: row.sourceType as ProjectSourceType,
       repoUrl: row.repoUrl,
       repoBranch: row.repoBranch,

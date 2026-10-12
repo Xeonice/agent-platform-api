@@ -62,7 +62,9 @@ import {
   withRuntimeBusinessAuthority,
 } from '../infrastructure/runtime-rpc/authority-context';
 
-const remoteRuntime = ['coordinator','coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE??'');
+const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
+  process.env.PLATFORM_PROCESS_ROLE ?? '',
+);
 
 /**
  * Composition root for the sandbox context — the ONE place ports are wired to
@@ -146,8 +148,10 @@ const remoteRuntime = ['coordinator','coordinator-prepared'].includes(process.en
     SANDBOX_CREATE_INTENTS,
     SandboxApplicationService,
     AgentTaskApplicationService,
+    TasksGateway,
     SANDBOX_PROVIDER_REGISTRY,
     RunAgentTaskWorkflow,
+    ProvisionSandboxWorkflow,
     SANDBOX_PTY_PORT,
     SANDBOX_EXEC_PORT,
     SANDBOX_FACADE,
