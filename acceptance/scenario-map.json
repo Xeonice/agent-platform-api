@@ -450,5 +450,11 @@
     "acs": ["AC-UPG-007.1", "AC-UPG-007.4"],
     "purpose": "Actual migrated SQLite fault-history reads and production fixed-target guard prevent expanding measured Web-only recovery into API/coordinator/owner actions. No positive native fallback qualification claim.",
     "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/auth-continuity-lookup.spec.ts",
+    "acs": ["AC-UPG-002.3", "AC-UPG-007.2"],
+    "purpose": "Actual Nest public request lookup, production ordinary-access guard and real SQLite verify original granted actor and independently issued fresh capability cookies without Catalog/Web/SDK dependencies; changed upgrade HMAC or ordinary access-key rotation rejects continuity. Authentication boundary support only, not native upgrade/fallback qualification.",
+    "relation": "backend-support"
   }
 ]

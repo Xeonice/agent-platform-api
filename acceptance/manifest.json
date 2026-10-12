@@ -14496,6 +14496,11 @@
           "file": "acceptance/upg/protocol/control-application-rpc.spec.ts",
           "purpose": "Actual separate Control API process to production Coordinator HTTP/MCP/WS/SSE with real SQLite/auth/usecases; upgrade swap and native continuity still require mapped shared/native tests.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/auth-continuity-lookup.spec.ts",
+          "purpose": "Actual Nest public request lookup, production ordinary-access guard and real SQLite verify original granted actor and independently issued fresh capability cookies without Catalog/Web/SDK dependencies; changed upgrade HMAC or ordinary access-key rotation rejects continuity. Authentication boundary support only, not native upgrade/fallback qualification.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
@@ -15168,6 +15173,11 @@
         {
           "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
           "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/auth-continuity-lookup.spec.ts",
+          "purpose": "Actual Nest public request lookup, production ordinary-access guard and real SQLite verify original granted actor and independently issued fresh capability cookies without Catalog/Web/SDK dependencies; changed upgrade HMAC or ordinary access-key rotation rejects continuity. Authentication boundary support only, not native upgrade/fallback qualification.",
           "relation": "backend-support"
         }
       ],
