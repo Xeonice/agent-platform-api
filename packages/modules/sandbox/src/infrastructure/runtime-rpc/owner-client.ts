@@ -465,6 +465,7 @@ export class RuntimeOwnerProcessStream implements ProcessStream {
   private detached = false;
   readonly connectionErrors = new EventEmitter();
   private connectionState: 'connected' | 'unconfirmed' = 'unconfirmed';
+  private connectionStateObserved = false;
   constructor(
     readonly ref: string,
     private readonly id: string,
@@ -487,7 +488,7 @@ export class RuntimeOwnerProcessStream implements ProcessStream {
   }
   onConnectionState(cb: (state: 'connected' | 'unconfirmed') => void): void {
     this.events.on('connection', cb);
-    cb(this.connectionState);
+    if (this.connectionStateObserved) cb(this.connectionState);
   }
   write(data: string | Buffer): void {
     if (!this.detached)
@@ -520,10 +521,7 @@ export class RuntimeOwnerProcessStream implements ProcessStream {
   private async pump(): Promise<void> {
     try {
       for await (const frame of this.connection.frames(this.id, this.abort.signal, (state) => {
-        if (state !== this.connectionState) {
-          this.connectionState = state;
-          this.events.emit('connection', state);
-        }
+        this.observeConnectionState(state);
       })) {
         if (frame.type === 'data') {
           const data = Buffer.from(frame.data, 'base64');
@@ -545,11 +543,16 @@ export class RuntimeOwnerProcessStream implements ProcessStream {
     }
   }
   private unconfirmed(error: unknown): void {
-    if (this.connectionState !== 'unconfirmed') {
-      this.connectionState = 'unconfirmed';
-      this.events.emit('connection', 'unconfirmed');
-    }
+    this.observeConnectionState('unconfirmed');
     this.connectionErrors.emit('unconfirmed', error);
+  }
+  private observeConnectionState(state: 'connected' | 'unconfirmed'): void {
+    // The constructor's initial value is not a failed read. Only replay actual
+    // HTTP observation, including a first failure before any successful read.
+    const changed = !this.connectionStateObserved || this.connectionState !== state;
+    this.connectionStateObserved = true;
+    this.connectionState = state;
+    if (changed) this.events.emit('connection', state);
   }
 }
 
