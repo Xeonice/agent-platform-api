@@ -46,3 +46,4 @@ export * from './sse-protocol';
 export * from './automation-project-cleanup.port';
 export * from './upgrade.contract';
 export * from './runtime-business-authority.port';
+export * from './terminal-bookmark-cleanup.port';

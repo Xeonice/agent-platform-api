@@ -23,6 +23,7 @@ import {
   isSandboxFailureCode,
   INTERNAL_ERROR_CODE,
   WAITING_INPUT_QUERY,
+  TERMINAL_BOOKMARK_CLEANUP,
 } from '@platform/contracts';
 import type {
   ResourceQuota,
@@ -46,6 +47,7 @@ import type {
   WorkspaceSource,
   RegisterRetainedVolumeCommand,
   WaitingInputQueryPort,
+  TerminalBookmarkCleanup,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { ResourceAllocator } from './resource-allocator';
@@ -163,6 +165,9 @@ export class SandboxApplicationService {
     @Optional()
     @Inject(SANDBOX_ADMISSION_INTENTS)
     private readonly admissionIntents?: SandboxAdmissionIntents,
+    @Optional()
+    @Inject(TERMINAL_BOOKMARK_CLEANUP)
+    private readonly terminalBookmarks?: TerminalBookmarkCleanup,
   ) {}
 
   /**
@@ -892,7 +897,10 @@ export class SandboxApplicationService {
     const drained = this.provision.cancel(id);
     let sandbox = await this.repo.findById(asSandboxId(id));
     if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    if (sandbox.status === 'destroyed') return;
+    if (sandbox.status === 'destroyed') {
+      this.uow.run((tx) => this.terminalBookmarks?.deleteForSandboxSync(tx, id));
+      return;
+    }
     const previous = sandbox.status;
     if (sandbox.status !== 'destroying') this.advance(sandbox, 'destroying', 'user');
     const provider = this.registry.get(sandbox.provider);
@@ -1007,6 +1015,8 @@ export class SandboxApplicationService {
   private persist(sandbox: Sandbox): void {
     this.uow.run((tx) => {
       this.repo.saveSync(tx, sandbox);
+      if (sandbox.status === 'destroyed')
+        this.terminalBookmarks?.deleteForSandboxSync(tx, sandbox.id);
       this.events.publishInTx(tx, sandbox.pullEvents());
     });
   }

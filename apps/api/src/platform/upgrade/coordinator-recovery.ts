@@ -10,12 +10,13 @@ import { statfs } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
 import { getHeapStatistics } from 'node:v8';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
-import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, SANDBOX_FACADE } from '@platform/contracts';
 import {
   RuntimeOwnerProviderRegistry,
   RunAgentTaskWorkflow,
   ProvisionSandboxWorkflow,
   TasksGateway,
+  SandboxFacadeAdapter,
 } from '@platform/sandbox';
 import { EventsGateway } from '../events/events.gateway';
 import {
@@ -69,6 +70,9 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     @Optional()
     @Inject(PROJECT_READ_PROJECTION)
     private readonly projection?: ProjectReadProjection,
+    @Optional()
+    @Inject(SANDBOX_FACADE)
+    private readonly cleanup?: SandboxFacadeAdapter,
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
@@ -327,7 +331,9 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       });
       await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
       requireUpgrade(
-        this.provisions.pauseOwnership() && this.clones.pauseOwnership(),
+        this.provisions.pauseOwnership() &&
+          this.clones.pauseOwnership() &&
+          this.cleanup?.pauseOwnership() === true,
         'BACKGROUND_WORK_PENDING',
       );
       this.pump.shutdown();
@@ -348,6 +354,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.automations.resumeOwnership();
       this.provisions.resumeOwnership();
       this.clones.resumeOwnership();
+      this.cleanup?.resumeOwnership();
       this.events.resumeAfterHandoff();
       this.tasks.resumeAfterHandoff();
       this.store.sqlite
@@ -440,6 +447,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.automations.resumeOwnership();
       this.provisions.resumeOwnership();
       this.clones.resumeOwnership();
+      this.cleanup?.resumeOwnership();
       this.events.resumeAfterHandoff();
       this.tasks.resumeAfterHandoff();
       const continuity = await this.inspector.continuity(id, fence);

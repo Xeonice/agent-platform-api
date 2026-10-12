@@ -157,7 +157,11 @@ export class RuntimeOwnerConnection {
     )
       this.assertBusinessWriter();
     const call = this.envelope(provider, method, args, sandboxId);
-    if (method === 'jobs.startJob' || method === 'create') {
+    if (
+      method === 'jobs.startJob' ||
+      method === 'create' ||
+      (method === 'destroy' && explicitRuntimeBusinessAuthority())
+    ) {
       const digest = createHash('sha256')
         .update(JSON.stringify(encodeOwnerValue({ provider, method, args, sandboxId })))
         .digest('hex');
@@ -166,7 +170,8 @@ export class RuntimeOwnerConnection {
         if (
           original.state === 'complete' &&
           original.digest === digest &&
-          original.result !== undefined
+          (original.result !== undefined ||
+            (method === 'destroy' && Object.prototype.hasOwnProperty.call(original, 'result')))
         )
           return original.result;
         throw new SandboxProviderError(
@@ -358,11 +363,13 @@ export class RuntimeOwnerConnection {
     const operationId =
       method === 'jobs.startJob' && stable
         ? `job:${stable.operationId}:${digest}`
-        : method === 'create' && sandboxId && !sandboxId.startsWith('auth-helper')
-          ? stable
-            ? `create:${stable.operationId}`
-            : `create:${sandboxId}:${digest}`
-          : `rpc:${randomBytes(20).toString('hex')}`;
+        : method === 'destroy' && stable
+          ? `destroy:${stable.operationId}:${digest}`
+          : method === 'create' && sandboxId && !sandboxId.startsWith('auth-helper')
+            ? stable
+              ? `create:${stable.operationId}`
+              : `create:${sandboxId}:${digest}`
+            : `rpc:${randomBytes(20).toString('hex')}`;
     const observe = [
       'inspect',
       'imageStaged',

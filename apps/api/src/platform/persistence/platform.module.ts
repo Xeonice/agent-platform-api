@@ -21,7 +21,11 @@ import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { requireUpgrade } from '../upgrade/upgrade-trust';
 import { SqliteUnitOfWork } from './unit-of-work.impl';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { coordinatorWriterControl, fenceCoordinatorConnection } from './coordinator-lease';
+import {
+  coordinatorWriterControl,
+  fenceCoordinatorConnection,
+  withCoordinatorBusinessEpoch,
+} from './coordinator-lease';
 import { platformInstanceId } from '@platform/sandbox';
 import { preparedConnection } from './prepared-connection';
 
@@ -96,6 +100,7 @@ export function activatePreparedPlatform(): number {
     {
       provide: BUSINESS_WRITER_AUTHORITY,
       useFactory: () => ({
+        run: <T>(work: () => T): T => withCoordinatorBusinessEpoch(openConnection().sqlite, work),
         epoch: () =>
           ['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '')
             ? coordinatorWriterControl(openConnection().sqlite).generation

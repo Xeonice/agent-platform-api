@@ -1,5 +1,9 @@
 import { Global, Module } from '@nestjs/common';
-import { AGENT_SESSION_BOOTSTRAP, WAITING_INPUT_QUERY } from '@platform/contracts';
+import {
+  AGENT_SESSION_BOOTSTRAP,
+  WAITING_INPUT_QUERY,
+  TERMINAL_BOOKMARK_CLEANUP,
+} from '@platform/contracts';
 import { SandboxModule } from '@platform/sandbox';
 import { TerminalSessionService } from '../application/terminal-session.service';
 import { TERMINAL_BOOKMARKS } from '../domain/ports/terminal-bookmarks.port';
@@ -32,6 +36,7 @@ import {
   providers: [
     TerminalSessionService,
     { provide: TERMINAL_BOOKMARKS, useClass: SqliteTerminalBookmarks },
+    { provide: TERMINAL_BOOKMARK_CLEANUP, useExisting: TERMINAL_BOOKMARKS },
     TerminalGateway,
     WaitingInputService,
     { provide: WAITING_INPUT_OBSERVER, useClass: WaitingInputDetector },
@@ -39,6 +44,11 @@ import {
     { provide: WAITING_INPUT_QUERY, useExisting: WaitingInputService },
     { provide: AGENT_SESSION_BOOTSTRAP, useExisting: TerminalSessionService },
   ],
-  exports: [AGENT_SESSION_BOOTSTRAP, WAITING_INPUT_QUERY, TerminalGateway],
+  exports: [
+    AGENT_SESSION_BOOTSTRAP,
+    WAITING_INPUT_QUERY,
+    TERMINAL_BOOKMARK_CLEANUP,
+    TerminalGateway,
+  ],
 })
 export class TerminalModule {}

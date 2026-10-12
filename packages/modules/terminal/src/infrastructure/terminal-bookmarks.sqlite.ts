@@ -9,17 +9,22 @@ import {
   type Clock,
   type IdGenerator,
   type UnitOfWork,
+  type Tx,
 } from '@platform/shared-kernel';
+import type { TerminalBookmarkCleanup } from '@platform/contracts';
 import type { TerminalBookmark, TerminalBookmarks } from '../domain/ports/terminal-bookmarks.port';
 
 @Injectable()
-export class SqliteTerminalBookmarks implements TerminalBookmarks {
+export class SqliteTerminalBookmarks implements TerminalBookmarks, TerminalBookmarkCleanup {
   constructor(
     @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
+  deleteForSandboxSync(_tx: Tx, sandboxId: string): void {
+    this.db.run(sql`DELETE FROM terminal_bookmarks WHERE sandbox_id=${sandboxId}`);
+  }
   async markCloseRequested(sandboxId: string, privateSessionId: string): Promise<void> {
     this.uow.run(() => {
       this.db.run(
@@ -35,10 +40,10 @@ export class SqliteTerminalBookmarks implements TerminalBookmarks {
   ): Promise<TerminalBookmark> {
     return this.uow.run(() => {
       this.db.run(
-        sql`INSERT OR IGNORE INTO terminal_bookmarks(terminal_identity,sandbox_id,kind,private_session_id,runtime_id) VALUES(${this.ids.next()},${sandboxId},${kind},${privateSessionId},${runtimeId ?? null})`,
+        sql`INSERT OR IGNORE INTO terminal_bookmarks(terminal_identity,sandbox_id,kind,private_session_id,runtime_id) SELECT ${this.ids.next()},${sandboxId},${kind},${privateSessionId},${runtimeId ?? null} WHERE EXISTS (SELECT 1 FROM sandboxes WHERE id=${sandboxId} AND status NOT IN ('destroying','destroyed'))`,
       );
       const row = this.db.get<{ terminal_identity: string }>(
-        sql`SELECT terminal_identity FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND kind=${kind} AND private_session_id=${privateSessionId}`,
+        sql`SELECT terminal_identity FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND kind=${kind} AND private_session_id=${privateSessionId} AND EXISTS (SELECT 1 FROM sandboxes WHERE id=${sandboxId} AND status NOT IN ('destroying','destroyed'))`,
       );
       if (!row) throw new Error('TERMINAL_BOOKMARK_NOT_COMMITTED');
       return {
@@ -59,7 +64,7 @@ export class SqliteTerminalBookmarks implements TerminalBookmarks {
       runtime_id: string | null;
       runtime_identity: string | null;
     }>(
-      sql`SELECT * FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND terminal_identity=${terminalIdentity}`,
+      sql`SELECT * FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND terminal_identity=${terminalIdentity} AND EXISTS (SELECT 1 FROM sandboxes WHERE id=${sandboxId} AND status NOT IN ('destroying','destroyed'))`,
     );
     return row
       ? {
@@ -79,7 +84,7 @@ export class SqliteTerminalBookmarks implements TerminalBookmarks {
   ): Promise<boolean> {
     return this.uow.run(() => {
       const row = this.db.get<{ runtime_identity: string | null }>(
-        sql`SELECT runtime_identity FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND terminal_identity=${terminalIdentity}`,
+        sql`SELECT runtime_identity FROM terminal_bookmarks WHERE sandbox_id=${sandboxId} AND terminal_identity=${terminalIdentity} AND EXISTS (SELECT 1 FROM sandboxes WHERE id=${sandboxId} AND status NOT IN ('destroying','destroyed'))`,
       );
       if (!row || (row.runtime_identity && row.runtime_identity !== runtimeIdentity)) return false;
       this.db.run(

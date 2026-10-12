@@ -327,6 +327,19 @@ export class RuntimeOwnerJournal {
       .prepare('SELECT sandbox_id,provider,handle,state FROM owner_assignments WHERE sandbox_id=?')
       .get(id) as Assignment | undefined;
   }
+  confirmedDestroyed(provider: string, providerId: string, sandboxId?: string): boolean {
+    // A destroy receipt and this tombstone commit atomically. Absence/unknown
+    // is not a completed cleanup, and an id belonging to another sandbox cannot
+    // authorize a caller to treat its resource as gone.
+    if (!sandboxId) return false;
+    return Boolean(
+      this.db
+        .prepare(
+          "SELECT 1 FROM owner_assignments WHERE sandbox_id=? AND provider=? AND provider_id=? AND state='destroyed'",
+        )
+        .get(sandboxId, provider, providerId),
+    );
+  }
   assignedHandle(provider: string, id: string, sandboxId?: string): SandboxHandle {
     const row = this.db
       .prepare(

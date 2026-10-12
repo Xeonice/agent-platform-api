@@ -385,14 +385,17 @@ export class RuntimeOwnerServer {
           : undefined;
       let destroyed: string | undefined;
       if (call.method === 'destroy') {
-        const handle = this.handleFor(call);
-        destroyed = this.journal
-          .assignments()
-          .find(
-            (item) =>
-              item.provider === handle.provider &&
-              item.providerSandboxId === handle.providerSandboxId,
-          )?.sandboxId;
+        if (this.destroyedReference(call)) destroyed = call.fence.sandboxId;
+        else {
+          const handle = this.handleFor(call);
+          destroyed = this.journal
+            .assignments()
+            .find(
+              (item) =>
+                item.provider === handle.provider &&
+                item.providerSandboxId === handle.providerSandboxId,
+            )?.sandboxId;
+        }
       } else if (call.method === 'destroyBySandboxId') destroyed = this.string(call.args[0]);
       this.journal.complete(call, value, assignment, destroyed);
       return value;
@@ -406,6 +409,9 @@ export class RuntimeOwnerServer {
   private async invoke(call: RuntimeOwnerCall): Promise<unknown> {
     const provider = this.provider(call);
     const a = call.args;
+    // The exact no-op still goes through begin/complete, so an acknowledged or
+    // lost response remains queryable under this newly accepted cleanup intent.
+    if (this.destroyedReference(call)) return undefined;
     if (call.method === 'create') {
       const context = RuntimeOwnerContextSchema.parse(a[0]);
       if (typeof context.sandboxId !== 'string' || context.sandboxId !== call.fence.sandboxId)
@@ -571,6 +577,15 @@ export class RuntimeOwnerServer {
       call.provider,
       handle.providerSandboxId,
       call.fence.sandboxId,
+    );
+  }
+  private destroyedReference(call: RuntimeOwnerCall): boolean {
+    if (call.method !== 'destroy') return false;
+    const handle = ownerRecord(call.args[0]);
+    return (
+      handle.provider === call.provider &&
+      typeof handle.providerSandboxId === 'string' &&
+      this.journal.confirmedDestroyed(call.provider, handle.providerSandboxId, call.fence.sandboxId)
     );
   }
   private async requireRunning(

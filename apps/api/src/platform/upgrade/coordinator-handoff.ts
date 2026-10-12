@@ -1,11 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
-import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
+import { SANDBOX_PROVIDER_REGISTRY, SANDBOX_FACADE } from '@platform/contracts';
 import {
   RuntimeOwnerProviderRegistry,
   RunAgentTaskWorkflow,
   ProvisionSandboxWorkflow,
   TasksGateway,
+  SandboxFacadeAdapter,
 } from '@platform/sandbox';
 import { EventsGateway } from '../events/events.gateway';
 import { CloneProjectWorkflow } from '@platform/project';
@@ -50,6 +51,7 @@ export class CoordinatorHandoff {
     private readonly tasks: TasksGateway,
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly owners: RuntimeOwnerProviderRegistry,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(SANDBOX_FACADE) private readonly cleanup: SandboxFacadeAdapter,
   ) {}
   private row(id: string): HandoffRow | undefined {
     return this.store.sqlite
@@ -210,7 +212,9 @@ export class CoordinatorHandoff {
         });
         await this.applications.quiesce(Math.min(1000, plan.policy.requestDeadlineMs / 2));
         requireUpgrade(
-          this.provisions.pauseOwnership() && this.clones.pauseOwnership(),
+          this.provisions.pauseOwnership() &&
+            this.clones.pauseOwnership() &&
+            this.cleanup.pauseOwnership(),
           'BACKGROUND_WORK_PENDING',
         );
         this.pump.shutdown();
@@ -225,6 +229,7 @@ export class CoordinatorHandoff {
         this.automations.resumeOwnership();
         this.provisions.resumeOwnership();
         this.clones.resumeOwnership();
+        this.cleanup.resumeOwnership();
         this.events.resumeAfterHandoff();
         this.tasks.resumeAfterHandoff();
         this.store.sqlite
@@ -264,6 +269,7 @@ export class CoordinatorHandoff {
         this.automations.resumeOwnership();
         this.provisions.resumeOwnership();
         this.clones.resumeOwnership();
+        this.cleanup.resumeOwnership();
         this.events.resumeAfterHandoff();
         this.tasks.resumeAfterHandoff();
         throw error;

@@ -117,7 +117,9 @@ export class SqliteSandboxRepository implements SandboxRepository {
         .values({
           sandboxId: row.id,
           provider: row.provider,
-          providerSandboxId: row.providerHandle,
+          // The terminal lifecycle state is committed only after successful
+          // provider/workspace teardown. A project purge must not destroy it twice.
+          providerSandboxId: row.status === 'destroyed' ? null : row.providerHandle,
           providerState: row.providerState,
           workspacePath: row.workspacePath,
         })
