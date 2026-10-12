@@ -3,6 +3,7 @@ import { platformValidationPipe } from './validation.pipe';
 import { ErrorEnvelopeFilter } from './error-envelope.filter';
 import { configurePublicHttp } from './public-origin-policy';
 import { configureDeploymentBarrier } from './deployment.setup';
+import { internalUpgradeJson } from './internal-upgrade-json';
 import {
   readPublicNetworkConfig,
   type PublicNetworkConfig,
@@ -38,10 +39,15 @@ export function configurePlatformApp(
   app: INestApplication,
   network: PublicNetworkConfig = readPublicNetworkConfig(),
 ): void {
+  // Before Nest init/listen installs the ordinary 100 KiB parser. Both initial
+  // and prepared/adopted Coordinators use this same bounded private transport.
+  app.use('/internal/upgrades', internalUpgradeJson());
   configurePublicHttp(app, network);
   configureDeploymentBarrier(app);
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).
-  app.setGlobalPrefix('api', { exclude: [{ path: 'internal/{*path}', method: RequestMethod.ALL }] });
+  app.setGlobalPrefix('api', {
+    exclude: [{ path: 'internal/{*path}', method: RequestMethod.ALL }],
+  });
   // zod single source validation for every createZodDto DTO (02 §3); failures come
   // out as a real ErrorEnvelope (04 §4) — see bootstrap/validation.pipe.ts.
   app.useGlobalPipes(platformValidationPipe());

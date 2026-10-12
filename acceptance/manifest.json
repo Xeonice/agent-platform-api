@@ -14448,6 +14448,11 @@
           "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
           "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/internal-upgrade-json.spec.ts",
+          "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
@@ -15390,6 +15395,11 @@
           "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
           "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/internal-upgrade-json.spec.ts",
+          "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
+          "relation": "backend-support"
         }
       ],
       "requiredVerification": {
@@ -15416,6 +15426,11 @@
         {
           "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
           "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+          "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/internal-upgrade-json.spec.ts",
+          "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
           "relation": "backend-support"
         }
       ],

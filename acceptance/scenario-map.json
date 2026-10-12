@@ -462,5 +462,11 @@
     "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-007.2", "AC-UPG-007.3"],
     "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
     "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/internal-upgrade-json.spec.ts",
+    "acs": ["AC-UPG-002.1", "AC-UPG-008.4", "AC-UPG-008.5"],
+    "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
+    "relation": "backend-support"
   }
 ]
