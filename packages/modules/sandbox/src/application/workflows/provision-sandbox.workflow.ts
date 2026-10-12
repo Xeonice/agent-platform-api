@@ -1,12 +1,29 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { builtinImageRef, CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/shared-kernel';
-import type { Clock, EventBus, UnitOfWork } from '@platform/shared-kernel';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  Optional,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from '@nestjs/common';
+import {
+  asSandboxId,
+  builtinImageRef,
+  CLOCK,
+  EVENT_BUS,
+  UNIT_OF_WORK,
+  BUSINESS_WRITER_AUTHORITY,
+} from '@platform/shared-kernel';
+import type { Clock, EventBus, UnitOfWork, BusinessWriterAuthority } from '@platform/shared-kernel';
 import {
   AGENT_SESSION_BOOTSTRAP,
   AUDIT_RECORDER,
   CREDENTIAL_FACADE,
   CredentialPreparationError,
   RUNTIME_ADAPTER_REGISTRY,
+  RUNTIME_BUSINESS_AUTHORITY,
+  RuntimeOwnerHandleSchema,
+  SANDBOX_PROVIDER_REGISTRY,
   RUNTIME_INSTALL_ORCHESTRATOR,
   SANDBOX_EVENT_BROADCASTER,
   IMAGE_FACADE,
@@ -24,6 +41,9 @@ import type {
   InjectableRuntimeCredential,
   ResolvedImageSpec,
   RuntimeAdapterRegistry,
+  RuntimeBusinessAuthorityPort,
+  ProviderRegistry,
+  SandboxProviderContext,
   RuntimeInstallOrchestrator,
   SandboxEventBroadcaster,
   SandboxExecFn,
@@ -39,6 +59,10 @@ import { SANDBOX_REPOSITORY } from '../../domain/repositories/sandbox.repository
 import type { SandboxRepository } from '../../domain/repositories/sandbox.repository';
 import { ResourceAllocator } from '../resource-allocator';
 import { withTeardownDeadline } from '../teardown-deadline';
+import {
+  SANDBOX_CREATE_INTENTS,
+  type SandboxCreateIntents,
+} from '../../domain/ports/sandbox-create-intents.port';
 
 /**
  * 兜底 quota —— **只在账本里查不到这条 sandbox 的活跃登记时**才用。
@@ -53,6 +77,9 @@ interface PreparedRuntimeCredential {
 }
 
 class SandboxProvisionCancelled extends Error {}
+class ProvisionOwnershipSuperseded extends Error {
+  readonly code = 'COORDINATOR_WRITER_FENCE_SUPERSEDED';
+}
 
 class RuntimeCredentialRevokedError extends Error {
   readonly code = 'AUTH_REJECTED';
@@ -118,10 +145,13 @@ const FALLBACK_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
  * separate call here — the gate exists, it just lives one layer down.
  */
 @Injectable()
-export class ProvisionSandboxWorkflow {
+export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger('ProvisionSandboxWorkflow');
   private readonly cancelled = new Set<string>();
   private readonly active = new Map<string, Promise<void>>();
+  private recoveryTimer?: ReturnType<typeof setInterval>;
+  private recovering = false;
+  private readonly activeEpochs = new Map<string, number>();
 
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
@@ -152,7 +182,77 @@ export class ProvisionSandboxWorkflow {
      * 同步段（那正是 `RESOURCE_EXHAUSTED` 能被调用方接住的原因）；这里只负责还回去。
      */
     private readonly resources: ResourceAllocator,
+    @Optional()
+    @Inject(RUNTIME_BUSINESS_AUTHORITY)
+    private readonly authority?: RuntimeBusinessAuthorityPort,
+    @Optional()
+    @Inject(SANDBOX_CREATE_INTENTS)
+    private readonly createIntents?: SandboxCreateIntents,
+    @Optional() @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers?: ProviderRegistry,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
+  onApplicationBootstrap(): void {
+    if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
+    const recover = (): void => {
+      void this.resumeUnconfirmed().catch(() => undefined);
+    };
+    recover();
+    this.recoveryTimer = setInterval(recover, 15_000);
+    this.recoveryTimer.unref();
+  }
+  onModuleDestroy(): void {
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+  }
+  async resumeUnconfirmed(): Promise<void> {
+    if (!this.createIntents || !this.providers || this.recovering) return;
+    const epoch = this.writer?.epoch?.() ?? 0;
+    this.assertEpoch(epoch);
+    this.recovering = true;
+    try {
+      for (const intent of await this.createIntents.pending()) {
+        this.assertEpoch(epoch);
+        if (this.active.has(intent.sandboxId)) continue;
+        const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
+        this.assertEpoch(epoch);
+        if (!sandbox || !['creating', 'starting', 'running', 'idle'].includes(sandbox.status))
+          continue;
+        if (sandbox.status === 'running' || sandbox.status === 'idle') {
+          this.uow.run((tx) => this.createIntents?.finishSync(tx, sandbox.id));
+          continue;
+        }
+        const provider = this.providers.get(sandbox.provider);
+        if (sandbox.status === 'creating') {
+          const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
+          this.assertEpoch(epoch);
+          if (receipt?.state !== 'complete') continue;
+          const handle = RuntimeOwnerHandleSchema.parse(receipt.result);
+          if (handle.provider !== sandbox.provider)
+            throw new Error('ORIGINAL_PROVIDER_CREATE_RECEIPT_MISMATCH');
+          sandbox.bindRuntime({
+            providerSandboxId: handle.providerSandboxId,
+            providerState: handle.providerState ?? null,
+            workspacePath: intent.workspacePath,
+          });
+          this.persist(sandbox, sandbox.id);
+        }
+        await this.restartSafely(sandbox, provider);
+        this.assertEpoch(epoch);
+      }
+    } finally {
+      this.recovering = false;
+    }
+  }
+  private isUnconfirmed(error: unknown): boolean {
+    if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'false') return true;
+    if (error instanceof Error && ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name))
+      return true;
+    if (error && typeof error === 'object' && 'retryable' in error && error.retryable === true)
+      return true;
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    return /(?:FENCE|UNKNOWN|UNCONFIRMED|UNAVAILABLE|LEASE|ECONN|ACK)/.test(code);
+  }
 
   /** Background runner — never rejects into an unhandled promise. */
   async runSafely(
@@ -181,6 +281,9 @@ export class ProvisionSandboxWorkflow {
   private track(sandboxId: string, work: () => Promise<void>): Promise<void> {
     const existing = this.active.get(sandboxId);
     if (existing) return existing;
+    const epoch = this.writer?.epoch?.() ?? 0;
+    this.assertEpoch(epoch);
+    this.activeEpochs.set(sandboxId, epoch);
     let settle!: () => void;
     const idle = new Promise<void>((resolve) => {
       settle = resolve;
@@ -188,12 +291,26 @@ export class ProvisionSandboxWorkflow {
     this.active.set(sandboxId, idle);
     return work().finally(() => {
       this.active.delete(sandboxId);
+      this.activeEpochs.delete(sandboxId);
       settle();
     });
   }
 
   private assertActive(sandboxId: string): void {
+    this.assertEpoch(this.activeEpochs.get(sandboxId) ?? this.writer?.epoch?.() ?? 0);
     if (this.cancelled.has(sandboxId)) throw new SandboxProvisionCancelled();
+  }
+  private assertEpoch(epoch: number): void {
+    this.writer?.assert();
+    if (epoch !== (this.writer?.epoch?.() ?? 0)) throw new ProvisionOwnershipSuperseded();
+  }
+  private superseded(sandboxId: string): boolean {
+    try {
+      this.assertEpoch(this.activeEpochs.get(sandboxId) ?? this.writer?.epoch?.() ?? 0);
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   private async provision(
@@ -206,6 +323,7 @@ export class ProvisionSandboxWorkflow {
     let handle: SandboxHandle | undefined;
     let workspacePath: string | undefined;
     let bound = false;
+    let submittedCreate = false;
     // ── 阶段计时（03 §7.8 `sandbox.provision.stage`）────────────────────────────
     // 「启动 237s→4s 无历史可比」是这几行存在的全部理由：状态流转本身已经在
     // `sandbox_state_transitions` 里，缺的是**每一段花了多久**。
@@ -254,7 +372,7 @@ export class ProvisionSandboxWorkflow {
       try {
         const usable = await this.reserveInjection(sandbox, credentials);
         this.assertActive(sandbox.id);
-        handle = await provider.create({
+        const createInput: SandboxProviderContext = {
           sandboxId: sandbox.id,
           quota,
           image: image.spec,
@@ -273,7 +391,28 @@ export class ProvisionSandboxWorkflow {
             },
           ],
           labels: { 'platform.sandboxId': sandbox.id },
-        });
+        };
+        const operation = {
+          operationId: `sandbox-create-${sandbox.id}`,
+          actor: this.authority?.current?.()?.actor ?? {
+            kind: 'system' as const,
+            id: `accepted-sandbox-${sandbox.id}`,
+          },
+        };
+        if (this.createIntents)
+          this.uow.run((tx) =>
+            this.createIntents?.reserveSync(
+              tx,
+              sandbox.id,
+              operation.operationId,
+              createInput,
+              this.clock.now(),
+            ),
+          );
+        submittedCreate = true;
+        handle = this.authority
+          ? await this.authority.run(operation, () => provider.create(createInput))
+          : await provider.create(createInput);
         this.assertActive(sandbox.id);
         sandbox.bindRuntime({
           providerSandboxId: handle.providerSandboxId,
@@ -283,7 +422,7 @@ export class ProvisionSandboxWorkflow {
           // rebuild the handle and still reach the instance.
           providerState: handle.providerState ?? null,
         });
-        this.persist(sandbox); // save handle (no new transition/event)
+        this.persist(sandbox, sandbox.id); // handle and bound create receipt commit together
         bound = true;
         done();
 
@@ -304,6 +443,15 @@ export class ProvisionSandboxWorkflow {
       this.advance(sandbox, 'running', 'scheduler');
       this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
     } catch (e) {
+      if (this.superseded(sandbox.id)) throw e;
+      if (this.authority && submittedCreate && (!bound || this.isUnconfirmed(e))) {
+        // Owner create may have completed before a response/lease/DB ack vanished.
+        // Keep its original reservation, workspace and quota; lookup alone recovers.
+        this.logger.warn(
+          `sandbox ${sandbox.id}: original provision result is unconfirmed; resource reservation retained`,
+        );
+        throw e;
+      }
       if (this.cancelled.has(sandbox.id)) {
         // A create can finish after cancellation. Teardown owns the late handle;
         // never resume starting or overwrite the deleting row with the old aggregate.
@@ -412,7 +560,14 @@ export class ProvisionSandboxWorkflow {
       this.advance(sandbox, 'running', 'scheduler');
       this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
     } catch (e) {
+      if (this.superseded(sandbox.id)) throw e;
       if (this.cancelled.has(sandbox.id)) return;
+      if (this.authority && this.isUnconfirmed(e)) {
+        this.logger.warn(
+          `sandbox ${sandbox.id}: original start remains unconfirmed; reservation retained`,
+        );
+        throw e;
+      }
       this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
       this.compensate(sandbox, e, 'start');
       // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
@@ -441,6 +596,7 @@ export class ProvisionSandboxWorkflow {
     // `sandbox.status` 恒为 `starting`、CPU 是 0%、到 registry 一条连接都没有 ——
     // 用户判它卡死，排查的人第一眼也判它卡死。下面两帧就是为了把这一段的**边界**
     // 说出来；进度百分比没有（provider 只给得出「开始」和「结束」，编一个就是幽灵字段）。
+    this.assertActive(sandbox.id);
     this.broadcaster.broadcast({
       event: 'sandbox.instance_progress',
       sandboxId: sandbox.id,
@@ -448,14 +604,24 @@ export class ProvisionSandboxWorkflow {
       ...imageStaged,
     });
     this.assertActive(sandbox.id);
-    await provider.start(handle);
+    const alreadyRunning = this.authority
+      ? (await provider.inspect(handle)).lifecycleState === 'instance_running'
+      : false;
+    this.assertActive(sandbox.id);
+    if (!alreadyRunning) await provider.start(handle);
     this.assertActive(sandbox.id);
     this.broadcaster.broadcast({
       event: 'sandbox.instance_progress',
       sandboxId: sandbox.id,
       phase: 'ready',
     });
-    const exec = toExecFn(provider, handle);
+    const underlyingExec = toExecFn(provider, handle);
+    const exec: SandboxExecFn = async (cmd, options) => {
+      this.assertActive(sandbox.id);
+      const result = await underlyingExec(cmd, options);
+      this.assertActive(sandbox.id);
+      return result;
+    };
 
     // ③ install the runtime CLI. Deliberately BEFORE ④: there is no point injecting
     // a credential for a CLI that is not there yet, and both steps need `exec`.
@@ -924,10 +1090,12 @@ export class ProvisionSandboxWorkflow {
     this.persist(sandbox);
   }
 
-  private persist(sandbox: Sandbox): void {
+  private persist(sandbox: Sandbox, completedCreate?: string): void {
     this.assertActive(sandbox.id);
     this.uow.run((tx) => {
       this.repo.saveSync(tx, sandbox);
+      if (completedCreate) this.createIntents?.completeSync(tx, completedCreate);
+      if (sandbox.status === 'running') this.createIntents?.finishSync(tx, sandbox.id);
       this.events.publishInTx(tx, sandbox.pullEvents());
     });
   }

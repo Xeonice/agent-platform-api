@@ -6,6 +6,7 @@ import {
   NotFoundException,
   Optional,
   type OnApplicationBootstrap,
+  type OnModuleDestroy,
 } from '@nestjs/common';
 import { asAgentTaskId, asSandboxId } from '@platform/shared-kernel';
 import {
@@ -67,7 +68,8 @@ export interface OpenedArtifact {
  * (`/proc/<pid>/cmdline`), and anything appended to it executes.
  */
 @Injectable()
-export class AgentTaskApplicationService implements OnApplicationBootstrap {
+export class AgentTaskApplicationService implements OnApplicationBootstrap, OnModuleDestroy {
+  private recoveryTimer?: ReturnType<typeof setInterval>;
   constructor(
     @Inject(AGENT_TASK_REPOSITORY) private readonly tasks: AgentTaskRepository,
     @Inject(SANDBOX_REPOSITORY) private readonly sandboxes: SandboxRepository,
@@ -86,8 +88,22 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
    * where every row would look like an orphan.
    */
   async onApplicationBootstrap(): Promise<void> {
-    if (process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true') return;
+    if (
+      process.env.PLATFORM_PROCESS_ROLE !== 'coordinator' &&
+      process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true'
+    )
+      return;
     await this.resumeRunning().catch(() => undefined);
+    if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
+      this.recoveryTimer = setInterval(() => {
+        void this.resumeRunning().catch(() => undefined);
+      }, 15_000);
+      this.recoveryTimer.unref();
+    }
+  }
+  onModuleDestroy(): void {
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    this.workflow.shutdown();
   }
 
   /** Public so an operator — or a restart test — can trigger recovery explicitly. */
@@ -103,20 +119,49 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap {
    * four hours.
    */
   async run(sandboxId: string, runtimeId: string, input: RunAgentTaskInput): Promise<AgentTaskDto> {
+    return this.runWithIdentity(sandboxId, runtimeId, input);
+  }
+
+  /** Scheduler-only accepted identity. A browser/API body cannot allocate this. */
+  runAccepted(
+    sandboxId: string,
+    runtimeId: string,
+    input: RunAgentTaskInput,
+    taskId: string,
+    actorId: string,
+  ): Promise<AgentTaskDto> {
+    return this.runWithIdentity(sandboxId, runtimeId, input, {
+      taskId,
+      actor: { kind: 'automation', id: actorId },
+    });
+  }
+  private async runWithIdentity(
+    sandboxId: string,
+    runtimeId: string,
+    input: RunAgentTaskInput,
+    accepted?: { taskId: string; actor: { kind: 'automation'; id: string } },
+  ): Promise<AgentTaskDto> {
     try {
       const sandbox = await this.requireSandbox(sandboxId);
-      this.assertRunnable(sandbox, runtimeId);
-      const task = await this.workflow.start(sandbox, {
-        sandboxId,
-        runtime: runtimeId,
-        prompt: input.prompt,
-        timeoutMinutes: input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
-        resumeFrom: input.resumeFrom,
-        // Already narrowed to the `TaskExtraArgSchema` enum by validation; passing the
-        // values through unchanged is the point — this is the LAST place they could be
-        // widened, and they are not.
-        extraArgs: input.extraArgs,
-      });
+      // An existing original task can be confirmed after its sandbox has finished;
+      // a fresh task still passes every normal admission gate.
+      if (!accepted || !(await this.tasks.findById(asAgentTaskId(accepted.taskId))))
+        this.assertRunnable(sandbox, runtimeId);
+      const task = await this.workflow.start(
+        sandbox,
+        {
+          sandboxId,
+          runtime: runtimeId,
+          prompt: input.prompt,
+          timeoutMinutes: input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
+          resumeFrom: input.resumeFrom,
+          // Already narrowed to the `TaskExtraArgSchema` enum by validation; passing the
+          // values through unchanged is the point — this is the LAST place they could be
+          // widened, and they are not.
+          extraArgs: input.extraArgs,
+        },
+        accepted,
+      );
       return AgentTaskMapper.toDto(task);
     } catch (e) {
       throw mapProviderErrorToHttp(e);

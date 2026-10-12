@@ -16,6 +16,8 @@ import { LoggingModule } from './platform/logging';
 import { mcpModuleOptions } from './bootstrap/mcp.setup';
 import { guardProviders } from './bootstrap/guards.setup';
 import { DeploymentModule } from './platform/deployment/deployment.module';
+import { UpgradeModule } from './platform/upgrade/upgrade.module';
+import { ControlRpcModule } from './platform/control-rpc/control-rpc.module';
 
 /**
  * Root module (01 §2): assembles the @Global platform, the MCP transport, the
@@ -47,6 +49,8 @@ import { DeploymentModule } from './platform/deployment/deployment.module';
     //    @Global 模块提供 —— 装配顺序与图上的可读性一致，省得下一个人去猜。
     SystemModule,
     DeploymentModule,
+    UpgradeModule,
+    ...(['coordinator','coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE??'') ? [ControlRpcModule] : []),
   ],
   providers: [...guardProviders],
 })

@@ -2,21 +2,38 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { Mutex } from 'async-mutex';
-import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
-import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
+import {
+  CLOCK,
+  EVENT_BUS,
+  ID_GENERATOR,
+  UNIT_OF_WORK,
+  BUSINESS_WRITER_AUTHORITY,
+} from '@platform/shared-kernel';
+import type {
+  Clock,
+  EventBus,
+  IdGenerator,
+  UnitOfWork,
+  Tx,
+  BusinessWriterAuthority,
+} from '@platform/shared-kernel';
 import {
   AUDIT_RECORDER,
   AUTOMATION_TASK_LAUNCHER,
   AutomationResourceExhausted,
+  AutomationLaunchRejected,
+  AutomationTaskLaunchInputSchema,
   RUNTIME_CREDENTIAL_STATE_READER,
   isCapacityFailureCode,
 } from '@platform/contracts';
 import type {
   AuditRecorder,
+  AcceptedAutomationTaskLaunchInput,
   AutomationTaskLaunchInput,
   AutomationTaskLauncher,
   RuntimeCredentialStateReader,
@@ -33,6 +50,11 @@ import { DEFAULT_MISSED_THRESHOLD_MIN, RetryPolicy } from '../domain/value-objec
 import type { TimeoutMinutes } from '../domain/value-objects/policies.vo';
 import { AutomationRunFinished, AutomationTriggered } from '../domain/events/automation-events';
 import { AutomationNotifier } from './automation.notifier';
+import {
+  AUTOMATION_LAUNCH_INTENTS,
+  type AutomationLaunchIntent,
+  type AutomationLaunchIntents,
+} from '../domain/ports/automation-launch-intents.port';
 
 /** 03 §8.1：**每分钟**扫一轮。 */
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -86,6 +108,10 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
   private readonly logger = new Logger('AutomationScheduler');
   private readonly mutex = new Mutex();
   private timer: NodeJS.Timeout | null = null;
+  private retired = false;
+  private ownershipEpoch = 0;
+  /** Only one mutex sweep runs at once; a retained old continuation keeps its epoch. */
+  private activeSweepEpoch: number | null = null;
   /** 单调递增的轮次号。**只用来数轮，不用来读时间** —— 与 `clock` 无关，测试里可确定复现。 */
   private sweepSeq = 0;
   /** `scope:id` → 连续失败账本。只保留**这一轮还在失败**的条目（`forgetHealedSkips`）。 */
@@ -103,11 +129,20 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
     private readonly notifier: AutomationNotifier,
+    @Inject(AUTOMATION_LAUNCH_INTENTS) private readonly launchIntents: AutomationLaunchIntents,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
 
   onApplicationBootstrap(): void {
-    if (process.env.DISABLE_AUTOMATION_SCHEDULER === '1') return;
-    this.timer = setInterval(() => void this.runOnce(), SWEEP_INTERVAL_MS);
+    if (this.retired || this.timer !== null || process.env.DISABLE_AUTOMATION_SCHEDULER === '1')
+      return;
+    this.timer = setInterval(() => {
+      void this.runOnce().catch((error) =>
+        this.logger.debug(`automation writer awaits ownership: ${reason(error)}`),
+      );
+    }, SWEEP_INTERVAL_MS);
     // 不为了调度器把事件循环吊着（与 `VolumeReaper` / `CredentialRefreshScanner` 同款）
     this.timer.unref?.();
   }
@@ -119,10 +154,36 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    * 它们会被 `runOnce` 的 try/catch 兜住，但那是一屏与本次失败无关的红色日志。
    */
   onModuleDestroy(): void {
+    this.pauseOwnership();
+  }
+
+  /** Retained old Coordinator becomes read-only; it can resume under a new epoch. */
+  pauseOwnership(): void {
+    this.retired = true;
+    this.ownershipEpoch += 1;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  resumeOwnership(): void {
+    this.writer?.assert();
+    if (this.retired) this.ownershipEpoch += 1;
+    this.retired = false;
+    this.onApplicationBootstrap();
+  }
+  private assertBusinessWriter(): void {
+    if (
+      this.retired ||
+      (this.activeSweepEpoch !== null && this.activeSweepEpoch !== this.ownershipEpoch)
+    )
+      throw new Error('AUTOMATION_WRITER_QUIESCED');
+    if (this.writer) this.writer.assert();
+    else if (
+      ['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '')
+    )
+      throw new Error('AUTOMATION_WRITER_AUTHORITY_REQUIRED');
   }
 
   /**
@@ -157,15 +218,23 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    * ─────────────────────────────────────────────────────────────────────────
    */
   async runOnce(): Promise<number> {
-    if (this.mutex.isLocked()) return 0;
+    if (this.retired || this.mutex.isLocked()) return 0;
+    this.assertBusinessWriter();
+    const epoch = this.ownershipEpoch;
     return this.mutex.runExclusive(async () => {
-      this.sweepSeq += 1;
-      let touched = 0;
-      touched += await this.runStage('apply-pending-outcomes', () => this.applyPendingOutcomes());
-      touched += await this.runStage('advance-in-flight', () => this.advanceInFlight());
-      touched += await this.runStage('fire-due', () => this.fireDue());
-      this.forgetHealedSkips();
-      return touched;
+      this.activeSweepEpoch = epoch;
+      try {
+        this.assertBusinessWriter();
+        this.sweepSeq += 1;
+        let touched = 0;
+        touched += await this.runStage('apply-pending-outcomes', () => this.applyPendingOutcomes());
+        touched += await this.runStage('advance-in-flight', () => this.advanceInFlight());
+        touched += await this.runStage('fire-due', () => this.fireDue());
+        this.forgetHealedSkips();
+        return touched;
+      } finally {
+        this.activeSweepEpoch = null;
+      }
     });
   }
 
@@ -180,6 +249,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    */
   private async runStage(stage: SweepStage, body: () => Promise<number>): Promise<number> {
     try {
+      this.assertBusinessWriter();
       return await body();
     } catch (e) {
       // ⚠️ 保留 `automation sweep failed` 这个子串：既有的日志检索按它匹配。
@@ -253,6 +323,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
           // 规则已被删（run 也会随 CASCADE 走，这里是竞态窗口里的残影）——标掉即可。
           run.markOutcomeApplied();
           this.uow.run((tx) => {
+            this.assertBusinessWriter();
             this.runs.saveSync(tx, run);
           });
           continue;
@@ -336,16 +407,25 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
     const sandboxId = run.sandboxId;
     // 拿 `null` 去问 provider 相位是一次必然失败的调用；这条 run 还在等沙箱，
     // 它的下一步是**创建**而不是**推进**。
-    if (sandboxId === null) return 0;
+    if (sandboxId === null) {
+      const automation = await this.rules.findById(run.automationId);
+      if (!automation) return 0;
+      // A committed occurrence with a lost create acknowledgement retains the
+      // exact original reservation. Legacy ambiguous rows remain unconfirmed.
+      if (!(await this.launchIntents.find(run.id, run.retryCount)))
+        throw new Error('AUTOMATION_LAUNCH_INTENT_UNCONFIRMED');
+      return (await this.tryStartSandbox(automation, run)) ? 1 : 0;
+    }
     const phase = await this.launcher.phaseOf(sandboxId);
     switch (phase.kind) {
+      case 'unconfirmed':
       case 'provisioning':
       case 'running':
         return 0;
       case 'ready': {
         const automation = await this.rules.findById(run.automationId);
         if (automation === null) return 0;
-        await this.startTaskOn(automation, run);
+        await this.startTaskOn(run);
         return 1;
       }
       case 'finished': {
@@ -358,7 +438,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         // ⚠️ 判据是**码**不是文案。`errorMessage` 是给人看的自由文本，靠它做分支就是
         // 把一条领域判定挂在一句随时会被改写的句子上。
         if (phase.status === 'failed' && isCapacityFailureCode(phase.errorCode)) {
-          this.queueOrGiveUp(automation, run);
+          await this.queueOrGiveUp(automation, run);
           return 1;
         }
         if (run.status === 'pending') run.markRunning(sandboxId, this.clock.now());
@@ -373,7 +453,10 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
         // Persist the result before external teardown. If teardown fails or the
         // process stops, outcome-pending recovery retries it without losing the
         // original success/failure or its retention start time.
-        this.uow.run((tx) => this.runs.saveSync(tx, run));
+        this.uow.run((tx) => {
+          this.assertBusinessWriter();
+          this.runs.saveSync(tx, run);
+        });
         await this.finishTask(automation, run);
         this.applyOutcome(automation, run, phase.status);
         this.notify(this.notifier.afterRunFinished(automation, run));
@@ -395,6 +478,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
 
   private async finishTask(automation: Automation, run: AutomationRun): Promise<void> {
     if (run.sandboxId === null || run.completedAt === null) return;
+    this.assertBusinessWriter();
     await this.launcher.finishTask(run.sandboxId, {
       automationId: automation.id,
       automationName: automation.name,
@@ -464,32 +548,20 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       missedThresholdMin: missedThresholdMin(),
     });
 
-    // ★★★ I-AUT-8：**先推进 `next_trigger_at`，再执行。** ★★★
-    //
-    // 这一行必须在下面任何一次 `launcher.*` 调用**之前**落库。顺序反过来的后果不是
-    // 「慢一点」：`createSandbox` 抛异常、进程在那一刻被 kill、甚至只是 DB 写超时，
-    // 都会让这条规则的 `next_trigger_at` 停在过去，于是**每一轮扫描都会再触发一次**
-    // —— 一分钟一发，直到有人发现。
-    automation.advanceTrigger(now);
-    this.uow.run((tx) => {
-      this.rules.saveSync(tx, automation);
-    });
-
+    const dueAt = automation.nextTriggerAt;
+    if (!dueAt) return;
+    let run: AutomationRun;
     switch (decision.kind) {
-      case 'missed': {
-        // 记 `missed`、**不补跑**、`next_trigger_at` 已经推进到下一个未来时刻。
-        const run = AutomationRun.missed(
+      case 'missed':
+        run = AutomationRun.missed(
           this.ids.next(),
           automation.id,
           `missed: next_trigger_at was more than ${String(missedThresholdMin())} minutes overdue`,
           now,
         );
-        this.persistRun(run);
-        this.logger.warn(`automation ${automation.id} missed a slot (downtime); not catching up`);
-        return;
-      }
-      case 'skip': {
-        const run = AutomationRun.skipped(
+        break;
+      case 'skip':
+        run = AutomationRun.skipped(
           this.ids.next(),
           automation.id,
           decision.reason,
@@ -498,62 +570,72 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
             : `runtime '${automation.runtimeId}' has no usable credential`,
           now,
         );
-        this.persistRun(run);
-        // 03 §8.2 行 2：凭证过期要**发 webhook**（横幅由前端拉 REST 得到）。
-        if (decision.reason === 'AUTH_EXPIRED') {
-          this.notify(this.notifier.afterAuthExpired(automation, run));
-        }
-        return;
-      }
-      case 'retry': {
-        // 行 3：资源不足 ⇒ 落一条 run 并**直接排队**（`resource-exhausted` + `retry_at`），
-        // ⛔ **不调 `createSandbox`**。调了就是明知会被互斥区拒还要去撞一次，而那次撞击
-        // 会在任务列表里留下痕迹（审计一条 provision 失败），历史上也说不清「已排队 n/5」
-        // 里的 n 是怎么来的。`listPendingRetries` 会在 `retry_at` 到点时接手。
-        const run = this.openRun(automation, now);
-        run.queueRetry(now);
-        this.persistRun(run);
-        return;
-      }
-      case 'fail': {
-        // 行 3 的尽头：5 次仍无资源 ⇒ 终态 `failed`。**这一次才计入失败计数**
-        // （03 §8.4：failed 累加）—— 两小时窗口里一直没有资源，已经不是「稍等一下」了。
-        const run = this.openRun(automation, now);
-        run.finalize('failed', this.clock.now(), {
-          errorCode: 'RESOURCE_EXHAUSTED',
-          errorMessage: `no capacity after ${String(RetryPolicy.MAX_ATTEMPTS)} queued retries`,
-        });
-        this.applyOutcome(automation, run, 'failed');
-        this.notify(this.notifier.afterRunFinished(automation, run));
-        return;
-      }
-      case 'trigger': {
-        const run = this.openRun(automation, now);
-        await this.tryStartSandbox(automation, run);
-        return;
-      }
+        break;
+      default:
+        run = AutomationRun.pending(this.ids.next(), automation.id, now);
+        automation.markTriggered(now);
+        if (decision.kind === 'retry') run.queueRetry(now);
+        if (decision.kind === 'fail')
+          run.finalize('failed', now, {
+            errorCode: 'RESOURCE_EXHAUSTED',
+            errorMessage: `no capacity after ${String(RetryPolicy.MAX_ATTEMPTS)} queued retries`,
+          });
     }
-  }
-
-  /**
-   * 落一条新的 `pending` run + 推进 `last_triggered_at` + 发 `AutomationTriggered`。
-   *
-   * 行 3（retry / fail）与行 4（trigger）**共用**它：三条都算「这一发触发了」，历史里
-   * 都该有一条记录，区别只在这条记录接下来变成什么。抽出来是因为它们此前写在同一个
-   * `case` 里，而把 retry/fail 分出去时最容易漏掉的就是这半段（少发一条
-   * `AutomationTriggered`，前端的「刚刚触发」提示就对着一条不存在的 run）。
-   */
-  private openRun(automation: Automation, now: Date): AutomationRun {
-    const run = AutomationRun.pending(this.ids.next(), automation.id, now);
-    automation.markTriggered(now);
-    this.uow.run((tx) => {
+    // A cron slot cannot leave the due scan until its one run and immutable
+    // launch reservation are committed. Crash at any statement rolls all back.
+    automation.advanceTrigger(now);
+    const accepted = this.uow.run((tx) => {
+      this.assertBusinessWriter();
+      if (!this.launchIntents.reserveOccurrenceSync(tx, automation.id, dueAt, run.id)) return false;
       this.rules.saveSync(tx, automation);
       this.runs.saveSync(tx, run);
-      this.events.publishInTx(tx, [
-        new AutomationTriggered(automation.id, automation.name, automation.projectId, run.id, now),
-      ]);
+      if (decision.kind === 'trigger' || decision.kind === 'retry')
+        this.reserveLaunchSync(tx, run, JSON.stringify(launchInput(automation)));
+      if (decision.kind === 'trigger' || decision.kind === 'retry' || decision.kind === 'fail')
+        this.events.publishInTx(tx, [
+          new AutomationTriggered(
+            automation.id,
+            automation.name,
+            automation.projectId,
+            run.id,
+            now,
+          ),
+        ]);
+      return true;
     });
-    return run;
+    if (!accepted) return;
+    if (decision.kind === 'trigger') await this.tryStartSandbox(automation, run);
+    else if (decision.kind === 'fail') {
+      this.applyOutcome(automation, run, 'failed');
+      this.notify(this.notifier.afterRunFinished(automation, run));
+    } else if (decision.kind === 'skip' && decision.reason === 'AUTH_EXPIRED')
+      this.notify(this.notifier.afterAuthExpired(automation, run));
+  }
+
+  private reserveLaunchSync(tx: Tx, run: AutomationRun, input: string): AutomationLaunchIntent {
+    return this.launchIntents.reserveSync(tx, {
+      runId: run.id,
+      retryCount: run.retryCount,
+      sandboxId: this.ids.next(),
+      taskId: this.ids.next(),
+      actorId: run.id,
+      input,
+      createdAt: this.clock.now(),
+    });
+  }
+  private async acceptedLaunchInput(
+    run: AutomationRun,
+  ): Promise<AcceptedAutomationTaskLaunchInput> {
+    const intent = await this.launchIntents.find(run.id, run.retryCount);
+    if (!intent) throw new Error('AUTOMATION_LAUNCH_INTENT_UNCONFIRMED');
+    return {
+      ...AutomationTaskLaunchInputSchema.parse(JSON.parse(intent.input)),
+      runId: run.id,
+      retryCount: run.retryCount,
+      acceptedSandboxId: intent.sandboxId,
+      acceptedTaskId: intent.taskId,
+      actorId: intent.actorId,
+    };
   }
 
   /**
@@ -582,21 +664,27 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    * 转终态 `failed`（`error_code='RESOURCE_EXHAUSTED'`）。
    */
   private async tryStartSandbox(automation: Automation, run: AutomationRun): Promise<boolean> {
-    const input = launchInput(automation);
+    const input = await this.acceptedLaunchInput(run);
     try {
+      this.assertBusinessWriter();
       const { sandboxId } = await this.launcher.createSandbox(input);
       run.markRunning(sandboxId, this.clock.now());
       // markRunning 把它推到 `running`，但 Task 还没 POST —— 相位机在下一轮把它接走。
       this.persistRun(run);
       return true;
     } catch (e) {
-      if (!(e instanceof AutomationResourceExhausted)) {
-        run.finalize('failed', this.clock.now(), { errorMessage: (e as Error).message });
+      if (e instanceof AutomationLaunchRejected) {
+        run.finalize('failed', this.clock.now(), { errorMessage: e.message });
         this.applyOutcome(automation, run, 'failed');
         this.notify(this.notifier.afterRunFinished(automation, run));
         return true;
       }
-      this.queueOrGiveUp(automation, run);
+      if (!(e instanceof AutomationResourceExhausted)) {
+        // An exception may follow an accepted guest create. Keep the original
+        // reservation pending; observation, not an exception, supplies a verdict.
+        throw e;
+      }
+      await this.queueOrGiveUp(automation, run);
       return true;
     }
   }
@@ -614,7 +702,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
    *
    * 只有 5 次都排完仍无资源才转终态 `failed`（那一次才计入失败计数，03 §8.4）。
    */
-  private queueOrGiveUp(automation: Automation, run: AutomationRun): void {
+  private async queueOrGiveUp(automation: Automation, run: AutomationRun): Promise<void> {
     if (!RetryPolicy.canRetry(run.retryCount)) {
       run.finalize('failed', this.clock.now(), {
         errorCode: 'RESOURCE_EXHAUSTED',
@@ -626,21 +714,23 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       this.notify(this.notifier.afterRunFinished(automation, run));
       return;
     }
+    const original = await this.launchIntents.find(run.id, run.retryCount);
+    if (!original) throw new Error('AUTOMATION_LAUNCH_INTENT_UNCONFIRMED');
     run.queueRetry(this.clock.now());
-    this.persistRun(run);
+    this.uow.run((tx) => {
+      this.assertBusinessWriter();
+      this.runs.saveSync(tx, run);
+      this.reserveLaunchSync(tx, run, original.input);
+    });
   }
 
-  private async startTaskOn(automation: Automation, run: AutomationRun): Promise<void> {
+  private async startTaskOn(run: AutomationRun): Promise<void> {
     if (run.sandboxId === null) return;
-    try {
-      await this.launcher.startTask(run.sandboxId, launchInput(automation));
-    } catch (e) {
-      run.finalize('failed', this.clock.now(), { errorMessage: (e as Error).message });
-      this.persistRun(run);
-      await this.finishTask(automation, run);
-      this.applyOutcome(automation, run, 'failed');
-      this.notify(this.notifier.afterRunFinished(automation, run));
-    }
+    // Idempotent original task start; lost acknowledgements remain pending and
+    // must never finalize the run or trigger finishTask/guest teardown.
+    const input = await this.acceptedLaunchInput(run);
+    this.assertBusinessWriter();
+    await this.launcher.startTask(run.sandboxId, input);
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -667,6 +757,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
       new AutomationRunFinished(automation.id, automation.name, run.id, run.status, now),
     ];
     this.uow.run((tx) => {
+      this.assertBusinessWriter();
       this.runs.saveSync(tx, run);
       this.rules.saveSync(tx, automation);
       this.events.publishInTx(tx, events);
@@ -704,6 +795,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
 
   private persistRun(run: AutomationRun): void {
     this.uow.run((tx) => {
+      this.assertBusinessWriter();
       this.runs.saveSync(tx, run);
     });
   }

@@ -1,4 +1,4 @@
-import type { INestApplication } from '@nestjs/common';
+import { RequestMethod, type INestApplication } from '@nestjs/common';
 import { platformValidationPipe } from './validation.pipe';
 import { ErrorEnvelopeFilter } from './error-envelope.filter';
 import { configurePublicHttp } from './public-origin-policy';
@@ -41,7 +41,7 @@ export function configurePlatformApp(
   configurePublicHttp(app, network);
   configureDeploymentBarrier(app);
   // /api prefix so REST paths and openapi.json paths carry it (02 §8).
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', { exclude: [{ path: 'internal/{*path}', method: RequestMethod.ALL }] });
   // zod single source validation for every createZodDto DTO (02 §3); failures come
   // out as a real ErrorEnvelope (04 §4) — see bootstrap/validation.pipe.ts.
   app.useGlobalPipes(platformValidationPipe());

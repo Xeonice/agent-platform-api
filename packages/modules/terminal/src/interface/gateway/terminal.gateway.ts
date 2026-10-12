@@ -15,7 +15,7 @@ import {
   isTerminalShellId,
   SandboxProviderError,
   TERMINAL_AUTHENTICATOR,
-  TERMINAL_EXIT_ATTACH_FAILED,
+  TERMINAL_PROTOCOL_RANGE,
   WS_SCHEMA_HASH,
   X_SCHEMA_HASH_HEADER,
   wsHandshakeError,
@@ -29,6 +29,7 @@ import type {
 } from '@platform/contracts';
 import {
   TerminalSessionService,
+  TerminalAttachError,
   type TerminalTarget,
 } from '../../application/terminal-session.service';
 import { WaitingInputService } from '../../application/waiting-input.service';
@@ -41,6 +42,7 @@ interface Attachment {
   /** 这条连接连的是哪一个 tmux 会话（06 §5）。`agent` = `platform-agent`。 */
   target: TerminalTarget;
   batcher: TerminalOutputBatcher;
+  confirmed: boolean;
 }
 
 /**
@@ -62,6 +64,7 @@ export class TerminalGateway
 {
   private readonly logger = new Logger('TerminalGateway');
   private readonly attachments = new Map<string, Attachment>();
+  private namespace?: Namespace;
 
   constructor(
     private readonly sessions: TerminalSessionService,
@@ -88,6 +91,7 @@ export class TerminalGateway
    * does not read, require or invalidate that key.
    */
   afterInit(server: Namespace): void {
+    this.namespace = server;
     server.use((socket, next) => {
       const rejection = this.rejectHandshake(socket);
       if (rejection) {
@@ -116,7 +120,14 @@ export class TerminalGateway
     // simply do not render; the handshake is the only place it can be reported as
     // itself.
     const presented = this.readSchemaHash(client);
-    if (presented !== WS_SCHEMA_HASH) {
+    const revision = this.protocolRevision(client);
+    if (revision === null)
+      return wsHandshakeError('PROTOCOL_INCOMPATIBLE', 'terminal protocol ranges do not overlap');
+    if (
+      revision === 1 &&
+      this.readQuery(client, 'protocolMin') === undefined &&
+      presented !== WS_SCHEMA_HASH
+    ) {
       return wsHandshakeError(
         'SCHEMA_MISMATCH',
         `expected ${WS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
@@ -147,6 +158,15 @@ export class TerminalGateway
    *     又会在沙箱里堆出没人认领的 tmux 会话。
    */
   private rejectTarget(client: Socket): Error | null {
+    const terminalIdentity = this.readQuery(client, 'terminalIdentity');
+    if (
+      terminalIdentity !== undefined &&
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(terminalIdentity)
+    )
+      return wsHandshakeError(
+        'TERMINAL_TARGET_INVALID',
+        '?terminalIdentity must be the public bookmark UUID',
+      );
     const kind = this.readQuery(client, 'kind');
     if (kind !== undefined && kind !== 'agent' && kind !== 'shell' && kind !== 'runtime') {
       return wsHandshakeError(
@@ -193,9 +213,15 @@ export class TerminalGateway
     // 形状在握手 middleware 已经过闸（`rejectTarget`）；这里只区分"带了"与"没带"。
     const shellId =
       presented !== undefined && presented !== '' ? presented : randomBytes(16).toString('hex'); // 128-bit, server-generated
-    if (kind === 'shell') return { kind: 'shell', shellId };
+    const create = presented === undefined || presented === '';
+    if (kind === 'shell') return { kind: 'shell', shellId, create };
     // 形状已在握手 middleware 过闸；能到这里就一定带了合法的 runtimeId。
-    return { kind: 'runtime', shellId, runtimeId: this.readQuery(client, 'runtimeId') ?? '' };
+    return {
+      kind: 'runtime',
+      shellId,
+      runtimeId: this.readQuery(client, 'runtimeId') ?? '',
+      create,
+    };
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -206,9 +232,27 @@ export class TerminalGateway
     const cols = Number(this.readQuery(client, 'cols') ?? 80);
     const rows = Number(this.readQuery(client, 'rows') ?? 24);
     const reuse = this.readQuery(client, 'socketSessionKey');
-    const target = this.resolveTarget(client);
+    const revision = this.protocolRevision(client) ?? 1;
+    const requestedBookmark = this.readQuery(client, 'terminalIdentity');
+    let target: TerminalTarget;
+    // Covers lookup, attach and guest identity confirmation together. Expiry
+    // only detaches a late host attachment; it never kills the guest session.
+    const attachDeadline =
+      revision === 2
+        ? setTimeout(() => {
+            this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+            this.removeAttachment(client.id, true);
+            client.disconnect(true);
+          }, 5000)
+        : undefined;
 
     try {
+      target = requestedBookmark
+        ? await this.sessions.resolveBookmark(sandboxId, requestedBookmark)
+        : this.resolveTarget(client);
+      const requestedKind = this.readQuery(client, 'kind');
+      if (requestedBookmark && requestedKind && target.kind !== requestedKind)
+        throw new TerminalAttachError('TERMINAL_GONE');
       // agent 那一支：ALWAYS attach the session provision already started
       // (26 §8 / 裁决 D-15) —— 网关不判断「是不是第一个连接」、不调 buildStartCommand。
       // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
@@ -224,29 +268,107 @@ export class TerminalGateway
         this.waiting.output(socketSessionKey, data);
         this.send(client, { type: 'data', data });
       });
-      this.attachments.set(client.id, { stream, socketSessionKey, sandboxId, target, batcher });
+      this.attachments.set(client.id, {
+        stream,
+        socketSessionKey,
+        sandboxId,
+        target,
+        batcher,
+        confirmed: revision === 1,
+      });
       if (detectWaiting) this.waiting.attach(socketSessionKey, sandboxId);
 
       // ⚠️ `shellId` **只在 shell 那一支带上**。agent 连接上给一个空串会让前端多出一条
       //    「有 shellId 但它是空的」的分支 —— 缺席才是「这条连的是 agent」。
+      const attachmentId = randomBytes(16).toString('hex');
+      const bookmark = revision === 2 ? await this.sessions.bookmark(sandboxId, target) : null;
+      if (requestedBookmark && bookmark?.terminalIdentity !== requestedBookmark)
+        throw new TerminalAttachError('TERMINAL_GONE');
       this.send(client, {
         type: 'session',
         socketSessionKey,
-        ...(target.kind === 'shell' ? { shellId: target.shellId } : {}),
+        sandboxId,
+        attachmentId,
+        protocolRevision: revision,
+        ...(bookmark ? { terminalIdentity: bookmark.terminalIdentity } : {}),
+        ...(target.kind !== 'agent' ? { shellId: target.shellId } : {}),
       });
       // 清单**不挡在 `session` 之前**：它要问一次沙箱（一次 exec 往返），而 `session`
       // 帧里装着重连凭据、也是前端判定"连上了"的那一帧。搭在它前面等于把开终端的
       // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
       if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
 
-      stream.onData((chunk) => batcher.write(chunk));
+      const pending: Buffer[] = [];
+      let confirmGuest!: () => void;
+      const guestOutput = new Promise<void>((resolve) => {
+        confirmGuest = resolve;
+      });
+      let pendingBytes = 0;
+      stream.onData((chunk) => {
+        if (this.attachments.get(client.id)?.stream !== stream) return;
+        confirmGuest();
+        if (this.attachments.get(client.id)?.confirmed) batcher.write(chunk);
+        else {
+          pendingBytes += chunk.length;
+          if (pendingBytes <= 1024 * 1024) pending.push(chunk);
+          else {
+            this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+            this.removeAttachment(client.id, true);
+            client.disconnect(true);
+          }
+        }
+      });
+      stream.onConnectionState?.((state) => {
+        if (state !== 'unconfirmed' || this.attachments.get(client.id)?.stream !== stream) return;
+        this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+        this.removeAttachment(client.id, true);
+        client.disconnect(true);
+      });
       stream.onExit((code) => {
         if (this.attachments.get(client.id)?.stream !== stream) return;
+        if (revision === 2) {
+          this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+          this.removeAttachment(client.id, true);
+          client.disconnect(true);
+          return;
+        }
         batcher.flush();
         this.removeAttachment(client.id);
         this.send(client, { type: 'exit', code: code ?? -1 });
         client.disconnect(true);
       });
+      if (revision === 2 && bookmark) {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            guestOutput,
+            new Promise<never>((_, reject) => {
+              deadline = setTimeout(() => reject(new TerminalAttachError('RUNTIME_UNKNOWN')), 5000);
+            }),
+          ]);
+          const runtimeIdentity = await this.sessions.confirmedIdentity(
+            sandboxId,
+            target,
+            bookmark.terminalIdentity,
+            stream.runtimeIdentity,
+          );
+          if (this.attachments.get(client.id)?.stream !== stream || client.disconnected) return;
+          this.send(client, {
+            type: 'ready',
+            sandboxId,
+            terminalIdentity: bookmark.terminalIdentity,
+            runtimeIdentity,
+            attachmentId,
+            protocolRevision: revision,
+            existingSession: target.kind === 'agent' || !target.create,
+          });
+          if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+          this.attachments.get(client.id)!.confirmed = true;
+          for (const chunk of pending) batcher.write(chunk);
+        } finally {
+          if (deadline) clearTimeout(deadline);
+        }
+      }
     } catch (e) {
       this.logger.error(`openSession failed for sandbox ${sandboxId}: ${(e as Error).message}`);
       // ⚠️ **先说一声再挂断,但只对不可重试的失败说。**
@@ -264,12 +386,17 @@ export class TerminalGateway
       // 码用 `TERMINAL_EXIT_ATTACH_FAILED`(-2)而不是 -1:后者已经表示"进程退出但退出码
       // 未知"(被信号杀死),复用会让"agent 被 OOM kill"和"沙箱整个不在了"变成字节级
       // 相同的一帧,而这两件事对用户的下一步完全不同。
-      if (this.isRetryableAttachFailureImpl(e)) {
-        client.disconnect(true); // 保持沉默：让客户端的退避重连照旧自愈
-        return;
-      }
-      this.send(client, { type: 'exit', code: TERMINAL_EXIT_ATTACH_FAILED });
+      this.removeAttachment(client.id, true);
+      const code =
+        e instanceof TerminalAttachError
+          ? e.code
+          : e instanceof SandboxProviderError && !e.retryable && e.code === 'NOT_FOUND'
+            ? 'TERMINAL_GONE'
+            : 'RUNTIME_UNKNOWN';
+      this.send(client, { type: 'error', code, sandboxId });
       client.disconnect(true);
+    } finally {
+      if (attachDeadline) clearTimeout(attachDeadline);
     }
   }
 
@@ -280,9 +407,6 @@ export class TerminalGateway
    * (例如 tmux 探测抛的裸 Error)按**不可重试**处理:宁可让用户看到一句明确的
    * "会话已结束、请重新发起",也好过让他盯着两分钟注定失败的重连。
    */
-  private isRetryableAttachFailureImpl(e: unknown): boolean {
-    return e instanceof SandboxProviderError && e.retryable;
-  }
   /**
    * WS 断开 = **detach**,不是结束(06 §6.2 / §6.3:"kill 掉的只是网关侧的 `tmux attach`
    * 进程, agent 会话不受影响")。
@@ -312,11 +436,28 @@ export class TerminalGateway
   onModuleDestroy(): void {
     for (const clientId of this.attachments.keys()) this.removeAttachment(clientId, true);
   }
+  /** Retire only attachments before the business epoch moves; original tmux lives. */
+  prepareHandoff(): number {
+    const count = this.attachments.size;
+    for (const [clientId, attachment] of this.attachments) {
+      this.namespace
+        ?.to(clientId)
+        .emit('frame', {
+          type: 'connection_state',
+          state: 'restoring',
+          sandboxId: attachment.sandboxId,
+        } satisfies TerminalServerFrame);
+      this.removeAttachment(clientId, true);
+      this.namespace?.to(clientId).disconnectSockets(true);
+    }
+    return count;
+  }
 
   @SubscribeMessage('frame')
   onFrame(@ConnectedSocket() client: Socket, @MessageBody() frame: TerminalClientFrame): void {
     const att = this.attachments.get(client.id);
     if (!att) return;
+    if (!att.confirmed && frame.type !== 'ping' && frame.type !== 'resize') return;
     switch (frame.type) {
       case 'input':
         att.batcher?.flush();
@@ -403,6 +544,24 @@ export class TerminalGateway
   private readQuery(client: Socket, key: string): string | undefined {
     const v = client.handshake.query[key];
     return Array.isArray(v) ? v[0] : v;
+  }
+  private protocolRevision(client: Socket): number | null {
+    const min = this.readQuery(client, 'protocolMin'),
+      max = this.readQuery(client, 'protocolMax');
+    if (min === undefined && max === undefined) return 1;
+    if (!min || !max || !/^\d+$/.test(min) || !/^\d+$/.test(max)) return null;
+    const lo = Number(min),
+      hi = Number(max);
+    if (
+      !Number.isSafeInteger(lo) ||
+      !Number.isSafeInteger(hi) ||
+      lo < 1 ||
+      lo > hi ||
+      lo > TERMINAL_PROTOCOL_RANGE.max ||
+      hi < TERMINAL_PROTOCOL_RANGE.min
+    )
+      return null;
+    return Math.min(hi, TERMINAL_PROTOCOL_RANGE.max);
   }
 
   /** Pull the passcode (auth/query/header) + `ap_session` cookie off the handshake. */

@@ -77,6 +77,12 @@ export class PasscodeGuard implements CanActivate {
   }
 
   private isExempt(req: Request): boolean {
+    // Internal controllers enforce separate exact role keys and loopback scope.
+    // Ordinary browser access cookies are not internal RPC credentials.
+    if (req.path.startsWith('/internal/')) return true;
+    // Dedicated isolation probe requires the controller role key inside its
+    // handler. Access-passcode never authorizes this private evidence capability.
+    if (req.path === '/api/system/upgrade/probe') return true;
     if (req.method === 'GET' && req.path === '/api/health') return true;
     // the passcode-submission endpoint must itself be reachable without a passcode.
     if (req.method === 'POST' && req.path === '/api/access/unlock') return true;

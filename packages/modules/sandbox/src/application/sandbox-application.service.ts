@@ -1,4 +1,4 @@
-import { HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import {
   CLOCK,
   ID_GENERATOR,
@@ -65,6 +65,10 @@ import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
 import { planQuota } from '../domain/services/resource-pool.domain-service';
+import {
+  SANDBOX_ADMISSION_INTENTS,
+  type SandboxAdmissionIntents,
+} from '../domain/ports/sandbox-admission-intents.port';
 
 /**
  * How long a `POST /api/sandboxes/:id/exec` command may run.
@@ -135,6 +139,10 @@ interface AdmittedCreate {
 @Injectable()
 export class SandboxApplicationService {
   private readonly teardowns = new Map<string, Teardown>();
+  private readonly acceptedCreates = new Map<
+    string,
+    { input: string; promise: Promise<SandboxDto> }
+  >();
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
@@ -152,6 +160,9 @@ export class SandboxApplicationService {
     /** 03 §3 的互斥登记 —— `RESOURCE_EXHAUSTED` 在本平台唯一的真实抛出点。 */
     private readonly resources: ResourceAllocator,
     @Inject(WAITING_INPUT_QUERY) private readonly waiting: WaitingInputQueryPort,
+    @Optional()
+    @Inject(SANDBOX_ADMISSION_INTENTS)
+    private readonly admissionIntents?: SandboxAdmissionIntents,
   ) {}
 
   /**
@@ -183,6 +194,7 @@ export class SandboxApplicationService {
       sourceAutomationName?: string;
       artifactRetentionDays?: 3 | 7 | 30;
     },
+    accepted?: { sandboxId: string; input: string },
   ): Promise<SandboxDto> {
     const admitted = await this.admit(input);
     // Fetch display metadata before reserving capacity or persisting the task.
@@ -190,7 +202,7 @@ export class SandboxApplicationService {
 
     const headless = input.headless ?? false;
     const sandbox = Sandbox.create({
-      id: asSandboxId(this.ids.next()),
+      id: asSandboxId(accepted?.sandboxId ?? this.ids.next()),
       projectId: asProjectId(input.projectId),
       runtime: input.runtime,
       runtimeLabel: this.runtimeLabel(input.runtime),
@@ -230,6 +242,7 @@ export class SandboxApplicationService {
       await this.resources.reserve({ sandboxId: sandbox.id, quota: admitted.quota }, (tx) => {
         this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
         this.repo.saveSync(tx, sandbox);
+        if (accepted) this.admissionIntents?.reserveSync(tx, sandbox.id, accepted.input);
         this.events.publishInTx(tx, sandbox.pullEvents());
       });
     } catch (e) {
@@ -254,6 +267,49 @@ export class SandboxApplicationService {
     const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
     void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
     return dto;
+  }
+
+  /** A retry confirms the originally accepted sandbox, never allocates another. */
+  createAccepted(
+    input: CreateSandboxInput & {
+      sourceAutomationId?: string;
+      sourceAutomationName?: string;
+      artifactRetentionDays?: 3 | 7 | 30;
+    },
+    sandboxId: string,
+  ): Promise<SandboxDto> {
+    const frozen = JSON.stringify(input);
+    const inFlight = this.acceptedCreates.get(sandboxId);
+    if (inFlight)
+      return inFlight.input === frozen
+        ? inFlight.promise
+        : Promise.reject(new Error('SANDBOX_ADMISSION_INTENT_CONFLICT'));
+    const promise = this.createAcceptedOnce(input, sandboxId, frozen).finally(() =>
+      this.acceptedCreates.delete(sandboxId),
+    );
+    this.acceptedCreates.set(sandboxId, { input: frozen, promise });
+    return promise;
+  }
+  private async createAcceptedOnce(
+    input: CreateSandboxInput & {
+      sourceAutomationId?: string;
+      sourceAutomationName?: string;
+      artifactRetentionDays?: 3 | 7 | 30;
+    },
+    sandboxId: string,
+    frozen: string,
+  ): Promise<SandboxDto> {
+    if (!this.admissionIntents) throw new Error('SANDBOX_ADMISSION_INTENTS_REQUIRED');
+    const prior = await this.admissionIntents.find(sandboxId);
+    if (prior !== null) {
+      if (prior !== frozen) throw new Error('SANDBOX_ADMISSION_INTENT_CONFLICT');
+      // Existing/ended sandbox identity is authoritative, even if capacity or the
+      // current rule changed. Recovery does not create, reprovision or start it.
+      return this.get(sandboxId);
+    }
+    if (await this.repo.findById(asSandboxId(sandboxId)))
+      throw new Error('ORIGINAL_SANDBOX_ADMISSION_UNCONFIRMED');
+    return this.create(input, { sandboxId, input: frozen });
   }
 
   /**

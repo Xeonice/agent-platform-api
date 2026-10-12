@@ -42,7 +42,9 @@ import { TIMED_OUT, within } from './within';
  * 拿 `sleep infinity` 覆盖 = 亲手掐掉唯一的进入通道。⇒ 本实现**不覆盖任何命令**，
  * helper 与任务沙箱用完全一样的启动方式，区别只在不挂卷、配额更小。
  *
- * ══ 为什么重启就重建，而不是接回去 ═════════════════════════════════════════
+ * ══ 独立 Owner 保管原句柄，Coordinator 更新可以接回 ════════════════════════
+ * 独立角色从原 Owner 的受保护 journal 取回 opaque 句柄，不把 token 交给浏览器。
+ * 未确认原资源时保留原 Owner；旧单容器兼容路径仍使用下面的旧清理纪律。
  * `agentAuthToken` 每次 create 新生成。api 重启后内存里那份就没了，**旧容器认的是
  * 旧 token** ⇒ 接不回去。要接回就得把 token 落库，而那是一份凭证类的值。
  * ⇒ 选更简单也更干净的一条：**开机先按固定名销毁残留的那个，再建一个新的**。
@@ -375,6 +377,17 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
   private async createOnce(): Promise<void> {
     try {
       const provider = this.providers.get(this.providers.defaultProvider);
+      if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' && provider.originalHandle) {
+        const original = await provider.originalHandle(HelperContainerSession.SANDBOX_ID);
+        if (original) {
+          const live = await this.liveness({ provider, handle: original });
+          if (live.verdict !== 'gone') {
+            this.ready = { provider, handle: original };
+            this.lastError = null; this.lastErrorKind = null;
+            return;
+          }
+        }
+      }
 
       // ① 先清残留：api 重启后、或上一个实例失效后，那个旧实例还在，名字会撞。
       //

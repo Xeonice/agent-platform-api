@@ -1,5 +1,6 @@
 import type { TimeoutMinutes } from './schemas/enums';
 import type { CredentialStatus } from './schemas/runtime.schema';
+import { z } from 'zod';
 
 /**
  * automation 上下文需要的三个**跨上下文出口**（26 §3 / 01 §5）。
@@ -30,6 +31,26 @@ export interface AutomationTaskLaunchInput {
   artifactRetentionDays?: 3 | 7 | 30;
 }
 
+/** Internal accepted identity. Never accepted from a public task-create body. */
+export interface AcceptedAutomationTaskLaunchInput extends AutomationTaskLaunchInput {
+  runId: string;
+  retryCount: number;
+  acceptedSandboxId: string;
+  acceptedTaskId: string;
+  actorId: string;
+}
+export const AutomationTaskLaunchInputSchema = z
+  .object({
+    projectId: z.string().min(1),
+    runtimeId: z.string().min(1),
+    prompt: z.string().max(8000),
+    timeoutMinutes: z.union([z.literal(30), z.literal(60), z.literal(120), z.literal(240)]),
+    automationId: z.string().min(1),
+    automationName: z.string().optional(),
+    artifactRetentionDays: z.union([z.literal(3), z.literal(7), z.literal(30)]).optional(),
+  })
+  .strict();
+
 /** 终态 Task 的结果面。`logPath` 是**可直接按字节区间读的文件**，不是目录。 */
 export interface AutomationTaskOutcome {
   status: 'success' | 'failed' | 'timeout';
@@ -59,6 +80,8 @@ export interface AutomationTaskOutcome {
  * 状态**全在库里**，进程重启接着走；用回调则那一段活在内存里，重启即丢。
  */
 export type AutomationTaskPhase =
+  /** Accepted original create/start is awaiting authoritative confirmation. */
+  | { readonly kind: 'unconfirmed' }
   /** 沙箱还在 provision（pending/scheduling/creating/starting/preparing-workspace）。 */
   | { readonly kind: 'provisioning' }
   /** 沙箱已 `running`，但还没起 Task —— 调用方该调 `startTask`。 */
@@ -92,9 +115,9 @@ export interface AutomationTaskLauncher {
    */
   capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'>;
   /** 行 4 第一步：创建**标准无头** sandbox，返回它的 id（= Task id，23 D-1）。 */
-  createSandbox(input: AutomationTaskLaunchInput): Promise<{ sandboxId: string }>;
+  createSandbox(input: AcceptedAutomationTaskLaunchInput): Promise<{ sandboxId: string }>;
   /** 行 4 第二步：沙箱 `running` 之后，按标准路径 POST 一个无头 Task。 */
-  startTask(sandboxId: string, input: AutomationTaskLaunchInput): Promise<void>;
+  startTask(sandboxId: string, input: AcceptedAutomationTaskLaunchInput): Promise<void>;
   /** 每轮扫描的观测点。沙箱不存在 ⇒ `{kind:'gone'}`（**不抛**）。 */
   phaseOf(sandboxId: string): Promise<AutomationTaskPhase>;
   /** Idempotent standard teardown. Preserve the code copy and release the task quota. */
@@ -121,6 +144,13 @@ export class AutomationResourceExhausted extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AutomationResourceExhausted';
+  }
+}
+/** Confirmed zero-effect admission rejection; never represents transport loss. */
+export class AutomationLaunchRejected extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutomationLaunchRejected';
   }
 }
 

@@ -156,6 +156,10 @@ export interface ProcessSpec {
 /** A demultiplexed clean byte stream (04 §2.4). */
 export interface ProcessStream {
   readonly ref: string;
+  /** Verified physical runtime start identity; missing evidence stays null/absent. */
+  readonly runtimeIdentity?: string | null;
+  /** Transport uncertainty is separate from a confirmed guest process exit. */
+  onConnectionState?(cb: (state: 'connected' | 'unconfirmed') => void): void;
   onData(cb: (chunk: Buffer) => void): void;
   write(data: string | Buffer): void;
   resize(cols: number, rows: number): void;
@@ -571,6 +575,10 @@ export interface SandboxProvider {
    *    并接受「清不了残留」这个降级（它的症状是 create 撞名字冲突,而不是静默出错）。
    */
   destroyBySandboxId?(sandboxId: string): Promise<void>;
+  /** Query an already persisted owner intent; never retries a guest side effect. */
+  observeOperation?(sandboxId: string, operationId: string): Promise<{ state: 'pending' | 'complete' | 'failed' | 'absent' | 'unknown'; result?: unknown }>;
+  /** Original ownership inventory; no SDK create/start fallback. */
+  originalHandle?(sandboxId: string): Promise<SandboxHandle | null>;
 
   /** Present iff `capabilities.headlessTask` (CAP-02) — together with `files`. */
   readonly jobs?: SandboxJobs;

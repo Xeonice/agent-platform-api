@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
@@ -10,14 +11,18 @@ import { asSandboxId, CLOCK, EVENT_BUS, UNIT_OF_WORK } from '@platform/shared-ke
 import type { Clock, EventBus, UnitOfWork } from '@platform/shared-kernel';
 import {
   AutomationResourceExhausted,
+  AutomationLaunchRejected,
   PROJECT_FACADE,
   SandboxProviderError,
   SandboxProviderErrorCode,
+  RUNTIME_BUSINESS_AUTHORITY,
 } from '@platform/contracts';
 import type {
   AutomationTaskLauncher,
   AutomationTaskLaunchInput,
   AutomationTaskPhase,
+  AcceptedAutomationTaskLaunchInput,
+  RuntimeBusinessAuthorityPort,
   ProjectFacade,
 } from '@platform/contracts';
 import { SandboxApplicationService } from './sandbox-application.service';
@@ -27,6 +32,10 @@ import type { SandboxRepository } from '../domain/repositories/sandbox.repositor
 import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.repository';
 import type { AgentTaskRepository } from '../domain/repositories/agent-task.repository';
 import type { AgentTask } from '../domain/entities/agent-task.entity';
+import {
+  AGENT_TASK_START_INTENTS,
+  type AgentTaskStartIntents,
+} from '../domain/ports/agent-task-start-intents.port';
 
 /**
  * `AUTOMATION_TASK_LAUNCHER` 的实现（contracts 口，automation 上下文消费）。
@@ -61,6 +70,12 @@ export class AutomationTaskLauncherAdapter
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
     @Inject(EVENT_BUS) private readonly events: EventBus,
     @Inject(PROJECT_FACADE) private readonly projects: ProjectFacade,
+    @Optional()
+    @Inject(RUNTIME_BUSINESS_AUTHORITY)
+    private readonly authority?: RuntimeBusinessAuthorityPort,
+    @Optional()
+    @Inject(AGENT_TASK_START_INTENTS)
+    private readonly startIntents?: AgentTaskStartIntents,
   ) {}
 
   /**
@@ -93,32 +108,53 @@ export class AutomationTaskLauncherAdapter
     }
   }
 
-  async createSandbox(input: AutomationTaskLaunchInput): Promise<{ sandboxId: string }> {
+  async createSandbox(input: AcceptedAutomationTaskLaunchInput): Promise<{ sandboxId: string }> {
     try {
-      const dto = await this.sandboxes.create({
-        projectId: input.projectId,
-        runtime: input.runtimeId,
-        headless: true,
-        timeoutMinutes: input.timeoutMinutes,
-        // ⚠️ **prompt 同时落 `initial_prompt`**：headless 路径不消费它（见上），但它是
-        // 这一发到底要跑什么的**唯一落库副本**，排障时没有它就只能去猜。
-        initialPrompt: input.prompt,
-        sourceAutomationId: input.automationId,
-        sourceAutomationName: input.automationName,
-        artifactRetentionDays: input.artifactRetentionDays ?? 30,
-      });
+      const create = () =>
+        this.sandboxes.createAccepted(
+          {
+            projectId: input.projectId,
+            runtime: input.runtimeId,
+            headless: true,
+            timeoutMinutes: input.timeoutMinutes,
+            // ⚠️ **prompt 同时落 `initial_prompt`**：headless 路径不消费它（见上），但它是
+            // 这一发到底要跑什么的**唯一落库副本**，排障时没有它就只能去猜。
+            initialPrompt: input.prompt,
+            sourceAutomationId: input.automationId,
+            sourceAutomationName: input.automationName,
+            artifactRetentionDays: input.artifactRetentionDays ?? 30,
+          },
+          input.acceptedSandboxId,
+        );
+      const dto = this.authority
+        ? await this.authority.run(
+            {
+              operationId: `automation-create-${input.runId}-${String(input.retryCount)}`,
+              actor: { kind: 'automation', id: input.actorId },
+            },
+            create,
+          )
+        : await create();
       return { sandboxId: dto.id };
     } catch (e) {
       throw this.asResourceSignal(e);
     }
   }
 
-  async startTask(sandboxId: string, input: AutomationTaskLaunchInput): Promise<void> {
+  async startTask(sandboxId: string, input: AcceptedAutomationTaskLaunchInput): Promise<void> {
     try {
-      await this.tasks.run(sandboxId, input.runtimeId, {
-        prompt: input.prompt,
-        timeoutMinutes: input.timeoutMinutes,
-      });
+      if (sandboxId !== input.acceptedSandboxId)
+        throw new Error('AUTOMATION_LAUNCH_INTENT_CONFLICT');
+      await this.tasks.runAccepted(
+        sandboxId,
+        input.runtimeId,
+        {
+          prompt: input.prompt,
+          timeoutMinutes: input.timeoutMinutes,
+        },
+        input.acceptedTaskId,
+        input.actorId,
+      );
     } catch (e) {
       throw this.asResourceSignal(e);
     }
@@ -136,6 +172,10 @@ export class AutomationTaskLauncherAdapter
     const sandbox = await this.repo.findById(asSandboxId(sandboxId));
     if (!sandbox || this.retentionConfirmed.has(sandboxId)) return;
     const task = await this.latestTask(sandboxId);
+    // A lost start acknowledgement is not a terminal task verdict. Never stop a
+    // live guest merely because the scheduler cannot currently confirm its start.
+    if (task?.isRunning) return;
+    if (!task && (await this.hasUnconfirmedStart(sandboxId))) return;
     if (sandbox.status === 'destroyed') {
       // A crash or an older best-effort registration may leave the retained
       // directory without its ledger row. The persisted completion snapshot, not
@@ -199,6 +239,7 @@ export class AutomationTaskLauncherAdapter
       )
         continue;
       const task = await this.latestTask(sandbox.id);
+      if (!task && (await this.hasUnconfirmedStart(sandbox.id))) continue;
       if (sandbox.status === 'destroyed' && !sandbox.automationFinishedAt) continue;
       if (task?.isRunning || (!task && sandbox.status !== 'failed')) continue;
       this.finishing.add(sandbox.id);
@@ -232,6 +273,7 @@ export class AutomationTaskLauncherAdapter
     if (!sandbox) return { kind: 'gone' };
 
     const latest = await this.latestTask(sandboxId);
+    if (!latest && (await this.hasUnconfirmedStart(sandboxId))) return { kind: 'unconfirmed' };
     if (latest !== null && !latest.isRunning) return this.finished(latest);
 
     if (
@@ -297,6 +339,12 @@ export class AutomationTaskLauncherAdapter
     if (rows.length === 0) return null;
     return rows.reduce((a, b) => (b.startedAt.getTime() >= a.startedAt.getTime() ? b : a));
   }
+  private async hasUnconfirmedStart(sandboxId: string): Promise<boolean> {
+    return (
+      (await this.startIntents?.pending())?.some((intent) => intent.sandboxId === sandboxId) ??
+      false
+    );
+  }
 
   /**
    * 把「没资源了」从一堆异常里认出来（决策表行 3）。
@@ -320,6 +368,13 @@ export class AutomationTaskLauncherAdapter
         if (code === SandboxProviderErrorCode.RESOURCE_EXHAUSTED) {
           return new AutomationResourceExhausted(e.message);
         }
+        if (
+          'sideEffectFree' in body &&
+          body.sideEffectFree === true &&
+          'retryable' in body &&
+          body.retryable === false
+        )
+          return new AutomationLaunchRejected(e.message);
       }
     }
     return e;

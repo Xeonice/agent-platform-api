@@ -51,6 +51,13 @@ const IN_MEMORY_DB = ':memory:';
 let inMemoryNonce: string | null = null;
 
 export function platformInstanceId(): string {
+  const configured = process.env.PLATFORM_INSTANCE_ID;
+  if (configured !== undefined) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(configured)) {
+      throw new Error('PLATFORM_INSTANCE_ID must be a stable 1–64 character instance identifier');
+    }
+    return configured;
+  }
   const dataRoot = process.env.DATA_ROOT ?? resolve(process.cwd(), 'data');
   const db = process.env.DATABASE_URL ?? resolve(dataRoot, 'platform.db');
   if (db === IN_MEMORY_DB) {

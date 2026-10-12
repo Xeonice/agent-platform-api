@@ -6,7 +6,7 @@ import { DeploymentState } from '../platform/deployment/deployment-state';
 export function configureDeploymentBarrier(app: INestApplication): void {
   const state = app.get(DeploymentState);
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (state.draining && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    if (!['coordinator', 'control'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '') && state.draining && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       next(
         new ServiceUnavailableException({
           code: 'UPSTREAM_UNAVAILABLE',

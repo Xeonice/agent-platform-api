@@ -52,6 +52,11 @@ describe('retained task artifacts', () => {
       h.projectFacade,
     );
     const { sandboxId } = await adapter.createSandbox({
+      runId: 'retention-run',
+      retryCount: 0,
+      acceptedSandboxId: 'sbx-1',
+      acceptedTaskId: 'retention-task',
+      actorId: 'retention-run',
       projectId: 'prj-1',
       runtimeId: 'claude-code',
       prompt: 'write report',

@@ -10,6 +10,7 @@ import type {
   PlatformReservation,
   ProjectFacade,
   ProviderRegistry,
+  RuntimeBusinessAuthorityPort,
   RegisterRetainedVolumeCommand,
   RuntimeAdapterRegistry,
   SandboxProvider,
@@ -30,6 +31,10 @@ import { ProvisionSandboxWorkflow } from '../../packages/modules/sandbox/src/app
 import { RunAgentTaskWorkflow } from '../../packages/modules/sandbox/src/application/workflows/run-agent-task.workflow';
 import { SqliteSandboxRepository } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { SqliteResourceAllocationRepository } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/resource-allocation.repository.impl';
+import { SqliteAgentTaskStartIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/agent-task-start-intents.impl';
+import { SqliteJobCompletionReceipts } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/job-completion-receipts.impl';
+import { SqliteSandboxCreateIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-create-intents.impl';
+import { SqliteSandboxAdmissionIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-admission-intents.impl';
 import { SqliteAgentTaskRepository } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/agent-task.repository.impl';
 import type { HostCapacity } from '../../packages/modules/sandbox/src/domain/services/resource-pool.domain-service';
 import { currentDatabase, seedImageManifest } from './sqlite';
@@ -50,6 +55,8 @@ export function harness(
     waiting?: WaitingInputQueryPort;
     /** Platform-resident reservations the runtime module injects in production. */
     reservations?: readonly PlatformReservation[];
+    durableStarts?: boolean;
+    authority?: RuntimeBusinessAuthorityPort;
   } = {},
 ) {
   const { sqlite, db, uow } = currentDatabase();
@@ -238,6 +245,9 @@ export function harness(
     audit,
     { broadcast: () => {} },
     resources,
+    options.authority,
+    options.authority ? new SqliteSandboxCreateIntents(db) : undefined,
+    registry,
   );
   const healthMonitor = new SandboxHealthMonitor(repo, registry, clock, audit);
   const waiting = options.waiting ?? {
@@ -259,6 +269,7 @@ export function harness(
     healthMonitor,
     resources,
     waiting,
+    new SqliteSandboxAdmissionIntents(db),
   );
   const logBytes = new Map<string, string>();
   const taskLogs: TaskLogStore = {
@@ -280,6 +291,7 @@ export function harness(
     },
     flush: async () => {},
   };
+  const jobCompletions = new SqliteJobCompletionReceipts(db);
   const taskWorkflow = new RunAgentTaskWorkflow(
     taskRepo,
     repo,
@@ -291,6 +303,9 @@ export function harness(
     runtimes,
     taskLogs,
     { publish: () => {} },
+    options.authority,
+    options.durableStarts ? new SqliteAgentTaskStartIntents(db) : undefined,
+    jobCompletions,
   );
   const taskService = new AgentTaskApplicationService(
     taskRepo,
@@ -315,6 +330,7 @@ export function harness(
     resources,
     schedulerQueue,
     taskRepo,
+    jobCompletions,
     taskLogs,
     taskWorkflow,
     taskService,
