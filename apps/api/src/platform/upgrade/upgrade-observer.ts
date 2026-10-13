@@ -11,28 +11,31 @@ import {
   type SandboxPtyPort,
 } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
-import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
+import { loopbackOrigin, persistedBinding, UpgradeInspector } from './upgrade-inspector';
 import { requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
+import {
+  UpgradeProbeEvidence,
+  type UpgradeProbeLane,
+  type UpgradeProbeScope,
+} from './upgrade-probe-evidence';
+import {
+  hasProbeIdentity,
+  matchesProbeIdentity,
+  type UpgradeProbeApiIdentity,
+} from './upgrade-probe-identity';
 
 type Json = Record<string, unknown>;
-interface Sample {
-  observed_at: number;
-  latency_ms: number;
-  success: number;
-  route_generation: number;
-}
-const p95 = (samples: Sample[]): number => {
-  const sorted = samples.map((s) => s.latency_ms).sort((a, b) => a - b);
-  return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
-};
-
 /** Durable actual 10 Hz HTTP read/write evidence, no timer-derived success. */
 @Injectable()
 export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy {
   private timer?: ReturnType<typeof setInterval>;
-  private inFlight = 0;
+  private readonly inFlight: Record<UpgradeProbeLane, number> = {
+    gateway: 0,
+    source: 0,
+    candidate: 0,
+  };
   // 20 launches/s leaves headroom above the mandatory 10 Hz floor. A read/write
   // pair has two independent <=2s HTTP deadlines, hence at most 80 live pairs.
   private readonly maxInFlight = 80;
@@ -44,15 +47,17 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     @Inject(SANDBOX_PTY_PORT) private readonly pty: SandboxPtyPort,
     private readonly migrations: UpgradeOnlineMigration,
+    private readonly probeEvidence: UpgradeProbeEvidence,
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.timer = setInterval(() => {
       if (this.retired || process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
       try {
-        void withCoordinatorBusinessEpoch(this.store.sqlite, () => this.sample()).catch(
-          () => undefined,
-        );
+        for (const lane of ['gateway', 'source', 'candidate'] as const)
+          void withCoordinatorBusinessEpoch(this.store.sqlite, () => this.sample(lane)).catch(
+            () => undefined,
+          );
       } catch {
         /* A concurrent writer retirement admits no new sample. */
       }
@@ -63,9 +68,67 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     this.retired = true;
     if (this.timer) clearInterval(this.timer);
   }
-  private async sample(): Promise<void> {
+  private currentScope(id: string, fence: number, binding: Json): Partial<UpgradeProbeScope> {
+    return {
+      instanceId: this.store.instanceId,
+      attemptId: id,
+      fence,
+      routeGeneration: Number(binding.routeGeneration),
+      routeWeight: Number(binding.weight),
+      coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
+      observerEpoch: this.probeEvidence.observerEpoch,
+    };
+  }
+  private candidateIdentity(
+    snapshot: ReturnType<UpgradeStore['snapshot']>,
+    binding: Json,
+  ): UpgradeProbeApiIdentity & { origin: string } {
+    const candidate = binding.candidateApi as Json | undefined;
+    const receipt = snapshot.appliedSteps.find((step) => step.stepId === 'candidate')?.evidence as
+      Json | undefined;
+    requireUpgrade(
+      candidate &&
+        receipt &&
+        candidate.digest === snapshot.manifest.components.api.artifactDigest &&
+        receipt.artifactDigest === candidate.digest &&
+        receipt.origin === candidate.origin &&
+        typeof receipt.startIdentity === 'string' &&
+        receipt.startIdentity.length > 0,
+      'CANDIDATE_PROBE_IDENTITY_UNKNOWN',
+    );
+    return {
+      instanceId: this.store.instanceId,
+      artifactDigest: String(candidate.digest),
+      startIdentity: String(receipt.startIdentity),
+      origin: loopbackOrigin(candidate.origin),
+    };
+  }
+  private sourceIdentity(
+    identity: Json,
+    binding: Json,
+    generation: number,
+  ): UpgradeProbeApiIdentity & { origin: string } {
+    const source = binding.oldApi as Json;
+    requireUpgrade(
+      identity.instanceId === this.store.instanceId &&
+        identity.role === 'control' &&
+        identity.artifactDigest === source.digest &&
+        typeof identity.startIdentity === 'string' &&
+        identity.startIdentity.length > 0 &&
+        identity.writerFenceValid === true &&
+        identity.coordinatorGeneration === generation,
+      'SOURCE_PROBE_IDENTITY_UNKNOWN',
+    );
+    return {
+      instanceId: this.store.instanceId,
+      artifactDigest: String(source.digest),
+      startIdentity: String(identity.startIdentity),
+      origin: loopbackOrigin(source.origin),
+    };
+  }
+  private async sample(lane: UpgradeProbeLane = 'gateway'): Promise<void> {
     if (
-      this.inFlight >= this.maxInFlight ||
+      this.inFlight[lane] >= this.maxInFlight ||
       this.retired ||
       process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
     )
@@ -74,47 +137,132 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     if (!attempt) return;
     const row = this.store.snapshot(attempt.attemptId);
     if (row.fence < 1 || row.leaseExpiresAt <= this.clock.now().getTime()) return;
-    this.inFlight++;
-    const requestId = this.ids.next(),
-      at = this.clock.now().getTime(),
-      origin = loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN);
-    let httpLatency = 0;
-    let success = false,
-      binding: Json | null = null,
-      evidence: Json = {};
+    this.inFlight[lane]++;
+    const requestId = this.ids.next();
+    let key: string | undefined, scope: UpgradeProbeScope | undefined;
+    let at = this.clock.now().getTime(),
+      httpLatency = 0,
+      success = false,
+      verified = lane === 'gateway',
+      transportFailed = false;
+    let completedAt: number | undefined;
+    let evidence: Json = {};
+    const keepMs =
+      row.plan.policy.stageDurationMs +
+      row.plan.policy.observationFreshnessMs +
+      row.plan.policy.requestDeadlineMs * 3;
     try {
-      binding = await this.inspector.entryBinding();
+      const binding = await this.inspector.entryBinding();
+      if (
+        binding.attemptId !== attempt.attemptId ||
+        Number(binding.fence) !== row.fence ||
+        (lane === 'candidate' && Number(binding.weight) === 0)
+      )
+        return;
+      const common = this.currentScope(attempt.attemptId, row.fence, binding);
+      key = this.probeEvidence.currentKey(lane, common);
+      const sourceApi = row.sourceActual?.components.api ?? row.sourceActivation.components.api;
+      requireUpgrade(
+        (binding.oldApi as Json).digest === sourceApi.artifactDigest,
+        'SOURCE_PROBE_ARTIFACT_MISMATCH',
+      );
+      let identity: (UpgradeProbeApiIdentity & { origin: string }) | undefined;
+      if (lane === 'source')
+        identity = this.sourceIdentity(
+          await this.inspector.controlIdentity((binding.oldApi as Json).origin),
+          binding,
+          Number(common.coordinatorGeneration),
+        );
+      if (lane === 'candidate') identity = this.candidateIdentity(row, binding);
+      const origin = identity?.origin ?? loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN);
+      scope = {
+        ...common,
+        origin,
+        artifactDigest: identity?.artifactDigest ?? 'stable-entry',
+        startIdentity: identity?.startIdentity ?? 'stable-entry',
+      } as UpgradeProbeScope;
+      key = this.probeEvidence.begin(lane, scope);
+      at = this.clock.now().getTime();
       const headers = {
         'content-type': 'application/json',
         'x-platform-internal-key': process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
         'x-platform-instance-id': this.store.instanceId,
+        'x-operation-id': requestId,
       };
-      const value = upgradeDigest({ attemptId: attempt.attemptId, requestId });
-      const writeStarted = this.clock.now().getTime();
-      const response = await fetch(origin + '/api/system/upgrade/probe', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ attemptId: attempt.attemptId, fence: row.fence, requestId, value }),
-        signal: AbortSignal.timeout(row.plan.policy.requestDeadlineMs),
-      });
-      const actual = (await response.json()) as Json;
-      httpLatency = this.clock.now().getTime() - writeStarted;
-      const readStarted = this.clock.now().getTime();
-      const read = await fetch(origin + '/api/system/upgrade/probe?requestId=' + requestId, {
-        headers,
-        signal: AbortSignal.timeout(row.plan.policy.requestDeadlineMs),
-      });
-      const actualRead = (await read.json()) as Json;
-      httpLatency = Math.max(httpLatency, this.clock.now().getTime() - readStarted);
+      const value = upgradeDigest({ attemptId: attempt.attemptId, requestId, lane });
+      const request = async (url: string, options: RequestInit) => {
+        const started = this.clock.now().getTime();
+        const response = await fetch(url, {
+          ...options,
+          headers,
+          redirect: 'error',
+          signal: AbortSignal.timeout(row.plan.policy.requestDeadlineMs),
+        });
+        let actual: Json = {};
+        try {
+          actual = (await response.json()) as Json;
+        } catch {
+          /* Invalid identified JSON is a failed pair. */
+        }
+        httpLatency = Math.max(httpLatency, this.clock.now().getTime() - started);
+        return { response, actual };
+      };
+      let writeResult: Awaited<ReturnType<typeof request>>,
+        readResult: Awaited<ReturnType<typeof request>>;
+      try {
+        writeResult = await request(origin + '/api/system/upgrade/probe', {
+          method: 'POST',
+          body: JSON.stringify({
+            attemptId: attempt.attemptId,
+            fence: row.fence,
+            requestId,
+            value,
+          }),
+        });
+        readResult = await request(origin + '/api/system/upgrade/probe?requestId=' + requestId, {});
+      } catch {
+        transportFailed = true;
+        throw new Error('ACTUAL_PROBE_TRANSPORT_FAILED');
+      }
+      completedAt = this.clock.now().getTime();
+      const { response, actual } = writeResult;
+      const { response: read, actual: actualRead } = readResult;
+      if (identity) {
+        // Legacy source A has no own-response metadata. Its actual private
+        // process identity must be unchanged on both sides of this pair.
+        if (
+          lane === 'source' &&
+          !hasProbeIdentity(response.headers) &&
+          !hasProbeIdentity(read.headers)
+        ) {
+          const after = this.sourceIdentity(
+            await this.inspector.controlIdentity(origin),
+            binding,
+            Number(common.coordinatorGeneration),
+          );
+          verified =
+            after.startIdentity === identity.startIdentity &&
+            after.artifactDigest === identity.artifactDigest;
+        } else
+          verified =
+            matchesProbeIdentity(response.headers, identity) &&
+            matchesProbeIdentity(read.headers, identity);
+      }
+      if (!verified) {
+        this.probeEvidence.unknown(lane, key);
+        return;
+      }
       success =
         response.ok &&
         read.ok &&
         actual.request_id === requestId &&
+        actualRead.request_id === requestId &&
         actual.value === value &&
         actualRead.value === value &&
         actualRead.revision === actual.revision;
       evidence = {
         requestId,
+        lane,
         writeStatus: response.status,
         readStatus: read.status,
         actual,
@@ -122,34 +270,62 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         pairDurationMs: this.clock.now().getTime() - at,
       };
     } catch {
-      evidence = { requestId, code: 'ACTUAL_PROBE_FAILED' };
+      completedAt ??= this.clock.now().getTime();
+      if (!transportFailed && !verified && key) this.probeEvidence.unknown(lane, key);
+      evidence = { requestId, lane, code: 'ACTUAL_PROBE_FAILED' };
     } finally {
-      const latency = success
-        ? httpLatency
-        : Math.max(httpLatency, this.clock.now().getTime() - at);
       try {
-        if (!this.retired && process.env.COORDINATOR_WRITER_FENCE_VALID === 'true') {
-          // An old async probe may finish after A1->B2->retained A3. The ALS
-          // admitted epoch and durable controller fence both remain mandatory.
+        if (
+          scope &&
+          key &&
+          !this.retired &&
+          process.env.COORDINATOR_WRITER_FENCE_VALID === 'true'
+        ) {
           this.store.assertFence(attempt.attemptId, row.fence);
-          this.store.sqlite
-            .prepare(
-              'INSERT INTO upgrade_observations(attempt_id,weight,route_generation,coordinator_generation,observed_at,latency_ms,success,request_id,evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)',
-            )
-            .run(
-              attempt.attemptId,
-              Number(binding?.weight ?? -1),
-              Number(binding?.routeGeneration ?? -1),
-              Number(process.env.COORDINATOR_GENERATION),
-              at,
-              latency,
-              Number(success),
-              requestId,
-              upgradeDigest(evidence),
-            );
+          const current = await this.inspector.entryBinding();
+          const expected = this.currentScope(attempt.attemptId, row.fence, current);
+          const api = (lane === 'candidate' ? current.candidateApi : current.oldApi) as
+            Json | undefined;
+          const unchanged =
+            Object.entries(expected).every(
+              ([field, value]) => scope![field as keyof UpgradeProbeScope] === value,
+            ) &&
+            (lane === 'gateway' ||
+              (api?.origin === scope.origin && api?.digest === scope.artifactDigest));
+          this.store.assertFence(attempt.attemptId, row.fence);
+          if (unchanged) {
+            const sample = {
+              observed_at: at,
+              completed_at: completedAt ?? this.clock.now().getTime(),
+              latency_ms: success
+                ? httpLatency
+                : Math.max(httpLatency, (completedAt ?? this.clock.now().getTime()) - at),
+              success: Number(success),
+              request_id: requestId,
+            };
+            const recorded = transportFailed
+              ? this.probeEvidence.transportFailure(lane, key, sample, keepMs)
+              : verified && this.probeEvidence.record(lane, key, sample, keepMs);
+            if (recorded && lane === 'gateway')
+              this.store.sqlite
+                .prepare(
+                  'INSERT INTO upgrade_observations(attempt_id,weight,route_generation,coordinator_generation,observed_at,latency_ms,success,request_id,evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)',
+                )
+                .run(
+                  attempt.attemptId,
+                  scope.routeWeight,
+                  scope.routeGeneration,
+                  scope.coordinatorGeneration,
+                  at,
+                  sample.latency_ms,
+                  Number(success),
+                  requestId,
+                  upgradeDigest(evidence),
+                );
+          }
         }
       } finally {
-        this.inFlight--;
+        this.inFlight[lane]--;
       }
     }
   }
@@ -219,22 +395,10 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const snapshot = this.store.snapshot(id),
       binding = await this.inspector.entryBinding(),
       continuity = await this.inspector.continuity(id, fence);
-    const samples = this.store.sqlite
-      .prepare(
-        'SELECT * FROM upgrade_observations WHERE attempt_id=? AND weight=? AND route_generation=? ORDER BY observed_at',
-      )
-      .all(id, weight, binding.routeGeneration) as Sample[];
     const baseRow = this.store.sqlite
       .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
       .get(id) as { snapshot: string };
     const base = JSON.parse(baseRow.snapshot) as Json;
-    const baseline = this.store.sqlite
-      .prepare(
-        'SELECT * FROM upgrade_observations WHERE attempt_id=? AND weight=0 AND coordinator_generation=? ORDER BY observed_at',
-      )
-      .all(id, base.coordinatorGeneration) as Sample[];
-    const windowMs =
-      samples.length > 1 ? samples[samples.length - 1].observed_at - samples[0].observed_at : 0;
     let attach = { qualified: false, maxMs: 0 };
     try {
       attach = await this.attachProof(id, fence);
@@ -313,7 +477,6 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
           Number(lease.expiresAt ?? lease.leaseExpiresAt) > this.clock.now().getTime(),
         );
       });
-    const enoughBaseline = baseline.length >= snapshot.plan.policy.minRequests;
     const migration = snapshot.plan.migrationPath.migrationPlanDigest
       ? this.migrations.metrics(id)
       : null;
@@ -334,12 +497,55 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     } catch {
       webHealth = { known: false, healthy: false, observedAt: this.clock.now().toISOString() };
     }
+    this.store.assertFence(id, fence);
+    const finalBinding = await this.inspector.entryBinding();
+    const stableBinding =
+      upgradeDigest(persistedBinding(finalBinding)) === upgradeDigest(persistedBinding(binding));
+    const expected = this.currentScope(id, fence, binding);
+    const freshness = snapshot.plan.policy.observationFreshnessMs;
+    const gateway = this.probeEvidence.read(
+      'gateway',
+      { ...expected, origin: loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) },
+      freshness,
+    );
+    const oldApi = binding.oldApi as Json;
+    const expectedSourceApi =
+      snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api;
+    const source = this.probeEvidence.read(
+      'source',
+      {
+        ...expected,
+        origin: loopbackOrigin(oldApi.origin),
+        artifactDigest: expectedSourceApi.artifactDigest,
+      },
+      freshness,
+    );
+    let candidateExpected: Partial<UpgradeProbeScope> = { ...expected, startIdentity: 'unknown' };
+    try {
+      candidateExpected = { ...expected, ...this.candidateIdentity(snapshot, binding) };
+    } catch {
+      /* Missing actual process receipt is unknown. */
+    }
+    const candidate = this.probeEvidence.read('candidate', candidateExpected, freshness);
+    const baselineWindow = Math.min(gateway.windowMs, source.windowMs);
+    const windowMs = weight === 0 ? baselineWindow : Math.min(baselineWindow, candidate.windowMs);
+    const baselineQualified =
+      source.known &&
+      gateway.known &&
+      baselineWindow >= Math.max(60000, snapshot.plan.policy.stageDurationMs) &&
+      source.requests >= snapshot.plan.policy.minRequests &&
+      source.failures === 0 &&
+      source.maxLatencyMs <= snapshot.plan.policy.requestDeadlineMs;
     return {
       webHealth,
       observedAt: this.clock.now().toISOString(),
       fenceValid: true,
       ownerGenerationsValid,
-      routeGenerationValid: Number(binding.fence) === fence && Number(binding.weight) === weight,
+      routeGenerationValid:
+        stableBinding &&
+        binding.attemptId === id &&
+        Number(binding.fence) === fence &&
+        Number(binding.weight) === weight,
       sharedStateHealthy: integrity,
       continuity,
       projectionReads: this.migrations.projectionReadEvidence(),
@@ -352,29 +558,53 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         migrationDifferences: migration ? (migration.known ? migration.differences : undefined) : 0,
         integrityFailures: integrity ? 0 : 1,
       },
+      coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
+      observerEpoch: this.probeEvidence.observerEpoch,
       probes: {
+        known: gateway.known,
         hz:
-          windowMs > 0
-            ? Math.min(snapshot.plan.policy.probeHz, (1000 * (samples.length - 1)) / windowMs)
+          gateway.windowMs > 0
+            ? Math.min(
+                snapshot.plan.policy.probeHz,
+                (1000 * (gateway.requests - 1)) / gateway.windowMs,
+              )
             : 0,
-        samples: samples.length,
-        failures: samples.filter((s) => s.success !== 1).length,
-        maxLatencyMs: Math.max(0, ...samples.map((s) => s.latency_ms)),
+        samples: gateway.requests,
+        failures: gateway.failures,
+        maxLatencyMs: gateway.maxLatencyMs,
+        windowMs: gateway.windowMs,
         attachMaxMs: attach.qualified ? attach.maxMs : snapshot.plan.policy.attachDeadlineMs + 1,
       },
+      candidateProbes: {
+        known: candidate.known,
+        hz:
+          candidate.windowMs > 0
+            ? Math.min(
+                snapshot.plan.policy.probeHz,
+                (1000 * (candidate.requests - 1)) / candidate.windowMs,
+              )
+            : 0,
+        samples: candidate.requests,
+        failures: candidate.failures,
+        maxLatencyMs: candidate.maxLatencyMs,
+        windowMs: candidate.windowMs,
+      },
       candidate: {
-        requests: samples.length,
-        errorRate: samples.length
-          ? samples.filter((s) => s.success !== 1).length / samples.length
-          : 0,
-        p95Ms: p95(samples),
+        known: candidate.known,
+        requests: candidate.requests,
+        errorRate: candidate.errorRate,
+        p95Ms: candidate.p95Ms,
+        windowMs: candidate.windowMs,
       },
       baseline: {
-        requests: baseline.length,
-        errorRate: enoughBaseline
-          ? baseline.filter((s) => s.success !== 1).length / baseline.length
-          : null,
-        p95Ms: enoughBaseline ? p95(baseline) : null,
+        known: baselineQualified,
+        qualified: baselineQualified,
+        requests: source.requests,
+        errorRate: source.errorRate,
+        p95Ms: source.p95Ms,
+        windowMs: baselineWindow,
+        failures: source.failures,
+        source: source.scope ? { ...source.scope, weight: 0, observedAt: source.observedAt } : null,
       },
       windowMs,
     };

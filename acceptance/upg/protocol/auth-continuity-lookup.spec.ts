@@ -191,6 +191,7 @@ beforeEach(async () => {
     sourcePasscodes,
     undefined as never,
     undefined as never,
+    undefined as never,
   );
   inspector.recordBaseline(attemptId, {
     authContinuityFingerprint: upgradeDigest({

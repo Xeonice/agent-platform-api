@@ -27,6 +27,7 @@ import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import { PasscodeService } from '../access-passcode/passcode.service';
 import { SESSION_COOKIE } from '../access-passcode/session-cookie';
+import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
 
 type Json = Record<string, unknown>;
 export function persistedBinding(value: Json): Json {
@@ -85,6 +86,7 @@ export class UpgradeInspector {
     private readonly passcodes: PasscodeService,
     @Inject(JOB_COMPLETION_RECEIPTS) private readonly jobCompletions: JobCompletionReceipts,
     @Inject(SANDBOX_EXEC_PORT) private readonly exec: SandboxExecPort,
+    private readonly probeEvidence: UpgradeProbeEvidence,
   ) {}
   get observedAt(): string {
     return this.clock.now().toISOString();
@@ -951,24 +953,38 @@ export class UpgradeInspector {
       (actual.web as Json).digest === snapshot.manifest.components.web.artifactDigest &&
       web.webRevision === snapshot.manifest.components.web.webRevision;
     this.store.assertFence(id, fence);
-    const base = this.store.sqlite
-      .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string };
-    const baseGeneration = (JSON.parse(base.snapshot) as Json).coordinatorGeneration;
-    const baselineSamples = (
-      this.store.sqlite
-        .prepare(
-          'SELECT count(*) n FROM upgrade_observations WHERE attempt_id=? AND weight=0 AND success=1 AND coordinator_generation=?',
-        )
-        .get(id, baseGeneration) as { n: number }
-    ).n;
+    const sourceApi = actual.oldApi as Json;
+    const sourceComponent =
+      snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api;
+    const baseline = this.probeEvidence.read(
+      'source',
+      {
+        instanceId: this.store.instanceId,
+        attemptId: id,
+        fence,
+        routeGeneration: Number(actual.routeGeneration),
+        routeWeight: Number(actual.weight),
+        coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
+        observerEpoch: this.probeEvidence.observerEpoch,
+        origin: loopbackOrigin(sourceApi.origin),
+        artifactDigest: sourceComponent.artifactDigest,
+      },
+      snapshot.plan.policy.observationFreshnessMs,
+    );
+    const baselineSamples = baseline.requests;
+    const baselineQualified =
+      baseline.known &&
+      baseline.windowMs >= Math.max(60000, snapshot.plan.policy.stageDurationMs) &&
+      baselineSamples >= snapshot.plan.policy.minRequests &&
+      baseline.failures === 0 &&
+      baseline.maxLatencyMs <= snapshot.plan.policy.requestDeadlineMs;
     return {
       qualified:
         artifactMatches &&
         controlOnly &&
         authContinuity &&
         originalResourceAddressable &&
-        baselineSamples >= snapshot.plan.policy.minRequests &&
+        baselineQualified &&
         (candidate ? true : businessMatches && webMatches),
       controlOnly,
       noRuntimeSideEffects: controlOnly,

@@ -11,6 +11,7 @@ import { ControlRpcModule } from '../control-rpc/control-rpc.module';
 import { CoordinatorHandoff } from './coordinator-handoff';
 import { UpgradeRoleHandoffs } from './upgrade-role-handoffs';
 import { UpgradeObserver } from './upgrade-observer';
+import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { CoordinatorRecovery } from './coordinator-recovery';
 import { createUpgradeProjectProjection } from './upgrade-project-projection';
@@ -31,6 +32,7 @@ import { UpgradeContractInternalController } from './upgrade.controller';
     CoordinatorHandoff,
     UpgradeRoleHandoffs,
     UpgradeObserver,
+    UpgradeProbeEvidence,
     UpgradeOnlineMigration,
     CoordinatorRecovery,
     UpgradeContractStore,

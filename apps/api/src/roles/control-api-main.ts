@@ -19,6 +19,7 @@ import { isRequestOriginAllowed } from '../bootstrap/public-origin-policy';
 import { createCoordinatorResolver } from '../platform/control-rpc/coordinator-routing';
 import { SystemClock } from '../platform/time/system-clock';
 import { installedApiIdentity } from '../platform/artifact-identity';
+import { UPGRADE_PROBE_IDENTITY_HEADERS } from '../platform/upgrade/upgrade-probe-identity';
 
 /** Public transport role: no database connection, migration, scheduler or SDK import. */
 export async function startControlApi(): Promise<ReturnType<typeof createServer>> {
@@ -62,6 +63,20 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   if (!catalog.routes.length || catalog.protocol.min > 2 || catalog.protocol.max < 1)
     throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
   const app = express();
+  const ownProbeHeaders: Record<string, string> = {};
+  const protectedProbeHeaders = new Set<string>(Object.values(UPGRADE_PROBE_IDENTITY_HEADERS));
+  if (installedArtifact && process.env.PLATFORM_PROCESS_START_IDENTITY) {
+    ownProbeHeaders[UPGRADE_PROBE_IDENTITY_HEADERS.instanceId] = instanceId;
+    ownProbeHeaders[UPGRADE_PROBE_IDENTITY_HEADERS.artifactDigest] =
+      installedArtifact.artifactDigest;
+    ownProbeHeaders[UPGRADE_PROBE_IDENTITY_HEADERS.startIdentity] =
+      process.env.PLATFORM_PROCESS_START_IDENTITY;
+  }
+  app.use((req, res, next) => {
+    if (req.path === '/api/system/upgrade/probe')
+      for (const [name, value] of Object.entries(ownProbeHeaders)) res.setHeader(name, value);
+    next();
+  });
   app.use((_req, res, next) => {
     res.locals.coordinatorResolutionDeadline = clock.now().getTime() + 1900;
     next();
@@ -216,7 +231,14 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         const frame = JSON.parse(line) as ApplicationFrame;
         if (frame.type === 'headers' && !res.headersSent) {
           res.status(frame.status);
-          for (const [name, value] of Object.entries(frame.headers)) res.setHeader(name, value);
+          for (const [name, value] of Object.entries(frame.headers)) {
+            if (
+              req.path === '/api/system/upgrade/probe' &&
+              protectedProbeHeaders.has(name.toLowerCase())
+            )
+              continue;
+            res.setHeader(name, value);
+          }
         } else if (frame.type === 'bytes') {
           stream = true;
           res.write(Buffer.from(frame.data, 'base64'));
