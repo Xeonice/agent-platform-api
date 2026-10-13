@@ -576,7 +576,10 @@ export interface SandboxProvider {
    */
   destroyBySandboxId?(sandboxId: string): Promise<void>;
   /** Query an already persisted owner intent; never retries a guest side effect. */
-  observeOperation?(sandboxId: string, operationId: string): Promise<{ state: 'pending' | 'complete' | 'failed' | 'absent' | 'unknown'; result?: unknown }>;
+  observeOperation?(
+    sandboxId: string,
+    operationId: string,
+  ): Promise<{ state: 'pending' | 'complete' | 'failed' | 'absent' | 'unknown'; result?: unknown }>;
   /** Original ownership inventory; no SDK create/start fallback. */
   originalHandle?(sandboxId: string): Promise<SandboxHandle | null>;
 

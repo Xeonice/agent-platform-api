@@ -50,7 +50,9 @@ import { ControlRpcModule } from './platform/control-rpc/control-rpc.module';
     SystemModule,
     DeploymentModule,
     UpgradeModule,
-    ...(['coordinator','coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE??'') ? [ControlRpcModule] : []),
+    ...(['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '')
+      ? [ControlRpcModule]
+      : []),
   ],
   providers: [...guardProviders],
 })
