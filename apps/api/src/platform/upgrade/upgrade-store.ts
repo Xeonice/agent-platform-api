@@ -175,9 +175,37 @@ export class UpgradeStore {
     for (const step of plan.steps) {
       const actual = steps.find((s) => s.step_id === step.stepId);
       const work = actual?.completed_work ?? 0;
+      requireUpgrade(
+        Number.isFinite(work) && work >= 0 && (step.totalWork === null || work <= step.totalWork),
+        'UPGRADE_WORK_CONFLICT',
+      );
       completedWork += work;
       if (step.totalWork === null) {
-        unknown ||= actual?.applied !== 1;
+        let completedTotal: number | null = null;
+        if (
+          actual?.applied === 1 &&
+          actual.receipt_digest &&
+          actual.evidence &&
+          actual.applied_at !== null &&
+          Number.isFinite(actual.applied_at)
+        ) {
+          try {
+            const receipt = JSON.parse(actual.evidence) as Record<string, unknown>;
+            if (
+              receipt?.commitKnown === true &&
+              receipt.complete === true &&
+              receipt.integrityValid === true &&
+              receipt.budgetExceeded === false &&
+              receipt.completedWork === work &&
+              upgradeDigest(receipt) === actual.receipt_digest
+            )
+              completedTotal = work;
+          } catch {
+            /* An invalid completion receipt cannot resolve an unknown total. */
+          }
+        }
+        unknown ||= completedTotal === null;
+        if (completedTotal !== null) totalWork += completedTotal;
         fraction += actual?.applied === 1 ? 1 : 0;
       } else {
         totalWork += step.totalWork;
@@ -203,7 +231,7 @@ export class UpgradeStore {
       stage: row.stage,
       percent,
       completedWork,
-      totalWork: plan.steps.some((s) => s.totalWork === null) ? null : totalWork,
+      totalWork: unknown ? null : totalWork,
       planDigest: plan.planDigest,
       acceptedAt: this.iso(row.accepted_at),
       observedAt: this.iso(row.observed_at),

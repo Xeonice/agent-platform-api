@@ -182,7 +182,14 @@ function command(
 }
 function apply(id: string, step: UpgradePlan['steps'][number], unknownWork = 7) {
   const completedWork = step.totalWork ?? unknownWork;
-  const evidence = { scope: 'sqlite-state-layer-only', stepId: step.stepId, completedWork };
+  const evidence = {
+    scope: 'sqlite-state-layer-only',
+    stepId: step.stepId,
+    completedWork,
+    ...(step.kind === 'migration'
+      ? { commitKnown: true, complete: true, integrityValid: true, budgetExceeded: false }
+      : {}),
+  };
   return store.commit(
     id,
     command(id, 'step-applied', {
@@ -573,6 +580,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
   it('keeps unknown migration totalWork frozen, counts only observed work and cannot claim 100 before activation', () => {
     const { id, plan } = accept(true);
     const frozen = canonicalUpgrade(plan);
+    const knownTotal = plan.steps.reduce((sum, step) => sum + (step.totalWork ?? 0), 0);
     const migration = plan.steps.find((s) => s.kind === 'migration')!;
     expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null, completedWork: 0 });
     for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
@@ -581,11 +589,11 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     time += 100;
     expect(store.attempt(id).percent).toBeNull();
     apply(id, migration, 7);
-    expect(store.attempt(id).totalWork).toBeNull();
+    expect(store.attempt(id).totalWork).toBe(knownTotal + 7);
     expect(store.attempt(id).percent).toBeLessThan(100);
     for (const step of plan.steps.slice(plan.steps.indexOf(migration) + 1)) apply(id, step);
     expect(store.attempt(id)).toMatchObject({
-      totalWork: null,
+      totalWork: knownTotal + 7,
       percent: 99,
       state: 'api-activated',
     });
@@ -593,10 +601,144 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     const activated = { ...current(plan.releaseId, 2), schema: plan.migrationPath.targetSchema };
     store.commit(id, command(id, 'activation-confirmed', {}), activated);
     expect(store.attempt(id)).toMatchObject({
-      totalWork: null,
+      totalWork: knownTotal + 7,
       percent: 100,
       state: 'activation-confirmed',
     });
+  });
+
+  it.each([9, 0])(
+    'uses only the completed migration receipt to resolve its actual %i units without rewriting the fixed plan or receipts',
+    (completed) => {
+      const { id, plan } = accept(true);
+      const migration = plan.steps.find((step) => step.kind === 'migration')!;
+      const before = canonicalUpgrade(store.plan(id));
+      const storedPlan = (
+        connection.sqlite
+          .prepare('SELECT plan FROM upgrade_attempts WHERE attempt_id=?')
+          .get(id) as {
+          plan: string;
+        }
+      ).plan;
+      for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
+      expect(store.attempt(id).totalWork).toBeNull();
+      apply(id, migration, completed);
+      const receipt = connection.sqlite
+        .prepare('SELECT * FROM upgrade_steps WHERE attempt_id=? AND step_id=?')
+        .get(id, migration.stepId);
+      const eventCount = events();
+      const snapshot = store.attempt(id);
+      expect(snapshot.totalWork).toBe(
+        plan.steps.reduce((sum, step) => sum + (step.totalWork ?? 0), 0) + completed,
+      );
+      expect(snapshot.completedWork).toBe(
+        plan.steps
+          .slice(0, plan.steps.indexOf(migration))
+          .reduce((sum, step) => sum + (step.totalWork ?? 0), 0) + completed,
+      );
+      expect(snapshot.percent).toBe(
+        Math.floor((100 * (plan.steps.indexOf(migration) + 1)) / plan.steps.length),
+      );
+      expect(snapshot.percent).toBeLessThan(100);
+      expect(
+        store.plan(id).steps.find((step) => step.stepId === migration.stepId)?.totalWork,
+      ).toBeNull();
+      expect(canonicalUpgrade(store.plan(id))).toBe(before);
+      expect(
+        connection.sqlite.prepare('SELECT plan FROM upgrade_attempts WHERE attempt_id=?').get(id),
+      ).toEqual({ plan: storedPlan });
+      expect(
+        connection.sqlite
+          .prepare('SELECT * FROM upgrade_steps WHERE attempt_id=? AND step_id=?')
+          .get(id, migration.stepId),
+      ).toEqual(receipt);
+      expect(events()).toBe(eventCount);
+    },
+  );
+
+  it('keeps incomplete unknown work unresolved despite progress and elapsed time, and rejects invalid or regressing work', () => {
+    const { id, plan } = accept(true);
+    const migration = plan.steps.find((step) => step.kind === 'migration')!;
+    for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
+    store.commit(id, command(id, 'progress', { stepId: migration.stepId, completedWork: 3 }));
+    expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null });
+    time += 5000;
+    store.renew(id, store.snapshot(id).fence, 'controller-a');
+    expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null });
+    const before = store.step(id, migration.stepId);
+    const eventCount = events();
+    for (const completedWork of [2, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        store.commit(id, command(id, 'progress', { stepId: migration.stepId, completedWork })),
+      ).toThrow();
+    }
+    expect(store.step(id, migration.stepId)).toEqual(before);
+    expect(events()).toBe(eventCount);
+  });
+
+  it.each([
+    'unapplied',
+    'missing-digest',
+    'missing-evidence',
+    'missing-applied-time',
+    'malformed-evidence',
+    'digest-mismatch',
+    'work-mismatch',
+    'incomplete',
+    'unknown-commit',
+    'invalid-integrity',
+    'over-budget',
+  ])('does not turn %s migration metadata into a known total', (fault) => {
+    const { id, plan } = accept(true);
+    const migration = plan.steps.find((step) => step.kind === 'migration')!;
+    for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
+    apply(id, migration, 9);
+    const row = connection.sqlite
+      .prepare('SELECT evidence FROM upgrade_steps WHERE attempt_id=? AND step_id=?')
+      .get(id, migration.stepId) as { evidence: string };
+    const evidence = JSON.parse(row.evidence) as Record<string, unknown>;
+    if (fault === 'unapplied')
+      connection.sqlite
+        .prepare('UPDATE upgrade_steps SET applied=0 WHERE attempt_id=? AND step_id=?')
+        .run(id, migration.stepId);
+    else if (
+      fault === 'missing-digest' ||
+      fault === 'missing-evidence' ||
+      fault === 'missing-applied-time'
+    ) {
+      const column = {
+        'missing-digest': 'receipt_digest',
+        'missing-evidence': 'evidence',
+        'missing-applied-time': 'applied_at',
+      }[fault];
+      connection.sqlite
+        .prepare(`UPDATE upgrade_steps SET ${column}=NULL WHERE attempt_id=? AND step_id=?`)
+        .run(id, migration.stepId);
+    } else if (fault === 'malformed-evidence')
+      connection.sqlite
+        .prepare('UPDATE upgrade_steps SET evidence=? WHERE attempt_id=? AND step_id=?')
+        .run('{', id, migration.stepId);
+    else if (fault === 'digest-mismatch')
+      connection.sqlite
+        .prepare('UPDATE upgrade_steps SET receipt_digest=? WHERE attempt_id=? AND step_id=?')
+        .run(upgradeDigest({ mismatched: true }), id, migration.stepId);
+    else {
+      if (fault === 'work-mismatch') evidence.completedWork = 10;
+      if (fault === 'incomplete') evidence.complete = false;
+      if (fault === 'unknown-commit') evidence.commitKnown = false;
+      if (fault === 'invalid-integrity') evidence.integrityValid = false;
+      if (fault === 'over-budget') evidence.budgetExceeded = true;
+      connection.sqlite
+        .prepare(
+          'UPDATE upgrade_steps SET evidence=?,receipt_digest=? WHERE attempt_id=? AND step_id=?',
+        )
+        .run(JSON.stringify(evidence), upgradeDigest(evidence), id, migration.stepId);
+    }
+    const original = canonicalUpgrade(store.plan(id));
+    const count = events();
+    expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null });
+    expect(canonicalUpgrade(store.plan(id))).toBe(original);
+    expect(events()).toBe(count);
   });
 
   it('rejects activation without all receipts or target/generation identity and retains original service', () => {
