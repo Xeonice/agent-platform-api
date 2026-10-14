@@ -383,7 +383,8 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
           const live = await this.liveness({ provider, handle: original });
           if (live.verdict !== 'gone') {
             this.ready = { provider, handle: original };
-            this.lastError = null; this.lastErrorKind = null;
+            this.lastError = null;
+            this.lastErrorKind = null;
             return;
           }
         }
