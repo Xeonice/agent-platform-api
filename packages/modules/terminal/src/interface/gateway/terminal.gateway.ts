@@ -353,6 +353,8 @@ export class TerminalGateway
             stream.runtimeIdentity,
           );
           if (this.attachments.get(client.id)?.stream !== stream || client.disconnected) return;
+          if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+          this.attachments.get(client.id)!.confirmed = true;
           this.send(client, {
             type: 'ready',
             sandboxId,
@@ -362,8 +364,6 @@ export class TerminalGateway
             protocolRevision: revision,
             existingSession: target.kind === 'agent' || !target.create,
           });
-          if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
-          this.attachments.get(client.id)!.confirmed = true;
           for (const chunk of pending) batcher.write(chunk);
         } finally {
           if (deadline) clearTimeout(deadline);

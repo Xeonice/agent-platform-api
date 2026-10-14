@@ -31,6 +31,7 @@ import {
 } from './boxlite-runtime';
 import { boxliteNamePrefix } from '../../reconcile/instance-id';
 import { spawnNative } from './boxlite-process.stream';
+import { boxliteShimIdentity } from './boxlite-shim-identity';
 import { BoxliteSandboxFiles } from './boxlite-files';
 import { BoxliteSandboxJobs } from './boxlite-jobs';
 import { withClosedGatewayEnv } from './boxlite-exposed-port';
@@ -507,7 +508,11 @@ export class BoxliteSandboxProvider implements SandboxProvider {
    * `cols,rows` 在 native 侧**全是原生参数**，没有翻译损耗。
    */
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
-    return this.guard(async () => spawnNative(await this.requireBox(handle), spec));
+    return this.guard(async () =>
+      spawnNative(await this.requireBox(handle), spec, () =>
+        boxliteShimIdentity(handle.providerSandboxId),
+      ),
+    );
   }
 
   /**

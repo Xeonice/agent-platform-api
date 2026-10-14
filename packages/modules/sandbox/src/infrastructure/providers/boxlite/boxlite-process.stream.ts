@@ -62,11 +62,21 @@ export function toSignalNumber(signal?: NodeJS.Signals): number {
 }
 
 /** `spawn()` 的入口：按 `spec.tty` 分流到两个 native 实现。 */
-export async function spawnNative(box: ExecCapableBox, spec: ProcessSpec): Promise<ProcessStream> {
-  return spec.tty ? openPty(box, spec) : startExec(box, spec);
+export async function spawnNative(
+  box: ExecCapableBox,
+  spec: ProcessSpec,
+  readRuntimeIdentity: () => Promise<string | null> = async () => null,
+): Promise<ProcessStream> {
+  return spec.tty
+    ? openPty(box, spec, readRuntimeIdentity)
+    : startExec(box, spec, readRuntimeIdentity);
 }
 
-async function startExec(box: ExecCapableBox, spec: ProcessSpec): Promise<ProcessStream> {
+async function startExec(
+  box: ExecCapableBox,
+  spec: ProcessSpec,
+  readRuntimeIdentity: () => Promise<string | null>,
+): Promise<ProcessStream> {
   const argv = requireArgv(spec);
   const timeoutSecs = spec.timeoutMs === undefined ? null : Math.ceil(spec.timeoutMs / 1000);
   const execution = await box.exec(
@@ -78,10 +88,18 @@ async function startExec(box: ExecCapableBox, spec: ProcessSpec): Promise<Proces
     timeoutSecs,
     spec.cwd ?? null,
   );
-  return new BoxliteExecStream(execution, { stdin: spec.stdin, timeoutMs: spec.timeoutMs });
+  return new BoxliteExecStream(
+    execution,
+    { stdin: spec.stdin, timeoutMs: spec.timeoutMs },
+    await readRuntimeIdentity(),
+  );
 }
 
-async function openPty(box: ExecCapableBox, spec: ProcessSpec): Promise<ProcessStream> {
+async function openPty(
+  box: ExecCapableBox,
+  spec: ProcessSpec,
+  readRuntimeIdentity: () => Promise<string | null>,
+): Promise<ProcessStream> {
   const argv = spec.cmd.length > 0 ? spec.cmd : DEFAULT_PTY_COMMAND;
   const execution = await box.exec(
     argv[0],
@@ -94,7 +112,7 @@ async function openPty(box: ExecCapableBox, spec: ProcessSpec): Promise<ProcessS
     null,
     spec.cwd ?? null,
   );
-  const stream = new BoxlitePtyStream(execution);
+  const stream = new BoxlitePtyStream(execution, await readRuntimeIdentity());
   // 先落初始窗口大小再交出去：xterm.js 第一帧就按它排版，晚一步就会先画一屏 80x24
   // 再跳一次。⚠️ 参数序是 (rows, cols)，与 `ProcessStream.resize(cols, rows)` 相反 ——
   // 实测 `resizeTty(30,100)` 之后 guest 里 `tput cols` 是 100。
@@ -118,6 +136,7 @@ function requireArgv(spec: ProcessSpec): string[] {
  */
 abstract class BoxliteStreamBase implements ProcessStream {
   abstract readonly ref: string;
+  constructor(readonly runtimeIdentity: string | null) {}
   protected dataCbs: ((chunk: Buffer) => void)[] = [];
   protected exitCbs: ((code: number | null) => void)[] = [];
   protected exited = false;
@@ -258,8 +277,9 @@ class BoxliteExecStream extends BoxliteStreamBase {
   constructor(
     private readonly execution: BoxliteExecution,
     opts: { stdin?: string; timeoutMs?: number },
+    runtimeIdentity: string | null,
   ) {
-    super();
+    super(runtimeIdentity);
     if (opts.timeoutMs !== undefined) {
       const timer = setTimeout(() => {
         this.timedOut = true;
@@ -373,8 +393,11 @@ class BoxlitePtyStream extends BoxliteStreamBase {
   private writeChain: Promise<unknown> = Promise.resolve();
   private stdin: Promise<{ writeString(text: string): Promise<void> }> | null = null;
 
-  constructor(private readonly execution: BoxliteExecution) {
-    super();
+  constructor(
+    private readonly execution: BoxliteExecution,
+    runtimeIdentity: string | null,
+  ) {
+    super(runtimeIdentity);
     void this.run();
   }
 

@@ -30,7 +30,10 @@ afterEach(async () => {
 /** Only the external stream/tmux results are controlled. HTTP, the production
  * owner client, Nest gateway, Socket.IO and terminal confirmation are real.
  * This regression is not evidence of a native VM or authenticated role chain. */
-async function transport(failFirstRead = false) {
+async function transport(
+  failFirstRead = false,
+  runtimeIdentity: string | null = 'external-fixture-runtime',
+) {
   let response: ServerResponse | undefined;
   let gets = 0;
   const actions: string[] = [];
@@ -89,7 +92,7 @@ async function transport(failFirstRead = false) {
       'external-fixture',
       connection,
       'original-sandbox',
-      'external-fixture-runtime',
+      runtimeIdentity,
     );
     streams.push(stream);
     return stream;
@@ -190,6 +193,25 @@ async function gateway(source: Awaited<ReturnType<typeof transport>>) {
 }
 
 describe('observed RuntimeOwner read state and terminal attach', () => {
+  it('sends an error and detaches without ready or forwarded input when physical identity is missing', async () => {
+    const t = await transport(false, null);
+    const g = await gateway(t);
+    g.client.on('frame', (frame: TerminalServerFrame) => {
+      if (frame.type === 'session') g.client.emit('frame', { type: 'input', data: 'unsafe input' });
+    });
+    g.client.connect();
+    await vi.waitFor(() =>
+      expect(
+        g.frames.some((frame) => frame.type === 'error' && frame.code === 'RUNTIME_UNKNOWN'),
+      ).toBe(true),
+    );
+    await vi.waitFor(() => expect(g.client.disconnected).toBe(true));
+    await vi.waitFor(() => expect(t.actions).toContain('stream.detach'));
+    expect(g.frames.some((frame) => frame.type === 'ready')).toBe(false);
+    expect(g.frames.some((frame) => frame.type === 'data')).toBe(false);
+    expect(t.actions).not.toContain('stream.write');
+    expect(t.actions).not.toContain('stream.kill');
+  });
   it('does not report a read failure before the delayed HTTP response, then replays the actual connected observation', async () => {
     const t = await transport();
     const stream = t.open();
