@@ -238,13 +238,65 @@ export class UpgradeStore {
       reason: row.reason,
     });
   }
-  latest(): UpgradeAttempt | null {
+  private latestAttemptId(): string | null {
     const row = this.sqlite
       .prepare(
         'SELECT attempt_id FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
       )
       .get(this.instanceId) as { attempt_id: string } | undefined;
-    return row ? this.attempt(row.attempt_id) : null;
+    return row?.attempt_id ?? null;
+  }
+  latest(): UpgradeAttempt | null {
+    const id = this.latestAttemptId();
+    return id ? this.attempt(id) : null;
+  }
+  /** Current probe inputs only. Historical observation receipts can be megabytes
+   * each; the 20 Hz sampler must never load or decode them to choose a lane. */
+  latestProbeSnapshot() {
+    const row = this.sqlite
+      .prepare(
+        'SELECT attempt_id,fence,lease_expires_at,plan,manifest,source_activation,source_actual FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
+      )
+      .get(this.instanceId) as
+      | Pick<
+          AttemptRow,
+          | 'attempt_id'
+          | 'fence'
+          | 'lease_expires_at'
+          | 'plan'
+          | 'manifest'
+          | 'source_activation'
+          | 'source_actual'
+        >
+      | undefined;
+    if (!row) return null;
+    const candidate = this.sqlite
+      .prepare(
+        "SELECT step_id,receipt_digest,completed_work,evidence FROM upgrade_steps WHERE attempt_id=? AND step_id='candidate' AND applied=1",
+      )
+      .get(row.attempt_id) as
+      Pick<StepRow, 'step_id' | 'receipt_digest' | 'completed_work' | 'evidence'> | undefined;
+    return {
+      attempt: { attemptId: row.attempt_id },
+      fence: row.fence,
+      leaseExpiresAt: row.lease_expires_at,
+      plan: UpgradePlanSchema.parse(JSON.parse(row.plan)),
+      manifest: (JSON.parse(row.manifest) as SignedUpgradeManifest).manifest,
+      sourceActivation: ConfirmedServiceReleaseSchema.parse(JSON.parse(row.source_activation)),
+      sourceActual: row.source_actual
+        ? UpgradeSourceActualSchema.parse(JSON.parse(row.source_actual))
+        : null,
+      appliedSteps: candidate
+        ? [
+            {
+              stepId: candidate.step_id,
+              receiptDigest: candidate.receipt_digest,
+              completedWork: candidate.completed_work,
+              evidence: candidate.evidence ? (JSON.parse(candidate.evidence) as unknown) : null,
+            },
+          ]
+        : [],
+    };
   }
   lookup(actorId: string, requestId: string): UpgradeAttempt {
     const row = this.sqlite
@@ -552,7 +604,7 @@ export class UpgradeStore {
   assertFence(id: string, fence: number, generation?: number): AttemptRow {
     const row = this.row(id);
     requireUpgrade(
-      this.latest()?.attemptId === id &&
+      this.latestAttemptId() === id &&
         (contractFenceFloor(this.sqlite, this.instanceId) === 0 ||
           row.fence > contractFenceFloor(this.sqlite, this.instanceId)),
       'UPGRADE_AUTHORITY_SUPERSEDED',
