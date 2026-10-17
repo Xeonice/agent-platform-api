@@ -28,6 +28,7 @@ import {
   persistedFaultScope,
 } from './upgrade-web-recovery';
 import { UpgradeContractService } from './upgrade-contract-service';
+import { withUpgradeObservation } from './upgrade-observation';
 
 type Json = Record<string, unknown>;
 
@@ -72,6 +73,13 @@ export class UpgradeService {
     return this.registering;
   }
   async status(
+    req: Request,
+    res: Response,
+    granted?: ReturnType<UpgradeSecurity['principal']>,
+  ): Promise<UpgradeStatus> {
+    return withUpgradeObservation(() => this.observeStatus(req, res, granted));
+  }
+  private async observeStatus(
     req: Request,
     res: Response,
     granted?: ReturnType<UpgradeSecurity['principal']>,
@@ -442,9 +450,9 @@ export class UpgradeService {
       live = (await response.json()) as Json;
       const prior = this.store.sqlite
         .prepare(
-          "SELECT plan FROM upgrade_attempts WHERE target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
+          "SELECT plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
         )
-        .get(source.releaseId) as { plan: string } | undefined;
+        .get(this.store.instanceId, source.releaseId) as { plan: string } | undefined;
       const root = prior
         ? resolve(
             process.env.UPGRADE_INSTALLER_ROOT ?? '',
@@ -455,16 +463,7 @@ export class UpgradeService {
           )
         : process.env.UPGRADE_INITIAL_ARTIFACT_ROOT;
       requireUpgrade(root, 'SOURCE_ARTIFACT_UNKNOWN');
-      const bundle = JSON.parse(await readFile(resolve(root, 'upgrade-artifact.json'), 'utf8')) as {
-        components: ConfirmedServiceRelease['components'];
-      };
-      for (const name of ['api', 'web', 'coordinator', 'owner'] as const)
-        if (source.components[name])
-          requireUpgrade(
-            canonicalUpgrade(source.components[name]) === canonicalUpgrade(bundle.components[name]),
-            'SOURCE_COMPONENT_CHANGED',
-          );
-      await this.inspector.verifyArtifact(root, bundle.components);
+      await this.inspector.verifySourceArtifact(root, source.components);
       immutable = true;
     } catch {
       /* Old process/schema/artifact absent is not a safe rollback. */
