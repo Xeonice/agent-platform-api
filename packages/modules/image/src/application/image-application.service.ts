@@ -54,6 +54,7 @@ import { ENV_SECRET_CIPHER } from '../domain/ports/env-secret.cipher.port';
 import type { EnvSecretCipher } from '../domain/ports/env-secret.cipher.port';
 import { ImageMapper } from './dto/image.mapper';
 import { imageProviderCompatibility } from './image-provider-compatibility';
+import { normalizeRuntimeVersions } from '../domain/value-objects/runtime-versions.vo';
 
 /** `POST /api/images` answers 200 for a re-registration and 201 for a new row (27 §6). */
 export interface RegisterImageResult {
@@ -215,6 +216,13 @@ export class ImageApplicationService {
         const current = this.images.findByIdSync(tx, image.id);
         if (current === null) throw new ImageNotFoundError(image.id);
         this.assertRegistrationAlias(current, alias);
+        known.backfillRuntimeVersions(
+          this.manifests.backfillRuntimeVersionsSync(
+            tx,
+            known.id,
+            normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
+          ),
+        );
         if (known.config === null && inheritedConfig !== null) {
           known.updateConfig(inheritedConfig, formatImageRef(image.name, known.version), now);
           this.manifests.saveSync(tx, known);
@@ -224,7 +232,11 @@ export class ImageApplicationService {
       });
       return {
         manifest: ImageMapper.toDto(known, currentImage),
-        validation: ImageMapper.outcome(resolved.outcome),
+        validation: {
+          ...ImageMapper.outcome(resolved.outcome),
+          digest: resolved.digest,
+          runtimeVersions: normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
+        },
         created: false,
       };
     }
@@ -257,6 +269,7 @@ export class ImageApplicationService {
         digest: resolved.digest,
         entrypointContract: resolved.manifest.entrypointContract,
         supportedRuntimes: resolved.manifest.supportedRuntimes,
+        runtimeVersions: normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
         resourceDefaults: resolved.manifest.resourceDefaults,
         labelsRequired: resolved.manifest.labelsRequired ?? [],
         diffIds: resolved.manifest.diffIds,
@@ -281,7 +294,11 @@ export class ImageApplicationService {
 
     return {
       manifest: ImageMapper.toDto(manifest, currentImage),
-      validation: ImageMapper.outcome(resolved.outcome),
+      validation: {
+        ...ImageMapper.outcome(resolved.outcome),
+        digest: resolved.digest,
+        runtimeVersions: normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
+      },
       created: true,
     };
   }
@@ -324,6 +341,7 @@ export class ImageApplicationService {
     return {
       ...ImageMapper.outcome(ValidationOutcome.from(errors, result.warnings ?? [])),
       digest: resolved.digest,
+      runtimeVersions: normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
     };
   }
 
@@ -351,6 +369,13 @@ export class ImageApplicationService {
     if (!digestChanged) {
       manifest.recordValidation(outcome, ref, this.clock.now());
       this.uow.run((tx) => {
+        manifest.backfillRuntimeVersions(
+          this.manifests.backfillRuntimeVersionsSync(
+            tx,
+            manifest.id,
+            normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
+          ),
+        );
         this.manifests.saveSync(tx, manifest);
         this.events.publishInTx(tx, manifest.pullEvents());
       });
@@ -361,6 +386,11 @@ export class ImageApplicationService {
       currentDigest: manifest.digest,
       upstreamDigest: resolved.digest,
       digestChanged,
+      // The outcome describes upstreamDigest even when that tag moved; the old
+      // row keeps its own declarations until an explicit new-row activation.
+      runtimeVersions: digestChanged
+        ? normalizeRuntimeVersions(resolved.manifest.runtimeVersions)
+        : manifest.runtimeVersions,
     };
   }
 
@@ -451,9 +481,10 @@ export class ImageApplicationService {
         current,
         upstream: {
           digest: resolved.digest,
-          validation: ImageMapper.outcome(
-            ValidationOutcome.from(result.errors, result.warnings ?? []),
-          ),
+          validation: {
+            ...ImageMapper.outcome(ValidationOutcome.from(result.errors, result.warnings ?? [])),
+            runtimeVersions: normalizeRuntimeVersions(resolved.manifest.runtimeVersions),
+          },
         },
         changed: resolved.digest !== manifest.digest,
       };

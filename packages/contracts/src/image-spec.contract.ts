@@ -37,6 +37,8 @@ export interface ImageSpecManifest {
   baseImage: string;
   entrypointContract: EntrypointContract;
   supportedRuntimes: string[];
+  /** Optional exact CLI versions declared by the image build; not a live runtime probe. */
+  runtimeVersions?: Record<string, string>;
   resourceDefaults: ResourceDefaults;
   labelsRequired?: string[];
   /**
@@ -272,6 +274,8 @@ export class ImageSpecError extends Error {
  */
 export const IMAGE_LABEL_TMUX = 'platform.tmux';
 export const IMAGE_LABEL_SUPPORTED_RUNTIMES = 'platform.supportedRuntimes';
+/** JSON object of runtime id → exact CLI version. Missing/invalid values mean unknown. */
+export const IMAGE_LABEL_RUNTIME_VERSIONS = 'platform.runtimeVersions';
 export const IMAGE_LABEL_RESOURCE_DEFAULTS = 'platform.resourceDefaults';
 
 /**

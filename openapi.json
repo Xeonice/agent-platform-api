@@ -4969,6 +4969,12 @@
               "type": "string"
             }
           },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "providerCompatibility": {
             "type": "object",
             "additionalProperties": {
@@ -5195,6 +5201,12 @@
                   "type": "string"
                 }
               },
+              "runtimeVersions": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
               "providerCompatibility": {
                 "type": "object",
                 "additionalProperties": {
@@ -5342,6 +5354,12 @@
               "digest": {
                 "type": "string"
               },
+              "runtimeVersions": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -5411,6 +5429,12 @@
         "properties": {
           "digest": {
             "type": "string"
+          },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "status": {
             "type": "string",
@@ -5569,6 +5593,12 @@
           "digest": {
             "type": "string"
           },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -5716,6 +5746,12 @@
                 "properties": {
                   "digest": {
                     "type": "string"
+                  },
+                  "runtimeVersions": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "status": {
                     "type": "string",

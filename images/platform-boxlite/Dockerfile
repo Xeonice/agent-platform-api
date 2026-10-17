@@ -94,8 +94,10 @@ RUN set -eux; \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}"; \
     # 构建期自证，而不是等第一个 Task 去发现。
-    claude --version | grep -F "${CLAUDE_CODE_VERSION}"; \
-    codex --version | grep -F "${CODEX_VERSION}"; \
+    CLAUDE_VERSION_ACTUAL="$(claude --version)"; \
+    CODEX_VERSION_ACTUAL="$(codex --version)"; \
+    test "$CLAUDE_VERSION_ACTUAL" = "${CLAUDE_CODE_VERSION} (Claude Code)"; \
+    test "$CODEX_VERSION_ACTUAL" = "codex-cli ${CODEX_VERSION}"; \
     command -v tmux; \
     tmux -V; \
     npm cache clean --force
@@ -107,4 +109,5 @@ CMD ["sleep", "infinity"]
 
 # 与 aio 档同义：只驱动 warning 与默认配额，**不是**合规判定，且会被派生镜像继承。
 LABEL platform.supportedRuntimes="codex,claude-code" \
+      platform.runtimeVersions="{\"codex\":\"${CODEX_VERSION}\",\"claude-code\":\"${CLAUDE_CODE_VERSION}\"}" \
       platform.resourceDefaults="{\"cores\":2,\"ramMb\":2048,\"diskMb\":10240}"

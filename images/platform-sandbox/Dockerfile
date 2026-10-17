@@ -96,15 +96,19 @@ RUN set -eux; \
     #   ① 两个 CLI 装到了 PATH 上、跑得起来、版本正是钉的那个（不是被旧 shim 遮住的）
     #   ② tmux 真的在（agent 会话由沙箱内的 tmux 持有）——被删掉的那个 LABEL 从来
     #      只是「声明」，这一行是**事实**
-    "$NODE_PREFIX/bin/claude" --version | grep -F "${CLAUDE_CODE_VERSION}"; \
-    "$NODE_PREFIX/bin/codex" --version | grep -F "${CODEX_VERSION}"; \
+    CLAUDE_VERSION_ACTUAL="$("$NODE_PREFIX/bin/claude" --version)"; \
+    CODEX_VERSION_ACTUAL="$("$NODE_PREFIX/bin/codex" --version)"; \
+    test "$CLAUDE_VERSION_ACTUAL" = "${CLAUDE_CODE_VERSION} (Claude Code)"; \
+    test "$CODEX_VERSION_ACTUAL" = "codex-cli ${CODEX_VERSION}"; \
     command -v tmux; \
     tmux -V
 
-# ⚠️ 这两个标签**留着**，删掉的只有 `platform.tmux`。它们从来不是合规判定：
+# ⚠️ 这些标签从来不是合规判定：
 #   · `platform.supportedRuntimes` → 只驱动 `RUNTIME_NOT_PREINSTALLED` 这个 **warning**
 #     与 install plan 的提示，从不阻断（04 §7：现装永远走得通）
 #   · `platform.resourceDefaults` → 创建实例时的默认配额
+#   · `platform.runtimeVersions` → 按 digest 展示构建声明的 CLI 版本，不代表运行中沙箱探测
 # 它们会被派生镜像继承且可能过期，所以「继承来的标签不作数」这条规则对它们同样成立。
 LABEL platform.supportedRuntimes="codex,claude-code" \
+      platform.runtimeVersions="{\"codex\":\"${CODEX_VERSION}\",\"claude-code\":\"${CLAUDE_CODE_VERSION}\"}" \
       platform.resourceDefaults="{\"cores\":2,\"ramMb\":2048,\"diskMb\":10240}"

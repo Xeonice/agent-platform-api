@@ -43,6 +43,7 @@ function fixture() {
   cleanup.push(useEnv({ PLATFORM_INSTANCE_ID: 'project-read-projection-test' }));
   const store = new UpgradeStore(db.sqlite, fixedClock(), { next: () => randomUUID() });
   const migration = new UpgradeOnlineMigration(store, fixedClock());
+  const schema = migration.schema();
   const oldReader = new SqliteProjectRepository(db.db);
   const newReader = new SqliteProjectRepository(db.db, {
     name: (id, original) => migration.projectedProjectName(id, original),
@@ -61,8 +62,8 @@ function fixture() {
   const plan = OnlineMigrationPlanSchema.parse({
     schemaVersion: 1,
     kind: 'expand-shadow',
-    fromSchema: 28,
-    targetSchema: 28,
+    fromSchema: schema,
+    targetSchema: schema,
     maxBatchRows: 100,
     oldRepresentationRetained: true,
     newSemanticsEnabled: false,
@@ -120,7 +121,7 @@ function fixture() {
       ${operation === 'DELETE' ? 'NULL' : "json_object('name',NEW.name)"},${Number(operation === 'DELETE')}); END`);
   }
   migration.onApplicationBootstrap();
-  return { db, migration, oldReader, newReader, project, digest, contract };
+  return { db, migration, schema, oldReader, newReader, project, digest, contract };
 }
 describe('REQ-UPG-006/008 — real business reads consume the bridge representation', () => {
   it('reads the renamed column through production project repository while the retained source reader stays usable', async () => {
@@ -139,7 +140,7 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
         count: 2,
       },
     ]);
-    expect(f.migration.schema()).toBe(28); // Representation epoch is not a new committed Drizzle version.
+    expect(f.migration.schema()).toBe(f.schema); // Representation epoch is not a new committed Drizzle version.
   });
   it('withdraws a corrupt isolated new read and returns complete old authority without claiming a confirmed projection', async () => {
     const f = fixture();
@@ -213,7 +214,7 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
           .get(created.id) as { tombstone: number }
       ).tombstone,
     ).toBe(1);
-    expect(f.migration.schema()).toBe(28);
+    expect(f.migration.schema()).toBe(f.schema);
   });
   it('rejects duplicate new names transactionally and never falls back to old internal slots after authority changes', async () => {
     const f = fixture();

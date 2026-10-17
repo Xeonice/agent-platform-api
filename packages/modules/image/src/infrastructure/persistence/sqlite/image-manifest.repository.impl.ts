@@ -10,6 +10,7 @@ import { ValidationOutcome } from '../../../domain/value-objects/validation-outc
 import type { ImageValidationStatus } from '../../../domain/value-objects/validation-outcome.vo';
 import type { ImageManifestRepository } from '../../../domain/repositories/image-manifest.repository';
 import { images, imageManifests, type ImageManifestRow } from '../schema/image.sqlite';
+import { normalizeRuntimeVersions } from '../../../domain/value-objects/runtime-versions.vo';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
 
@@ -129,6 +130,7 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
         digest: manifest.digest,
         entrypointContract: manifest.entrypointContract,
         supportedRuntimes: manifest.supportedRuntimes,
+        runtimeVersions: manifest.runtimeVersions,
         resourceDefaults: manifest.resourceDefaults,
         labelsRequired: manifest.labelsRequired,
         diffIds: manifest.diffIds,
@@ -157,6 +159,29 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
         },
       })
       .run();
+  }
+
+  backfillRuntimeVersionsSync(
+    _tx: Tx,
+    manifestId: string,
+    versions: Record<string, string>,
+  ): Record<string, string> {
+    const row = this.db
+      .select({ runtimeVersions: imageManifests.runtimeVersions })
+      .from(imageManifests)
+      .where(eq(imageManifests.id, manifestId))
+      .get();
+    if (!row) throw new ImageStateError(`manifest ${manifestId} no longer exists`);
+    const current = normalizeRuntimeVersions(row.runtimeVersions);
+    const merged = { ...normalizeRuntimeVersions(versions), ...current };
+    if (JSON.stringify(current) !== JSON.stringify(merged)) {
+      this.db
+        .update(imageManifests)
+        .set({ runtimeVersions: merged })
+        .where(eq(imageManifests.id, manifestId))
+        .run();
+    }
+    return merged;
   }
 
   deactivateOthersSync(tx: Tx, imageId: string, version: string, keepId: string): void {
@@ -219,6 +244,7 @@ function toDomain(row: ImageManifestRow): ImageManifest {
     digest: row.digest,
     entrypointContract: row.entrypointContract,
     supportedRuntimes: row.supportedRuntimes,
+    runtimeVersions: row.runtimeVersions,
     resourceDefaults: row.resourceDefaults,
     labelsRequired: row.labelsRequired,
     diffIds: row.diffIds,

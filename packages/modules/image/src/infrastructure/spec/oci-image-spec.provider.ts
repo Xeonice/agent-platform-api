@@ -3,6 +3,7 @@ import {
   IMAGE_ENTRYPOINT_INVALID,
   IMAGE_LABEL_RESOURCE_DEFAULTS,
   IMAGE_LABEL_SUPPORTED_RUNTIMES,
+  IMAGE_LABEL_RUNTIME_VERSIONS,
   IMAGE_LABEL_TMUX,
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_NOT_PREINSTALLED,
@@ -19,6 +20,7 @@ import type {
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
 import { OciRegistryClient } from './oci-registry.client';
+import { parseRuntimeVersionsLabel } from '../../domain/value-objects/runtime-versions.vo';
 
 /**
  * Built-in `ImageSpecProvider` over the OCI Distribution API (docs/backend/04 §7).
@@ -104,6 +106,7 @@ export class OciImageSpecProvider implements ImageSpecProvider {
         healthcheckCmd: cfg.Healthcheck?.Test,
       },
       supportedRuntimes: parseRuntimes(labels[IMAGE_LABEL_SUPPORTED_RUNTIMES]),
+      runtimeVersions: parseRuntimeVersionsLabel(labels[IMAGE_LABEL_RUNTIME_VERSIONS]),
       resourceDefaults: parseResourceDefaults(labels[IMAGE_LABEL_RESOURCE_DEFAULTS]),
       /**
        * ⚠️ READ THIS FIELD AS 「the platform-contract labels this image DECLARES」ONLY.

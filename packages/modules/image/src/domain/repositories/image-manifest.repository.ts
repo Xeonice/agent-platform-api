@@ -49,6 +49,12 @@ export interface ImageManifestRepository {
    */
   listBuiltinAnchors(): Promise<Array<{ ref: string; digest: string; diffIds: string[] }>>;
   saveSync(tx: Tx, manifest: ImageManifest): void;
+  /** Add missing declarations for the same digest without saving stale config/active state. */
+  backfillRuntimeVersionsSync(
+    tx: Tx,
+    manifestId: string,
+    versions: Record<string, string>,
+  ): Record<string, string>;
   /**
    * Retire every OTHER active row of the same tag, in the caller's transaction.
    *

@@ -474,5 +474,23 @@
     "acs": ["AC-UPG-002.1", "AC-UPG-008.4", "AC-UPG-008.5"],
     "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
     "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/pure/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.2"],
+    "purpose": "Optional untrusted build declarations accept only known runtime ids with exact bounded versions; malformed or unsafe values degrade independently to unknown without changing image admission.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/sqlite/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.1", "AC-IMG-062.2", "AC-IMG-062.3", "AC-IMG-062.4"],
+    "purpose": "Actual HTTP OCI metadata and SQLite registration, read-only preflight/update/list, same-digest backfill, tag-drift history and additive schema28-to29 preserve business rows, active pointers and unknown old metadata. No Guest/CLI execution or build-content qualification is inferred.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/protocol/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.1", "AC-IMG-062.2", "AC-IMG-062.3"],
+    "purpose": "Actual Nest existing image routes serialize declaration maps through register, list, preflight, revalidation, update comparison and PATCH; omitted provider metadata and old API response shapes remain compatible. External registry fixture does not prove image CLI contents.",
+    "relation": "backend-support"
   }
 ]
