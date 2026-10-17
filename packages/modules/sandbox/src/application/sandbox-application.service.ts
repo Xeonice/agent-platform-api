@@ -703,19 +703,20 @@ export class SandboxApplicationService {
   /**
    * `POST /api/sandboxes/:id/stop` (27 §2) — graceful shutdown, instance kept.
    *
-   * ⚠️ THIS ONE IS SYNCHRONOUS, AND THE ASYMMETRY WITH `start` IS THE POINT. Stopping
-   * is one `provider.stop()` call — no image staging, no CLI install, no agent
-   * bootstrap — which is why `destroy` (which walks the same `running → stopping →
-   * stopped` edge inline) has always awaited it too. Returning early here would mean
-   * inventing a second async path for the cheap half of the pair.
+   * The normal response awaits the one accepted `provider.stop()` call. Its intent
+   * and `stopping` transition commit together before dispatch. A transport timeout
+   * only ends that wait: the original stop, Guest and reservation stay intact.
+   * The existing owner reconciliation sweep queries that exact journal receipt
+   * and assigned handle; it never dispatches another stop.
    *
    * ⚠️ IT DOES NOT DESTROY ANYTHING. The workspace directory, the instance and the
    * `providerSandboxId` all survive — that is what makes `start` above possible. What
    * does NOT survive is the agent's conversation: `stopped → start` is a NEW session
    * (P22 §2), which is why the UI has to say so rather than calling it "resume".
    *
-   * The failure path mirrors `destroy`: mark `failed` best-effort so a wedged instance
-   * does not sit in `stopping` forever, then surface the provider's own code (04 §4).
+   * A definite provider failure records `failed` and releases its reservation.
+   * Unknown/inflight results preserve `stopping` and occupancy. A late original
+   * acknowledgement cannot overwrite a newer explicit lifecycle action.
    */
   async stop(id: string): Promise<SandboxDto> {
     const sandbox = await this.repo.findById(asSandboxId(id));
