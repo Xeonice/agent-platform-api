@@ -18,7 +18,7 @@ import {
   type Connection,
 } from './drizzle.connection';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
-import { requireUpgrade } from '../upgrade/upgrade-trust';
+import { assertCoordinatorMigrationCompatibility } from './coordinator-schema-compatibility';
 import { SqliteUnitOfWork } from './unit-of-work.impl';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import {
@@ -45,19 +45,11 @@ function openConnection(): Connection {
     }
     conn = createConnection(url);
     if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
-      const journal = conn.sqlite
-        .prepare("SELECT 1 FROM sqlite_master WHERE name='__drizzle_migrations'")
-        .get();
-      if (journal) {
-        const applied = (
-          conn.sqlite.prepare('SELECT count(*) n FROM __drizzle_migrations').get() as { n: number }
-        ).n;
-        requireUpgrade(
-          applied === 0 ||
-            applied === readMigrationFiles({ migrationsFolder: migrationsDir() }).length,
-          'ONLINE_MIGRATION_REQUIRED',
-        );
-      }
+      assertCoordinatorMigrationCompatibility(
+        conn.sqlite,
+        readMigrationFiles({ migrationsFolder: migrationsDir() }).length,
+        true,
+      );
       const sqlite = fenceCoordinatorConnection(
         conn.sqlite,
         platformInstanceId(),

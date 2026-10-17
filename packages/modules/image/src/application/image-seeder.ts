@@ -7,7 +7,14 @@ import {
   isPublishedImageRef,
 } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY, type ProviderRegistry } from '@platform/contracts';
-import { ImageApplicationService, ManifestInvalidError } from './image-application.service';
+import {
+  ImageApplicationService,
+  ManifestInvalidError,
+  type PreparedBuiltinImage,
+} from './image-application.service';
+import { IMAGE_MANIFEST_REPOSITORY } from '../domain/repositories/image-manifest.repository';
+import type { ImageManifestRepository } from '../domain/repositories/image-manifest.repository';
+import { parseImageRef } from '@platform/contracts';
 
 /**
  * 平台自带镜像的**开机播种**。
@@ -66,6 +73,8 @@ const SEED_BUDGET_MS = 10_000;
 @Injectable()
 export class ImageSeeder implements OnApplicationBootstrap {
   private readonly logger = new Logger('ImageSeeder');
+  private prepared: Map<string, PreparedBuiltinImage> | null = null;
+  private preparationComplete = false;
 
   constructor(
     @Inject(IMAGE_REPOSITORY) private readonly images: ImageRepository,
@@ -76,9 +85,40 @@ export class ImageSeeder implements OnApplicationBootstrap {
      * 而那正是 §8 扩展点承诺过可以做的事。
      */
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
+    @Inject(IMAGE_MANIFEST_REPOSITORY) private readonly manifests: ImageManifestRepository,
   ) {}
 
+  /** Read-only preparation, explicitly called before a candidate advertises prepared identity. */
+  async prepare(): Promise<void> {
+    this.preparationComplete = false;
+    const prepared = new Map<string, PreparedBuiltinImage>();
+    this.prepared = prepared;
+    await Promise.all(
+      this.refs().map(async (ref) => {
+        if (await this.alreadySeeded(ref)) return;
+        prepared.set(ref, await withBudget(this.service.prepareBuiltinImage(ref), ref));
+      }),
+    );
+    this.preparationComplete = true;
+  }
+
+  private refs(): string[] {
+    return builtinImageRefs(this.providers.list().map((provider) => provider.name));
+  }
+
   async onApplicationBootstrap(): Promise<void> {
+    if (this.prepared !== null) {
+      if (!this.preparationComplete) throw new Error('BUILTIN_IMAGE_PREPARATION_INCOMPLETE');
+      // No network fallback is permitted after the writer has been released.
+      for (const ref of this.refs()) {
+        if (await this.alreadySeeded(ref)) continue;
+        const prepared = this.prepared.get(ref);
+        if (prepared === undefined) throw new Error('BUILTIN_IMAGE_PREPARATION_MISSING');
+        const result = await this.service.registerPreparedBuiltinImage(prepared);
+        this.logger.log(`seeded prepared built-in image ${ref} → ${result.manifest.digest}`);
+      }
+      return;
+    }
     // ⚠️ **去重后并行种**：单档部署（显式配了 `SANDBOX_DEFAULT_IMAGE`，两档指向同一张）
     // 恒为 1 张；什么都不配时是 2 张 —— 两档各自回落到平台发布的那一张（2026-09-07）。
     //
@@ -91,9 +131,7 @@ export class ImageSeeder implements OnApplicationBootstrap {
     //    一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉），而播种只抓
     //    manifest + config blob、不拉层，几 KB 的 HTTP 并发毫无压力。
     //    ⇒ 启动延迟从 O(档数 × 预算) 变回 O(预算)。
-    await Promise.all(
-      builtinImageRefs(this.providers.list().map((p) => p.name)).map((ref) => this.seedOne(ref)),
-    );
+    await Promise.all(this.refs().map((ref) => this.seedOne(ref)));
   }
 
   private async seedOne(ref: string): Promise<void> {
@@ -114,8 +152,7 @@ export class ImageSeeder implements OnApplicationBootstrap {
       // 修好**。日志说错下一步，比不打日志更贵。
       this.logger.warn(
         `built-in image ${ref} could not be seeded (${describeSeedFailure(e)}). ` +
-          '平台已正常启动，但**建不了 Task，也注册不了自定义镜像**——' +
-          '自定义镜像必须基于平台预制镜像，而平台现在一张预制镜像都没有。' +
+          '目标预制镜像尚未登记；已有镜像与任务保持原状。' +
           `下一步是修好这一张：${seedFailureNextStep(ref, configuredSandboxNetwork())}`,
       );
     });
@@ -142,13 +179,19 @@ export class ImageSeeder implements OnApplicationBootstrap {
   }
 
   /**
-   * ⚠️ 按**镜像名**查，不按完整 ref 查。`ghcr.io/x/y:latest` 与 `ghcr.io/x/y:v2` 是
-   * 同一个 `images` 行的两个 manifest；用户手动注册过任一版本之后，播种就不该再插手
-   * ——那是他的目录，不是平台的。
+   * User-owned repositories are never promoted to builtin. Existing builtin repositories
+   * may receive a missing exact release coordinate, without reactivating disabled versions
+   * or touching any earlier manifest, alias, configuration or digest selection.
    */
   private async alreadySeeded(ref: string): Promise<boolean> {
-    const name = ref.includes('@') ? ref.slice(0, ref.indexOf('@')) : stripTag(ref);
-    return (await this.images.findByName(name)) !== null;
+    const parsed = parseImageRef(ref);
+    const image = await this.images.findByName(parsed.name);
+    if (image === null) return false;
+    if (!image.isBuiltin) return true;
+    const version = parsed.digest ?? parsed.tag ?? 'latest';
+    return (await this.manifests.listByImage(image.id)).some(
+      (manifest) => manifest.version === version,
+    );
   }
 }
 
@@ -195,13 +238,6 @@ function describeSeedFailure(e: unknown): string {
     return findings === '' ? e.message : findings;
   }
   return e instanceof Error ? e.message : String(e);
-}
-
-/** 仓库坐标里去掉 tag —— 冒号可能是端口（`localhost:5001/x`），只认最后一段里的。 */
-function stripTag(ref: string): string {
-  const lastSlash = ref.lastIndexOf('/');
-  const colon = ref.indexOf(':', lastSlash + 1);
-  return colon < 0 ? ref : ref.slice(0, colon);
 }
 
 /**

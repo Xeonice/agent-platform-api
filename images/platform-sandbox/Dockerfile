@@ -70,8 +70,8 @@ RUN set -eux; \
 #
 # 升级流程是**改这两行 + 重新构建 + 让 SANDBOX_DEFAULT_IMAGE 指过去**，于是「升级」在
 # git 历史里是一次可审计、可回滚的提交。
-ARG CLAUDE_CODE_VERSION=2.1.251
-ARG CODEX_VERSION=0.150.1
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG CODEX_VERSION=0.163.0
 
 # ⚠️ **`npm install -g` 的默认 prefix 在这张镜像里是「每个用户一份」的，直接用会装了等于
 # 没装。** 实测（v1.11.0）：镜像 ENV 里 `NPM_CONFIG_PREFIX=/root/.npm-global`，而

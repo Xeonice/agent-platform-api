@@ -35,6 +35,7 @@ import {
 } from './claude-code.output-parser';
 import { assertSessionRef } from '../session-ref.util';
 import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
+import { AGENT_CLI_VERSIONS } from '../agent-cli-versions';
 
 /**
  * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 这一步要在 PTY 里
@@ -357,6 +358,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan {
     return npmInstallPlan({
       packageName: '@anthropic-ai/claude-code',
+      version: AGENT_CLI_VERSIONS['claude-code'],
       binary: CLAUDE_BINARY,
       preinstalled: imagePreinstalls(imageSpec, 'claude-code'),
       estimatedInstallSec: 753,

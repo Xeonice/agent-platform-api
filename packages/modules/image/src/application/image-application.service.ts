@@ -64,6 +64,12 @@ export interface RegisterImageResult {
   created: boolean;
 }
 
+/** Opaque, process-local preparation handle; resolved registry data never enters REST input. */
+export interface PreparedBuiltinImage {
+  readonly ref: string;
+}
+type JudgedImage = ResolvedImage & { outcome: ValidationOutcome };
+
 /** Raised when `PATCH` is asked to enable a version (10 §6 ★). Mapped to 400. */
 export class PatchCannotActivateError extends Error {
   constructor(readonly manifestId: string) {
@@ -97,9 +103,10 @@ export class ImageNotFoundError extends Error {
 /**
  * Protocol-agnostic application service for the image context (02 §1, 24 §7).
  *
- * ⚠️ THE NETWORK LIVES IN EXACTLY TWO OF THESE METHODS — `registerImage` and
- * `revalidateImage` (plus the read-only `validateImage` / `checkImageUpdate` probes,
- * which persist nothing). Everything the CREATE DOOR needs is served from the
+ * Registry I/O lives in registration, revalidation and read-only preflight/preparation.
+ * `registerPreparedBuiltinImage` consumes already-validated process-local metadata,
+ * allowing a prepared Coordinator to adopt without waiting for the registry.
+ * Everything the CREATE DOOR needs is served from the
  * database by `ImageFacadeAdapter`. That split is the whole reason the door can keep
  * promising 「every rejection here is `retryable:false` and side-effect free」
  * (04 §7 / 10 §6.8).
@@ -111,6 +118,8 @@ export class ImageNotFoundError extends Error {
  */
 @Injectable()
 export class ImageApplicationService {
+  private readonly preparedBuiltinImages = new WeakMap<PreparedBuiltinImage, JudgedImage>();
+
   constructor(
     @Inject(IMAGE_REPOSITORY) private readonly images: ImageRepository,
     @Inject(IMAGE_MANIFEST_REPOSITORY) private readonly manifests: ImageManifestRepository,
@@ -182,11 +191,41 @@ export class ImageApplicationService {
     opts: { builtin?: boolean; copyConfigFromId?: string; alias?: string | null } = {},
   ): Promise<RegisterImageResult> {
     const alias = opts.alias === undefined ? undefined : normalizeImageAlias(opts.alias);
+    return this.registerResolvedImage(await this.resolveAndJudge(ref), { ...opts, alias });
+  }
+
+  /** Registry I/O and root validation happen while the previous Coordinator still serves. */
+  async prepareBuiltinImage(ref: string): Promise<PreparedBuiltinImage> {
     const resolved = await this.resolveAndJudge(ref);
+    this.assertRootDeclaresTmux(resolved);
+    const image = await this.images.findByName(parseImageRef(resolved.ref).name);
+    this.assertBuiltinRegistration(image);
+    const known = image ? await this.manifests.findByDigest(image.id, resolved.digest) : null;
+    if (known !== null && known.version !== resolved.manifest.version) {
+      throw new ImageStateError('目标镜像 digest 已使用其他坐标登记，不能把旧版本冒充为新默认。');
+    }
+    const prepared = Object.freeze({ ref: resolved.ref });
+    this.preparedBuiltinImages.set(prepared, resolved);
+    return prepared;
+  }
+
+  /** Local-only adoption. Arbitrary resolved objects or handles from another process are refused. */
+  async registerPreparedBuiltinImage(prepared: PreparedBuiltinImage): Promise<RegisterImageResult> {
+    const resolved = this.preparedBuiltinImages.get(prepared);
+    if (resolved === undefined) throw new ImageStateError('预制镜像尚未在本进程完成准备。');
+    return this.registerResolvedImage(resolved, { builtin: true });
+  }
+
+  private async registerResolvedImage(
+    resolved: JudgedImage,
+    opts: { builtin?: boolean; copyConfigFromId?: string; alias?: string | null },
+  ): Promise<RegisterImageResult> {
+    const alias = opts.alias === undefined ? undefined : normalizeImageAlias(opts.alias);
     const parsed = parseImageRef(resolved.ref);
     const now = this.clock.now();
 
     const existingImage = await this.images.findByName(parsed.name);
+    if (opts.builtin === true) this.assertBuiltinRegistration(existingImage);
     this.assertRegistrationAlias(existingImage, alias);
     const image =
       existingImage ??
@@ -215,6 +254,7 @@ export class ImageApplicationService {
       const currentImage = this.uow.run((tx) => {
         const current = this.images.findByIdSync(tx, image.id);
         if (current === null) throw new ImageNotFoundError(image.id);
+        if (opts.builtin === true) this.assertBuiltinRegistration(current);
         this.assertRegistrationAlias(current, alias);
         known.backfillRuntimeVersions(
           this.manifests.backfillRuntimeVersionsSync(
@@ -285,6 +325,7 @@ export class ImageApplicationService {
     const currentImage = this.uow.run((tx) => {
       const current = existingImage === null ? image : this.images.findByIdSync(tx, image.id);
       if (current === null) throw new ImageNotFoundError(image.id);
+      if (opts.builtin === true) this.assertBuiltinRegistration(current);
       if (existingImage !== null) this.assertRegistrationAlias(current, alias);
       this.images.saveSync(tx, image);
       this.manifests.saveSync(tx, manifest);
@@ -306,6 +347,12 @@ export class ImageApplicationService {
   private assertRegistrationAlias(image: Image | null, alias: string | null | undefined): void {
     if (image !== null && alias !== undefined && alias !== image.alias) {
       throw new ImageAliasValidationError('这张镜像已注册，请在镜像卡片中编辑别名');
+    }
+  }
+
+  private assertBuiltinRegistration(image: Image | null): void {
+    if (image !== null && !image.isBuiltin) {
+      throw new ImageStateError('用户登记的镜像仓库不能通过启动播种获得预制镜像准入豁免。');
     }
   }
 

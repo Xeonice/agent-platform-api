@@ -83,8 +83,8 @@ RUN set -eux; \
 # `@latest` 会让**同一份源码在不同的日子产出不同的镜像**，于是再也无法从仓库回答
 # 「这个 digest 里装的是哪个版本」，而上游一个坏版本会在无人改动任何东西的情况下，
 # 静悄悄地进到每一个 Task 里。升级 = 改这两行 + 重新构建 + 重新推。
-ARG CLAUDE_CODE_VERSION=2.1.251
-ARG CODEX_VERSION=0.150.1
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG CODEX_VERSION=0.163.0
 
 # ⚠️ 这里可以老老实实用默认 prefix（`/usr/local`）—— 官方 node 镜像里 root 就是运行
 # 用户、`NPM_CONFIG_PREFIX` 没被改过、也没有会遮住它的旧 shim。

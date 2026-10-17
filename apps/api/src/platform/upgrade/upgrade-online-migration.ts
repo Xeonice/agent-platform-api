@@ -9,6 +9,11 @@ import { UpgradeStore } from './upgrade-store';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { registerBusinessTransactionHook } from '../persistence/business-transaction-hooks';
 import { sqliteStorageObservation } from './sqlite-storage-budget';
+import { IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST } from './image-runtime-schema-plan';
+import {
+  executeImageRuntimeSchemaMigration,
+  imageRuntimeSchemaMetrics,
+} from './image-runtime-schema-migration';
 
 const Identifier = z.string().regex(/^[a-z][a-z0-9_]{0,80}$/);
 const Field = z
@@ -717,6 +722,15 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     readEpoch: number;
     degraded: boolean;
   } {
+    const attempt = this.store.sqlite
+      .prepare('SELECT plan FROM upgrade_attempts WHERE attempt_id=?')
+      .get(id) as { plan: string } | undefined;
+    if (
+      attempt &&
+      (JSON.parse(attempt.plan) as { migrationPath: { migrationPlanDigest: string | null } })
+        .migrationPath.migrationPlanDigest === IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST
+    )
+      return imageRuntimeSchemaMetrics(this.store.sqlite);
     const row = this.store.sqlite
       .prepare('SELECT * FROM upgrade_online_migrations WHERE attempt_id=?')
       .get(id) as Row | undefined;
@@ -748,6 +762,8 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     this.store.assertControllerFence(id, fence);
     const snapshot = this.store.snapshot(id),
       digest = snapshot.plan.migrationPath.migrationPlanDigest;
+    if (digest === IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST)
+      return executeImageRuntimeSchemaMigration(this.store, id, input);
     requireUpgrade(
       digest &&
         input.planDigest === digest &&

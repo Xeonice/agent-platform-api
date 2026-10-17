@@ -38,6 +38,7 @@ import {
 import { assertSessionRef } from '../session-ref.util';
 import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
 import { CREDENTIAL_FILE_MODE, writeCredentialFile } from '../credential-file.util';
+import { AGENT_CLI_VERSIONS } from '../agent-cli-versions';
 
 /**
  * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 这一步要在 PTY 里
@@ -392,6 +393,7 @@ export class CodexAdapter implements RuntimeAdapter {
   getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan {
     return npmInstallPlan({
       packageName: '@openai/codex',
+      version: AGENT_CLI_VERSIONS.codex,
       binary: CODEX_BINARY,
       preinstalled: imagePreinstalls(imageSpec, 'codex'),
       // measured on a cold AIO default image; codex is the SMALL one of the two.

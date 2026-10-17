@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { NestFactory } from '@nestjs/core';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
 import { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
+import { ImageSeeder } from '@platform/image';
 import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
 import { supportedDataFormats } from '../platform/data-format-capabilities';
 import { fromEpochMs } from '@platform/shared-kernel';
@@ -40,6 +41,9 @@ export async function startPreparedCoordinator(): Promise<void> {
   const { AppModule } = await import('../app.module');
   platformConnection();
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
+  // Resolve and validate future builtin metadata before exposing prepared identity;
+  // app.listen during adoption consumes only these process-local prepared results.
+  await app.get(ImageSeeder).prepare();
   const store = app.get(UpgradeStore),
     owners = app.get<RuntimeOwnerProviderRegistry>(SANDBOX_PROVIDER_REGISTRY);
   let projection: ProjectReadProjection | undefined;

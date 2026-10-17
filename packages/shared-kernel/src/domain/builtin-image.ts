@@ -77,7 +77,15 @@ export function builtinImageRefFor(provider: string): string {
   //
   //    ⇒ 平台按机器选对那一张，用户不必知道自己该用 aio 还是 boxlite。
   const published = PUBLISHED_IMAGE_BY_PROVIDER[provider];
-  if (published !== undefined && !isBuiltinImageConfigured()) return published;
+  // The old bootstrap wrote our mutable official alias explicitly. Treat only
+  // those two exact legacy aliases as managed defaults of THIS installed code.
+  // Provider overrides, third-party repositories and pinned user refs retain
+  // precedence; reverting this package also restores its previous resolution.
+  const legacyOfficial = [
+    'ghcr.io/xeonice/agent-platform-sandbox:latest',
+    'ghcr.io/xeonice/agent-platform-boxlite:latest',
+  ].includes(builtinImageRef());
+  if (published !== undefined && (!isBuiltinImageConfigured() || legacyOfficial)) return published;
   return builtinImageRef();
 }
 
@@ -95,8 +103,8 @@ export function builtinImageRefFor(provider: string): string {
  * 平台不知道一个外部 provider 该用哪张镜像，**猜一个比让它响亮失败更糟**。
  */
 const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Record<string, string>> = {
-  aio: 'ghcr.io/xeonice/agent-platform-sandbox:latest',
-  boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:latest',
+  aio: 'ghcr.io/xeonice/agent-platform-sandbox:v0.3.12-cli.20261017.1',
+  boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:v0.3.12-cli.20261017.1',
 };
 
 /** 平台发布的按档镜像坐标（只读视图，给诊断与错误消息用）。 */

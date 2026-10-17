@@ -2,7 +2,9 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { SystemClock } from '../time/system-clock';
 import { UuidIdGenerator } from '../time/uuid-id-generator';
-import { createConnection, type Connection } from './drizzle.connection';
+import { createConnection, migrationsDir, type Connection } from './drizzle.connection';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
+import { assertCoordinatorMigrationCompatibility } from './coordinator-schema-compatibility';
 import { fenceCoordinatorConnection } from './coordinator-lease';
 import { requireUpgrade } from '../upgrade/upgrade-trust';
 import { finishBusinessTransaction } from './business-transaction-hooks';
@@ -14,6 +16,13 @@ export function preparedConnection(
 ): { connection: Connection; activate(): number } {
   requireUpgrade(filename !== ':memory:', 'PREPARED_DATABASE_MUST_EXIST');
   let target: Database.Database = new Database(filename, { readonly: true, fileMustExist: true });
+  const migrationCount = readMigrationFiles({ migrationsFolder: migrationsDir() }).length;
+  try {
+    assertCoordinatorMigrationCompatibility(target, migrationCount);
+  } catch (error) {
+    target.close();
+    throw error;
+  }
   let activated = false;
   const proxy = new Proxy(target, {
     get(_unused, property) {
@@ -85,6 +94,7 @@ export function preparedConnection(
       const readonly = target;
       const writable = createConnection(filename);
       try {
+        assertCoordinatorMigrationCompatibility(writable.sqlite, migrationCount);
         target = fenceCoordinatorConnection(
           writable.sqlite,
           instanceId,
