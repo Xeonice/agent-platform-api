@@ -14,7 +14,11 @@ import { UpgradeStore } from './upgrade-store';
 import { loopbackOrigin, persistedBinding, UpgradeInspector } from './upgrade-inspector';
 import { requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
-import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
+import {
+  coordinatorWriterControl,
+  withCoordinatorBusinessEpoch,
+} from '../persistence/coordinator-lease';
+import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 import {
   UpgradeProbeEvidence,
   type UpgradeProbeLane,
@@ -391,9 +395,44 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     return { qualified: true, maxMs };
   }
   async observation(id: string, fence: number, weight: number): Promise<Json> {
+    const writer = coordinatorWriterControl(this.store.sqlite);
+    writer.assert();
     this.store.assertFence(id, fence);
-    const snapshot = this.store.snapshot(id),
-      binding = await this.inspector.entryBinding(),
+    const writerGeneration = writer.generation,
+      writerFence = writer.fence,
+      initialBinding = await this.inspector.entryBinding(),
+      initialScope = this.currentScope(id, fence, initialBinding),
+      initialBindingDigest = upgradeDigest(persistedBinding(initialBinding));
+    const assertAuthority = () => {
+      writer.assert();
+      this.store.assertFence(id, fence);
+      requireUpgrade(
+        writer.generation === writerGeneration &&
+          writer.fence === writerFence &&
+          Number(process.env.COORDINATOR_GENERATION) === writerGeneration,
+        'OBSERVATION_SCOPE_CHANGED',
+      );
+    };
+    const currentBinding = async () => {
+      assertAuthority();
+      const actual = await this.inspector.entryBinding();
+      assertAuthority();
+      requireUpgrade(
+        upgradeDigest(this.currentScope(id, fence, actual)) === upgradeDigest(initialScope) &&
+          upgradeDigest(persistedBinding(actual)) === initialBindingDigest,
+        'OBSERVATION_SCOPE_CHANGED',
+      );
+      return actual;
+    };
+    // Scan every real database snapshot on an independent read-only connection.
+    // A synchronous whole-database scan here starves the 20 Hz HTTP sampler.
+    // Collect mutable continuity/Owner/Web proofs only after the worker exits.
+    assertAuthority();
+    const integrityStartedAt = this.clock.now().getTime();
+    await verifyMigrationDatabaseIntegrity(this.store.sqlite);
+    const binding = await currentBinding(),
+      proofStartedAt = this.clock.now().getTime(),
+      snapshot = this.store.snapshot(id),
       continuity = await this.inspector.continuity(id, fence);
     const baseRow = this.store.sqlite
       .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
@@ -465,7 +504,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         )
         .get() as { n: number }
     ).n;
-    const integrity = this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok';
+    const integrity = true; // The uncached read-only worker above completed successfully.
     const ownerAudits = Array.isArray(owner?.owners) ? (owner.owners as Json[]) : [];
     const ownerGenerationsValid =
       ownerAudits.length > 0 &&
@@ -497,12 +536,23 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     } catch {
       webHealth = { known: false, healthy: false, observedAt: this.clock.now().toISOString() };
     }
-    this.store.assertFence(id, fence);
-    const finalBinding = await this.inspector.entryBinding();
+    const finalBinding = await currentBinding();
+    const now = this.clock.now().getTime(),
+      freshness = snapshot.plan.policy.observationFreshnessMs,
+      continuityAge = now - Date.parse(String(continuity.observedAt));
+    requireUpgrade(
+      now >= integrityStartedAt &&
+        now - integrityStartedAt <= freshness &&
+        now >= proofStartedAt &&
+        now - proofStartedAt <= freshness &&
+        Number.isFinite(continuityAge) &&
+        continuityAge >= -1000 &&
+        continuityAge <= freshness,
+      'OBSERVATION_STALE',
+    );
     const stableBinding =
       upgradeDigest(persistedBinding(finalBinding)) === upgradeDigest(persistedBinding(binding));
     const expected = this.currentScope(id, fence, binding);
-    const freshness = snapshot.plan.policy.observationFreshnessMs;
     const gateway = this.probeEvidence.read(
       'gateway',
       { ...expected, origin: loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) },

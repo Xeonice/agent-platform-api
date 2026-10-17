@@ -1,8 +1,12 @@
 import 'reflect-metadata';
 import { createServer, type Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fromEpochMs } from '@platform/shared-kernel';
 import { UpgradeObserver } from '../../../apps/api/src/platform/upgrade/upgrade-observer';
 import {
@@ -11,11 +15,14 @@ import {
 } from '../../../apps/api/src/platform/upgrade/upgrade-probe-evidence';
 import { UPGRADE_PROBE_IDENTITY_HEADERS } from '../../../apps/api/src/platform/upgrade/upgrade-probe-identity';
 import { useEnv } from '../../support/strict-ports';
+import { COORDINATOR_WRITER_CONTROL } from '../../../apps/api/src/platform/persistence/coordinator-lease';
+import * as integrity from '../../../apps/api/src/platform/upgrade/migration-database-integrity';
 
 type Json = Record<string, unknown>;
 let servers: Server[] = [],
   restore = () => {};
 let clockOffset = 0;
+const files: Array<{ db: Database.Database; directory: string }> = [];
 const clock = { now: () => fromEpochMs(Date.now() + clockOffset) };
 const ids = { next: randomUUID };
 const instanceId = 'verified-observer-http-fixture';
@@ -61,6 +68,7 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
       return;
     }
     if (state.waitMs) await delay(state.waitMs);
+    if (req.aborted || res.destroyed) return;
     if (state.headers) {
       res.setHeader(UPGRADE_PROBE_IDENTITY_HEADERS.instanceId, instanceId);
       res.setHeader(
@@ -97,6 +105,10 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
   return state;
 }
 async function fixture() {
+  const directory = mkdtempSync(join(tmpdir(), 'upg-observer-integrity-')),
+    db = new Database(join(directory, 'observation.sqlite'));
+  db.exec('CREATE TABLE unrelated_history(id INTEGER PRIMARY KEY, payload BLOB)');
+  files.push({ db, directory });
   const source = await backend(sourceDigest, false),
     candidate = await backend(candidateDigest, true);
   let binding: Json = {
@@ -145,13 +157,27 @@ async function fixture() {
       },
     },
   };
+  let writerValid = true,
+    controllerValid = true;
+  const writer = {
+    instanceId,
+    generation: Number(process.env.COORDINATOR_GENERATION),
+    fence: 3,
+    assert: () => {
+      if (!writerValid) throw new Error('COORDINATOR_WRITER_FENCE_EXPIRED');
+    },
+  };
   const store = {
     instanceId,
     latest: () => ({ attemptId: 'attempt' }),
     snapshot: () => snapshot,
     latestProbeSnapshot: () => ({ attempt: { attemptId: 'attempt' }, ...snapshot }),
-    assertFence: () => {},
+    assertFence: () => {
+      if (!controllerValid) throw new Error('UPGRADE_FENCE_EXPIRED');
+    },
     sqlite: {
+      name: db.name,
+      [COORDINATOR_WRITER_CONTROL]: writer,
       prepare: (sql: string) => ({
         run: (...args: unknown[]) => durable.push(args),
         get: () =>
@@ -165,7 +191,9 @@ async function fixture() {
               }
             : { n: 0 },
       }),
-      pragma: () => 'ok',
+      pragma: () => {
+        throw new Error('WHOLE_DATABASE_SCAN_ON_EVENT_LOOP');
+      },
     },
   };
   const inspector = {
@@ -174,6 +202,7 @@ async function fixture() {
       (await (await fetch(origin + '/internal/control/identity')).json()) as Json,
     continuity: async () => ({
       qualified: true,
+      observedAt: clock.now().toISOString(),
       resources: [],
       owner: {
         operations: [],
@@ -223,6 +252,15 @@ async function fixture() {
     observer,
     durable,
     snapshot,
+    db,
+    inspector,
+    writer,
+    retireWriter: () => {
+      writerValid = false;
+    },
+    expireController: () => {
+      controllerValid = false;
+    },
     binding: () => binding,
     change: (patch: Json) => {
       binding = { ...binding, ...patch };
@@ -240,11 +278,16 @@ beforeEach(() => {
   });
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const server of servers) {
     server.closeAllConnections();
     await new Promise<void>((ok) => server.close(() => ok()));
   }
   servers = [];
+  for (const { db, directory } of files.splice(0)) {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
   restore();
 });
 
@@ -335,6 +378,7 @@ describe('UPG actual backend HTTP evidence, independent of sticky gateway succes
       },
     });
     process.env.COORDINATOR_GENERATION = '3';
+    f.writer.generation = 3; // A new actual writer epoch cannot borrow the old cohort.
     expect((await f.observer.observation('attempt', 7, 0)).baseline).toMatchObject({
       known: false,
       qualified: false,
@@ -370,5 +414,138 @@ describe('UPG actual backend HTTP evidence, independent of sticky gateway succes
     f.candidate.waitMs = 2200;
     await f.sample('candidate');
     expect(f.read('candidate')).toMatchObject({ known: false, requests: 0, failures: 1 });
+  });
+  it('keeps real HTTP pairs and the event loop running during an uncached large-file integrity worker', async () => {
+    const f = await fixture();
+    f.db.transaction(() => {
+      const insert = f.db.prepare('INSERT INTO unrelated_history(payload) VALUES(zeroblob(?))');
+      for (let i = 0; i < 128; i++) insert.run(1024 * 1024);
+    })();
+    const scan = vi.spyOn(integrity, 'verifyMigrationDatabaseIntegrity');
+    let heartbeats = 0,
+      completedPairs = 0,
+      pending = false;
+    const timer = setInterval(() => {
+      heartbeats++;
+      if (!pending) {
+        pending = true;
+        void f.sample('gateway').then(() => {
+          completedPairs++;
+          pending = false;
+        });
+      }
+    }, 5);
+    try {
+      expect((await f.observer.observation('attempt', 7, 1)).sharedStateHealthy).toBe(true);
+      expect(heartbeats).toBeGreaterThan(1);
+      expect(completedPairs).toBeGreaterThan(0);
+      expect(f.read('gateway').known).toBe(true);
+      // Every observation starts its own actual worker; no previous pass is cached.
+      await f.observer.observation('attempt', 7, 1);
+      expect(scan).toHaveBeenCalledTimes(2);
+    } finally {
+      clearInterval(timer);
+      while (pending) await delay(1);
+    }
+  });
+  it.each([
+    ['retired writer', (f: Awaited<ReturnType<typeof fixture>>) => f.retireWriter()],
+    ['controller lease', (f: Awaited<ReturnType<typeof fixture>>) => f.expireController()],
+    ['route', (f: Awaited<ReturnType<typeof fixture>>) => f.change({ routeGeneration: 2 })],
+    ['weight', (f: Awaited<ReturnType<typeof fixture>>) => f.change({ weight: 25 })],
+    [
+      'API identity',
+      (f: Awaited<ReturnType<typeof fixture>>) =>
+        f.change({ oldApi: { origin: f.source.origin, digest: candidateDigest } }),
+    ],
+    [
+      'writer epoch',
+      (f: Awaited<ReturnType<typeof fixture>>) => {
+        f.writer.generation++;
+      },
+    ],
+    [
+      'observer epoch',
+      (f: Awaited<ReturnType<typeof fixture>>) => {
+        Object.assign(f.evidence, { observerEpoch: randomUUID() });
+      },
+    ],
+  ])(
+    'rejects %s changed while the real worker was awaited before collecting mutable proofs',
+    async (_name, change) => {
+      const f = await fixture();
+      const verify = integrity.verifyMigrationDatabaseIntegrity;
+      let release = () => {},
+        scanned = () => {};
+      const scannedPromise = new Promise<void>((ok) => {
+        scanned = ok;
+      });
+      const releasePromise = new Promise<void>((ok) => {
+        release = ok;
+      });
+      vi.spyOn(integrity, 'verifyMigrationDatabaseIntegrity').mockImplementationOnce(async (db) => {
+        await verify(db);
+        scanned();
+        await releasePromise;
+      });
+      const continuity = vi.spyOn(f.inspector, 'continuity');
+      const observation = f.observer.observation('attempt', 7, 1);
+      const rejection = expect(observation).rejects.toThrow();
+      await scannedPromise;
+      change(f);
+      release();
+      await rejection;
+      expect(continuity).not.toHaveBeenCalled();
+    },
+  );
+  it('refuses an expired integrity snapshot and stale mutable proof tails without relying on caller timeouts', async () => {
+    const f = await fixture();
+    const verify = integrity.verifyMigrationDatabaseIntegrity;
+    vi.spyOn(integrity, 'verifyMigrationDatabaseIntegrity').mockImplementationOnce(async (db) => {
+      await verify(db);
+      clockOffset += 6000;
+    });
+    // A late worker must not give its old read snapshot a fresh wrapper timestamp.
+    await expect(f.observer.observation('attempt', 7, 1)).rejects.toThrow('OBSERVATION_STALE');
+    const web = f.inspector.webBuild;
+    vi.spyOn(f.inspector, 'webBuild').mockImplementationOnce(async () => {
+      clockOffset += 5001;
+      return web();
+    });
+    await expect(f.observer.observation('attempt', 7, 1)).rejects.toThrow('OBSERVATION_STALE');
+  });
+  it.each([
+    ['route', (f: Awaited<ReturnType<typeof fixture>>) => f.change({ routeGeneration: 2 })],
+    ['writer', (f: Awaited<ReturnType<typeof fixture>>) => f.retireWriter()],
+    ['controller', (f: Awaited<ReturnType<typeof fixture>>) => f.expireController()],
+  ])('rejects %s changes during post-worker proof collection', async (_name, change) => {
+    const f = await fixture();
+    const web = f.inspector.webBuild;
+    vi.spyOn(f.inspector, 'webBuild').mockImplementationOnce(async () => {
+      change(f);
+      return web();
+    });
+    await expect(f.observer.observation('attempt', 7, 1)).rejects.toThrow();
+  });
+  it('does not stamp a stale continuity result with a new wrapper observation time', async () => {
+    const f = await fixture();
+    const continuity = f.inspector.continuity;
+    vi.spyOn(f.inspector, 'continuity').mockImplementation(async () => ({
+      ...(await continuity()),
+      observedAt: new Date(clock.now().getTime() - 5001).toISOString(),
+    }));
+    await expect(f.observer.observation('attempt', 7, 1)).rejects.toThrow('OBSERVATION_STALE');
+  });
+  it('fails closed on real foreign-key corruption in the independently opened database', async () => {
+    const f = await fixture();
+    f.db.pragma('foreign_keys=OFF');
+    f.db.exec(
+      'CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id)); INSERT INTO child VALUES(1)',
+    );
+    const continuity = vi.spyOn(f.inspector, 'continuity');
+    await expect(f.observer.observation('attempt', 7, 1)).rejects.toThrow(
+      'GLOBAL_SCHEMA_INTEGRITY_FAILED',
+    );
+    expect(continuity).not.toHaveBeenCalled();
   });
 });
