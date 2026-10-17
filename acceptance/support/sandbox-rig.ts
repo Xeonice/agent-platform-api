@@ -328,6 +328,7 @@ export function harness(
     events,
     clock,
     resources,
+    provision,
     schedulerQueue,
     taskRepo,
     jobCompletions,

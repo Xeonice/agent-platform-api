@@ -38,6 +38,15 @@ export interface RuntimeOwnerClientOptions {
   clock: Clock;
   deferClaim?: boolean;
 }
+function unconfirmedTransport(cause: unknown): SandboxProviderError {
+  return new SandboxProviderError(
+    SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+    'Runtime operation result is not confirmed; look up the original intent',
+    cause,
+    true,
+  );
+}
+
 interface RuntimeReference {
   ownerId: string;
   sandboxId: string;
@@ -417,11 +426,11 @@ export class RuntimeOwnerConnection {
       outgoing.setTimeout(
         method === 'GET' && path.startsWith('/runtime/streams/') ? 0 : 120000,
         () =>
-          outgoing.destroy(
-            new Error('Runtime operation result is not confirmed; look up the original intent'),
-          ),
+          outgoing.destroy(unconfirmedTransport(new Error('RuntimeOwner HTTP response timeout'))),
       );
-      outgoing.on('error', reject);
+      outgoing.on('error', (error) =>
+        reject(error instanceof SandboxProviderError ? error : unconfirmedTransport(error)),
+      );
       outgoing.end(body);
     });
   }
@@ -433,12 +442,24 @@ export class RuntimeOwnerConnection {
   private async text(response: IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
     let bytes = 0;
-    for await (const item of response) {
-      const chunk = Buffer.isBuffer(item) ? item : Buffer.from(item as string);
-      bytes += chunk.length;
-      if (bytes > 32 * 1024 * 1024)
-        throw new Error('Runtime response exceeds control-message limit');
-      chunks.push(chunk);
+    try {
+      for await (const item of response) {
+        const chunk = Buffer.isBuffer(item) ? item : Buffer.from(item as string);
+        bytes += chunk.length;
+        if (bytes > 32 * 1024 * 1024)
+          throw new Error('Runtime response exceeds control-message limit');
+        chunks.push(chunk);
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ERR_STREAM_PREMATURE_CLOSE'].includes(
+          String(error.code),
+        )
+      )
+        throw unconfirmedTransport(error);
+      throw error;
     }
     return Buffer.concat(chunks).toString('utf8');
   }

@@ -357,6 +357,22 @@ export class RuntimeOwnerServer {
         throw new Error('Operation identity reused with different input');
       return active;
     }
+    // A transport timeout does not cancel the original native start. Recovery
+    // may inspect the same assigned handle, but must not dispatch a second start
+    // while the first operation is still applying in this stable owner.
+    if (
+      call.method === 'start' &&
+      call.fence.sandboxId !== undefined &&
+      [...this.effectTargets.values()].some(
+        (target) => target.method === 'start' && target.sandboxId === call.fence.sandboxId,
+      )
+    )
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Original runtime start remains in flight; observe the assigned runtime before retrying',
+        undefined,
+        true,
+      );
     const prior = this.journal.begin(call);
     if (prior.cached) return prior.value;
     this.effectTargets.set(call.fence.operationId, {

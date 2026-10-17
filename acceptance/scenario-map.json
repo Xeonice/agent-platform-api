@@ -374,6 +374,12 @@
     "relation": "backend-support"
   },
   {
+    "file": "acceptance/upg/protocol/provision-owner-timeout.spec.ts",
+    "acs": ["AC-UPG-007.3"],
+    "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy; the external runtime is controlled and does not establish native VM continuity.",
+    "relation": "backend-support"
+  },
+  {
     "file": "acceptance/upg/protocol/automation-launch-recovery.spec.ts",
     "acs": ["AC-UPG-001.3", "AC-UPG-006.5", "AC-UPG-007.2"],
     "purpose": "Actual Owner HTTP journal plus real business services validate fixed job intent across lost acknowledgement and writer epochs; no native runtime claim.",
