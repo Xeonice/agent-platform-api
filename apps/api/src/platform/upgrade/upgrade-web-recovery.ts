@@ -1,13 +1,14 @@
-import { statfs, readFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { statfs } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { freemem } from 'node:os';
 import { getHeapStatistics } from 'node:v8';
 import type { Clock } from '@platform/shared-kernel';
-import { ConfirmedServiceReleaseSchema } from '@platform/contracts';
+import { ConfirmedServiceReleaseSchema, SignedUpgradeManifestSchema } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
 import { UpgradeInspector, loopbackOrigin } from './upgrade-inspector';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { env } from '../config/env';
+import { initialSourceActivation } from './upgrade-artifact-proof';
 
 type Json = Record<string, unknown>;
 /** Every action stays within the independently persisted recovery plan. */
@@ -140,9 +141,9 @@ export async function qualifyWebRecovery(
   );
   const previous = store.sqlite
     .prepare(
-      "SELECT plan FROM upgrade_attempts WHERE target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
+      "SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
     )
-    .get(fallback.releaseId) as { plan: string } | undefined;
+    .get(store.instanceId, fallback.releaseId) as { manifest: string; plan: string } | undefined;
   const root = previous
     ? resolve(
         process.env.UPGRADE_INSTALLER_ROOT ?? '',
@@ -153,12 +154,14 @@ export async function qualifyWebRecovery(
       )
     : process.env.UPGRADE_INITIAL_ARTIFACT_ROOT;
   requireUpgrade(root, 'RETAINED_WEB_ARTIFACT_UNKNOWN');
-  const bundle = JSON.parse(await readFile(join(root, 'upgrade-artifact.json'), 'utf8')) as Json;
-  await inspector.verifyArtifact(root, bundle.components as typeof source.components);
+  const retainedRelease = previous
+    ? SignedUpgradeManifestSchema.parse(JSON.parse(previous.manifest)).manifest
+    : await initialSourceActivation(store);
+  requireUpgrade(retainedRelease.releaseId === fallback.releaseId, 'RETAINED_WEB_ARTIFACT_CHANGED');
+  await inspector.verifySourceArtifact(root, retainedRelease.components);
   requireUpgrade(
-    upgradeDigest((bundle.components as typeof source.components).web) ===
-      upgradeDigest(sourceWeb) &&
-      (bundle.components as typeof source.components).api.artifactDigest === fallback.apiDigest,
+    upgradeDigest(retainedRelease.components.web) === upgradeDigest(sourceWeb) &&
+      retainedRelease.components.api.artifactDigest === fallback.apiDigest,
     'RETAINED_WEB_ARTIFACT_CHANGED',
   );
   const fs = await statfs(env.dataRoot),

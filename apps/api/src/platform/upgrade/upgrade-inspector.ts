@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -29,6 +28,8 @@ import { PasscodeService } from '../access-passcode/passcode.service';
 import { SESSION_COOKIE } from '../access-passcode/session-cookie';
 import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
 import { imageRuntimeSchemaCommitted } from './image-runtime-schema-migration';
+import { initialSourceActivation, sourceArtifactProof } from './upgrade-artifact-proof';
+import { observeUpgradeOnce } from './upgrade-observation';
 
 type Json = Record<string, unknown>;
 export function persistedBinding(value: Json): Json {
@@ -213,6 +214,11 @@ export class UpgradeInspector {
    * Only installed signed artifacts and a live unique writer may seed a NEW
    * user intent. The last complete release remains the version-chain anchor. */
   async sourceActual(forRecovery = false): Promise<UpgradeSourceActual | null> {
+    return observeUpgradeOnce(this, 'sourceActual:' + forRecovery, () =>
+      this.measureSourceActual(forRecovery),
+    );
+  }
+  private async measureSourceActual(forRecovery: boolean): Promise<UpgradeSourceActual | null> {
     const source = this.store.confirmed(),
       latest = this.store.latest();
     if (
@@ -262,14 +268,13 @@ export class UpgradeInspector {
       'ACTUAL_OWNER_UNKNOWN',
     );
     const installs = this.store.sqlite
-      .prepare('SELECT manifest,plan FROM upgrade_attempts ORDER BY generation DESC')
-      .all() as { manifest: string; plan: string }[];
+      .prepare(
+        'SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC',
+      )
+      .all(this.store.instanceId) as { manifest: string; plan: string }[];
     const candidates: { root: string; components: ConfirmedServiceRelease['components'] }[] = [];
-    if (process.env.UPGRADE_INITIAL_ARTIFACT_ROOT && process.env.UPGRADE_INITIAL_RELEASE_PATH) {
-      const raw = JSON.parse(
-        await readFile(process.env.UPGRADE_INITIAL_RELEASE_PATH, 'utf8'),
-      ) as Json;
-      const initial = (raw.release ?? raw) as ConfirmedServiceRelease;
+    if (process.env.UPGRADE_INITIAL_ARTIFACT_ROOT) {
+      const initial = await initialSourceActivation(this.store);
       candidates.push({
         root: process.env.UPGRADE_INITIAL_ARTIFACT_ROOT,
         components: initial.components,
@@ -314,7 +319,7 @@ export class UpgradeInspector {
       });
       requireUpgrade(match, 'SOURCE_COMPONENT_UNCONFIRMED');
       if (!verified.has(match.root)) {
-        await this.verifyArtifact(match.root, match.components);
+        await this.verifySourceArtifact(match.root, match.components);
         verified.add(match.root);
       }
       const part = match.components[name] ?? match.components.api;
@@ -459,7 +464,14 @@ export class UpgradeInspector {
     root: string,
     expected: ConfirmedServiceRelease['components'],
   ): Promise<void> {
-    await verifyUpgradeArtifact(root, expected);
+    await observeUpgradeOnce(this, 'artifact:' + root + ':' + upgradeDigest(expected), () =>
+      verifyUpgradeArtifact(root, expected),
+    );
+  }
+  async verifySourceArtifact(root: string, expected: ConfirmedServiceRelease['components']) {
+    return sourceArtifactProof(root, expected, (path, components) =>
+      this.verifyArtifact(path, components),
+    );
   }
   schema(): number {
     return this.migrations.schema();
