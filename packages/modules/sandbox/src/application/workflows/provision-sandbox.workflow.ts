@@ -566,10 +566,15 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       //    盒子里的事实就变了，`injectedRuntimes` 必须跟着覆盖（见实体上的注释）。
       const credentials = await this.prepareCredentials(sandbox);
       try {
+        // Recovery must make the same eligibility decision as first provision:
+        // an already expired credential is omitted before delivery, while the
+        // injection checks still reject a later revocation of a reserved one.
+        const usable = await this.reserveInjection(sandbox, credentials);
+        this.assertActive(sandbox.id);
         // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
         // 而用户对「重启」的时间预期比「新建」短得多。
         stageDetail = await this.imageStagedOf(provider, spec);
-        await this.runStartingSteps(sandbox, provider, handle, spec, credentials, stageDetail);
+        await this.runStartingSteps(sandbox, provider, handle, spec, usable, stageDetail);
       } finally {
         for (const c of credentials) c.credential.zeroize();
       }

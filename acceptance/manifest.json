@@ -6095,6 +6095,11 @@
           "file": "acceptance/sbx/service/lifecycle-races.spec.ts",
           "purpose": "Actual services and SQLite coordinate cancel/delete across workspace/create/start waits, release allocation and revalidate credentials before injection.",
           "relation": "backend-support"
+        },
+        {
+          "file": "acceptance/upg/protocol/provision-owner-timeout.spec.ts",
+          "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy. Actual credential services and SQLite omit already expired credentials during recovery, inject valid credentials and reject revocation before or during injection; credential materialization and the external runtime are controlled and do not establish native VM or model continuity.",
+          "relation": "backend-support"
         }
       ]
     },
@@ -15229,7 +15234,7 @@
         },
         {
           "file": "acceptance/upg/protocol/provision-owner-timeout.spec.ts",
-          "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy; the external runtime is controlled and does not establish native VM continuity.",
+          "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy. Actual credential services and SQLite omit already expired credentials during recovery, inject valid credentials and reject revocation before or during injection; credential materialization and the external runtime are controlled and do not establish native VM or model continuity.",
           "relation": "backend-support"
         },
         {

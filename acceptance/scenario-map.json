@@ -375,8 +375,8 @@
   },
   {
     "file": "acceptance/upg/protocol/provision-owner-timeout.spec.ts",
-    "acs": ["AC-UPG-007.3"],
-    "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy; the external runtime is controlled and does not establish native VM continuity.",
+    "acs": ["AC-UPG-007.3", "AC-CRD-003.6"],
+    "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy. Actual credential services and SQLite omit already expired credentials during recovery, inject valid credentials and reject revocation before or during injection; credential materialization and the external runtime are controlled and do not establish native VM or model continuity.",
     "relation": "backend-support"
   },
   {
