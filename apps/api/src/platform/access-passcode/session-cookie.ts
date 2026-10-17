@@ -22,7 +22,23 @@ export function readCookie(req: Request, name: string): string | undefined {
   if (!raw) return undefined;
   for (const part of raw.split(';')) {
     const [k, ...rest] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(rest.join('='));
+    if (k === name) {
+      try {
+        return decodeURIComponent(rest.join('='));
+      } catch {
+        return undefined;
+      }
+    }
   }
   return undefined;
+}
+
+/** The existing instance access credential transports, shared by the guard and upgrades. */
+export function presentedAccessPasscode(req: Request): string | undefined {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length);
+  const header = req.headers['x-access-passcode'];
+  if (header) return Array.isArray(header) ? header[0] : header;
+  const query = req.query?.['passcode'];
+  return typeof query === 'string' ? query : undefined;
 }

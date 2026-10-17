@@ -159,6 +159,7 @@ export async function startRuntimeOwnerFromEnvironment(
     'PLATFORM_CONTROL_RPC_KEY',
     'PLATFORM_CONTROLLER_RPC_KEY',
     'UPGRADE_ADMIN_KEY',
+    'UPGRADE_LEGACY_AUTH_CONTINUITY_KEY',
   ])
     if (Object.hasOwn(process.env, key))
       throw new Error('RuntimeOwner may not receive business database or controller authority');

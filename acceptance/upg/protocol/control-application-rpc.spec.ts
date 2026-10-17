@@ -35,7 +35,6 @@ import type {
 const INSTANCE = 'control-rpc-test-instance';
 const INTERNAL_KEY = 'synthetic-control-rpc-key-at-least-32-characters';
 const PASSCODE = 'synthetic-control-rpc-access-passcode';
-const ADMIN_KEY = 'synthetic-independent-upgrade-administrator-key';
 const ORIGIN = 'http://127.0.0.1:43191';
 const roleEntry = resolve('apps/api/dist/roles/control-api-main.js');
 let coordinator: {
@@ -158,7 +157,7 @@ beforeAll(async () => {
     ACCESS_PASSCODE_AUTO_GENERATE: 'false',
     API_ALLOWED_ORIGINS: ORIGIN,
     PASSCODE_COOKIE_SECURE: 'false',
-    UPGRADE_ADMIN_KEY: ADMIN_KEY,
+    UPGRADE_ADMIN_KEY: undefined,
     SANDBOX_DEFAULT_IMAGE: 'ghcr.io/agent-infra/sandbox:latest',
   });
   const { AppModule } = await import('../../../apps/api/src/app.module');
@@ -408,32 +407,84 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
     expect(response.body).not.toHaveProperty('result');
     expect(JSON.stringify(response.body)).not.toContain(PASSCODE);
   });
-  it('upgrade grant checks CSRF/capability in the original public request and forwards actual signed viewer/grant cookies', async () => {
+  it('the existing unlock authorizes upgrades through actual ControlAPI RPC without a separate key', async () => {
+    const before = (db.prepare('SELECT count(*) n FROM upgrade_attempts').get() as { n: number }).n;
     const status = await publicRead('/api/system/upgrade/status').expect(200);
     const viewerCookies = cookies(status.headers['set-cookie']);
     expect(viewerCookies.length).toBeGreaterThan(0);
     expect(viewerCookies[0]).toContain('HttpOnly');
+    expect(status.headers['x-upgrade-user-scope']).toBe(status.body.userScope);
+    expect(status.body.capabilities).toMatchObject({
+      canUpgradeInstance: true,
+      canAuthenticate: false,
+    });
+    expect((db.prepare('SELECT count(*) n FROM upgrade_attempts').get() as { n: number }).n).toBe(
+      before,
+    );
     const viewer = [...viewerCookies.map((value) => value.split(';')[0]), cookie].join('; ');
+    // The old endpoint remains usable for rolling clients, without issuing a grant.
     await request(url)
       .post('/api/system/upgrade/access')
       .set('Origin', ORIGIN)
       .set('Cookie', viewer)
-      .send({ upgradeKey: ADMIN_KEY })
+      .send({})
       .expect(403);
-    const grant = await request(url)
+    const compatible = await request(url)
       .post('/api/system/upgrade/access')
       .set('Origin', ORIGIN)
       .set('Cookie', viewer)
       .set('x-upgrade-csrf', status.body.csrfToken)
-      .send({ upgradeKey: ADMIN_KEY })
+      .send({})
       .expect(200);
-    expect(grant.body.capabilities.canUpgradeInstance).toBe(true);
+    expect(compatible.body.capabilities).toMatchObject({
+      canUpgradeInstance: true,
+      canAuthenticate: false,
+    });
     expect(
-      cookies(grant.headers['set-cookie']).some(
-        (value: string) => value.startsWith('ap_upgrade_grant=') && value.includes('HttpOnly'),
+      cookies(compatible.headers['set-cookie']).some((value) =>
+        value.startsWith('ap_upgrade_grant='),
       ),
-    ).toBe(true);
-    expect(status.body.capabilities.canUpgradeInstance).toBe(false);
+    ).toBe(false);
+    expect(compatible.body.userScope).toBe(status.body.userScope);
+    // A real upgrade command reaches catalog admission immediately; no manufactured installed release exists in this fixture.
+    const command = {
+      requestId: randomUUID(),
+      targetReleaseId: 'v9.9.9-unpublished',
+      targetDigest: 'sha256:' + 'a'.repeat(64),
+      expectedActivationGeneration: 0,
+    };
+    for (const headers of [
+      { Origin: ORIGIN, Cookie: viewer },
+      { Origin: 'https://other.invalid', Cookie: viewer, 'x-upgrade-csrf': status.body.csrfToken },
+    ])
+      await request(url)
+        .post('/api/system/upgrade/requests')
+        .set(headers)
+        .send(command)
+        .expect(403);
+    await request(url)
+      .post('/api/system/upgrade/requests')
+      .set('Origin', ORIGIN)
+      .set('Cookie', 'ap_session=forged; ap_upgrade_grant=forged')
+      .set('x-upgrade-csrf', status.body.csrfToken)
+      .send(command)
+      .expect(401);
+    const reached = await request(url)
+      .post('/api/system/upgrade/requests')
+      .set('Origin', ORIGIN)
+      .set('Cookie', viewer)
+      .set('x-upgrade-csrf', status.body.csrfToken)
+      .send(command)
+      .expect(409);
+    expect(reached.body.code).not.toBe('UPGRADE_PERMISSION_REQUIRED');
+    expect((db.prepare('SELECT count(*) n FROM upgrade_attempts').get() as { n: number }).n).toBe(
+      before,
+    );
+    // Lookup uses real actor scope and exposes the viewer proof header through both process/RPC hops.
+    const id = randomUUID();
+    // A missing request still exercises authorization but deliberately fabricates no accepted release.
+    const missing = await publicRead('/api/system/upgrade/requests/' + id).expect(404);
+    expect(missing.body.code).toBe('UPGRADE_REQUEST_NOT_FOUND');
   });
   it('forwards the actual audit gzip bytes and headers rather than a JSON representation of a stream', async () => {
     const binary = await fetch(`${url}/api/system/audit/export`, {

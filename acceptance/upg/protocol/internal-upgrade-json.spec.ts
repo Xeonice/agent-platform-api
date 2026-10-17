@@ -19,6 +19,7 @@ import { fromEpochMs } from '@platform/shared-kernel';
 import { configurePlatformApp } from '../../../apps/api/src/bootstrap/configure-app';
 import { INTERNAL_UPGRADE_JSON_LIMIT } from '../../../apps/api/src/bootstrap/internal-upgrade-json';
 import { DeploymentState } from '../../../apps/api/src/platform/deployment/deployment-state';
+import { PasscodeService } from '../../../apps/api/src/platform/access-passcode/passcode.service';
 import { UpgradeSecurity } from '../../../apps/api/src/platform/access-passcode/upgrade-security.service';
 import { UpgradeInternalController } from '../../../apps/api/src/platform/upgrade/upgrade.controller';
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
@@ -172,7 +173,7 @@ beforeEach(async () => {
   );
   attemptId = accepted.attemptId;
   fence = store.claim(attemptId, 'state-fixture-controller', 120000).fence;
-  const security = new UpgradeSecurity(clock, ids);
+  const security = new UpgradeSecurity(clock, ids, new PasscodeService(drizzle(sqlite)));
   const service = new UpgradeService(
     store,
     undefined as never,

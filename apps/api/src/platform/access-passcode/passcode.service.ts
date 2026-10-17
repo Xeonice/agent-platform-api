@@ -6,6 +6,8 @@ import { DATABASE } from '@platform/shared-kernel';
 import { env } from '../config/env';
 import { SYSTEM_SETTINGS_ROW_ID, systemSettings } from '../system/system-settings.sqlite';
 import { hashPasscode, verifyPasscode } from './passcode-hash';
+import type { Request } from 'express';
+import { SESSION_COOKIE, readCookie, presentedAccessPasscode } from './session-cookie';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
 
@@ -100,6 +102,15 @@ export class PasscodeService {
     if (process.env.ACCESS_PASSCODE_ALLOW_LOOPBACK !== 'true' || !address) return false;
     const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
     return normalized === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
+  }
+
+  /** Read-only authorization check using exactly the instance's existing access policy.
+   * The HTTP guard still owns lockout accounting and issuing access cookies. */
+  authenticatesRequest(req: Request, now: number): boolean {
+    if (!this.enabled || this.allowsLoopback(req.socket.remoteAddress)) return true;
+    if (this.verifySessionToken(readCookie(req, SESSION_COOKIE), now)) return true;
+    const presented = presentedAccessPasscode(req);
+    return presented !== undefined && this.matches(presented);
   }
 
   /** When the stored passcode was last written — `undefined` for env / never set. */

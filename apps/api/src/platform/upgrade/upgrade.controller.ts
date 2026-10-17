@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, Res } from '@nestjs/common';
-import { ApiAcceptedResponse, ApiOkResponse, ApiTags } from '@nestjs/swagger';
+import { ApiAcceptedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
@@ -48,6 +48,10 @@ export class UpgradeController {
     return this.upgrades.status(req, res);
   }
   @Post('access')
+  @ApiOperation({
+    deprecated: true,
+    summary: 'Compatibility endpoint; instance access already permits upgrades',
+  })
   @HttpCode(200)
   @ApiOkResponse({ type: UpgradeStatusDto })
   access(

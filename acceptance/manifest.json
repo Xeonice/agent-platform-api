@@ -14838,7 +14838,7 @@
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
         "scenarios": ["F01", "F03", "I01", "I02"],
         "layers": ["web", "real-browser-api-controller"],
-        "actualExpected": "available无attempt/percent、只读提示/按权限命令；ongoing0–99、installed不同ready才刷新；轻量不抢焦点，no-click零执行",
+        "actualExpected": "available无attempt/percent、已解锁直接点升级，无授权UI；ongoing0–99、installed不同ready才刷新；轻量不抢焦点，no-click零执行",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
       }
@@ -14870,9 +14870,9 @@
       "requirement": "REQ-UPG-005",
       "source": "../docs/product/requirements/UPG.md:130",
       "level": "跨仓／API",
-      "given": "原任务运行，当前操作人尚未授权／已经授权，重复点击或提交后断网",
-      "when": "显式立即升级、重复提交／按requestId查结果，之后合法刷新",
-      "then": "服务端planned授权与instance CAS通过才接纳单attempt、固定精确target；共享口令不默认admin，未授权无副作用，目录新target不替换已确认目标；仅实际不同ready页面可刷新，复用Web无需刷新，无任务停止／重建／重跑",
+      "given": "原任务运行，操作人已通过已有访问保护，重复点击或提交后断网；另有失效访问会话对照",
+      "when": "直接点击立即升级、重复提交／按requestId查结果，之后合法刷新",
+      "then": "无额外口令／密钥／授权对话框；服务端验证已有会话、Origin／CSRF、实例绑定与CAS后接纳单attempt、固定精确target；失效访问会话拒绝且零副作用，目录新target不替换已确认目标；仅实际不同ready页面可刷新，复用Web无需刷新，无任务停止／重建／重跑",
       "responsibility": "shared",
       "coverage": "scenario-defined",
       "scenarios": [
@@ -14891,7 +14891,7 @@
         "source": "../docs/testing/changes/2026-10-10-不停机升级与沙箱续接测试计划.md",
         "scenarios": ["B02", "B03", "F01", "I02", "I03", "N01"],
         "layers": ["backend", "web", "real-browser-api-controller", "native-runtime"],
-        "actualExpected": "真权限/CSRF/CAS单受理、target固定、断网lookup，升级与刷新分开，sameWeb不强刷",
+        "actualExpected": "已有访问会话/Origin/CSRF/CAS单受理，无独立升级密钥、target固定、断网lookup，升级与刷新分开，sameWeb不强刷",
         "status": "not-run",
         "meaning": "A source mapping or passed API unit/protocol test does not satisfy missing shared/browser/native layers. Only a report for the exact artifact input may confirm this AC."
       }
@@ -15004,7 +15004,7 @@
       "level": "真实升级",
       "given": "删除字段、长 DDL／全表重建、新语义不可无损旧表示或未经证明的 runtime 热接管",
       "when": "预检兼容化／回退资格／连续性预算，并到达独立contract步骤",
-      "then": "优先桥接／影子／短epoch；窗口内新语义禁用／隔离，不可逆边界预审只能前进并验证恢复；破坏contract另由有权限用户发起，CD／窗口到期不自动执行；无证明延期／限功能，残余维护另证，不删门禁或停任务强行升级",
+      "then": "优先桥接／影子／短epoch；窗口内新语义禁用／隔离，不可逆边界预审只能前进并验证恢复；破坏contract另由已进入平台的用户发起，CD／窗口到期不自动执行；无证明延期／限功能，残余维护另证，不删门禁或停任务强行升级",
       "responsibility": "shared",
       "coverage": "scenario-defined",
       "scenarios": [
@@ -15259,7 +15259,7 @@
       "source": "../docs/product/requirements/UPG.md:175",
       "level": "集成",
       "given": "熔断、只能前进边界或不满足安全回退，之后修复／出现新target",
-      "when": "诊断、CD重试、开页检查及有权限用户再次明确发起",
+      "when": "诊断、CD重试、开页检查及已进入平台的用户再次明确发起",
       "then": "保留健康组合与真实失败原因，诊断只读；同attempt不循环重试，CD／目录变化不创建新attempt或换目标；用户重新发起才接纳固定target的新attempt重过全门禁，独立破坏contract另行用户发起；不退数据或伪完成",
       "responsibility": "shared",
       "coverage": "scenario-defined",
@@ -15621,7 +15621,7 @@
       "level": "跨仓浏览器",
       "given": "available未升级、实例0–99或已确认100；Web artifact相同／不同且缓存可能旧",
       "when": "按状态发起升级或刷新页面",
-      "then": "升级权限与刷新动作分开，available仅显式受权命令接纳才执行；100后不同实际ready页面才刷新，API单变／Web复用无强制刷新；只有实载构建才改页面身份，不重启attempt，原任务续接",
+      "then": "显式升级命令与刷新动作分开，available仅显式受权命令接纳才执行；100后不同实际ready页面才刷新，API单变／Web复用无强制刷新；只有实载构建才改页面身份，不重启attempt，原任务续接",
       "responsibility": "shared",
       "coverage": "scenario-defined",
       "scenarios": [
@@ -15648,7 +15648,7 @@
       "level": "API／跨仓",
       "given": "精确target验证、跨实例／attempt／generation旧响应，重复点击或重复requestId，另有目录新版本",
       "when": "接纳实例命令并汇总升级／recovery",
-      "then": "验manifest／digest／信任provenance／架构／版本链／schema兼容与本实例授权，CAS单活动attempt，重复查同结果；目标不可被CD替换，旧响应／原100不覆盖新计划；恢复关联原尝试，新尝试仍须操作人明确发起",
+      "then": "验manifest／digest／信任provenance／架构／版本链／schema兼容与本实例访问会话，CAS单活动attempt，重复查同结果；目标不可被CD替换，旧响应／原100不覆盖新计划；恢复关联原尝试，新尝试仍须操作人明确发起",
       "responsibility": "shared",
       "coverage": "scenario-defined",
       "scenarios": [

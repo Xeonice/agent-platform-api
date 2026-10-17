@@ -82,6 +82,7 @@ export class UpgradeService {
       /* Unknown installed data stays unknown, never a guessed ENV version. */
     }
     const principal = granted ?? this.security.principal(req, res, this.store.instanceId);
+    res.setHeader('X-Upgrade-User-Scope', principal.userScope);
     await this.catalog.refresh();
     const row = this.store.instance(),
       last = this.store.confirmed();
@@ -230,7 +231,9 @@ export class UpgradeService {
   lookup(req: Request, res: Response, id: string) {
     const principal = this.security.principal(req, res, this.store.instanceId);
     requireUpgrade(principal.canUpgrade, 'UPGRADE_PERMISSION_REQUIRED', 403);
-    return this.store.lookup(principal.actorId, id);
+    const attempt = this.store.lookup(principal.actorId, id);
+    res.setHeader('X-Upgrade-User-Scope', principal.userScope);
+    return attempt;
   }
   async claim(id: string, controllerId: string, leaseMs: number) {
     const currentBinding = await this.inspector.entryBinding();

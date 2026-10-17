@@ -2716,6 +2716,7 @@
     },
     "/api/system/upgrade/access": {
       "post": {
+        "deprecated": true,
         "operationId": "UpgradeController_access",
         "parameters": [],
         "requestBody": {
@@ -2740,6 +2741,7 @@
             }
           }
         },
+        "summary": "Compatibility endpoint; instance access already permits upgrades",
         "tags": [
           "upgrade"
         ]
@@ -8403,13 +8405,9 @@
         "properties": {
           "upgradeKey": {
             "type": "string",
-            "minLength": 16,
             "maxLength": 512
           }
-        },
-        "required": [
-          "upgradeKey"
-        ]
+        }
       },
       "UpgradeRequestDto": {
         "type": "object",

@@ -3,7 +3,12 @@ import type { Request, Response } from 'express';
 import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
 import { passcodeInvalid, passcodeLocked, passcodeRequired } from './passcode-errors';
-import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
+import {
+  SESSION_COOKIE,
+  readCookie,
+  setSessionCookie,
+  presentedAccessPasscode,
+} from './session-cookie';
 import { readPublicNetworkConfig } from '../config/public-network';
 import { requestClientIp } from './client-ip';
 
@@ -61,7 +66,7 @@ export class PasscodeGuard implements CanActivate {
       throw passcodeLocked(lockedFor);
     }
 
-    const presented = this.presentedPasscode(req);
+    const presented = presentedAccessPasscode(req);
     if (presented !== undefined && this.passcodes.matches(presented)) {
       this.limiter.reset(ip);
       setSessionCookie(res, this.passcodes.issueSessionToken(now));
@@ -87,14 +92,5 @@ export class PasscodeGuard implements CanActivate {
     // the passcode-submission endpoint must itself be reachable without a passcode.
     if (req.method === 'POST' && req.path === '/api/access/unlock') return true;
     return false;
-  }
-
-  private presentedPasscode(req: Request): string | undefined {
-    const auth = req.headers.authorization;
-    if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length);
-    const header = req.headers['x-access-passcode'];
-    if (header) return Array.isArray(header) ? header[0] : header;
-    const q = req.query?.['passcode'];
-    return typeof q === 'string' ? q : undefined;
   }
 }

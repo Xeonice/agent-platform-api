@@ -613,12 +613,14 @@ export class UpgradeInspector {
     const row = this.store.sqlite
       .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
       .get(id) as { snapshot: string } | undefined;
-    if (
-      !row ||
-      (JSON.parse(row.snapshot) as Json).authContinuityFingerprint !== this.authFingerprint()
-    )
-      return false;
-    const challenge = this.security.continuityChallenge(this.store.instanceId);
+    if (!row) return false;
+    const expected = (JSON.parse(row.snapshot) as Json).authContinuityFingerprint;
+    const legacy = this.security.legacyContinuityFingerprint(this.store.instanceId);
+    const legacyBaseline =
+      legacy !== null &&
+      expected === upgradeDigest({ upgrade: legacy, access: this.passcodes.issueSessionToken(0) });
+    if (expected !== this.authFingerprint() && !legacyBaseline) return false;
+    const challenge = this.security.continuityChallenge(this.store.instanceId, legacyBaseline);
     const cookie =
       challenge.cookie +
       '; ' +
@@ -628,7 +630,7 @@ export class UpgradeInspector {
     try {
       // A Web outage must not make the independent cookie/capability proof
       // depend on Catalog, installed-Web or Runtime health. The current
-      // explicitly granted principal has the same instance-administrator actor
+      // authenticated instance principal has the same instance-administrator actor
       // as the original accepted request; lookup independently checks that
       // actor plus instance/request identity and performs no upgrade action.
       const accepted = this.store.attempt(id);
@@ -640,6 +642,16 @@ export class UpgradeInspector {
         },
       );
       if (!response.ok) return false;
+      const returnedScope = response.headers.get('x-upgrade-user-scope');
+      // The preceding API release predates this header. Only its sealed legacy
+      // baseline and a signed legacy challenge can use that compatibility path:
+      // its real HTTP guard still verifies ap_session and its old parser verifies
+      // the viewer-bound grant. New baselines always require the scope header.
+      if (
+        returnedScope !== challenge.userScope &&
+        !(returnedScope === null && legacyBaseline && challenge.legacy)
+      )
+        return false;
       const actual = (await response.json()) as Json;
       return (
         actual.instanceId === this.store.instanceId &&

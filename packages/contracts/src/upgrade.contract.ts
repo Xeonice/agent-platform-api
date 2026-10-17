@@ -254,7 +254,10 @@ export const UpgradeRequestSchema = z
     expectedActivationGeneration: z.number().int().nonnegative(),
   })
   .strict();
-export const UpgradeAccessSchema = z.object({ upgradeKey: z.string().min(16).max(512) }).strict();
+/** Deprecated rolling-compatibility request: instance access already authorizes upgrades. */
+export const UpgradeAccessSchema = z
+  .object({ upgradeKey: z.string().max(512).optional() })
+  .strict();
 export const UpgradeAttemptStateSchema = z.enum([
   'accepted',
   'downloading',

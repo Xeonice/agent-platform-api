@@ -7,6 +7,7 @@ import type { Request, Response } from 'express';
 import { env } from '../config/env';
 import { readPublicNetworkConfig, parseHttpOrigin } from '../config/public-network';
 import { readCookie } from './session-cookie';
+import { PasscodeService } from './passcode.service';
 import { requireUpgrade } from '../upgrade/upgrade-trust';
 
 interface UpgradePrincipal {
@@ -17,16 +18,16 @@ interface UpgradePrincipal {
   csrfToken: string;
 }
 const VIEWER_COOKIE = 'ap_upgrade_viewer';
-const GRANT_COOKIE = 'ap_upgrade_grant';
 const TTL = 7 * 24 * 60 * 60 * 1000;
 
-/** Independent installation authorization. The access passcode never grants this capability. */
+/** Upgrades use the existing instance access policy; the automatic viewer binds CSRF and UI state. */
 @Injectable()
 export class UpgradeSecurity {
   private readonly secret: Buffer;
   constructor(
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
+    private readonly passcodes: PasscodeService,
   ) {
     const pinned = process.env.UPGRADE_SESSION_SECRET;
     if (pinned) {
@@ -54,31 +55,50 @@ export class UpgradeSecurity {
     }
   }
   get canAuthenticate(): boolean {
-    return (process.env.UPGRADE_ADMIN_KEY ?? '').length >= 32;
+    // Retained for old Web clients: there is no separate authorization step.
+    return false;
   }
   continuityFingerprint(instanceId: string): string {
     return createHmac('sha256', this.secret)
-      .update(`session-continuity:${instanceId}:${process.env.UPGRADE_ADMIN_KEY ?? ''}`)
+      .update(`session-continuity:${instanceId}`)
       .digest('hex');
+  }
+  /** Optional migration aid for already installed releases. This key cannot authorize
+   * a user or enable upgrades; new installations never need to create one. */
+  private get legacyContinuityKey(): string | undefined {
+    const key = process.env.UPGRADE_LEGACY_AUTH_CONTINUITY_KEY ?? process.env.UPGRADE_ADMIN_KEY;
+    return key && key.length >= 32 ? key : undefined;
+  }
+  legacyContinuityFingerprint(instanceId: string): string | null {
+    const legacy = this.legacyContinuityKey;
+    return legacy
+      ? createHmac('sha256', this.secret)
+          .update(`session-continuity:${instanceId}:${legacy}`)
+          .digest('hex')
+      : null;
   }
   /** Sent directly to an accepted ControlAPI from the Coordinator; never returned
    * by management RPC, logged or persisted. This exercises real cookie parsing. */
-  continuityChallenge(instanceId: string): { cookie: string; userScope: string } {
+  continuityChallenge(
+    instanceId: string,
+    legacyBaseline = false,
+  ): { cookie: string; userScope: string; legacy: boolean } {
     const viewerId = this.ids.next(),
       expiresAt = this.clock.now().getTime() + 60_000;
     const viewer = this.sign({ instanceId, viewerId, expiresAt });
-    const grantVersion = createHmac('sha256', this.secret)
-      .update(`grant:${process.env.UPGRADE_ADMIN_KEY ?? ''}`)
-      .digest('hex');
-    const grant = this.sign({
-      instanceId,
-      viewerId,
-      capability: 'upgrade-instance',
-      grantVersion,
-      expiresAt,
-    });
+    const legacy = legacyBaseline ? this.legacyContinuityKey : undefined;
+    const grant = legacy
+      ? this.sign({
+          instanceId,
+          viewerId,
+          capability: 'upgrade-instance',
+          grantVersion: createHmac('sha256', this.secret).update(`grant:${legacy}`).digest('hex'),
+          expiresAt,
+        })
+      : undefined;
     return {
-      cookie: `${VIEWER_COOKIE}=${viewer}; ${GRANT_COOKIE}=${grant}`,
+      cookie: `${VIEWER_COOKIE}=${viewer}${grant ? `; ap_upgrade_grant=${grant}` : ''}`,
+      legacy: grant !== undefined,
       userScope: createHmac('sha256', this.secret)
         .update(`scope:${instanceId}:${viewerId}`)
         .digest('hex'),
@@ -129,16 +149,7 @@ export class UpgradeSecurity {
       this.cookie(res, VIEWER_COOKIE, this.sign(viewer));
     }
     const viewerId = String(viewer.viewerId);
-    const grant = this.verify(readCookie(req, GRANT_COOKIE));
-    const grantVersion = createHmac('sha256', this.secret)
-      .update(`grant:${process.env.UPGRADE_ADMIN_KEY ?? ''}`)
-      .digest('hex');
-    const canUpgrade =
-      this.canAuthenticate &&
-      grant?.grantVersion === grantVersion &&
-      grant?.instanceId === instanceId &&
-      grant?.viewerId === viewerId &&
-      grant?.capability === 'upgrade-instance';
+    const canUpgrade = this.passcodes.authenticatesRequest(req, this.clock.now().getTime());
     const actorId = canUpgrade ? 'instance-administrator' : `viewer-${viewerId}`;
     const userScope = createHmac('sha256', this.secret)
       .update(`scope:${instanceId}:${viewerId}`)
@@ -168,32 +179,17 @@ export class UpgradeSecurity {
     );
     requireUpgrade(!requiresCapability || principal.canUpgrade, 'UPGRADE_PERMISSION_REQUIRED', 403);
   }
-  grant(req: Request, res: Response, instanceId: string, upgradeKey: string): UpgradePrincipal {
+  /** Deprecated compatibility endpoint. Existing instance access is sufficient;
+   * legacy request bodies are accepted but never interpreted as credentials. */
+  grant(
+    req: Request,
+    res: Response,
+    instanceId: string,
+    _legacyUpgradeKey?: string,
+  ): UpgradePrincipal {
     const principal = this.principal(req, res, instanceId);
-    this.mutation(req, principal, false);
-    const installed = process.env.UPGRADE_ADMIN_KEY ?? '';
-    const expected = createHmac('sha256', this.secret).update(installed).digest();
-    const presented = createHmac('sha256', this.secret).update(upgradeKey).digest();
-    requireUpgrade(
-      this.canAuthenticate && timingSafeEqual(expected, presented),
-      'UPGRADE_PERMISSION_REQUIRED',
-      403,
-    );
-    const grantVersion = createHmac('sha256', this.secret)
-      .update(`grant:${installed}`)
-      .digest('hex');
-    this.cookie(
-      res,
-      GRANT_COOKIE,
-      this.sign({
-        instanceId,
-        viewerId: principal.viewerId,
-        capability: 'upgrade-instance',
-        grantVersion,
-        expiresAt: this.clock.now().getTime() + TTL,
-      }),
-    );
-    return { ...principal, actorId: 'instance-administrator', canUpgrade: true };
+    this.mutation(req, principal);
+    return principal;
   }
   internal(req: Request, instanceId: string): void {
     const remote = req.socket.remoteAddress;

@@ -12,9 +12,11 @@ import { UpgradeContractService } from '../../../apps/api/src/platform/upgrade/u
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
 import { UpgradeStore } from '../../../apps/api/src/platform/upgrade/upgrade-store';
 import { UpgradeOnlineMigration } from '../../../apps/api/src/platform/upgrade/upgrade-online-migration';
+import { PasscodeService } from '../../../apps/api/src/platform/access-passcode/passcode.service';
+import { PasscodeGuard } from '../../../apps/api/src/platform/access-passcode/passcode.guard';
+import { PasscodeAttemptLimiter } from '../../../apps/api/src/platform/access-passcode/passcode-attempt-limiter';
 import { UpgradeSecurity } from '../../../apps/api/src/platform/access-passcode/upgrade-security.service';
 import { currentDatabase } from '../../support/sqlite';
-import { fixedClock } from '../../support/project-ports';
 import { useEnv } from '../../support/strict-ports';
 
 type Request = Parameters<UpgradeSecurity['principal']>[0];
@@ -39,6 +41,7 @@ class AccessFixture {
 let app: INestApplication;
 let db: ReturnType<typeof currentDatabase>;
 let restore: () => void;
+let passcodes: PasscodeService;
 beforeEach(async () => {
   restore = useEnv({
     PLATFORM_INSTANCE_ID: instance,
@@ -46,11 +49,13 @@ beforeEach(async () => {
     UPGRADE_ADMIN_KEY: operatorKey,
     API_ALLOWED_ORIGINS: origin,
     ACCESS_PASSCODE: 'ordinary-shared-passcode',
+    ACCESS_PASSCODE_ALLOW_LOOPBACK: 'false',
   });
   db = currentDatabase();
-  const clock = fixedClock(),
-    ids = { next: () => randomUUID() },
-    security = new UpgradeSecurity(clock, ids);
+  const clock = { now: () => new Date() },
+    ids = { next: () => randomUUID() };
+  passcodes = new PasscodeService(db.db);
+  const security = new UpgradeSecurity(clock, ids, passcodes);
   const upgrades = new UpgradeStore(db.sqlite, clock, ids);
   const contracts = new UpgradeContractStore(upgrades, clock, ids);
   // This protocol gate stops before runtime/installer inspection: no confirmed
@@ -81,6 +86,7 @@ beforeEach(async () => {
     ],
   }).compile();
   app = module.createNestApplication();
+  app.useGlobalGuards(new PasscodeGuard(passcodes, new PasscodeAttemptLimiter()));
   configurePlatformApp(app, { allowedOrigins: [origin], trustProxy: 'none' });
   await app.listen(0, '127.0.0.1');
 });
@@ -90,11 +96,17 @@ afterEach(async () => {
   restore();
 });
 function cookies(response: { headers: Record<string, unknown> }) {
-  return (response.headers['set-cookie'] as string[]).map((v) => v.split(';')[0]).join('; ');
+  return ((response.headers['set-cookie'] ?? []) as string[])
+    .map((v) => v.split(';')[0])
+    .join('; ');
 }
 async function viewer() {
-  const r = await request(app.getHttpServer()).get('/api/fixture-access').expect(200);
-  return { cookie: cookies(r), csrf: r.body.csrfToken };
+  const session = 'ap_session=' + passcodes.issueCurrentSessionToken();
+  const r = await request(app.getHttpServer())
+    .get('/api/fixture-access')
+    .set('Cookie', session)
+    .expect(200);
+  return { cookie: session + '; ' + cookies(r), csrf: r.body.csrfToken };
 }
 async function grant(v: Awaited<ReturnType<typeof viewer>>) {
   const r = await request(app.getHttpServer())
@@ -124,19 +136,19 @@ function noIntent() {
   });
 }
 describe('REQ-UPG-006/007 — actual contract controller, service and SQLite admission boundary', () => {
-  it('shared access alone cannot authorize an independent irreversible contract', async () => {
+  it('a forged access cookie cannot authorize an irreversible contract', async () => {
     const v = await viewer();
     const denied = await request(app.getHttpServer())
       .post('/api/system/upgrade/contracts/requests')
       .set('Origin', origin)
-      .set('Cookie', v.cookie + '; ap_session=ordinary-shared-passcode')
+      .set('Cookie', 'ap_session=ordinary-shared-passcode')
       .set('X-Upgrade-CSRF', v.csrf)
       .send(command())
-      .expect(403);
-    expect(denied.body.code).toBe('UPGRADE_PERMISSION_REQUIRED');
+      .expect(401);
+    expect(denied.body.code).toBe('PASSCODE_REQUIRED');
     noIntent();
   });
-  it('requires exact Origin and the granted viewer CSRF before any contract or migration record', async () => {
+  it('requires exact Origin and the automatic viewer CSRF before any contract or migration record', async () => {
     const v = await viewer(),
       other = await viewer(),
       cookie = await grant(v);
@@ -154,7 +166,7 @@ describe('REQ-UPG-006/007 — actual contract controller, service and SQLite adm
       noIntent();
     }
   });
-  it('does not treat a granted key or acknowledgement as installed-plan/retirement qualification', async () => {
+  it('does not treat instance access or acknowledgement as installed-plan/retirement qualification', async () => {
     const v = await viewer(),
       cookie = await grant(v);
     const denied = await request(app.getHttpServer())
