@@ -10,6 +10,7 @@ import type {
 } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
 import { UpgradeInspector } from './upgrade-inspector';
+import { compatibleGlobalSchemaPath } from './image-runtime-schema-plan';
 import {
   freezeUpgradePlan,
   readUpgradeTrustRoot,
@@ -219,10 +220,12 @@ export class UpgradeCatalog {
               actualSchema <= p.maxSchema,
           );
           requireUpgrade(path, 'UPGRADE_PATH_INCOMPATIBLE');
-          // Namespace representation epochs do not register a global Drizzle
-          // migration. Until a real online global-DDL executor is qualified,
-          // metadata discovery must not offer that residual step for execution.
-          requireUpgrade(path.targetSchema === actualSchema, 'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED');
+          // Only the fixed, journal-bound additive recipe may cross a global
+          // version. Namespace read epochs do not register Drizzle migrations.
+          requireUpgrade(
+            compatibleGlobalSchemaPath(path, actualSchema),
+            'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED',
+          );
           requireUpgrade(
             !this.store.sqlite
               .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')

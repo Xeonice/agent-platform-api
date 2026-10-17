@@ -28,6 +28,7 @@ import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import { PasscodeService } from '../access-passcode/passcode.service';
 import { SESSION_COOKIE } from '../access-passcode/session-cookie';
 import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
+import { imageRuntimeSchemaCommitted } from './image-runtime-schema-migration';
 
 type Json = Record<string, unknown>;
 export function persistedBinding(value: Json): Json {
@@ -192,7 +193,10 @@ export class UpgradeInspector {
         webMatches &&
         installerMatches &&
         ownerMatches &&
-        release.schema === this.schema(),
+        (release.schema === this.schema() ||
+          (release.schema === 28 &&
+            this.schema() === 29 &&
+            imageRuntimeSchemaCommitted(this.store.sqlite))),
       apiMatches,
       coordinatorMatches,
       webMatches,

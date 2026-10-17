@@ -11,6 +11,7 @@ import {
   type UpgradePlan,
   type UpgradeTrustRoot,
 } from '@platform/contracts';
+import { compatibleGlobalSchemaPath } from './image-runtime-schema-plan';
 
 export class UpgradeError extends HttpException {
   constructor(
@@ -220,10 +221,12 @@ export function freezeUpgradePlan(
       current.schema <= p.maxSchema,
   );
   requireUpgrade(path, 'UPGRADE_PATH_NOT_SUPPORTED');
-  // The current bridge executes declarative shadow namespaces only. A future
-  // global SQL version requires a separately qualified capable bridge and the
-  // real fixed migration journal; a supplied read_epoch number is not that proof.
-  requireUpgrade(path.targetSchema === current.schema, 'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED');
+  // The single reviewed additive recipe is the only global-version exception.
+  // Neither a shadow read epoch nor arbitrary package SQL proves compatibility.
+  requireUpgrade(
+    compatibleGlobalSchemaPath(path, current.schema),
+    'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED',
+  );
   requireUpgrade(
     path.bridgeReleases.every(
       (release) => release === current.releaseId || appliedBridges.includes(release),
