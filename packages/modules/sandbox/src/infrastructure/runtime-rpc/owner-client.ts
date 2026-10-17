@@ -169,6 +169,7 @@ export class RuntimeOwnerConnection {
     if (
       method === 'jobs.startJob' ||
       method === 'create' ||
+      (method === 'stop' && explicitRuntimeBusinessAuthority()) ||
       (method === 'destroy' && explicitRuntimeBusinessAuthority())
     ) {
       const digest = createHash('sha256')
@@ -179,7 +180,8 @@ export class RuntimeOwnerConnection {
         if (
           original.state === 'complete' &&
           original.digest === digest &&
-          (original.result !== undefined ||
+          (method === 'stop' ||
+            original.result !== undefined ||
             (method === 'destroy' && Object.prototype.hasOwnProperty.call(original, 'result')))
         )
           return original.result;
@@ -187,7 +189,7 @@ export class RuntimeOwnerConnection {
           SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
           'Original runtime operation is unconfirmed; only its recorded result may be observed',
           undefined,
-          false,
+          method === 'stop',
         );
       }
     }
@@ -372,13 +374,15 @@ export class RuntimeOwnerConnection {
     const operationId =
       method === 'jobs.startJob' && stable
         ? `job:${stable.operationId}:${digest}`
-        : method === 'destroy' && stable
-          ? `destroy:${stable.operationId}:${digest}`
-          : method === 'create' && sandboxId && !sandboxId.startsWith('auth-helper')
-            ? stable
-              ? `create:${stable.operationId}`
-              : `create:${sandboxId}:${digest}`
-            : `rpc:${randomBytes(20).toString('hex')}`;
+        : method === 'stop' && stable
+          ? `stop:${stable.operationId}`
+          : method === 'destroy' && stable
+            ? `destroy:${stable.operationId}:${digest}`
+            : method === 'create' && sandboxId && !sandboxId.startsWith('auth-helper')
+              ? stable
+                ? `create:${stable.operationId}`
+                : `create:${sandboxId}:${digest}`
+              : `rpc:${randomBytes(20).toString('hex')}`;
     const observe = [
       'inspect',
       'imageStaged',
@@ -697,7 +701,11 @@ export class RuntimeOwnerProvider implements SandboxProvider {
   }> {
     const connection = this.registry.assignedOwner(sandboxId);
     if (!connection) return { state: 'unknown' };
-    const observation = await connection.observeOperation('create:' + operationId);
+    const stopping = operationId.startsWith('sandbox-stop-');
+    const observation = await connection.observeOperation(
+      (stopping ? 'stop:' : 'create:') + operationId,
+    );
+    if (stopping) return observation;
     if (observation.state !== 'complete') return observation;
     const handle = ownerRecord(observation.result);
     if (handle.provider !== this.name || typeof handle.providerSandboxId !== 'string')

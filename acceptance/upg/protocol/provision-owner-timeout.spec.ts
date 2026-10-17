@@ -23,6 +23,7 @@ import {
 } from '../../../packages/modules/sandbox/src/infrastructure/runtime-rpc/authority-context';
 import { harness } from '../../support/sandbox-rig';
 import { deferred, useEnv } from '../../support/strict-ports';
+import { SqliteSandboxStartupProgress } from '../../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-startup-progress.impl';
 
 const authority: RuntimeBusinessAuthorityPort = {
   run: withRuntimeBusinessAuthority,
@@ -56,9 +57,14 @@ async function fixture(fault: 'none' | 'body-reset' = 'none') {
     return input.keep ? { hostPath: join(home, 'workspaces', id) } : null;
   };
   let running = false;
+  let stopped = false;
   const provider: SandboxProvider = h.provider;
   provider.inspect = async () => ({
-    lifecycleState: running ? 'instance_running' : 'instance_creating',
+    lifecycleState: running
+      ? 'instance_running'
+      : stopped
+        ? 'instance_exited'
+        : 'instance_creating',
   });
   const originalStart = h.provider.start.bind(h.provider);
   h.provider.start = async (handle) => {
@@ -133,12 +139,17 @@ async function fixture(fault: 'none' | 'body-reset' = 'none') {
   const setRunning = () => {
     running = true;
   };
+  const setStopped = () => {
+    running = false;
+    stopped = true;
+  };
   return {
     h,
     owner,
     home,
     runs,
     setRunning,
+    setStopped,
     close: async () => {
       remote.onModuleDestroy();
       proxy.closeAllConnections();
@@ -396,6 +407,25 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
         .get(dto.id) as { status: string; provider_handle: string; workspace_path: string };
       expect(before.status).toBe('starting');
       expect(before.provider_handle).toBe('instance-' + dto.id);
+      const timedOut = (await f.h.service.get(dto.id)).startupObservation;
+      expect(timedOut).toMatchObject({ state: 'unknown', stage: 'instance-start' });
+      expect(timedOut?.operationId).toMatch(/^sandbox-startup:/);
+      // This is the original workflow cycle, deliberately not the Owner RPC id.
+      expect(operations(f.owner).some((v) => v.id === timedOut?.operationId)).toBe(false);
+      const restartedReader = new SqliteSandboxStartupProgress(f.h.db);
+      expect(restartedReader.readSync(dto.id)).toMatchObject({
+        operationId: timedOut?.operationId,
+        sequence: timedOut?.sequence,
+        startedAt: timedOut?.startedAt,
+        stageEnteredAt: timedOut?.stageEnteredAt,
+        lastProgressAt: timedOut?.lastProgressAt,
+      });
+      f.h.advanceClock(1000);
+      const refreshed = (await f.h.service.get(dto.id)).startupObservation;
+      expect(refreshed).toEqual({
+        ...timedOut,
+        observedAt: f.h.clock.now().toISOString(),
+      });
       expect(await readFile(join(before.workspace_path, 'original-workspace'), 'utf8')).toBe(
         'retained-before-native-start',
       );
@@ -406,6 +436,17 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
       ).toEqual({ state: 'bound' });
       expect((await f.h.allocations.listAll())[0].isActive).toBe(true);
       await f.h.provision.resumeUnconfirmed();
+      const stillPending = (await f.h.service.get(dto.id)).startupObservation;
+      expect(stillPending).toMatchObject({
+        operationId: timedOut?.operationId,
+        state: 'unknown',
+        stage: 'instance-start',
+        startedAt: timedOut?.startedAt,
+        stageEnteredAt: timedOut?.stageEnteredAt,
+        lastProgressAt: timedOut?.lastProgressAt,
+        heartbeatAt: f.h.clock.now().toISOString(),
+      });
+      expect(stillPending!.sequence).toBeGreaterThan(timedOut!.sequence);
       expect(f.h.provider.calls.filter((v) => v === 'create')).toHaveLength(1);
       expect(f.h.provider.calls.filter((v) => v === 'start')).toHaveLength(1);
       expect(f.h.provider.calls).not.toContain('destroy');
@@ -418,6 +459,22 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
       await f.h.provision.resumeUnconfirmed();
       await f.h.provision.resumeUnconfirmed();
       expect((await f.h.service.get(dto.id)).status).toBe('running');
+      expect((await f.h.service.get(dto.id)).startupObservation).toMatchObject({
+        operationId: timedOut?.operationId,
+        state: 'succeeded',
+        stage: 'completed',
+        startedAt: timedOut?.startedAt,
+        lastProgressAt: f.h.clock.now().toISOString(),
+      });
+      const stages = f.h.instanceProgressEvents.flatMap((event) =>
+        event.event === 'sandbox.instance_progress' && event.startupObservation
+          ? [event.startupObservation.stage]
+          : [],
+      );
+      expect(stages).toContain('runtime-tools');
+      expect(stages).toContain('environment-initialization');
+      expect(stages).toContain('agent-bootstrap');
+      expect(stages).not.toContain('image-pull');
       expect(
         f.h.sqlite.prepare('SELECT provider_handle FROM sandboxes WHERE id=?').get(dto.id),
       ).toEqual({ provider_handle: before.provider_handle });
@@ -473,10 +530,68 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
       const actual = await f.h.service.get(dto.id);
       expect(actual.status).toBe('failed');
       expect(actual.failureCode).toBe('IMAGE_PULL_FAILED');
+      expect(actual.startupObservation).toMatchObject({
+        state: 'failed',
+        stage: 'instance-start',
+      });
       expect(f.h.provider.calls.filter((v) => v === 'destroy')).toHaveLength(1);
       expect(f.h.wsCalls).toContain('cleanup:' + dto.id + ':false');
       expect((await f.h.allocations.listAll())[0].isActive).toBe(false);
     } finally {
+      await f.close();
+    }
+  });
+  it('keeps a timed-out original stop and quota, then reconciles its journal receipt without another stop', async () => {
+    const f = await fixture();
+    const started = deferred<void>(),
+      release = deferred<void>();
+    f.h.provider.stop = async () => {
+      f.h.provider.calls.push('stop');
+      started.resolve();
+      await release.promise;
+      f.setStopped();
+    };
+    try {
+      const { dto, finished } = await accepted(f);
+      await finished;
+      const original = f.h.sqlite
+        .prepare('SELECT provider_handle,workspace_path FROM sandboxes WHERE id=?')
+        .get(dto.id);
+      shortOwnerTimeout();
+      const stop = f.h.service.stop(dto.id).catch((error: unknown) => error);
+      await started.promise;
+      const error = await stop;
+      expect(error).toMatchObject({ status: 503 });
+      expect((await f.h.service.get(dto.id)).status).toBe('stopping');
+      expect((await f.h.allocations.listAll())[0].isActive).toBe(true);
+      const originalOperation = operations(f.owner).find((v) => v.method === 'stop');
+      expect(originalOperation).toMatchObject({ state: 'pending', sandboxId: dto.id });
+      expect(originalOperation!.id).toMatch(/^stop:sandbox-stop-/);
+      await f.h.provision.resumeUnconfirmed();
+      await f.h.provision.resumeUnconfirmed();
+      expect((await f.h.service.get(dto.id)).status).toBe('stopping');
+      expect(f.h.provider.calls.filter((v) => v === 'stop')).toHaveLength(1);
+      release.resolve();
+      await expect
+        .poll(() => operations(f.owner).find((v) => v.id === originalOperation!.id)?.state)
+        .toBe('complete');
+      await f.h.provision.resumeUnconfirmed();
+      await f.h.provision.resumeUnconfirmed();
+      expect((await f.h.service.get(dto.id)).status).toBe('stopped');
+      expect(
+        f.h.sqlite
+          .prepare('SELECT provider_handle,workspace_path FROM sandboxes WHERE id=?')
+          .get(dto.id),
+      ).toEqual(original);
+      expect((await f.h.allocations.listAll())[0].isActive).toBe(true);
+      expect(f.h.provider.calls.filter((v) => v === 'stop')).toHaveLength(1);
+      expect(f.h.provider.calls).not.toContain('destroy');
+      expect(
+        f.h.sqlite.prepare("SELECT state FROM platform_operations WHERE role='sandbox-stop'").all(),
+      ).toEqual([{ state: 'finished' }]);
+    } finally {
+      release.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await f.close();
     }
   });

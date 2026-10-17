@@ -7,7 +7,7 @@ import {
   asSandboxId,
   asProjectId,
 } from '@platform/shared-kernel';
-import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-kernel';
+import type { Clock, IdGenerator, UnitOfWork, EventBus, Tx } from '@platform/shared-kernel';
 import {
   RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
@@ -24,6 +24,7 @@ import {
   INTERNAL_ERROR_CODE,
   WAITING_INPUT_QUERY,
   TERMINAL_BOOKMARK_CLEANUP,
+  RUNTIME_BUSINESS_AUTHORITY,
 } from '@platform/contracts';
 import type {
   ResourceQuota,
@@ -48,6 +49,7 @@ import type {
   RegisterRetainedVolumeCommand,
   WaitingInputQueryPort,
   TerminalBookmarkCleanup,
+  RuntimeBusinessAuthorityPort,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { ResourceAllocator } from './resource-allocator';
@@ -71,6 +73,10 @@ import {
   SANDBOX_ADMISSION_INTENTS,
   type SandboxAdmissionIntents,
 } from '../domain/ports/sandbox-admission-intents.port';
+import {
+  SANDBOX_STOP_INTENTS,
+  type SandboxStopIntents,
+} from '../domain/ports/sandbox-stop-intents.port';
 
 /**
  * How long a `POST /api/sandboxes/:id/exec` command may run.
@@ -168,6 +174,12 @@ export class SandboxApplicationService {
     @Optional()
     @Inject(TERMINAL_BOOKMARK_CLEANUP)
     private readonly terminalBookmarks?: TerminalBookmarkCleanup,
+    @Optional()
+    @Inject(SANDBOX_STOP_INTENTS)
+    private readonly stopIntents?: SandboxStopIntents,
+    @Optional()
+    @Inject(RUNTIME_BUSINESS_AUTHORITY)
+    private readonly authority?: RuntimeBusinessAuthorityPort,
   ) {}
 
   /**
@@ -679,7 +691,13 @@ export class SandboxApplicationService {
       throw this.mapProviderError(error);
     }
     void this.provision.restartSafely(sandbox, provider);
-    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
+    return SandboxMapper.toDto(
+      sandbox,
+      false,
+      this.health.healthOf(sandbox.id),
+      image,
+      this.provision.startupObservation(sandbox.id),
+    );
   }
 
   /**
@@ -710,22 +728,60 @@ export class SandboxApplicationService {
     }
     const provider = this.registry.get(sandbox.provider);
     const handle = this.handleOf(sandbox);
+    const operation = {
+      operationId: `sandbox-stop-${sandbox.id}:${sandbox.version + 1}`,
+      actor: this.authority?.current?.()?.actor ?? { kind: 'user' as const, id: 'platform-user' },
+    };
     try {
-      this.advance(sandbox, 'stopping', 'user');
+      sandbox.transitionTo('stopping', 'user', this.clock.now());
+      this.persist(sandbox, (tx) =>
+        this.stopIntents?.reserveSync(
+          tx,
+          { sandboxId: sandbox.id, ...operation },
+          this.clock.now(),
+        ),
+      );
     } catch (error) {
       throw this.mapProviderError(error);
     }
     try {
-      if (handle) await provider.stop(handle);
+      if (handle) {
+        if (this.authority) await this.authority.run(operation, () => provider.stop(handle));
+        else await provider.stop(handle);
+      }
       const current = await this.repo.findById(sandbox.id);
       if (!current || current.status === 'destroying' || current.status === 'destroyed') {
         throw this.invalidState('任务正在删除，请刷新任务状态。');
       }
-      this.advance(current, 'stopped', 'user');
+      // The original receipt can arrive after its read-only reconciliation (or a
+      // later explicit lifecycle action). Never mutate that newer aggregate.
+      if (current.version !== sandbox.version || current.status !== 'stopping') {
+        this.uow.run((tx) =>
+          this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+        );
+        return this.toDto(current);
+      }
+      current.transitionTo('stopped', 'user', this.clock.now());
+      this.persist(current, (tx) =>
+        this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+      );
       return this.toDto(current);
     } catch (e) {
       const current = await this.repo.findById(sandbox.id);
-      if (current?.status === 'stopping') this.recordFailure(current, e, 'stop');
+      if (
+        (e instanceof Error && ['AbortError', 'TimeoutError', 'TypeError'].includes(e.name)) ||
+        (e instanceof SandboxProviderError && e.retryable)
+      ) {
+        // A transport wait ended, not the original stop effect. The existing
+        // provision reconciliation sweep only looks up this exact durable intent.
+        throw this.mapProviderError(e);
+      }
+      if (current?.status !== 'stopping' || current.version !== sandbox.version)
+        throw this.mapProviderError(e);
+      this.recordFailure(current, e, 'stop');
+      this.uow.run((tx) =>
+        this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+      );
       // `stopped` **保留**登记（工作区还在盘上、实例还在，`start` 会把它接回来）；
       // `failed` 不会 —— 它是终态，这条沙箱不会再回来占任何东西。
       await this.resources.release(sandbox.id);
@@ -846,6 +902,7 @@ export class SandboxApplicationService {
         this.waitingDisplayApplies(s) && waiting.has(s.id),
         this.health.healthOf(s.id),
         images.get(s.imageRef),
+        this.provision.startupObservation(s.id),
       ),
     );
   }
@@ -860,6 +917,7 @@ export class SandboxApplicationService {
       this.waitingDisplayApplies(sandbox) && this.waiting.isWaiting(sandbox.id),
       this.health.healthOf(sandbox.id),
       image,
+      this.provision.startupObservation(sandbox.id),
     );
   }
 
@@ -1012,9 +1070,10 @@ export class SandboxApplicationService {
     this.persist(sandbox);
   }
 
-  private persist(sandbox: Sandbox): void {
+  private persist(sandbox: Sandbox, afterSave?: (tx: Tx) => void): void {
     this.uow.run((tx) => {
       this.repo.saveSync(tx, sandbox);
+      afterSave?.(tx);
       if (sandbox.status === 'destroyed')
         this.terminalBookmarks?.deleteForSandboxSync(tx, sandbox.id);
       this.events.publishInTx(tx, sandbox.pullEvents());

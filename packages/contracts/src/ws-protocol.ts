@@ -1,6 +1,7 @@
 import type { RuntimeInstallStatus, SandboxStatus } from './schemas/enums';
 import type { TaskStatus } from './schemas/task.schema';
 import type { RuntimeEvent } from './runtime-adapter.contract';
+import type { StartupObservation } from './schemas/sandbox.schema';
 
 /**
  * WS frame contract — SYNC WITH shared/10 §7.4 (the single canonical definition).
@@ -249,26 +250,21 @@ export type SandboxWsEvent =
    *    callback to read, so any number here would be invented. This repo has already
    *    deleted one invented denominator for exactly that reason (see
    *    `project.clone_progress`: `totalBytes` was a 「幽灵字段，已删」).
-   * ② **No elapsed milliseconds.** The frontend knows the instant it received
-   *    `status_changed → starting`; counting up from there costs it one `setInterval`
-   *    and needs no field, no frame and no clock-skew handling. An `elapsedMs` here
-   *    would be a field whose only reader can already compute it alone.
+   * ② **No elapsed milliseconds.** Additive `startupObservation` supplies durable
+   *    server timestamps for the original provision cycle. Counting from the page's
+   *    receipt loses history on reload; query/heartbeat time is not work progress.
    *
-   * ⇒ what IS here is only what the platform knows and the browser CANNOT: whether
-   * this machine already holds the image's bits (`SandboxProvider.imageStaged`).
-   * `imageStaged:false` is the whole difference between 「几秒」 and 「几分钟」, and it is
-   * the one fact that turns 「卡住了」 into 「首次用这个镜像，正在准备」.
+   * Cache presence (`imageStaged`) is only a cache observation, not evidence that
+   * an image download is currently running. Optional `startupObservation` records
+   * actual workflow boundaries and durable times, with no invented sub-progress.
    *
    * ⚠️ IT IS **ABSENT**, NOT `false`, WHEN THE PROVIDER CANNOT SAY. 「不知道」 and
    * 「本机没有这份镜像」 are different claims, and only one of them may be put in
    * front of a waiting user as a reason for a multi-minute wait.
    *
-   * NOT Outbox-backed, deliberately — the opposite call from `runtime.install_progress`
-   * one variant up, for a reason specific to this frame: a dropped `starting` only
-   * degrades the copy to the generic wording for the rest of THIS wait, and a dropped
-   * `ready` is overwritten by the `status_changed` that always follows. Install
-   * progress rides the Outbox because nothing follows it — a dropped frame there pins
-   * the card on stale copy forever.
+   * NOT Outbox-backed: missed progress is restored from the persisted observation
+   * on GET, retaining its cycle/sequence and original work times. A read/heartbeat
+   * never manufactures progress; absent legacy facts remain unknown.
    */
   | {
       event: 'sandbox.instance_progress';
@@ -277,6 +273,8 @@ export type SandboxWsEvent =
       phase: 'starting' | 'ready';
       /** 只在 `phase:'starting'` 且 provider 答得上时出现；缺席 = 「不知道」。 */
       imageStaged?: boolean;
+      /** Optional durable facts; operationId identifies the provision cycle, not an RPC. */
+      startupObservation?: StartupObservation;
     };
 
 // ── /tasks channel (S6 无头 Task 输出流;discriminator: type) ────────────────
@@ -359,7 +357,7 @@ export const WS_PROTOCOL_CANONICAL =
   'receivedBytes?,bytesPerSecond?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
   'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?},' +
-  'sandbox.instance_progress{sandboxId,phase,imageStaged?}|' +
+  'sandbox.instance_progress{sandboxId,phase,imageStaged?,startupObservation?}|' +
   'tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|' +
   'tasks.server:event{taskId,seq,event},caught_up{taskId,firstSeq,seq},' +
   'exit{taskId,status,exitCode?},error{taskId,code},pong';

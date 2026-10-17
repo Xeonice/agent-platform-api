@@ -1,4 +1,9 @@
-import type { RegisteredImageSummary, SandboxDto, SandboxHealthWire } from '@platform/contracts';
+import type {
+  RegisteredImageSummary,
+  SandboxDto,
+  SandboxHealthWire,
+  StartupObservation,
+} from '@platform/contracts';
 import type { Sandbox } from '../../domain/entities/sandbox.entity';
 
 /**
@@ -24,6 +29,7 @@ export const SandboxMapper = {
     waitingInput: boolean,
     health?: SandboxHealthWire,
     image?: RegisteredImageSummary | null,
+    startupObservation?: StartupObservation,
   ): SandboxDto {
     return {
       id: agg.id as string,
@@ -45,6 +51,7 @@ export const SandboxMapper = {
           }),
       name: agg.name,
       status: agg.status,
+      ...(startupObservation ? { startupObservation } : {}),
       headless: agg.headless,
       timeoutMinutes: agg.timeoutMinutes as SandboxDto['timeoutMinutes'],
       idleTimeoutSec: agg.idleTimeoutSec,

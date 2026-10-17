@@ -16,6 +16,8 @@ import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.reposit
 import { AGENT_TASK_START_INTENTS } from '../domain/ports/agent-task-start-intents.port';
 import { SANDBOX_CREATE_INTENTS } from '../domain/ports/sandbox-create-intents.port';
 import { SANDBOX_ADMISSION_INTENTS } from '../domain/ports/sandbox-admission-intents.port';
+import { SANDBOX_STARTUP_PROGRESS } from '../domain/ports/sandbox-startup-progress.port';
+import { SANDBOX_STOP_INTENTS } from '../domain/ports/sandbox-stop-intents.port';
 import { RESOURCE_ALLOCATION_REPOSITORY } from '../domain/repositories/resource-allocation.repository';
 import { HOST_CAPACITY_PROBE } from '../domain/ports/host-capacity.port';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
@@ -37,6 +39,8 @@ import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/
 import { SqliteAgentTaskStartIntents } from '../infrastructure/persistence/sqlite/agent-task-start-intents.impl';
 import { SqliteSandboxCreateIntents } from '../infrastructure/persistence/sqlite/sandbox-create-intents.impl';
 import { SqliteSandboxAdmissionIntents } from '../infrastructure/persistence/sqlite/sandbox-admission-intents.impl';
+import { SqliteSandboxStartupProgress } from '../infrastructure/persistence/sqlite/sandbox-startup-progress.impl';
+import { SqliteSandboxStopIntents } from '../infrastructure/persistence/sqlite/sandbox-stop-intents.impl';
 import { SqliteResourceAllocationRepository } from '../infrastructure/persistence/sqlite/resource-allocation.repository.impl';
 import { OsHostCapacityProbe } from '../infrastructure/scheduler/host-capacity.probe';
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
@@ -105,6 +109,8 @@ const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
     { provide: AGENT_TASK_START_INTENTS, useClass: SqliteAgentTaskStartIntents },
     { provide: SANDBOX_CREATE_INTENTS, useClass: SqliteSandboxCreateIntents },
     { provide: SANDBOX_ADMISSION_INTENTS, useClass: SqliteSandboxAdmissionIntents },
+    { provide: SANDBOX_STARTUP_PROGRESS, useClass: SqliteSandboxStartupProgress },
+    { provide: SANDBOX_STOP_INTENTS, useClass: SqliteSandboxStopIntents },
     { provide: RESOURCE_ALLOCATION_REPOSITORY, useClass: SqliteResourceAllocationRepository },
     { provide: HOST_CAPACITY_PROBE, useClass: OsHostCapacityProbe },
     // 03 §3：显式 FIFO（创建/销毁/对账的读-改-写都从它过）+ 互斥登记

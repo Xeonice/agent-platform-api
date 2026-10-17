@@ -49,6 +49,7 @@ import type {
   SandboxExecFn,
   SandboxHandle,
   SandboxProvider,
+  StartupObservation,
   WorkspacePreparer,
   WorkspaceSource,
 } from '@platform/contracts';
@@ -63,6 +64,16 @@ import {
   SANDBOX_CREATE_INTENTS,
   type SandboxCreateIntents,
 } from '../../domain/ports/sandbox-create-intents.port';
+import {
+  SANDBOX_STARTUP_PROGRESS,
+  type SandboxStartupProgress,
+  type SandboxStartupProgressStore,
+  type SandboxStartupStage,
+} from '../../domain/ports/sandbox-startup-progress.port';
+import {
+  SANDBOX_STOP_INTENTS,
+  type SandboxStopIntents,
+} from '../../domain/ports/sandbox-stop-intents.port';
 
 /**
  * 兜底 quota —— **只在账本里查不到这条 sandbox 的活跃登记时**才用。
@@ -193,6 +204,12 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     @Optional()
     @Inject(BUSINESS_WRITER_AUTHORITY)
     private readonly writer?: BusinessWriterAuthority,
+    @Optional()
+    @Inject(SANDBOX_STARTUP_PROGRESS)
+    private readonly startupProgress?: SandboxStartupProgressStore,
+    @Optional()
+    @Inject(SANDBOX_STOP_INTENTS)
+    private readonly stopIntents?: SandboxStopIntents,
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
@@ -221,6 +238,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
           continue;
         if (sandbox.status === 'running' || sandbox.status === 'idle') {
           this.uow.run((tx) => this.createIntents?.finishSync(tx, sandbox.id));
+          this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
           continue;
         }
         const provider = this.providers.get(sandbox.provider);
@@ -238,8 +256,40 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
           });
           this.persist(sandbox, sandbox.id);
         }
-        await this.restartSafely(sandbox, provider);
+        await this.restartSafely(sandbox, provider, true);
         this.assertEpoch(epoch);
+      }
+      // Reuse this existing periodic owner reconciliation. This branch never
+      // calls stop: only the exact accepted native receipt may finish it.
+      for (const intent of (await this.stopIntents?.pending()) ?? []) {
+        this.assertEpoch(epoch);
+        const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
+        this.assertEpoch(epoch);
+        if (!sandbox || sandbox.status === 'destroyed' || sandbox.status === 'stopped') {
+          this.uow.run((tx) =>
+            this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now()),
+          );
+          continue;
+        }
+        if (sandbox.status !== 'stopping') continue;
+        const provider = this.providers.get(sandbox.provider);
+        const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
+        this.assertEpoch(epoch);
+        if (receipt?.state !== 'complete') continue;
+        const handle = this.handleOf(sandbox);
+        const actual = await provider.inspect(handle);
+        this.assertEpoch(epoch);
+        if (actual.lifecycleState !== 'instance_exited') continue;
+        const current = await this.repo.findById(sandbox.id);
+        this.assertEpoch(epoch);
+        if (!current || current.status !== 'stopping' || current.version !== sandbox.version)
+          continue;
+        current.transitionTo('stopped', 'user', this.clock.now());
+        this.uow.run((tx) => {
+          this.repo.saveSync(tx, current);
+          this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now());
+          this.events.publishInTx(tx, current.pullEvents());
+        });
       }
     } finally {
       this.recovering = false;
@@ -328,6 +378,72 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     }
   }
 
+  /** Read-only projection. Query time must not freshen work/Provider heartbeat. */
+  startupObservation(sandboxId: string): StartupObservation | undefined {
+    const progress = this.startupProgress?.readSync(sandboxId);
+    return progress ? { ...progress, observedAt: this.clock.now().toISOString() } : undefined;
+  }
+
+  private beginStartup(sandbox: Sandbox, stage: SandboxStartupStage, resumeOriginal = false): void {
+    if (!this.startupProgress) return;
+    const prior = this.startupProgress.readSync(sandbox.id);
+    // Reconciliation is the original cycle: preserve its identity and all clocks.
+    if (resumeOriginal && prior && ['inflight', 'unknown'].includes(prior.state)) return;
+    const at = this.clock.now();
+    const instant = at.toISOString();
+    const progress: SandboxStartupProgress = {
+      operationId: `sandbox-startup:${sandbox.id}:${sandbox.version}`,
+      sequence: 0,
+      state: 'inflight',
+      stage,
+      startedAt: instant,
+      stageEnteredAt: instant,
+      lastProgressAt: instant,
+      heartbeatAt: null,
+    };
+    this.uow.run((tx) => this.startupProgress?.saveSync(tx, sandbox.id, progress, at));
+    this.broadcastStartup(sandbox.id, progress);
+  }
+
+  private observeStartup(
+    sandboxId: string,
+    update: {
+      stage?: SandboxStartupStage;
+      state?: SandboxStartupProgress['state'];
+      heartbeat?: boolean;
+    },
+  ): void {
+    if (!this.startupProgress) return;
+    this.assertActive(sandboxId);
+    const prior = this.startupProgress.readSync(sandboxId);
+    if (!prior) return;
+    const at = this.clock.now();
+    const instant = at.toISOString();
+    const changedStage = update.stage !== undefined && update.stage !== prior.stage;
+    const state = update.state ?? prior.state;
+    if (!changedStage && state === prior.state && !update.heartbeat) return;
+    const progress: SandboxStartupProgress = {
+      ...prior,
+      sequence: prior.sequence + 1,
+      state,
+      stage: update.stage ?? prior.stage,
+      stageEnteredAt: changedStage ? instant : prior.stageEnteredAt,
+      lastProgressAt: changedStage ? instant : prior.lastProgressAt,
+      heartbeatAt: update.heartbeat ? instant : prior.heartbeatAt,
+    };
+    this.uow.run((tx) => this.startupProgress?.saveSync(tx, sandboxId, progress, at));
+    this.broadcastStartup(sandboxId, progress);
+  }
+
+  private broadcastStartup(sandboxId: string, progress: SandboxStartupProgress): void {
+    this.broadcaster.broadcast({
+      event: 'sandbox.instance_progress',
+      sandboxId,
+      phase: progress.state === 'succeeded' ? 'ready' : 'starting',
+      startupObservation: { ...progress, observedAt: this.clock.now().toISOString() },
+    });
+  }
+
   private async provision(
     sandbox: Sandbox,
     provider: SandboxProvider,
@@ -357,6 +473,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     const done = (): void =>
       this.recordStage(sandbox, stage, stageStartedAt, 'ok', undefined, stageDetail);
     try {
+      this.beginStartup(sandbox, 'workspace-preparation');
       this.advance(sandbox, 'scheduling', 'scheduler');
       this.advance(sandbox, 'preparing-workspace', 'scheduler');
       enter('preparing-workspace');
@@ -371,6 +488,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
 
       this.advance(sandbox, 'creating', 'scheduler');
       enter('creating');
+      this.observeStartup(sandbox.id, { stage: 'instance-create', state: 'inflight' });
       const image = await this.imageSpecOf(sandbox);
       // env-form credentials (claude's `CLAUDE_CODE_OAUTH_TOKEN`, an api-key) can ONLY
       // be delivered at instance creation: a per-call `env` would be visible in `ps`
@@ -457,10 +575,12 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       }
 
       this.advance(sandbox, 'running', 'scheduler');
+      this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
       this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
     } catch (e) {
       if (this.superseded(sandbox.id)) throw e;
       if (this.authority && submittedCreate && (!bound || this.isUnconfirmed(e))) {
+        this.observeStartup(sandbox.id, { state: 'unknown' });
         // Owner create may have completed before a response/lease/DB ack vanished.
         // Keep its original reservation, workspace and quota; lookup alone recovers.
         this.logger.warn(
@@ -510,6 +630,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       // 挂在总计上会让读者以为那是整段的成因。
       this.recordStage(sandbox, 'provision', provisionStartedAt, 'failed', e);
       this.compensate(sandbox, e);
+      this.observeStartup(sandbox.id, { state: 'failed' });
       if (handle) await provider.destroy(handle).catch(() => undefined);
       await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
       // 03 §640：失败即**回滚配额登记**。沙箱已落 `failed`（终态），它不会再占任何东西
@@ -543,23 +664,36 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
    * time this catch runs (`compensate`); the log line is for the operator reading
    * stderr, not the record.
    */
-  async restartSafely(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+  async restartSafely(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    resumeOriginal = false,
+  ): Promise<void> {
     try {
-      await this.restart(sandbox, provider);
+      await this.restart(sandbox, provider, resumeOriginal);
     } catch (e) {
       this.logger.error(`restart failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
     }
   }
 
-  async restart(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
-    return this.track(sandbox.id, () => this.restartInstance(sandbox, provider));
+  async restart(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    resumeOriginal = false,
+  ): Promise<void> {
+    return this.track(sandbox.id, () => this.restartInstance(sandbox, provider, resumeOriginal));
   }
 
-  private async restartInstance(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+  private async restartInstance(
+    sandbox: Sandbox,
+    provider: SandboxProvider,
+    resumeOriginal: boolean,
+  ): Promise<void> {
     const handle = this.handleOf(sandbox);
     const startedAt = this.clock.now().getTime();
     let stageDetail: Record<string, unknown> = {};
     try {
+      this.beginStartup(sandbox, 'instance-start', resumeOriginal);
       if (sandbox.status !== 'starting') this.advance(sandbox, 'starting', 'scheduler');
       const spec = (await this.imageSpecOf(sandbox)).spec;
       // 重启重新验证任务所选 Agent 的凭证：用户可能已在停止后删除或替换凭证，重启之后
@@ -579,11 +713,13 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
         for (const c of credentials) c.credential.zeroize();
       }
       this.advance(sandbox, 'running', 'scheduler');
+      this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
       this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
     } catch (e) {
       if (this.superseded(sandbox.id)) throw e;
       if (this.cancelled.has(sandbox.id)) return;
       if (this.authority && this.isUnconfirmed(e)) {
+        this.observeStartup(sandbox.id, { state: 'unknown' });
         this.logger.warn(
           `sandbox ${sandbox.id}: original start remains unconfirmed; reservation retained`,
         );
@@ -591,6 +727,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       }
       this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
       this.compensate(sandbox, e, 'start');
+      this.observeStartup(sandbox.id, { state: 'failed' });
       // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
       await this.resources.release(sandbox.id);
       throw e;
@@ -625,10 +762,12 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       ...imageStaged,
     });
     this.assertActive(sandbox.id);
+    this.observeStartup(sandbox.id, { stage: 'instance-start', state: 'inflight' });
     const alreadyRunning = this.authority
       ? (await provider.inspect(handle)).lifecycleState === 'instance_running'
       : false;
     this.assertActive(sandbox.id);
+    if (this.authority) this.observeStartup(sandbox.id, { heartbeat: true });
     if (!alreadyRunning) await provider.start(handle);
     this.assertActive(sandbox.id);
     this.broadcaster.broadcast({
@@ -646,6 +785,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
 
     // ③ install the runtime CLI. Deliberately BEFORE ④: there is no point injecting
     // a credential for a CLI that is not there yet, and both steps need `exec`.
+    this.observeStartup(sandbox.id, { stage: 'runtime-tools', state: 'inflight' });
     await this.installs.ensureInstalled({
       sandboxId: sandbox.id,
       runtimeId: sandbox.runtime,
@@ -657,6 +797,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     // ③.5 落 runtime 启动前需要的文件。**刻意排在 ④ 之前、且与 ④ 无关**:
     // ④ 只在有凭证时才跑,而这一步要处理的闸门(codex 的目录信任提示)在**没有凭证时
     // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
+    this.observeStartup(sandbox.id, { stage: 'environment-initialization' });
     await this.seedStartupFiles(sandbox, exec);
     this.assertActive(sandbox.id);
 
@@ -667,6 +808,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     // ⑤ start the agent session — this is what makes "the agent starts working the
     // moment the task starts" true for a user who closed the browser, and for MCP
     // `create_sandbox`, which has no terminal at all (裁决 D-15).
+    this.observeStartup(sandbox.id, { stage: 'agent-bootstrap' });
     await this.bootstrapAgentSession(sandbox, exec);
   }
 

@@ -14,6 +14,7 @@ import type {
   RegisterRetainedVolumeCommand,
   RuntimeAdapterRegistry,
   SandboxProvider,
+  SandboxWsEvent,
   TaskLogStore,
   WaitingInputQueryPort,
   WorkspacePreparer,
@@ -35,6 +36,8 @@ import { SqliteAgentTaskStartIntents } from '../../packages/modules/sandbox/src/
 import { SqliteJobCompletionReceipts } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/job-completion-receipts.impl';
 import { SqliteSandboxCreateIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-create-intents.impl';
 import { SqliteSandboxAdmissionIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-admission-intents.impl';
+import { SqliteSandboxStartupProgress } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-startup-progress.impl';
+import { SqliteSandboxStopIntents } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox-stop-intents.impl';
 import { SqliteAgentTaskRepository } from '../../packages/modules/sandbox/src/infrastructure/persistence/sqlite/agent-task.repository.impl';
 import type { HostCapacity } from '../../packages/modules/sandbox/src/domain/services/resource-pool.domain-service';
 import { currentDatabase, seedImageManifest } from './sqlite';
@@ -222,6 +225,9 @@ export function harness(
   );
   const installInputs: EnsureRuntimeInstalledInput[] = [];
   const bootstrapInputs: BootstrapAgentSessionInput[] = [];
+  const startupProgress = new SqliteSandboxStartupProgress(db);
+  const stopIntents = new SqliteSandboxStopIntents(db);
+  const instanceProgressEvents: SandboxWsEvent[] = [];
   const provision = new ProvisionSandboxWorkflow(
     repo,
     uow,
@@ -243,11 +249,14 @@ export function harness(
     },
     imageFacade,
     audit,
-    { broadcast: () => {} },
+    { broadcast: (event) => instanceProgressEvents.push(event) },
     resources,
     options.authority,
     options.authority ? new SqliteSandboxCreateIntents(db) : undefined,
     registry,
+    undefined,
+    startupProgress,
+    stopIntents,
   );
   const healthMonitor = new SandboxHealthMonitor(repo, registry, clock, audit);
   const waiting = options.waiting ?? {
@@ -270,6 +279,9 @@ export function harness(
     resources,
     waiting,
     new SqliteSandboxAdmissionIntents(db),
+    undefined,
+    stopIntents,
+    options.authority,
   );
   const logBytes = new Map<string, string>();
   const taskLogs: TaskLogStore = {
@@ -329,7 +341,9 @@ export function harness(
     clock,
     resources,
     provision,
+    startupProgress,
     schedulerQueue,
+    instanceProgressEvents,
     taskRepo,
     jobCompletions,
     taskLogs,

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { HealthStatus, SandboxProviderCapabilities } from '../sandbox-provider.contract';
 import { SandboxStatusSchema, TimeoutMinutesSchema } from './enums';
+import { IsoInstantSchema } from './primitives';
 
 /**
  * zod single source (docs/backend/02 §3). These schemas produce, from one place:
@@ -179,6 +180,29 @@ export type SandboxHealthWire = z.infer<typeof SandboxHealthSchema>;
  */
 export type SandboxHealthWireParity = AssertTrue<Exact<SandboxHealthWire, HealthStatus>>;
 
+/** Facts for one original provision/start cycle, not a native Provider RPC identity.
+ * Missing observation is unknown. Query/heartbeat time never means work progressed. */
+export const StartupObservationSchema = z.object({
+  operationId: z.string().min(1),
+  sequence: z.number().int().nonnegative(),
+  state: z.enum(['inflight', 'unknown', 'succeeded', 'failed']),
+  stage: z.enum([
+    'workspace-preparation',
+    'instance-create',
+    'instance-start',
+    'runtime-tools',
+    'environment-initialization',
+    'agent-bootstrap',
+    'completed',
+  ]),
+  startedAt: IsoInstantSchema.nullable(),
+  stageEnteredAt: IsoInstantSchema.nullable(),
+  lastProgressAt: IsoInstantSchema.nullable(),
+  heartbeatAt: IsoInstantSchema.nullable(),
+  observedAt: IsoInstantSchema.nullable(),
+});
+export type StartupObservation = z.infer<typeof StartupObservationSchema>;
+
 export const SandboxDtoSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -243,6 +267,7 @@ export const SandboxDtoSchema = z.object({
    */
   name: z.string(),
   status: SandboxStatusSchema,
+  startupObservation: StartupObservationSchema.optional(),
   headless: z.boolean(),
   timeoutMinutes: TimeoutMinutesSchema.nullable(),
   idleTimeoutSec: z.number().int().positive(),
