@@ -11,6 +11,7 @@ import {
   IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST as planDigest,
 } from './image-runtime-schema-plan';
 import { sqliteStorageObservation } from './sqlite-storage-budget';
+import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 
 type Json = Record<string, unknown>;
 const SQL = "ALTER TABLE `image_manifests` ADD `runtime_versions` text DEFAULT '{}' NOT NULL;";
@@ -85,15 +86,25 @@ export async function executeImageRuntimeSchemaMigration(
     'FIXED_GLOBAL_SCHEMA_COMMAND_REQUIRED',
   );
   const sqlite = store.sqlite;
-  const result = (): Json => ({
-    commitKnown: true,
-    checkpoint: { phase: 'complete', planDigest, schema: 29 },
-    completedWork: 1,
-    complete: true,
-    integrityValid: sqlite.pragma('quick_check', { simple: true }) === 'ok',
-    budgetExceeded: false,
-    metrics: imageRuntimeSchemaMetrics(sqlite),
-  });
+  const writer = coordinatorWriterControl(sqlite);
+  const authority = () => {
+    writer.assert();
+    store.assertControllerFence(id, fence);
+  };
+  const result = async (): Promise<Json> => {
+    await verifyMigrationDatabaseIntegrity(sqlite);
+    authority();
+    requireUpgrade(imageRuntimeSchemaCommitted(sqlite), 'GLOBAL_SCHEMA_COMMIT_UNCONFIRMED');
+    return {
+      commitKnown: true,
+      checkpoint: { phase: 'complete', planDigest, schema: 29 },
+      completedWork: 1,
+      complete: true,
+      integrityValid: true,
+      budgetExceeded: false,
+      metrics: imageRuntimeSchemaMetrics(sqlite),
+    };
+  };
   if (input.action === 'status') {
     if (imageRuntimeSchemaCommitted(sqlite)) return result();
     requireUpgrade(state(sqlite) === 'source', 'GLOBAL_SCHEMA_BASELINE_CHANGED');
@@ -144,12 +155,14 @@ export async function executeImageRuntimeSchemaMigration(
   );
   store.assertControllerFence(id, fence);
   if (imageRuntimeSchemaCommitted(sqlite)) return result();
+  requireUpgrade(state(sqlite) === 'source', 'GLOBAL_SCHEMA_BASELINE_CHANGED');
+  await verifyMigrationDatabaseIntegrity(sqlite);
+  authority();
   const policy = snapshot.plan.policy;
   const storage = await sqliteStorageObservation(sqlite);
+  authority();
   requireUpgrade(storage.availableBytes >= policy.minFreeBytes, 'MIGRATION_DISK_BUDGET');
   requireUpgrade(storage.walBytes <= policy.maxWalBytes, 'MIGRATION_WAL_BUDGET');
-  const writer = coordinatorWriterControl(sqlite);
-  writer.assert();
   const started = performance.now();
   const busy = Number(sqlite.pragma('busy_timeout', { simple: true }));
   sqlite.pragma('busy_timeout = ' + Math.min(busy, policy.migrationBatchMs));
@@ -169,8 +182,8 @@ export async function executeImageRuntimeSchemaMigration(
           .run(plan.migrationHash, plan.migrationTimestamp);
         requireUpgrade(state(sqlite) === 'target', 'GLOBAL_SCHEMA_COMMIT_IDENTITY_INVALID');
         requireUpgrade(
-          sqlite.pragma('quick_check', { simple: true }) === 'ok' &&
-            (sqlite.pragma('foreign_key_check') as unknown[]).length === 0,
+          sqlite.pragma('quick_check(image_manifests)', { simple: true }) === 'ok' &&
+            (sqlite.pragma('foreign_key_check(image_manifests)') as unknown[]).length === 0,
           'GLOBAL_SCHEMA_INTEGRITY_FAILED',
         );
         requireUpgrade(
@@ -194,6 +207,10 @@ export async function executeImageRuntimeSchemaMigration(
               complete: true,
             }),
           );
+        requireUpgrade(
+          performance.now() - started <= policy.migrationBatchMs,
+          'MIGRATION_BATCH_BUDGET',
+        );
       })
       .immediate();
   } finally {
