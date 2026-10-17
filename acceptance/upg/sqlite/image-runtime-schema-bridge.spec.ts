@@ -4,8 +4,10 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
+import { createServer, get } from 'node:http';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import type Database from 'better-sqlite3';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ConfirmedServiceReleaseSchema,
   UpgradeManifestSchema,
@@ -33,12 +35,15 @@ import {
   IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST as recipeDigest,
 } from '../../../apps/api/src/platform/upgrade/image-runtime-schema-plan';
 import { imageRuntimeSchemaCommitted } from '../../../apps/api/src/platform/upgrade/image-runtime-schema-migration';
+import * as integrity from '../../../apps/api/src/platform/upgrade/migration-database-integrity';
 import { useEnv } from '../../support/strict-ports';
 
 // Actual SQLite/journal, old-writer fencing and immutable package-plan boundary.
 // These state-layer tests do not claim native Guest or release qualification.
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 async function fixture(options: { verified?: boolean; minFreeBytes?: number } = {}) {
@@ -471,5 +476,160 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
     expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(false);
     expect(f.schema()).toBe(28);
     expect(f.oldRead.all()).toHaveLength(1);
+  });
+  it('refuses unrelated foreign-key corruption before acquiring the migration write transaction', async () => {
+    const f = await fixture();
+    f.sqlite.exec(
+      'CREATE TABLE integrity_parent(id INTEGER PRIMARY KEY);' +
+        'CREATE TABLE integrity_child(parent_id INTEGER REFERENCES integrity_parent(id));' +
+        'PRAGMA foreign_keys=OFF; INSERT INTO integrity_child VALUES(7); PRAGMA foreign_keys=ON;',
+    );
+    await expect(f.execute()).rejects.toMatchObject({ code: 'GLOBAL_SCHEMA_INTEGRITY_FAILED' });
+    expect(f.schema()).toBe(28);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(false);
+    expect(f.oldRead.all()).toHaveLength(1);
+  });
+  it('rolls back scoped integrity failure with the real DDL, journal and receipt', async () => {
+    const f = await fixture();
+    f.sqlite.exec(
+      'PRAGMA foreign_keys=OFF;' +
+        "CREATE TRIGGER break_image_fk AFTER INSERT ON __drizzle_migrations BEGIN UPDATE image_manifests SET image_id='missing-parent'; END;",
+    );
+    await expect(f.execute()).rejects.toThrow('GLOBAL_SCHEMA_INTEGRITY_FAILED');
+    expect(f.schema()).toBe(28);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(false);
+    expect(f.sqlite.prepare('SELECT image_id FROM image_manifests').get()).toEqual({
+      image_id: 'image-old',
+    });
+    expect(
+      (f.sqlite.prepare('PRAGMA table_xinfo(image_manifests)').all() as { name: string }[]).some(
+        (column) => column.name === 'runtime_versions',
+      ),
+    ).toBe(false);
+  });
+  it('still rolls back a real write batch exceeding 500 ms, including receipt work', async () => {
+    const f = await fixture();
+    f.sqlite.function('slow_receipt_fixture', () => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 525);
+      return 1;
+    });
+    f.sqlite.exec(
+      'CREATE TRIGGER delay_receipt BEFORE INSERT ON upgrade_migration_operations BEGIN SELECT slow_receipt_fixture(); END;',
+    );
+    expect(f.plan.policy.migrationBatchMs).toBe(500);
+    await expect(f.execute()).rejects.toThrow('MIGRATION_BATCH_BUDGET');
+    expect(f.schema()).toBe(28);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(false);
+    expect(f.oldRead.all()).toHaveLength(1);
+  });
+  it('preserves a committed expansion after failed global postcheck and rechecks idempotent status', async () => {
+    const f = await fixture();
+    f.sqlite.exec(
+      'CREATE TABLE integrity_parent(id INTEGER PRIMARY KEY);' +
+        'CREATE TABLE integrity_child(parent_id INTEGER REFERENCES integrity_parent(id));' +
+        'PRAGMA foreign_keys=OFF;' +
+        'CREATE TRIGGER break_global_fk AFTER INSERT ON upgrade_migration_operations BEGIN INSERT INTO integrity_child VALUES(7); END;',
+    );
+    await expect(f.execute()).rejects.toThrow('GLOBAL_SCHEMA_INTEGRITY_FAILED');
+    expect(f.schema()).toBe(29);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(true);
+    await expect(f.execute('status')).rejects.toThrow('GLOBAL_SCHEMA_INTEGRITY_FAILED');
+    f.sqlite.exec('DROP TRIGGER break_global_fk; DELETE FROM integrity_child;');
+    expect(await f.execute('status')).toMatchObject({ complete: true, integrityValid: true });
+    expect(await f.execute()).toMatchObject({ complete: true, integrityValid: true });
+    expect(f.schema()).toBe(29);
+    expect(f.oldRead.all()).toHaveLength(1);
+  });
+  it('rechecks controller and writer authority after asynchronous integrity verification', async () => {
+    const f = await fixture();
+    const verify = integrity.verifyMigrationDatabaseIntegrity;
+    vi.spyOn(integrity, 'verifyMigrationDatabaseIntegrity').mockImplementationOnce(
+      async (sqlite) => {
+        await verify(sqlite);
+        f.advance(31_000);
+      },
+    );
+    await expect(f.execute()).rejects.toThrow(/FENCE_EXPIRED/);
+    expect(f.schema()).toBe(28);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(false);
+  });
+  it('does not acknowledge a committed expansion using a fence that expired during the postcheck', async () => {
+    const f = await fixture();
+    const verify = integrity.verifyMigrationDatabaseIntegrity;
+    vi.spyOn(integrity, 'verifyMigrationDatabaseIntegrity')
+      .mockImplementationOnce(verify)
+      .mockImplementationOnce(async (sqlite) => {
+        await verify(sqlite);
+        f.advance(31_000);
+      });
+    await expect(f.execute()).rejects.toThrow(/FENCE_EXPIRED/);
+    expect(f.schema()).toBe(29);
+    expect(imageRuntimeSchemaCommitted(f.sqlite)).toBe(true);
+    expect(f.oldRead.all()).toHaveLength(1);
+  });
+  it('keeps HTTP and event-loop callbacks responsive during a real unrelated-history scan', async () => {
+    const f = await fixture();
+    f.sqlite.exec('CREATE TABLE unrelated_history(id INTEGER PRIMARY KEY,payload BLOB NOT NULL)');
+    f.sqlite.transaction(() => {
+      const insert = f.sqlite.prepare(
+        'INSERT INTO unrelated_history(payload) VALUES(zeroblob(131072))',
+      );
+      for (let index = 0; index < 256; index++) insert.run();
+    })();
+    const server = createServer((_request, response) => response.end('healthy'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw Error('test-listener-missing');
+    let finished = false;
+    const pending = integrity.verifyMigrationDatabaseIntegrity(f.sqlite).then(() => {
+      finished = true;
+    });
+    const response = await new Promise<string>((resolve, reject) => {
+      get('http://127.0.0.1:' + address.port, (incoming) => {
+        let body = '';
+        incoming.setEncoding('utf8');
+        incoming.on('data', (part: string) => (body += part));
+        incoming.on('end', () => resolve(body));
+      }).on('error', reject);
+    });
+    expect(response).toBe('healthy');
+    expect(finished).toBe(false);
+    await pending;
+    expect(f.plan.policy.migrationBatchMs).toBe(500);
+    expect(await f.execute()).toMatchObject({ complete: true, integrityValid: true });
+  });
+  it('fails closed on a real corrupt database worker without exporting database error details', async () => {
+    const f = await fixture();
+    const corrupt = join(f.directory, 'corrupt.db');
+    await writeFile(corrupt, Buffer.alloc(8192, 0xff));
+    await expect(
+      integrity.verifyMigrationDatabaseIntegrity({ name: corrupt } as Database.Database),
+    ).rejects.toMatchObject({ code: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE' });
+    await expect(
+      integrity.verifyMigrationDatabaseIntegrity({
+        name: join(f.directory, 'missing-private-path.db'),
+      } as Database.Database),
+    ).rejects.toMatchObject({
+      code: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE',
+      message: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE',
+    });
+    expect(f.schema()).toBe(28);
+  });
+  it('terminates an expired independent integrity worker instead of leaving a read transaction running', async () => {
+    const f = await fixture();
+    const realTimeout = globalThis.setTimeout;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const result = expect(
+      integrity.verifyMigrationDatabaseIntegrity(f.sqlite),
+    ).rejects.toMatchObject({ code: 'GLOBAL_SCHEMA_INTEGRITY_TIMEOUT' });
+    for (let turn = 0; turn < 100 && vi.getTimerCount() === 0; turn++)
+      await new Promise<void>((resolve) => realTimeout(resolve, 1));
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await result;
+    vi.useRealTimers();
+    expect(f.schema()).toBe(28);
+    expect(f.sqlite.pragma('quick_check', { simple: true })).toBe('ok');
   });
 });
