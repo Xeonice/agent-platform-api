@@ -1,4 +1,10 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Optional,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from '@nestjs/common';
 import { lstat, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -20,6 +26,9 @@ import {
   requireUpgrade,
   upgradeDigest,
   freezeUpgradePlan,
+  readUpgradeTrustRoot,
+  verifyUpgradeEnvelope,
+  UpgradeError,
 } from './upgrade-trust';
 
 import {
@@ -29,12 +38,23 @@ import {
 } from './upgrade-web-recovery';
 import { UpgradeContractService } from './upgrade-contract-service';
 import { withUpgradeObservation } from './upgrade-observation';
+import {
+  UpgradeOperationStore,
+  type UpgradeOperationRecord,
+  type DefaultImageSnapshot,
+} from './upgrade-operation-store';
+import { UpgradeProjection } from './upgrade-projection';
+import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
 
 type Json = Record<string, unknown>;
+export const UPGRADE_OPERATION_DATA_FORMATS = ['upgrade-plan-v1'] as const;
 
 @Injectable()
-export class UpgradeService {
+export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
   private registering: Promise<void> | null = null;
+  private operationTimer?: ReturnType<typeof setInterval>;
+  private advancing = false;
+  private stopped = false;
   constructor(
     readonly store: UpgradeStore,
     private readonly catalog: UpgradeCatalog,
@@ -42,7 +62,49 @@ export class UpgradeService {
     readonly inspector: UpgradeInspector,
     @Inject(CLOCK) private readonly clock: Clock,
     @Optional() readonly contracts?: UpgradeContractService,
+    @Optional() readonly operations?: UpgradeOperationStore,
+    @Optional() private readonly projection?: UpgradeProjection,
   ) {}
+  onApplicationBootstrap(): void {
+    if (process.env.PLATFORM_PROCESS_ROLE && process.env.PLATFORM_PROCESS_ROLE !== 'coordinator')
+      return;
+    setImmediate(() => {
+      if (!this.stopped) {
+        try {
+          void withCoordinatorBusinessEpoch(this.store.sqlite, () =>
+            this.registerInstalled(),
+          ).catch(() => undefined);
+        } catch {
+          /* No writer authority. */
+        }
+      }
+    });
+    this.operationTimer = setInterval(() => this.scheduleOperation(), 250);
+    this.operationTimer.unref();
+  }
+  onModuleDestroy(): void {
+    this.stopped = true;
+    if (this.operationTimer) clearInterval(this.operationTimer);
+  }
+  private scheduleOperation(): void {
+    if (
+      this.stopped ||
+      !this.operations ||
+      (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
+        process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
+    )
+      return;
+    setImmediate(() => {
+      if (this.stopped) return;
+      try {
+        void withCoordinatorBusinessEpoch(this.store.sqlite, () => this.advanceOperation()).catch(
+          () => undefined,
+        );
+      } catch {
+        /* Retired writer cannot queue work. */
+      }
+    });
+  }
   async registerInstalled(): Promise<void> {
     if (this.store.confirmed()) return;
     if (this.registering) return this.registering;
@@ -77,6 +139,36 @@ export class UpgradeService {
     res: Response,
     granted?: ReturnType<UpgradeSecurity['principal']>,
   ): Promise<UpgradeStatus> {
+    if (this.projection) {
+      const principal = granted ?? this.security.principal(req, res, this.store.instanceId);
+      res.setHeader('X-Upgrade-User-Scope', principal.userScope);
+      res.setHeader('Cache-Control', 'no-store');
+      const row = this.store.instance(),
+        last = this.store.confirmed(),
+        physical = this.projection.view(),
+        attempt = this.store.latest();
+      this.projection.schedule();
+      return UpgradeStatusSchema.parse({
+        ...physical,
+        instanceId: this.store.instanceId,
+        userScope: principal.userScope,
+        activationGeneration: row.activation_generation,
+        confirmedServiceRelease: physical.serviceState === 'confirmed' ? last : null,
+        lastConfirmedServiceRelease: last,
+        catalog: this.catalog.status(),
+        capabilities: {
+          canUpgradeInstance: principal.canUpgrade,
+          canAuthenticate: this.security.canAuthenticate,
+          canContract: principal.canUpgrade && physical.contract?.availablePlan?.eligible === true,
+        },
+        csrfToken: principal.csrfToken,
+        attempt,
+        recovery: this.store.recovery(),
+        operation: this.operations?.latest()?.operation ?? null,
+        currentStageProgress: attempt ? this.store.stageProgress(attempt.attemptId) : null,
+        observedAt: this.clock.now().toISOString(),
+      });
+    }
     return withUpgradeObservation(() => this.observeStatus(req, res, granted));
   }
   private async observeStatus(
@@ -166,10 +258,39 @@ export class UpgradeService {
   async request(req: Request, res: Response, command: UpgradeRequest) {
     const principal = this.security.principal(req, res, this.store.instanceId);
     this.security.mutation(req, principal);
+    res.setHeader('Vary', 'Prefer');
+    res.setHeader('Cache-Control', 'no-store');
+    const asyncRequested = this.preferAsync(req);
+    const operation = this.operations?.replay(principal.actorId, command);
+    if (operation) {
+      if (asyncRequested) return operation.operation;
+      return this.legacyOperationAttempt(operation);
+    }
     const replay = this.store.replay(principal.actorId, command);
     if (replay) {
       await this.syncIntentBarrier(replay.attemptId);
       return replay;
+    }
+    if (asyncRequested) {
+      requireUpgrade(this.operations, 'UPGRADE_ASYNC_UNAVAILABLE');
+      const target = this.catalog.target(command.targetReleaseId, command.targetDigest);
+      requireUpgrade(
+        target.chain.every((stage) =>
+          stage.envelope.manifest.components.coordinator.upgradeOperationFormats?.includes(
+            'upgrade-plan-v1',
+          ),
+        ),
+        'UPGRADE_PLAN_RESUME_UNSUPPORTED',
+      );
+      const accepted = this.operations.accept(
+        principal.actorId,
+        command,
+        target.chain,
+        this.defaultImagesSnapshot(),
+      );
+      res.setHeader('Preference-Applied', 'respond-async');
+      this.scheduleOperation();
+      return accepted.operation;
     }
     await this.registerInstalled();
     await this.catalog.refresh();
@@ -239,9 +360,195 @@ export class UpgradeService {
   lookup(req: Request, res: Response, id: string) {
     const principal = this.security.principal(req, res, this.store.instanceId);
     requireUpgrade(principal.canUpgrade, 'UPGRADE_PERMISSION_REQUIRED', 403);
-    const attempt = this.store.lookup(principal.actorId, id);
+    const operation = this.operations?.find(principal.actorId, id);
+    const attempt = operation
+      ? this.preferAsync(req)
+        ? operation.operation
+        : this.legacyOperationAttempt(operation)
+      : this.store.lookup(principal.actorId, id);
     res.setHeader('X-Upgrade-User-Scope', principal.userScope);
+    res.setHeader('Vary', 'Prefer');
+    res.setHeader('Cache-Control', 'no-store');
     return attempt;
+  }
+  private preferAsync(req: Request): boolean {
+    return String(req.headers?.prefer ?? '')
+      .split(',')
+      .some((preference) => preference.trim().toLowerCase() === 'respond-async');
+  }
+  private defaultImagesSnapshot(): DefaultImageSnapshot[] {
+    try {
+      return this.inspector.defaultImagesSnapshot();
+    } catch {
+      return [];
+    }
+  }
+  private legacyOperationAttempt(record: UpgradeOperationRecord) {
+    const final = record.operation.stages[record.operation.stages.length - 1];
+    requireUpgrade(final.attemptId, 'UPGRADE_OPERATION_REQUIRES_ASYNC');
+    return this.store.attempt(final.attemptId);
+  }
+  async advanceOperation(): Promise<void> {
+    if (!this.operations || this.advancing || this.stopped) return;
+    const record = this.operations.active();
+    if (!record) return;
+    this.advancing = true;
+    try {
+      const id = record.operation.operationId,
+        index = record.operation.currentStageIndex,
+        stage = record.operation.stages[index];
+      if (stage.attemptId) {
+        const attempt = this.store.attempt(stage.attemptId);
+        if (['failed', 'deferred', 'candidate-rejected', 'reverted'].includes(attempt.state)) {
+          this.operations.update(id, (next) => {
+            next.operation.state = attempt.state === 'deferred' ? 'deferred' : 'failed';
+            next.operation.reason = attempt.reason;
+            next.operation.stages[index].state =
+              attempt.state === 'deferred' ? 'deferred' : 'failed';
+          });
+          return;
+        }
+        if (attempt.state !== 'activation-confirmed') {
+          await this.syncIntentBarrier(attempt.attemptId);
+          return;
+        }
+        const current = this.store.confirmed(),
+          instance = this.store.instance();
+        requireUpgrade(
+          current &&
+            current.releaseId === stage.releaseId &&
+            instance.service_state === 'confirmed' &&
+            instance.ready === 1,
+          'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
+        );
+        requireUpgrade(
+          (await this.inspector.installedProof(current)).qualified === true,
+          'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
+        );
+        this.operations.update(id, (next) => {
+          const live = this.store.instance(),
+            confirmed = this.store.confirmed(),
+            technical = this.store.attempt(attempt.attemptId);
+          requireUpgrade(
+            live.ready === 1 &&
+              live.service_state === 'confirmed' &&
+              confirmed &&
+              canonicalUpgrade(confirmed) === canonicalUpgrade(current) &&
+              technical.state === 'activation-confirmed' &&
+              next.operation.currentStageIndex === index &&
+              next.operation.stages[index].attemptId === attempt.attemptId,
+            'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
+          );
+          next.operation.stages[index].state = 'confirmed';
+          if (index === next.operation.stages.length - 1) {
+            next.operation.state = 'completed';
+            next.operation.percent = 100;
+            const after = this.defaultImagesSnapshot();
+            const images = after.flatMap((image) => {
+              const before = next.defaultImagesBefore.find(
+                (old) => old.provider === image.provider,
+              );
+              return before?.managed &&
+                image.managed &&
+                (before.ref !== image.ref || before.digest !== image.digest)
+                ? [
+                    {
+                      provider: image.provider,
+                      previousRef: before.ref,
+                      previousDigest: before.digest,
+                      ref: image.ref,
+                      digest: image.digest,
+                      runtimeVersions: image.runtimeVersions,
+                    },
+                  ]
+                : [];
+            });
+            next.operation.defaultImageUpdate = images.length
+              ? { scope: 'managed-default', images, observedAt: this.clock.now().toISOString() }
+              : null;
+          } else {
+            next.operation.currentStageIndex = index + 1;
+            next.operation.state = 'preparing';
+          }
+        });
+        return;
+      }
+      this.operations.update(id, (next) => {
+        next.operation.state = 'preparing';
+      });
+      const fixed = record.chain[index];
+      const roots = await readUpgradeTrustRoot(process.env.UPGRADE_TRUST_ROOT_PATH ?? '');
+      const envelope = verifyUpgradeEnvelope(fixed.envelope, roots, this.clock.now().getTime());
+      const current = this.store.confirmed();
+      requireUpgrade(current, 'INSTALLED_RELEASE_UNKNOWN');
+      const sourceActual = await this.inspector.sourceActual();
+      if (!sourceActual)
+        requireUpgrade(
+          (await this.inspector.installedProof(current)).qualified === true,
+          'CURRENT_SERVICE_UNCONFIRMED',
+        );
+      const source = sourceActual
+        ? { ...current, schema: sourceActual.schema, components: sourceActual.components }
+        : current;
+      const plan = freezeUpgradePlan(envelope, source, this.store.appliedBridges());
+      requireUpgrade(
+        canonicalUpgrade(plan) === canonicalUpgrade(fixed.plan),
+        'FROZEN_SOURCE_PLAN_CONFLICT',
+      );
+      const baseline = await this.inspector.capture(),
+        binding = await this.inspector.entryBinding();
+      const accepted = this.operations.update(id, (next) => {
+        requireUpgrade(
+          next.operation.currentStageIndex === index &&
+            next.operation.stages[index].attemptId === null,
+          'UPGRADE_OPERATION_CHANGED',
+        );
+        const attempt = this.store.accept(
+          next.actorId,
+          {
+            requestId: fixed.requestId,
+            targetReleaseId: envelope.manifest.releaseId,
+            targetDigest: envelope.manifestDigest,
+            expectedActivationGeneration: current.activationGeneration,
+          },
+          envelope,
+          plan,
+          Number(binding.fence),
+          baseline,
+          sourceActual,
+          id,
+        );
+        next.operation.stages[index].attemptId = attempt.attemptId;
+        next.operation.stages[index].state = 'running';
+        next.operation.state = 'running';
+      });
+      await this.syncIntentBarrier(accepted.operation.stages[index].attemptId!);
+    } catch (error) {
+      // An epoch loss cannot commit even this failure. A new actual writer resumes
+      // the same immutable record; it never replays an already-created attempt.
+      const current = this.operations.active();
+      if (current && !current.operation.stages[current.operation.currentStageIndex].attemptId) {
+        this.operations.update(current.operation.operationId, (next) => {
+          next.operation.state = 'deferred';
+          next.operation.reason =
+            error instanceof UpgradeError ? error.code : 'UPGRADE_PREPARATION_UNCONFIRMED';
+          next.operation.stages[next.operation.currentStageIndex].state = 'deferred';
+        });
+      } else if (current) {
+        const actual = this.store.attempt(
+          current.operation.stages[current.operation.currentStageIndex].attemptId!,
+        );
+        if (actual.state === 'activation-confirmed')
+          this.operations.update(current.operation.operationId, (next) => {
+            next.operation.state = 'deferred';
+            next.operation.reason =
+              error instanceof UpgradeError ? error.code : 'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED';
+            next.operation.stages[next.operation.currentStageIndex].state = 'deferred';
+          });
+      }
+    } finally {
+      this.advancing = false;
+    }
   }
   async claim(id: string, controllerId: string, leaseMs: number) {
     const currentBinding = await this.inspector.entryBinding();

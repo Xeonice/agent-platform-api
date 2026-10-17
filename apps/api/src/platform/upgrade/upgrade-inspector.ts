@@ -1,6 +1,11 @@
 import { resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
-import { CLOCK, type Clock } from '@platform/shared-kernel';
+import {
+  CLOCK,
+  builtinImageRefFor,
+  isManagedBuiltinImageDefault,
+  type Clock,
+} from '@platform/shared-kernel';
 import {
   SANDBOX_PROVIDER_REGISTRY,
   SANDBOX_EXEC_PORT,
@@ -11,6 +16,7 @@ import {
   type SandboxExecPort,
   UpgradeSourceActualSchema,
   type UpgradeSourceActual,
+  parseImageRef,
 } from '@platform/contracts';
 import {
   RuntimeOwnerProviderRegistry,
@@ -30,6 +36,8 @@ import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
 import { imageRuntimeSchemaCommitted } from './image-runtime-schema-migration';
 import { initialSourceActivation, sourceArtifactProof } from './upgrade-artifact-proof';
 import { observeUpgradeOnce } from './upgrade-observation';
+import type { DefaultImageSnapshot } from './upgrade-operation-store';
+import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 
 type Json = Record<string, unknown>;
 export function persistedBinding(value: Json): Json {
@@ -92,6 +100,40 @@ export class UpgradeInspector {
   ) {}
   get observedAt(): string {
     return this.clock.now().toISOString();
+  }
+  defaultImagesSnapshot(): DefaultImageSnapshot[] {
+    const hasVersions = (
+      this.store.sqlite.pragma('table_info(image_manifests)') as { name: string }[]
+    ).some((column) => column.name === 'runtime_versions');
+    return this.providers.list().flatMap((provider) => {
+      const ref = builtinImageRefFor(provider.name),
+        parsed = parseImageRef(ref);
+      const row = this.store.sqlite
+        .prepare(
+          `SELECT m.digest,${hasVersions ? 'm.runtime_versions' : "'{}' AS runtime_versions"} FROM images i JOIN image_manifests m ON m.image_id=i.id WHERE i.name=? AND i.is_builtin=1 AND m.version=? AND m.is_active=1 AND m.validation_status IN ('valid','warning') ORDER BY m.registered_at DESC,m.rowid DESC LIMIT 1`,
+        )
+        .get(parsed.name, parsed.digest ?? parsed.tag ?? 'latest') as
+        { digest: string; runtime_versions: string } | undefined;
+      if (!row || !/^sha256:[a-f0-9]{64}$/.test(row.digest)) return [];
+      const versions: unknown = JSON.parse(row.runtime_versions);
+      const runtimeVersions =
+        versions && typeof versions === 'object'
+          ? Object.fromEntries(
+              Object.entries(versions).filter(
+                (pair): pair is [string, string] => typeof pair[1] === 'string',
+              ),
+            )
+          : {};
+      return [
+        {
+          provider: provider.name,
+          managed: isManagedBuiltinImageDefault(provider.name),
+          ref,
+          digest: row.digest,
+          runtimeVersions,
+        },
+      ];
+    });
   }
   async entryBinding(): Promise<Json> {
     const origin = loopbackOrigin(process.env.PLATFORM_ENTRY_CONTROL_ORIGIN);
@@ -245,9 +287,15 @@ export class UpgradeInspector {
         identity.noRuntimeSideEffects === true,
       'SOURCE_WRITER_UNCONFIRMED',
     );
+    await verifyMigrationDatabaseIntegrity(this.store.sqlite);
+    const afterIntegrity = await this.controlIdentity(api.origin);
     requireUpgrade(
-      this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok',
-      'SOURCE_DATABASE_UNCONFIRMED',
+      afterIntegrity.writerFenceValid === true &&
+        afterIntegrity.coordinatorGeneration === identity.coordinatorGeneration &&
+        afterIntegrity.actualCoordinatorArtifactDigest ===
+          identity.actualCoordinatorArtifactDigest &&
+        afterIntegrity.startIdentity === identity.startIdentity,
+      'SOURCE_WRITER_UNCONFIRMED',
     );
     requireUpgrade(this.providers instanceof RuntimeOwnerProviderRegistry, 'ACTUAL_OWNER_UNKNOWN');
     const route = this.providers
@@ -342,6 +390,15 @@ export class UpgradeInspector {
           return Number(p.min) <= protocol.max && Number(p.max) >= protocol.min;
         }),
       'SOURCE_OWNER_PROTOCOL_UNCONFIRMED',
+    );
+    const finalIdentity = await this.controlIdentity(api.origin);
+    requireUpgrade(
+      finalIdentity.writerFenceValid === true &&
+        finalIdentity.coordinatorGeneration === identity.coordinatorGeneration &&
+        finalIdentity.actualCoordinatorArtifactDigest ===
+          identity.actualCoordinatorArtifactDigest &&
+        finalIdentity.startIdentity === identity.startIdentity,
+      'SOURCE_WRITER_UNCONFIRMED',
     );
     requireUpgrade(
       canonicalUpgrade(persistedBinding(binding)) ===

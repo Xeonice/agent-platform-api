@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { builtinImageRefFor, builtinImageRefs, publishedImageFor } from '@platform/shared-kernel';
+import {
+  builtinImageRefFor,
+  builtinImageRefs,
+  publishedImageFor,
+  isManagedBuiltinImageDefault,
+} from '@platform/shared-kernel';
 import { useEnv } from '../../support/strict-ports';
 
 const cleanup: (() => void)[] = [];
@@ -29,6 +34,7 @@ describe('package-bound official sandbox defaults', () => {
       defaults(common);
       for (const provider of ['aio', 'boxlite']) {
         expect(builtinImageRefFor(provider)).toBe(publishedImageFor(provider));
+        expect(isManagedBuiltinImageDefault(provider)).toBe(true);
         expect(builtinImageRefFor(provider)).toContain(':v0.3.12-cli.20261017.1');
       }
       expect(builtinImageRefs(['aio', 'boxlite', 'boxlite'])).toHaveLength(2);
@@ -42,13 +48,16 @@ describe('package-bound official sandbox defaults', () => {
     ]) {
       defaults(ref);
       expect(builtinImageRefFor('boxlite')).toBe(ref);
+      expect(isManagedBuiltinImageDefault('boxlite')).toBe(false);
     }
     defaults(
       'ghcr.io/xeonice/agent-platform-boxlite:latest',
       'ghcr.io/xeonice/agent-platform-boxlite:latest',
     );
     expect(builtinImageRefFor('boxlite')).toBe('ghcr.io/xeonice/agent-platform-boxlite:latest');
+    expect(isManagedBuiltinImageDefault('boxlite')).toBe(false);
     defaults('third-party.test/custom:latest');
     expect(builtinImageRefFor('external')).toBe('third-party.test/custom:latest');
+    expect(isManagedBuiltinImageDefault('external')).toBe(false);
   });
 });

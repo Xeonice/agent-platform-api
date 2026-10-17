@@ -178,6 +178,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       'authorization',
       'x-access-passcode',
       'x-upgrade-csrf',
+      'prefer',
       'x-schema-hash',
       'x-operation-id',
       'sec-fetch-site',

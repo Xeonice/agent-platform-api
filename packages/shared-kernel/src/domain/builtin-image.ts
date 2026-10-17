@@ -81,12 +81,22 @@ export function builtinImageRefFor(provider: string): string {
   // those two exact legacy aliases as managed defaults of THIS installed code.
   // Provider overrides, third-party repositories and pinned user refs retain
   // precedence; reverting this package also restores its previous resolution.
+  if (published !== undefined && isManagedBuiltinImageDefault(provider)) return published;
+  return builtinImageRef();
+}
+
+/** Explicit provider overrides and pinned user defaults are never update-managed. */
+export function isManagedBuiltinImageDefault(provider: string): boolean {
+  const override = (process.env[`SANDBOX_${provider.toUpperCase()}_IMAGE`] ?? '').trim();
   const legacyOfficial = [
     'ghcr.io/xeonice/agent-platform-sandbox:latest',
     'ghcr.io/xeonice/agent-platform-boxlite:latest',
   ].includes(builtinImageRef());
-  if (published !== undefined && (!isBuiltinImageConfigured() || legacyOfficial)) return published;
-  return builtinImageRef();
+  return (
+    override === '' &&
+    publishedImageFor(provider) !== undefined &&
+    (!isBuiltinImageConfigured() || legacyOfficial)
+  );
 }
 
 /**

@@ -10,9 +10,8 @@ import type {
 } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
 import { UpgradeInspector } from './upgrade-inspector';
-import { compatibleGlobalSchemaPath } from './image-runtime-schema-plan';
+import { freezeUpgradeChain, type FixedUpgradeStage } from './upgrade-chain';
 import {
-  freezeUpgradePlan,
   readUpgradeTrustRoot,
   requireUpgrade,
   upgradeDigest,
@@ -55,6 +54,7 @@ export class UpgradeCatalog {
     envelope: SignedUpgradeManifest;
     plan: UpgradePlan;
     sourceActual: UpgradeSourceActual | null;
+    chain: FixedUpgradeStage[];
   } | null = null;
   private refreshing: Promise<void> | null = null;
   constructor(
@@ -70,11 +70,27 @@ export class UpgradeCatalog {
     return this.refreshing;
   }
   status(): UpgradeStatus['catalog'] {
+    const age = this.projection.observedAt
+      ? this.clock.now().getTime() - Date.parse(this.projection.observedAt)
+      : Infinity;
+    if (this.projection.state === 'verified' && (age < 0 || age > 5000))
+      return {
+        ...this.projection,
+        state: 'unknown',
+        availableRelease: null,
+        reason: 'CATALOG_OBSERVATION_STALE',
+      };
     return this.projection;
   }
   target(releaseId: string, digest: string) {
     requireUpgrade(
       this.verified &&
+        this.projection.state === 'verified' &&
+        this.projection.observedAt !== null &&
+        this.clock.now().getTime() - Date.parse(this.projection.observedAt) >= 0 &&
+        this.clock.now().getTime() - Date.parse(this.projection.observedAt) <= 5000 &&
+        this.verified.chain[0].plan.sourceActivationGeneration ===
+          this.store.instance().activation_generation &&
         this.verified.envelope.manifest.releaseId === releaseId &&
         this.verified.envelope.manifestDigest === digest,
       'UPGRADE_TARGET_UNAVAILABLE',
@@ -83,7 +99,6 @@ export class UpgradeCatalog {
   }
   private async read(): Promise<void> {
     const observedAt = this.clock.now().toISOString();
-    this.verified = null;
     try {
       const path = process.env.UPGRADE_TRUST_ROOT_PATH;
       requireUpgrade(path, 'TRUST_ROOT_MISSING');
@@ -114,9 +129,13 @@ export class UpgradeCatalog {
         );
       }
       let raw: unknown;
-      if (process.env.UPGRADE_CATALOG_FILE)
+      if (process.env.UPGRADE_CATALOG_FILE) {
+        requireUpgrade(
+          (await lstat(process.env.UPGRADE_CATALOG_FILE)).size <= 1024 * 1024,
+          'CATALOG_TOO_LARGE',
+        );
         raw = JSON.parse(await readFile(process.env.UPGRADE_CATALOG_FILE, 'utf8'));
-      else {
+      } else {
         const url = new URL(process.env.UPGRADE_CATALOG_URL ?? '');
         requireUpgrade(
           url.protocol === 'https:' &&
@@ -161,7 +180,9 @@ export class UpgradeCatalog {
         envelope: SignedUpgradeManifest;
         plan: UpgradePlan;
         sourceActual: UpgradeSourceActual | null;
+        chain: FixedUpgradeStage[];
       }[] = [];
+      const envelopes: SignedUpgradeManifest[] = [];
       let incompatibleReason: string | null = null;
       for (const entry of raw.releases) {
         if (!entry || typeof entry !== 'object' || !('envelope' in entry)) continue;
@@ -206,39 +227,51 @@ export class UpgradeCatalog {
             entry.manifestDigest === signed.manifestDigest,
           'CATALOG_IDENTITY_MISMATCH',
         );
+        const duplicate = envelopes.find((e) => e.manifest.releaseId === signed.manifest.releaseId);
+        requireUpgrade(
+          !duplicate || duplicate.manifestDigest === signed.manifestDigest,
+          'AMBIGUOUS_BRIDGE_RELEASE',
+        );
+        if (!duplicate) envelopes.push(signed);
+      }
+      for (const signed of envelopes) {
         if (
           !newer(signed.manifest.releaseId, installed.releaseId) &&
           !(sourceActual && signed.manifest.releaseId === installed.releaseId)
         )
           continue;
         try {
-          const actualSchema = this.inspector.schema();
-          const path = signed.manifest.upgradePaths.find(
-            (p) =>
-              p.fromRelease === installed.releaseId &&
-              actualSchema >= p.minSchema &&
-              actualSchema <= p.maxSchema,
+          const chain = freezeUpgradeChain(
+            signed,
+            planSource,
+            envelopes,
+            this.store.appliedBridges(),
           );
-          requireUpgrade(path, 'UPGRADE_PATH_INCOMPATIBLE');
-          // Only the fixed, journal-bound additive recipe may cross a global
-          // version. Namespace read epochs do not register Drizzle migrations.
           requireUpgrade(
-            compatibleGlobalSchemaPath(path, actualSchema),
-            'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED',
+            chain.length === 1 ||
+              chain.every((stage) =>
+                stage.envelope.manifest.components.coordinator.upgradeOperationFormats?.includes(
+                  'upgrade-plan-v1',
+                ),
+              ),
+            'UPGRADE_PLAN_RESUME_UNSUPPORTED',
           );
           requireUpgrade(
             !this.store.sqlite
               .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
               .get() ||
-              signed.manifest.components.coordinator.dataFormats?.includes(
-                'project-name-v2-authority',
+              chain.every((stage) =>
+                stage.envelope.manifest.components.coordinator.dataFormats?.includes(
+                  'project-name-v2-authority',
+                ),
               ),
             'TARGET_DATA_FORMAT_INCOMPATIBLE',
           );
           targets.push({
             envelope: signed,
-            plan: freezeUpgradePlan(signed, planSource, this.store.appliedBridges()),
+            plan: chain[chain.length - 1].plan,
             sourceActual,
+            chain,
           });
         } catch (error) {
           if (!(error instanceof UpgradeError)) throw error;
@@ -252,7 +285,7 @@ export class UpgradeCatalog {
       const target = this.verified?.envelope;
       this.projection = {
         state: target ? 'verified' : incompatibleReason ? 'unavailable' : 'no-update',
-        observedAt,
+        observedAt: this.clock.now().toISOString(),
         reason: target ? null : incompatibleReason,
         availableRelease: target
           ? {
@@ -261,10 +294,16 @@ export class UpgradeCatalog {
               webRevision: target.manifest.components.web.webRevision,
               webArtifactDigest: target.manifest.components.web.artifactDigest,
               installable: true,
+              supportsAsync: this.verified!.chain.every((stage) =>
+                stage.envelope.manifest.components.coordinator.upgradeOperationFormats?.includes(
+                  'upgrade-plan-v1',
+                ),
+              ),
             }
           : null,
       };
     } catch (error) {
+      this.verified = null;
       this.projection = {
         state: 'unknown',
         observedAt,

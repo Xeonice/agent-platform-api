@@ -18,6 +18,8 @@ import { createUpgradeProjectProjection } from './upgrade-project-projection';
 import { UpgradeContractStore } from './upgrade-contract-store';
 import { UpgradeContractService } from './upgrade-contract-service';
 import { UpgradeContractInternalController } from './upgrade.controller';
+import { UpgradeOperationStore } from './upgrade-operation-store';
+import { UpgradeProjection } from './upgrade-projection';
 
 @Global()
 @Module({
@@ -29,6 +31,8 @@ import { UpgradeContractInternalController } from './upgrade.controller';
     UpgradeInspector,
     UpgradeSecurity,
     UpgradeService,
+    UpgradeOperationStore,
+    UpgradeProjection,
     CoordinatorHandoff,
     UpgradeRoleHandoffs,
     UpgradeObserver,

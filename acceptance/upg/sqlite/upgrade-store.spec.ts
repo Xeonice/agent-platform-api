@@ -234,6 +234,36 @@ function events() {
   ).n;
 }
 
+it('keeps known download progress and immutable stage clocks when later migration total is unknown and heartbeat repeats work', () => {
+  const { id } = accept(true);
+  store.commit(id, command(id, 'progress', { stepId: 'package-download', completedWork: 250 }));
+  const first = store.stageProgress(id)!;
+  expect(store.attempt(id).percent).toBeNull();
+  expect(first).toMatchObject({
+    stage: 'package-download',
+    completedWork: 250,
+    totalWork: 1000,
+    percent: 25,
+    enteredAt: clock.now().toISOString(),
+    lastProgressAt: clock.now().toISOString(),
+  });
+  time += 1000;
+  store.commit(id, command(id, 'progress', { stepId: 'package-download', completedWork: 250 }));
+  expect(store.stageProgress(id)).toEqual(first);
+  time += 1000;
+  store.commit(id, command(id, 'progress', { stepId: 'package-download', completedWork: 500 }));
+  expect(store.stageProgress(id)).toMatchObject({
+    completedWork: 500,
+    percent: 50,
+    enteredAt: first.enteredAt,
+    lastProgressAt: clock.now().toISOString(),
+  });
+  const queries = vi.spyOn(connection.sqlite, 'prepare');
+  store.stageProgress(id);
+  expect(queries.mock.calls.some(([sql]) => sql.includes('upgrade_events'))).toBe(false);
+  queries.mockRestore();
+});
+
 beforeEach(() => {
   time = epoch;
   directory = mkdtempSync(join(tmpdir(), 'upg-store-sqlite-'));

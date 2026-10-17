@@ -116,6 +116,14 @@ export class UpgradeContractStore {
         const replay = this.replay(actorId, command);
         if (replay) return replay;
         requireUpgrade(
+          !this.sqlite
+            .prepare(
+              "SELECT 1 FROM platform_operations WHERE instance_id=? AND role='upgrade-plan' AND state IN ('accepted','preparing','running')",
+            )
+            .get(this.upgrades.instanceId),
+          'UPGRADE_ALREADY_ACTIVE',
+        );
+        requireUpgrade(
           this.upgrades.instance().service_state === 'confirmed' &&
             this.upgrades.instance().activation_generation === command.expectedActivationGeneration,
           'CONTRACT_ACTIVATION_CONFLICT',

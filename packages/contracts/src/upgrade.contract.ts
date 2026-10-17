@@ -16,6 +16,7 @@ export const UpgradeArtifactSchema = z
     sourceRevision: Revision,
     protocol: UpgradeProtocolRangeSchema,
     dataFormats: z.array(z.literal('project-name-v2-authority')).optional(),
+    upgradeOperationFormats: z.array(z.literal('upgrade-plan-v1')).optional(),
   })
   .passthrough();
 export const UpgradeComponentsSchema = z
@@ -292,6 +293,60 @@ export const UpgradeAttemptSchema = z.object({
   observedAt: Time,
   reason: z.string().nullable(),
 });
+/** One explicit user request, with a signed ordered chain of technical attempts. */
+export const UpgradeOperationSchema = z.object({
+  instanceId: Name,
+  operationId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  finalTargetReleaseId: Release,
+  finalTargetDigest: Digest,
+  sequence: z.number().int().nonnegative(),
+  state: z.enum(['accepted', 'preparing', 'running', 'completed', 'failed', 'deferred']),
+  acceptedAt: Time,
+  observedAt: Time,
+  currentStageIndex: z.number().int().nonnegative(),
+  stages: z
+    .array(
+      z.object({
+        releaseId: Release,
+        targetDigest: Digest,
+        attemptId: z.string().uuid().nullable(),
+        state: z.enum(['pending', 'running', 'confirmed', 'failed', 'deferred']),
+      }),
+    )
+    .min(1)
+    .max(16),
+  // No cross-stage weights or estimated total. Only the final confirmation is 100.
+  percent: z.literal(100).nullable(),
+  reason: z.string().nullable(),
+  defaultImageUpdate: z
+    .object({
+      scope: z.literal('managed-default'),
+      images: z
+        .array(
+          z.object({
+            provider: Name,
+            previousRef: z.string().min(1),
+            previousDigest: Digest,
+            ref: z.string().min(1),
+            digest: Digest,
+            runtimeVersions: z.record(z.string()),
+          }),
+        )
+        .min(1),
+      observedAt: Time,
+    })
+    .nullable()
+    .optional(),
+});
+export const UpgradeStageProgressSchema = z.object({
+  stage: z.string(),
+  completedWork: z.number().nonnegative(),
+  totalWork: z.number().nonnegative().nullable(),
+  percent: z.number().min(0).max(100).nullable(),
+  enteredAt: Time.nullable(),
+  lastProgressAt: Time.nullable(),
+});
 export const ConfirmedServiceReleaseSchema = z.object({
   releaseId: Release,
   activationGeneration: z.number().int().nonnegative(),
@@ -343,6 +398,7 @@ export const UpgradeStatusSchema = z.object({
         webRevision: Revision,
         webArtifactDigest: Digest,
         installable: z.literal(true),
+        supportsAsync: z.boolean().optional(),
       })
       .nullable(),
   }),
@@ -378,6 +434,23 @@ export const UpgradeStatusSchema = z.object({
     .nullable()
     .optional(),
   contract: UpgradeContractStatusSchema.nullable().optional(),
+  operation: UpgradeOperationSchema.nullable().optional(),
+  currentStageProgress: UpgradeStageProgressSchema.nullable().optional(),
+  serviceAvailability: z
+    .object({
+      state: z.enum(['available', 'unavailable', 'unknown']),
+      observedAt: Time.nullable(),
+      reason: z.string().nullable(),
+    })
+    .optional(),
+  observation: z
+    .object({
+      state: z.enum(['fresh', 'stale', 'checking']),
+      confirmedAt: Time.nullable(),
+      checkedAt: Time.nullable(),
+      reason: z.string().nullable(),
+    })
+    .optional(),
 });
 
 export type UpgradeManifest = z.infer<typeof UpgradeManifestSchema>;
@@ -386,6 +459,8 @@ export type UpgradeTrustRoot = z.infer<typeof UpgradeTrustRootSchema>;
 export type UpgradePlan = z.infer<typeof UpgradePlanSchema>;
 export type UpgradeRequest = z.infer<typeof UpgradeRequestSchema>;
 export type UpgradeAttempt = z.infer<typeof UpgradeAttemptSchema>;
+export type UpgradeOperation = z.infer<typeof UpgradeOperationSchema>;
+export type UpgradeStageProgress = z.infer<typeof UpgradeStageProgressSchema>;
 export type UpgradeStatus = z.infer<typeof UpgradeStatusSchema>;
 export type ConfirmedServiceRelease = z.infer<typeof ConfirmedServiceReleaseSchema>;
 export type UpgradeRecovery = z.infer<typeof UpgradeRecoverySchema>;

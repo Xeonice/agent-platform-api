@@ -20,6 +20,7 @@ import {
   type UpgradeRequest,
   type UpgradeRecovery,
   type UpgradeSourceActual,
+  type UpgradeStageProgress,
 } from '@platform/contracts';
 import { PLATFORM_SQLITE } from '../persistence/platform.module';
 import {
@@ -250,6 +251,46 @@ export class UpgradeStore {
     const id = this.latestAttemptId();
     return id ? this.attempt(id) : null;
   }
+  stageProgress(id: string): UpgradeStageProgress | null {
+    const row = this.row(id),
+      plan = this.plan(id);
+    const stage = plan.steps.find((step) => step.stepId === row.stage);
+    if (!stage) return null;
+    const actual = this.steps(id).find((step) => step.step_id === stage.stepId);
+    const saved = this.sqlite
+      .prepare(
+        "SELECT result FROM platform_operations WHERE operation_id=? AND instance_id=? AND role='upgrade-stage-progress'",
+      )
+      .get('upgrade-stage-progress:' + id, this.instanceId) as { result: string } | undefined;
+    const timing = saved
+      ? (JSON.parse(saved.result) as {
+          stage: string;
+          enteredAt: string | null;
+          lastProgressAt: string | null;
+        })
+      : null;
+    const work = actual?.completed_work ?? 0;
+    return {
+      stage: stage.stepId,
+      completedWork: work,
+      totalWork: stage.totalWork,
+      percent:
+        stage.totalWork === null
+          ? null
+          : stage.totalWork === 0
+            ? actual?.applied === 1
+              ? 100
+              : 0
+            : Math.min(100, Math.floor((100 * work) / stage.totalWork)),
+      enteredAt: timing?.stage === stage.stepId ? timing.enteredAt : null,
+      lastProgressAt:
+        timing?.stage === stage.stepId
+          ? timing.lastProgressAt
+          : actual?.applied_at
+            ? this.iso(actual.applied_at)
+            : null,
+    };
+  }
   /** Current probe inputs only. Historical observation receipts can be megabytes
    * each; the 20 Hz sampler must never load or decode them to choose a lane. */
   latestProbeSnapshot() {
@@ -326,6 +367,7 @@ export class UpgradeStore {
     entryFenceFloor?: number,
     continuityBaseline?: Record<string, unknown>,
     sourceActual?: UpgradeSourceActual | null,
+    operationId?: string,
   ): UpgradeAttempt {
     return this.sqlite
       .transaction(() => {
@@ -340,6 +382,24 @@ export class UpgradeStore {
           return this.attempt(prior.attempt_id);
         }
         const installed = this.instance();
+        requireUpgrade(
+          !this.sqlite
+            .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+            .get() ||
+            envelope.manifest.components.coordinator.dataFormats?.includes(
+              'project-name-v2-authority',
+            ),
+          'TARGET_DATA_FORMAT_INCOMPATIBLE',
+        );
+        const activePlan = this.sqlite
+          .prepare(
+            "SELECT operation_id FROM platform_operations WHERE instance_id=? AND role='upgrade-plan' AND state IN ('accepted','preparing','running')",
+          )
+          .get(this.instanceId) as { operation_id: string } | undefined;
+        requireUpgrade(
+          !activePlan || activePlan.operation_id === operationId,
+          'UPGRADE_ALREADY_ACTIVE',
+        );
         requireUpgrade(!contractActive(this.sqlite, this.instanceId), 'INSTANCE_CONTRACT_ACTIVE');
         if (sourceActual) {
           sourceActual = UpgradeSourceActualSchema.parse(sourceActual);
@@ -710,6 +770,32 @@ export class UpgradeStore {
             'UPGRADE_WORK_CONFLICT',
             400,
           );
+          const timing = this.stageProgress(id);
+          const facts = {
+            stage: step.stepId,
+            enteredAt: timing?.stage === step.stepId ? timing.enteredAt : this.iso(now),
+            lastProgressAt:
+              p.completedWork > existing.completedWork ||
+              (command.kind === 'step-applied' && !existing.applied)
+                ? this.iso(now)
+                : timing?.stage === step.stepId
+                  ? timing.lastProgressAt
+                  : null,
+          };
+          this.sqlite
+            .prepare(
+              "INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,'upgrade-stage-progress',?,?,'observed',?,?,?) ON CONFLICT(operation_id) DO UPDATE SET fence=excluded.fence,request_digest=excluded.request_digest,result=excluded.result,updated_at=excluded.updated_at",
+            )
+            .run(
+              'upgrade-stage-progress:' + id,
+              this.instanceId,
+              row.actor_id,
+              row.fence,
+              upgradeDigest(facts),
+              JSON.stringify(facts),
+              now,
+              now,
+            );
           const index = plan.steps.indexOf(step);
           requireUpgrade(
             plan.steps.slice(0, index).every((s) => this.step(id, s.stepId).applied),

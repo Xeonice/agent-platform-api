@@ -1,5 +1,13 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, Res } from '@nestjs/common';
-import { ApiAcceptedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiAcceptedResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiExtraModels,
+  ApiHeader,
+  getSchemaPath,
+} from '@nestjs/swagger';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
@@ -9,6 +17,7 @@ import {
   UpgradeAttemptSchema,
   UpgradeRequestSchema,
   UpgradeStatusSchema,
+  UpgradeOperationSchema,
 } from '@platform/contracts';
 import type { Request, Response } from 'express';
 import { UpgradeService } from './upgrade-service';
@@ -27,6 +36,10 @@ export class UpgradeRequestDto extends createZodDto(UpgradeRequestSchema) {}
 export class UpgradeAccessDto extends createZodDto(UpgradeAccessSchema) {}
 export class UpgradeStatusDto extends createZodDto(UpgradeStatusSchema) {}
 export class UpgradeAttemptDto extends createZodDto(UpgradeAttemptSchema) {}
+export class UpgradeOperationDto extends createZodDto(UpgradeOperationSchema) {}
+const commandResponse = {
+  oneOf: [{ $ref: getSchemaPath(UpgradeAttemptDto) }, { $ref: getSchemaPath(UpgradeOperationDto) }],
+};
 export class UpgradeProbeDto extends createZodDto(
   z
     .object({
@@ -39,6 +52,7 @@ export class UpgradeProbeDto extends createZodDto(
 ) {}
 
 @ApiTags('upgrade')
+@ApiExtraModels(UpgradeAttemptDto, UpgradeOperationDto)
 @Controller('system/upgrade')
 export class UpgradeController {
   constructor(private readonly upgrades: UpgradeService) {}
@@ -69,7 +83,13 @@ export class UpgradeController {
   }
   @Post('requests')
   @HttpCode(202)
-  @ApiAcceptedResponse({ type: UpgradeAttemptDto })
+  @ApiHeader({
+    name: 'Prefer',
+    required: false,
+    description:
+      'respond-async admits one durable final-target operation; omitted preserves the legacy technical-attempt response.',
+  })
+  @ApiAcceptedResponse({ schema: commandResponse })
   request(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -78,7 +98,13 @@ export class UpgradeController {
     return this.upgrades.request(req, res, input);
   }
   @Get('requests/:requestId')
-  @ApiOkResponse({ type: UpgradeAttemptDto })
+  @ApiHeader({
+    name: 'Prefer',
+    required: false,
+    description:
+      'respond-async looks up the original user operation. Existing legacy attempts remain readable.',
+  })
+  @ApiOkResponse({ schema: commandResponse })
   lookup(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,

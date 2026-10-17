@@ -27,6 +27,12 @@ import { configurePlatformApp } from '../../../apps/api/src/bootstrap/configure-
 import { setupWebsockets } from '../../../apps/api/src/bootstrap/websocket.setup';
 import { PLATFORM_SQLITE } from '../../../apps/api/src/platform/persistence/platform.module';
 import { ApplicationOperationSchema } from '../../../apps/api/src/platform/control-rpc/control-rpc.contract';
+import { UpgradeCatalog } from '../../../apps/api/src/platform/upgrade/upgrade-catalog';
+import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
+import { UpgradeStore } from '../../../apps/api/src/platform/upgrade/upgrade-store';
+import { freezeUpgradeChain } from '../../../apps/api/src/platform/upgrade/upgrade-chain';
+import { withCoordinatorBusinessEpoch } from '../../../apps/api/src/platform/persistence/coordinator-lease';
+import { planFixtureEnvelope, planFixtureSource } from '../../support/upgrade-plan-fixture';
 import type {
   ApplicationRequest,
   ApplicationCatalog,
@@ -685,4 +691,72 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
       }
     });
   }
+  it('preserves Prefer and negotiated operation responses through the real independent Control API', async () => {
+    const store = coordinator.app.get(UpgradeStore),
+      service = coordinator.app.get(UpgradeService),
+      catalog = coordinator.app.get(UpgradeCatalog);
+    // The installation/catalog boundary is synthetic; transport, ordinary
+    // authentication/CSRF and the durable operation ledger are actual production
+    // code. Park the executor so this transport test never prepares an install.
+    const advance = vi.spyOn(service, 'advanceOperation').mockResolvedValue(undefined);
+    const source = planFixtureSource();
+    withCoordinatorBusinessEpoch(db, () => store.bootstrap(source));
+    const envelope = planFixtureEnvelope(source, '0.2.1');
+    const chain = freezeUpgradeChain(envelope, source, [envelope]);
+    const target = vi.spyOn(catalog, 'target').mockReturnValue({
+      envelope,
+      plan: chain[0]!.plan,
+      sourceActual: null,
+      chain,
+    });
+    try {
+      const status = await publicRead('/api/system/upgrade/status').expect(200);
+      const viewer = [
+        cookie,
+        ...cookies(status.headers['set-cookie']).map((c) => c.split(';')[0]),
+      ].join('; ');
+      const command = {
+        requestId: randomUUID(),
+        targetReleaseId: envelope.manifest.releaseId,
+        targetDigest: envelope.manifestDigest,
+        expectedActivationGeneration: source.activationGeneration,
+      };
+      const accepted = await publicWrite('/api/system/upgrade/requests')
+        .set('Cookie', viewer)
+        .set('X-Upgrade-CSRF', status.body.csrfToken)
+        .set('Prefer', 'respond-async')
+        .send(command)
+        .expect(202);
+      expect(accepted.body).toMatchObject({
+        requestId: command.requestId,
+        finalTargetDigest: command.targetDigest,
+        state: 'accepted',
+        sequence: 0,
+        stages: [expect.objectContaining({ attemptId: null, state: 'pending' })],
+      });
+      expect(accepted.body).not.toHaveProperty('attemptId');
+      expect(accepted.headers.vary).toContain('Prefer');
+      expect(accepted.headers['preference-applied']).toBe('respond-async');
+      expect(accepted.headers['cache-control']).toBe('no-store');
+      const recovered = await request(url)
+        .get('/api/system/upgrade/requests/' + command.requestId)
+        .set('Cookie', viewer)
+        .set('Prefer', 'respond-async')
+        .expect(200);
+      expect(recovered.body.operationId).toBe(accepted.body.operationId);
+      expect(recovered.headers.vary).toContain('Prefer');
+      expect(recovered.headers['cache-control']).toBe('no-store');
+      const legacy = await request(url)
+        .get('/api/system/upgrade/requests/' + command.requestId)
+        .set('Cookie', viewer)
+        .expect(409);
+      expect(legacy.body.code).toBe('UPGRADE_OPERATION_REQUIRES_ASYNC');
+      expect((db.prepare('SELECT count(*) n FROM upgrade_attempts').get() as { n: number }).n).toBe(
+        0,
+      );
+    } finally {
+      target.mockRestore();
+      advance.mockRestore();
+    }
+  });
 });
