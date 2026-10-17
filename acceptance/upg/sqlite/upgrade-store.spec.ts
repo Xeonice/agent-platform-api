@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ConfirmedServiceReleaseSchema,
   SignedUpgradeManifestSchema,
@@ -332,6 +332,11 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     expect(store.instance().service_state).not.toBe('confirmed');
     expect(store.snapshot(accepted.attemptId).sourceActual).toEqual(actual);
     expect(store.snapshot(accepted.attemptId).sourceActivation).toEqual(original);
+    expect(store.latestProbeSnapshot()).toMatchObject({
+      attempt: { attemptId: accepted.attemptId },
+      sourceActual: actual,
+      sourceActivation: original,
+    });
     expect(store.plan(accepted.attemptId)).toMatchObject({
       ownerReused: true,
       installerReused: true,
@@ -1023,5 +1028,166 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     expect(currentRecovery.state).toBe('recovering');
     expect(store.latest()?.attemptId).toBe(next.attemptId);
     expect(store.attempt(first.id)).toMatchObject({ state: 'activation-confirmed', percent: 100 });
+  });
+});
+
+// Real SQLite projection regression only. Large state-layer receipts do not
+// represent runtime/native traffic or release qualification evidence.
+describe('UPG high-frequency probe snapshot excludes historical receipt payloads', () => {
+  it('preserves current probe inputs and the applied candidate without reading or decoding megabytes of observation/continuity history', () => {
+    const fixture = accept();
+    const candidate = {
+      kind: 'api',
+      instanceId: store.instanceId,
+      attemptId: fixture.id,
+      origin: 'http://127.0.0.1:32123',
+      artifactDigest: fixture.envelope.manifest.components.api.artifactDigest,
+      inputFingerprint: fixture.envelope.manifest.components.api.inputFingerprint,
+      startIdentity: 'persisted-candidate-incarnation',
+      pid: 1,
+    };
+    const write = connection.sqlite.prepare(
+      'UPDATE upgrade_steps SET applied=1,completed_work=1,receipt_digest=?,evidence=?,applied_at=? WHERE attempt_id=? AND step_id=?',
+    );
+    write.run(upgradeDigest(candidate), JSON.stringify(candidate), time, fixture.id, 'candidate');
+    const marker = 'HISTORICAL_OBSERVATION_NOT_A_PROBE_INPUT';
+    const history = { marker, payload: 'x'.repeat(1_800_000) };
+    const large = JSON.stringify(history);
+    for (const stepId of ['observe-1', 'observe-5'])
+      expect(write.run(upgradeDigest(history), large, time, fixture.id, stepId).changes).toBe(1);
+    connection.sqlite
+      .prepare('INSERT INTO upgrade_continuity_baselines VALUES(?,?,?,?)')
+      .run(fixture.id, large, upgradeDigest(history), time);
+    const full = store.snapshot(fixture.id);
+    expect(full.appliedSteps.filter((step) => step.stepId.startsWith('observe-'))).toHaveLength(2);
+    expect(Buffer.byteLength(large) * 2).toBeGreaterThan(3_600_000);
+    const prepareSpy = vi.spyOn(connection.sqlite, 'prepare');
+    const parseSpy = vi.spyOn(JSON, 'parse');
+    let projected: ReturnType<UpgradeStore['latestProbeSnapshot']>;
+    let queries: string[], decoded: string[];
+    try {
+      projected = store.latestProbeSnapshot();
+      queries = prepareSpy.mock.calls.map(([sql]) => sql);
+      decoded = parseSpy.mock.calls.map(([value]) => value);
+    } finally {
+      prepareSpy.mockRestore();
+      parseSpy.mockRestore();
+    }
+    expect(projected).toEqual({
+      attempt: { attemptId: fixture.id },
+      fence: full.fence,
+      leaseExpiresAt: full.leaseExpiresAt,
+      plan: full.plan,
+      manifest: full.manifest,
+      sourceActivation: full.sourceActivation,
+      sourceActual: full.sourceActual,
+      appliedSteps: full.appliedSteps.filter((step) => step.stepId === 'candidate'),
+    });
+    expect(projected!.appliedSteps[0]!.evidence).toEqual(candidate);
+    expect(decoded!.some((value) => value.includes(marker))).toBe(false);
+    expect(queries!.every((sql) => !/SELECT\s+\*/i.test(sql))).toBe(true);
+    expect(
+      queries!.some((sql) =>
+        /upgrade_continuity_baselines|upgrade_events|upgrade_recoveries/.test(sql),
+      ),
+    ).toBe(false);
+    const stepQueries = queries!.filter((sql) => sql.includes('upgrade_steps'));
+    expect(stepQueries).toHaveLength(1);
+    expect(stepQueries[0]).toMatch(/step_id\s*=\s*'candidate'/);
+    expect(stepQueries[0]).toMatch(/applied\s*=\s*1/);
+    // Even undecodable unrelated history cannot be loaded into this hot path.
+    connection.sqlite
+      .prepare("UPDATE upgrade_steps SET evidence=? WHERE attempt_id=? AND step_id='observe-1'")
+      .run('{invalid-history:' + large, fixture.id);
+    expect(store.latestProbeSnapshot()).toEqual(projected);
+  });
+  it('reads the current fence and lease afresh and never exposes an unapplied candidate', () => {
+    expect(store.latestProbeSnapshot()).toBeNull();
+    const fixture = accept();
+    connection.sqlite
+      .prepare("UPDATE upgrade_steps SET evidence=? WHERE attempt_id=? AND step_id='candidate'")
+      .run('{not-yet-applied', fixture.id);
+    const initial = store.latestProbeSnapshot()!;
+    expect(initial.appliedSteps).toEqual([]);
+    time += 31_000;
+    expect(store.latestProbeSnapshot()!.leaseExpiresAt).toBeLessThan(time);
+    const claimed = store.claim(fixture.id, 'replacement-probe-controller', 30_000);
+    const fresh = store.latestProbeSnapshot()!;
+    expect(fresh.fence).toBe(claimed.fence);
+    expect(fresh.fence).toBeGreaterThan(initial.fence);
+    expect(fresh.leaseExpiresAt).toBe(time + 30_000);
+    expect(fresh.appliedSteps).toEqual([]);
+    expect(() => store.assertFence(fixture.id, initial.fence)).toThrow('UPGRADE_FENCE_EXPIRED');
+  });
+  it('selects the same latest instance attempt as the full snapshot after a new explicit intent', () => {
+    const first = accept();
+    store.commit(first.id, command(first.id, 'deferred', { reason: 'state-layer fixture' }));
+    const second = accept();
+    expect(second.id).not.toBe(first.id);
+    const selected = store.latestProbeSnapshot()!;
+    expect(selected.attempt.attemptId).toBe(store.latest()!.attemptId);
+    expect(selected.attempt.attemptId).toBe(second.id);
+    expect(selected.fence).toBe(store.snapshot(second.id).fence);
+  });
+  it.each([
+    'valid',
+    'wrong-fence',
+    'wrong-generation',
+    'expired',
+    'newer-attempt',
+    'higher-contract',
+  ])('retains the actual %s authority guard without reading large step history', (boundary) => {
+    const fixture = accept();
+    const before = store.snapshot(fixture.id);
+    const evidence = { marker: 'large-unrelated-guard-history', payload: 'x'.repeat(1_800_000) };
+    connection.sqlite
+      .prepare(
+        "UPDATE upgrade_steps SET applied=1,receipt_digest=?,evidence=?,applied_at=? WHERE attempt_id=? AND step_id='observe-1'",
+      )
+      .run(upgradeDigest(evidence), JSON.stringify(evidence), time, fixture.id);
+    if (boundary === 'expired') time += 31_000;
+    if (boundary === 'newer-attempt') {
+      store.commit(fixture.id, command(fixture.id, 'deferred', { reason: 'state fixture' }));
+      accept();
+    }
+    if (boundary === 'higher-contract')
+      connection.sqlite
+        .prepare(
+          'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          randomUUID(),
+          store.instanceId,
+          'state-fixture-actor',
+          'project-name-contract',
+          before.fence + 1,
+          upgradeDigest({ scope: 'state-only-contract' }),
+          'completed',
+          time,
+          time,
+        );
+    const querySpy = vi.spyOn(connection.sqlite, 'prepare');
+    let queries: string[];
+    try {
+      const check = () =>
+        store.assertFence(
+          fixture.id,
+          before.fence + Number(boundary === 'wrong-fence'),
+          before.attempt.generation + Number(boundary === 'wrong-generation'),
+        );
+      if (boundary === 'valid') expect(check().attempt_id).toBe(fixture.id);
+      else
+        expect(check).toThrow(
+          ['newer-attempt', 'higher-contract'].includes(boundary)
+            ? 'UPGRADE_AUTHORITY_SUPERSEDED'
+            : 'UPGRADE_FENCE_EXPIRED',
+        );
+      queries = querySpy.mock.calls.map(([sql]) => sql);
+    } finally {
+      querySpy.mockRestore();
+    }
+    expect(queries!.some((sql) => /upgrade_steps|upgrade_continuity_baselines/.test(sql))).toBe(
+      false,
+    );
   });
 });

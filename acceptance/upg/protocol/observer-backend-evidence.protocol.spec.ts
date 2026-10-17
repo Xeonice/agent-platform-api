@@ -149,6 +149,7 @@ async function fixture() {
     instanceId,
     latest: () => ({ attemptId: 'attempt' }),
     snapshot: () => snapshot,
+    latestProbeSnapshot: () => ({ attempt: { attemptId: 'attempt' }, ...snapshot }),
     assertFence: () => {},
     sqlite: {
       prepare: (sql: string) => ({

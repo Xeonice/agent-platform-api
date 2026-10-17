@@ -80,7 +80,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     };
   }
   private candidateIdentity(
-    snapshot: ReturnType<UpgradeStore['snapshot']>,
+    snapshot: Pick<ReturnType<UpgradeStore['snapshot']>, 'manifest' | 'appliedSteps'>,
     binding: Json,
   ): UpgradeProbeApiIdentity & { origin: string } {
     const candidate = binding.candidateApi as Json | undefined;
@@ -133,9 +133,9 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
     )
       return;
-    const attempt = this.store.latest();
-    if (!attempt) return;
-    const row = this.store.snapshot(attempt.attemptId);
+    const row = this.store.latestProbeSnapshot();
+    if (!row) return;
+    const attempt = row.attempt;
     if (row.fence < 1 || row.leaseExpiresAt <= this.clock.now().getTime()) return;
     this.inFlight[lane]++;
     const requestId = this.ids.next();
