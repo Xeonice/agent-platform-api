@@ -12,6 +12,7 @@ import { loopbackOrigin } from './upgrade-inspector';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { env } from '../config/env';
 import { initialSourceActivation } from './upgrade-artifact-proof';
+import { recoveryIntegrity } from './upgrade-recovery-integrity';
 
 type Json = Record<string, unknown>;
 /** Every action stays within the independently persisted recovery plan. */
@@ -97,11 +98,17 @@ export async function qualifyWebRecovery(
       m.components.api.protocol.min <= w.protocol.max &&
       m.components.api.protocol.max >= w.protocol.min,
   );
+  const sharedHealthy = await recoveryIntegrity(
+    store,
+    inspector,
+    clock,
+    id,
+    fence,
+    binding,
+    snapshot.plan.policy.observationFreshnessMs,
+  );
   requireUpgrade(
-    auth &&
-      compatible &&
-      continuity.qualified === true &&
-      store.sqlite.pragma('quick_check', { simple: true }) === 'ok',
+    auth && compatible && continuity.qualified === true && sharedHealthy,
     'WEB_RECOVERY_SHARED_STATE_UNCONFIRMED',
   );
   const owners = optionalUpgradeRecord(continuity.owner)?.owners;

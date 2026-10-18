@@ -53,6 +53,7 @@ import {
 } from './upgrade-operation-store';
 import { UpgradeProjection } from './upgrade-projection';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
+import { recoveryIntegrity } from './upgrade-recovery-integrity';
 
 type Json = Record<string, unknown>;
 export const UPGRADE_OPERATION_DATA_FORMATS = ['upgrade-plan-v1'] as const;
@@ -832,7 +833,15 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         return range && Number(range.min) <= coor.max && Number(range.max) >= coor.min;
       }) &&
       continuity.qualified === true;
-    const sharedHealthy = this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok';
+    const sharedHealthy = await recoveryIntegrity(
+      this.store,
+      this.inspector,
+      this.clock,
+      id,
+      fence,
+      binding,
+      snapshot.plan.policy.observationFreshnessMs,
+    );
     // Qualification is a separately signed, isolated installation purpose: its
     // first real rehearsal is not represented as a production passed receipt.
     const rehearsalDigest = rehearsal?.reportDigest ?? (qualification ? baselineRow.digest : null);
