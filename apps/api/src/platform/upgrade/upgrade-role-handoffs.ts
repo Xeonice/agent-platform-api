@@ -1,3 +1,4 @@
+import { upgradeRecord, upgradeRecords } from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
@@ -32,8 +33,10 @@ export class UpgradeRoleHandoffs {
       'FIXED_ROLE_HANDOFF_COMMAND_REQUIRED',
     );
     const row = this.store.sqlite
-      .prepare('SELECT * FROM upgrade_role_handoffs WHERE attempt_id=? AND kind=?')
-      .get(id, kind) as Handoff | undefined;
+      .prepare<unknown[], Handoff>(
+        'SELECT * FROM upgrade_role_handoffs WHERE attempt_id=? AND kind=?',
+      )
+      .get(id, kind);
     const snapshot = this.store.snapshot(id);
     requireUpgrade(snapshot.plan.planDigest === input.planDigest, 'HANDOFF_PLAN_CHANGED');
     if (row)
@@ -54,14 +57,15 @@ export class UpgradeRoleHandoffs {
     }
     const fence = Number(input.fence);
     this.store.assertControllerFence(id, fence);
-    const candidate = row ? (JSON.parse(row.candidate) as Json) : (input.candidate as Json);
+    const candidate = row
+      ? upgradeRecord(JSON.parse(row.candidate))
+      : upgradeRecord(input.candidate);
     const component =
       kind === 'owner'
         ? snapshot.manifest.components.owner
         : snapshot.manifest.components.installer;
     requireUpgrade(
       component &&
-        candidate &&
         candidate.artifactDigest === component.artifactDigest &&
         candidate.inputFingerprint === component.inputFingerprint &&
         typeof candidate.startIdentity === 'string',
@@ -90,7 +94,7 @@ export class UpgradeRoleHandoffs {
         signal: AbortSignal.timeout(1500),
       });
       requireUpgrade(r.ok, 'INSTALLER_IDENTITY_UNKNOWN');
-      const metadata = (await r.json()) as Json;
+      const metadata = upgradeRecord(await r.json());
       requireUpgrade(
         metadata.artifactDigest === component.artifactDigest &&
           metadata.inputFingerprint === component.inputFingerprint &&
@@ -144,7 +148,7 @@ export class UpgradeRoleHandoffs {
       signal: AbortSignal.timeout(1500),
     });
     requireUpgrade(metadataResponse.ok, 'NEW_OWNER_METADATA_UNKNOWN');
-    const metadata = (await metadataResponse.json()) as Json;
+    const metadata = upgradeRecord(await metadataResponse.json());
     requireUpgrade(
       typeof metadata.ownerId === 'string' &&
         metadata.artifactDigest === component.artifactDigest &&
@@ -187,7 +191,7 @@ export class UpgradeRoleHandoffs {
       owners: this.owners.installedRoutes(),
     };
     try {
-      previous = JSON.parse(await readFile(path, 'utf8')) as Json;
+      previous = upgradeRecord(JSON.parse(await readFile(path, 'utf8')));
     } catch {
       /* First installed route set uses the existing private installation endpoint. */
     }
@@ -195,7 +199,7 @@ export class UpgradeRoleHandoffs {
       previous.instanceId === this.store.instanceId && Array.isArray(previous.owners),
       'OWNER_BINDING_SCOPE_MISMATCH',
     );
-    const routes = previous.owners as Json[];
+    const routes = upgradeRecords(previous.owners);
     if (!routes.some((v) => v.ownerId === metadata.ownerId))
       routes.push({
         ownerId: metadata.ownerId,

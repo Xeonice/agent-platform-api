@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -187,7 +188,7 @@ describe('REQ-UPG-008/009 — actual Ed25519 trust and fixed deployment plans', 
       'ALREADY_INSTALLED_OR_WRONG_CHANNEL',
     );
     expect(() => freezeUpgradePlan(envelope(m), mixed)).toThrow('UPGRADE_PATH_NOT_SUPPORTED');
-    m.upgradePaths.push({ ...m.upgradePaths[0]!, fromRelease: m.releaseId });
+    m.upgradePaths.push({ ...assertDefined(m.upgradePaths[0]), fromRelease: m.releaseId });
     const fixed = freezeUpgradePlan(envelope(m), mixed);
     expect(fixed.migrationPath.fromRelease).toBe(m.releaseId);
     expect(
@@ -294,13 +295,13 @@ describe('REQ-UPG-008/009 — actual Ed25519 trust and fixed deployment plans', 
       protocols: Object.fromEntries(
         (['api', 'web', 'coordinator', 'owner', 'installer'] as const).map((name) => [
           name,
-          old.components[name]!.protocol,
+          assertDefined(old.components[name]).protocol,
         ]),
       ),
       ...Object.fromEntries(
         (['api', 'web', 'coordinator', 'owner', 'installer'] as const).flatMap((name) => [
-          [name + 'Digest', old.components[name]!.artifactDigest],
-          [name + 'InputFingerprint', old.components[name]!.inputFingerprint],
+          [name + 'Digest', assertDefined(old.components[name]).artifactDigest],
+          [name + 'InputFingerprint', assertDefined(old.components[name]).inputFingerprint],
         ]),
       ),
     };

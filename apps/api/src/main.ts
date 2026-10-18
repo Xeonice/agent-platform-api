@@ -37,7 +37,7 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   await app.listen(env.port, env.host);
-  Logger.log(`API listening on http://${env.host}:${env.port} (prefix /api)`, 'Bootstrap');
+  Logger.log(`API listening on http://${env.host}:${String(env.port)} (prefix /api)`, 'Bootstrap');
 }
 
 void bootstrap();

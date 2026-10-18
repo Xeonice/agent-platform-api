@@ -9,7 +9,7 @@ import { hashPasscode, verifyPasscode } from './passcode-hash';
 import type { Request } from 'express';
 import { SESSION_COOKIE, readCookie, presentedAccessPasscode } from './session-cookie';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 const COOKIE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (11 §3.1)
 // base58-ish alphabet without 0 O l 1 (11 §3.1)
@@ -171,14 +171,14 @@ export class PasscodeService {
     this.reload();
   }
 
-  /** `${expiresAt}.${hmac}` — verified without server-side session state. */
+  /** `${String(expiresAt)}.${hmac}` — verified without server-side session state. */
   issueCurrentSessionToken(): string {
     return this.issueSessionToken(Date.now());
   }
 
   issueSessionToken(now: number): string {
     const expiresAt = now + COOKIE_TTL_MS;
-    return `${expiresAt}.${this.sign(String(expiresAt))}`;
+    return `${String(expiresAt)}.${this.sign(String(expiresAt))}`;
   }
 
   verifySessionToken(token: string | undefined, now: number): boolean {

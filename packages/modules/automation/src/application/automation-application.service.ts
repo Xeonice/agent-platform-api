@@ -245,8 +245,9 @@ export class AutomationApplicationService {
       summary: '更新了自动化规则',
       // Only changed field names: prompts, webhook URLs and names are never evidence.
       detail: {
-        fieldNames: Object.keys(patch)
-          .filter((field) => patch[field as keyof UpdateAutomationInput] !== undefined)
+        fieldNames: Object.entries<unknown>(patch)
+          .filter(([, value]) => value !== undefined)
+          .map(([field]) => field)
           .sort(),
       },
       outcome: 'ok',

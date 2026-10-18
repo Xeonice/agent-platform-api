@@ -20,8 +20,9 @@ import type {
   RunSlice,
 } from '../../../domain/repositories/automation-run.repository';
 import { automationRuns, type AutomationRunRow } from '../schema/automation.sqlite';
+import { asAutomationId } from '@platform/shared-kernel';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 @Injectable()
 export class SqliteAutomationRunRepository implements AutomationRunRepository {
@@ -29,7 +30,7 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
 
   async findById(id: string): Promise<AutomationRun | null> {
     const row = this.db.select().from(automationRuns).where(eq(automationRuns.id, id)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async findLatest(automationId: AutomationId): Promise<AutomationRun | null> {
@@ -40,16 +41,16 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .orderBy(desc(automationRuns.triggeredAt), desc(automationRuns.id))
       .limit(1)
       .get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async countByAutomation(automationId: AutomationId): Promise<number> {
-    return (
+    return Promise.resolve(
       this.db
         .select({ n: sql<number>`count(*)` })
         .from(automationRuns)
         .where(eq(automationRuns.automationId, automationId))
-        .get()?.n ?? 0
+        .get()?.n ?? 0,
     );
   }
 
@@ -86,10 +87,10 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .limit(cursor.limit + 1)
       .all();
     const hasMore = rows.length > cursor.limit;
-    return {
+    return Promise.resolve({
       items: hydrateAll(rows.slice(0, cursor.limit), 'listHistory'),
       hasMore,
-    };
+    });
   }
 
   async listPendingRetries(now: Date): Promise<AutomationRun[]> {
@@ -99,7 +100,7 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .where(and(eq(automationRuns.status, 'resource-exhausted'), lte(automationRuns.retryAt, now)))
       .orderBy(asc(automationRuns.retryAt))
       .all();
-    return hydrateAll(rows, 'listPendingRetries');
+    return Promise.resolve(hydrateAll(rows, 'listPendingRetries'));
   }
 
   async listActive(): Promise<AutomationRun[]> {
@@ -109,7 +110,7 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .where(inArray(automationRuns.status, ['pending', 'running']))
       .orderBy(asc(automationRuns.triggeredAt))
       .all();
-    return hydrateAll(rows, 'listActive');
+    return Promise.resolve(hydrateAll(rows, 'listActive'));
   }
 
   /**
@@ -131,7 +132,7 @@ export class SqliteAutomationRunRepository implements AutomationRunRepository {
       .orderBy(asc(automationRuns.triggeredAt))
       .limit(limit)
       .all();
-    return hydrateAll(rows, 'listOutcomePending');
+    return Promise.resolve(hydrateAll(rows, 'listOutcomePending'));
   }
 
   saveSync(_tx: Tx, run: AutomationRun): void {
@@ -213,7 +214,7 @@ function hydrateAll(rows: readonly AutomationRunRow[], where: string): Automatio
     } catch (e) {
       HYDRATE_LOGGER.error(
         `automation run ${row.id} 的行数据无法水化（${where}），本轮跳过它、其余照常：` +
-          `${e instanceof Error ? e.message : String(e)}`,
+          (e instanceof Error ? e.message : String(e)),
       );
     }
   }
@@ -238,7 +239,7 @@ function decodeEnum<T>(
 function toDomain(row: AutomationRunRow): AutomationRun {
   return AutomationRun.rehydrate({
     id: row.id,
-    automationId: row.automationId as AutomationId,
+    automationId: asAutomationId(row.automationId),
     sandboxId: row.sandboxId,
     triggeredAt: row.triggeredAt,
     status: decodeEnum<AutomationRunStatus>(AutomationRunStatusSchema, row.status, 'status'),

@@ -114,7 +114,10 @@ export interface HelperObservation {
   awaitingRebuild?: true;
 }
 
-type ReadyHelper = { provider: SandboxProvider; handle: SandboxHandle };
+interface ReadyHelper {
+  provider: SandboxProvider;
+  handle: SandboxHandle;
+}
 
 /** `inspect` 的三种读法 —— 见 {@link HelperContainerSession.liveness}。 */
 type Liveness =
@@ -290,8 +293,7 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
   invalidate(handle: SandboxHandle, reason: string): void {
     const cur = this.ready;
     if (
-      cur === null ||
-      cur.handle.provider !== handle.provider ||
+      cur?.handle.provider !== handle.provider ||
       cur.handle.providerSandboxId !== handle.providerSandboxId
     ) {
       return;
@@ -411,9 +413,9 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
       // ⚠️ 运行期重建时旧实例可能还在跑（被作废不等于已经死了）：boxlite 的实现先礼貌停机
       //    再 force remove，真删掉了会在 provider 日志里留一行 —— 见它的 `destroyBySandboxId`。
       if (typeof provider.destroyBySandboxId === 'function') {
-        await provider
-          .destroyBySandboxId(HelperContainerSession.SANDBOX_ID)
-          .catch((e: unknown) => this.logger.warn(`auth helper 清残留失败：${msgOf(e)}`));
+        await provider.destroyBySandboxId(HelperContainerSession.SANDBOX_ID).catch((e: unknown) => {
+          this.logger.warn(`auth helper 清残留失败：${msgOf(e)}`);
+        });
       }
 
       const image = await this.resolveImage(provider.name);
@@ -484,9 +486,9 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
     } else if (stopped !== null) {
       this.logger.warn(`auth helper 半成品 ${id} 停机失败（${stopped}），直接销毁`);
     }
-    await provider
-      .destroy(handle)
-      .catch((d: unknown) => this.logger.warn(`auth helper 半成品 ${id} 销毁失败：${msgOf(d)}`));
+    await provider.destroy(handle).catch((d: unknown) => {
+      this.logger.warn(`auth helper 半成品 ${id} 销毁失败：${msgOf(d)}`);
+    });
   }
 
   /**

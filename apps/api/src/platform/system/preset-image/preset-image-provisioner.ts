@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { Injectable, Logger } from '@nestjs/common';
 import { builtinImageRefFor } from '@platform/shared-kernel';
 import { pickAsset, planProvision, type ProvisionPlan, type ReleaseAsset } from './provision-plan';
@@ -198,7 +199,7 @@ export class PresetImageProvisioner {
     try {
       return this.providerStage.canStage();
     } catch (e) {
-      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${(e as Error).message}`);
+      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${errorMessage(e)}`);
       return false;
     }
   }
@@ -208,7 +209,7 @@ export class PresetImageProvisioner {
       if (!(await this.docker.available())) return false;
       return await this.docker.hasImage(ref);
     } catch (e) {
-      this.log.debug(`探本机 docker 镜像库失败，按「没有」处理：${(e as Error).message}`);
+      this.log.debug(`探本机 docker 镜像库失败，按「没有」处理：${errorMessage(e)}`);
       return false;
     }
   }
@@ -220,7 +221,7 @@ export class PresetImageProvisioner {
       const all = await readAssetManifest(dir);
       return pickAsset(all, this.host.defaultProvider(), this.host.platform());
     } catch (e) {
-      this.log.debug(`读资产清单失败，按「没有」处理：${(e as Error).message}`);
+      this.log.debug(`读资产清单失败，按「没有」处理：${errorMessage(e)}`);
       return null;
     }
   }
@@ -301,8 +302,9 @@ export class PresetImageProvisioner {
       yield ev('verify', 'skipped', '本机镜像不经过资产校验（它不是从清单来的）');
       yield ev('load', 'skipped', '无需装载');
     } else {
-      const asset = plan.asset!;
-      const dir = this.assets.assetsDir()!;
+      const asset = plan.asset;
+      const dir = this.assets.assetsDir();
+      if (!asset || !dir) throw new Error('Release asset location is unavailable');
       // ⛔ **真的查，不是宣称。** 此前这里直接报 ok，文件缺失会在下一阶段以 ENOENT 冒出来
       //    —— 把「资产没下载」归到了「校验失败」头上，而两者的下一步完全不同。
       yield ev('fetch', 'running', `正在确认资产在本机：${asset.asset}…`);

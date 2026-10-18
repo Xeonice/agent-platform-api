@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   builtinImageDeclaresTmux,
@@ -139,7 +140,7 @@ export class PresetImageCheck implements DiagnoseCheck {
     try {
       resolved = await this.specs.get(this.specs.defaultProvider).resolve(ref);
     } catch (e) {
-      const reason = (e as Error).message;
+      const reason = errorMessage(e);
       // ⛔ **先问「字节够不够得着」，够得着就别让用户去敲命令**（P21-8 §2 ⇒ 新判据）。
       //    2026-09-05 实测：清空 registry 后镜像的字节仍躺在本机 docker 库里，而这里
       //    原样输出的 hint 是「docker build ... && docker push ...」—— 让用户**重新
@@ -191,7 +192,9 @@ export class PresetImageCheck implements DiagnoseCheck {
     // ⚠️ 走到这里 `catalogued` 必然是 null（有它就在上面返回了），所以这里问的**只剩
     //    一件事**：字节都对，为什么平台没记下来。`notSeededVerdict(ref, null)` 说的
     //    正是这件事，且它永远返回非 null。
-    return this.notSeededVerdict(ref, null) ?? this.stagedVerdict(ref, catalogued!);
+    const verdict = this.notSeededVerdict(ref, null);
+    if (!verdict) throw new Error('Missing preset-image seeding verdict');
+    return verdict;
   }
 
   /** 第 4 步的三种「没就绪」—— 它们的下一步各不相同，所以文案也各不相同。 */
@@ -316,8 +319,8 @@ export class PresetImageCheck implements DiagnoseCheck {
         // ⚠️ 三态的第三态：「说不出」既不是「有」也不是「没有」，照实转达，⛔ 不替它猜。
         detailText:
           `'${ref}' 平台检查过、可以选用。` +
-          `这次问不出它有没有下载到本机（${(e as Error).message}）—— 首个任务可能需要多等一会。`,
-        detail: { ...detail, staged: null, reason: (e as Error).message },
+          `这次问不出它有没有下载到本机（${errorMessage(e)}）—— 首个任务可能需要多等一会。`,
+        detail: { ...detail, staged: null, reason: errorMessage(e) },
       };
     }
   }

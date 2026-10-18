@@ -72,7 +72,7 @@ export interface ValidationIssue {
 export interface ValidationResult {
   valid: boolean;
   errors: ValidationIssue[];
-  warnings?: Array<{ code: string; message: string }>;
+  warnings?: { code: string; message: string }[];
 }
 
 /**

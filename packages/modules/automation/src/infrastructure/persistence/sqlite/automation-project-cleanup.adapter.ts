@@ -8,9 +8,7 @@ import { automations, automationRuns } from '../schema/automation.sqlite';
 
 @Injectable()
 export class SqliteAutomationProjectCleanup implements AutomationProjectCleanup {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
 
   deleteByProjectSync(_tx: Tx, projectId: string): void {
     // Runs cascade from their rule; both deletions belong to the project's transaction.
@@ -31,6 +29,6 @@ export class SqliteAutomationProjectCleanup implements AutomationProjectCleanup 
         .innerJoin(automations, eq(automations.id, automationRuns.automationId))
         .where(eq(automations.projectId, projectId))
         .get()?.n ?? 0;
-    return { rules, runs };
+    return Promise.resolve({ rules, runs });
   }
 }

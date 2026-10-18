@@ -1,5 +1,5 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { SandboxId, ProjectId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { SandboxId, ProjectId } from '@platform/shared-kernel/pure';
 import { SandboxStatusVO } from '../value-objects/sandbox-status.vo';
 import type { SandboxStatus } from '../value-objects/sandbox-status.vo';
 import type { StateTransition, TriggeredBy } from './state-transition.entity';

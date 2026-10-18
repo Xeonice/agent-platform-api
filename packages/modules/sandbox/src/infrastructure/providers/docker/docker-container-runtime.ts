@@ -1,3 +1,5 @@
+import { isRecord } from '@platform/shared-kernel';
+import { DockerInspectSchema } from './docker-values';
 import type Docker from 'dockerode';
 import {
   pinnedImageRef,
@@ -52,7 +54,7 @@ export class DockerContainerRuntime implements ContainerRuntime {
   async create(spec: ContainerCreateSpec): Promise<string> {
     return this.guard(async () => {
       const binds = spec.volumes.map((v) => `${v.source}:${v.target}:${v.mode}`);
-      const portKey = `${spec.agentPort}/tcp`;
+      const portKey = `${String(spec.agentPort)}/tcp`;
       const network = this.network();
       if (network !== null && !isDnsResolvableContainerName(spec.instanceName)) {
         // 名字不是一个 DNS label ⇒ 容器**照样起得来**，只是 `http://<名字>:8080`
@@ -154,7 +156,7 @@ export class DockerContainerRuntime implements ContainerRuntime {
 
   async inspect(id: string): Promise<SandboxRuntimeStatus> {
     try {
-      const info = await this.docker.getContainer(id).inspect();
+      const info = DockerInspectSchema.parse(await this.docker.getContainer(id).inspect());
       return {
         lifecycleState: mapState(info.State?.Status, info.State?.Running),
         exitCode: info.State?.ExitCode,
@@ -197,7 +199,7 @@ export class DockerContainerRuntime implements ContainerRuntime {
       await this.docker.getImage(ref).inspect();
       return true;
     } catch (e: unknown) {
-      if ((e as { statusCode?: number }).statusCode === 404) return false;
+      if (this.statusCode(e) === 404) return false;
       throw this.toProviderError(e);
     }
   }
@@ -228,7 +230,10 @@ export class DockerContainerRuntime implements ContainerRuntime {
     await new Promise<void>((resolve, reject) => {
       this.docker.modem.followProgress(
         stream,
-        (err: Error | null) => (err === null ? resolve() : reject(this.toProviderError(err))),
+        (err: Error | null) => {
+          if (err === null) resolve();
+          else reject(this.toProviderError(err));
+        },
         (evt: { id?: string; progressDetail?: { current?: number } }) => {
           if (onProgress === undefined) return;
           const cur = evt.progressDetail?.current;
@@ -245,7 +250,9 @@ export class DockerContainerRuntime implements ContainerRuntime {
   }
 
   async agentOrigin(id: string, agentPort: number): Promise<string> {
-    const info = await this.guard(() => this.docker.getContainer(id).inspect());
+    const info = DockerInspectSchema.parse(
+      await this.guard(() => this.docker.getContainer(id).inspect()),
+    );
     const network = this.network();
     if (network !== null) {
       // 不在这个网络上 ⇒ 名字解析不出来。这**必须**是一条指名道姓的错误：否则症状是
@@ -262,11 +269,11 @@ export class DockerContainerRuntime implements ContainerRuntime {
       }
       return `http://${(info.Name ?? '').replace(/^\//, '')}:${String(agentPort)}`;
     }
-    const mapping = info.NetworkSettings?.Ports?.[`${agentPort}/tcp`]?.[0];
+    const mapping = info.NetworkSettings?.Ports?.[`${String(agentPort)}/tcp`]?.[0];
     if (!mapping?.HostPort) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
-        `agent port ${agentPort} is not published for container ${id}`,
+        `agent port ${String(agentPort)} is not published for container ${id}`,
       );
     }
     const host = mapping.HostIp && mapping.HostIp !== '0.0.0.0' ? mapping.HostIp : '127.0.0.1';
@@ -279,9 +286,7 @@ export class DockerContainerRuntime implements ContainerRuntime {
   }
 
   private statusCode(e: unknown): number | undefined {
-    return typeof e === 'object' && e !== null && 'statusCode' in e
-      ? (e as { statusCode?: number }).statusCode
-      : undefined;
+    return isRecord(e) && typeof e.statusCode === 'number' ? e.statusCode : undefined;
   }
 
   private async guard<T>(fn: () => Promise<T>): Promise<T> {
@@ -302,7 +307,7 @@ export class DockerContainerRuntime implements ContainerRuntime {
     // retry nor a corrected address helps — the way out is [检查更新] onto a new
     // digest, so the user's action differs and therefore so must the code
     // (04 §4 四类分类法). Tested BEFORE the generic 404 rule, which would swallow it.
-    if (code === 404 && /@sha256:/.test(msg)) {
+    if (code === 404 && msg.includes('@sha256:')) {
       return new SandboxProviderError(SandboxProviderErrorCode.IMAGE_DIGEST_GONE, msg, e);
     }
     if (code === 404) {

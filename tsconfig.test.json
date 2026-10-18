@@ -13,7 +13,9 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
+      "@platform/contracts/testkit": ["packages/contracts/src/testkit/index.ts"],
       "@platform/contracts": ["packages/contracts/src/index.ts"],
+      "@platform/shared-kernel/pure": ["packages/shared-kernel/src/pure.ts"],
       "@platform/shared-kernel": ["packages/shared-kernel/src/index.ts"],
       "@platform/project": ["packages/modules/project/src/index.ts"],
       "@platform/sandbox": ["packages/modules/sandbox/src/index.ts"],

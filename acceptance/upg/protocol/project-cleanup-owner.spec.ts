@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -142,7 +143,7 @@ describe('project cleanup against original RuntimeOwner durable destroy receipts
     expect(after.operations).toHaveLength(
       (before as { operations: unknown[] }).operations.length + 1,
     );
-    expect(f.owner.journal.operation(f.calls.at(-1)!)?.state).toBe('complete');
+    expect(f.owner.journal.operation(assertDefined(f.calls.at(-1)))?.state).toBe('complete');
   });
 
   it('does not confuse absent, another provider or another sandbox with a completed exact destroy receipt', async () => {
@@ -221,7 +222,7 @@ describe('project cleanup against original RuntimeOwner durable destroy receipts
       withRuntimeBusinessAuthority(accepted, () => f.proxy.destroy(handle)),
     ).rejects.toThrow();
     expect(f.calls).toHaveLength(2);
-    const cleanupOperationId = f.calls[1]!;
+    const cleanupOperationId = assertDefined(f.calls[1]);
     expect(await f.client.active.observeOperation(cleanupOperationId)).toMatchObject({
       state: 'complete',
       result: undefined,

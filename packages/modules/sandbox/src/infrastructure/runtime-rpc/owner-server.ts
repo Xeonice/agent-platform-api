@@ -1,3 +1,14 @@
+import {
+  OwnerProcessSpecSchema,
+  OwnerJobSpecSchema,
+  OwnerJobHandleSchema,
+  OwnerJobReadOptionsSchema,
+  OwnerFileOptionsSchema,
+  OwnerStopOptionsSchema,
+  OwnerBytesSchema,
+  ownerSignal,
+  ownerBytes,
+} from './owner-values';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
@@ -7,6 +18,8 @@ import {
   RuntimeOwnerLeaseClaimSchema,
   RuntimeOwnerLeaseReleaseSchema,
   RuntimeOwnerContextSchema,
+  RuntimeOwnerImageSchema,
+  RuntimeOwnerHandleSchema,
   SandboxProviderError,
   SandboxProviderErrorCode,
   type RuntimeOwnerCall,
@@ -17,13 +30,6 @@ import {
   type SandboxProvider,
   type ProviderRegistry,
   type ProcessStream,
-  type ProcessSpec,
-  type SandboxProviderContext,
-  type ResourceQuota,
-  type ResolvedImageSpec,
-  type JobSpec,
-  type JobHandle,
-  type JobReadOptions,
 } from '@platform/contracts';
 import { RuntimeOwnerJournal } from './owner-journal';
 import { decodeOwnerValue, encodeOwnerValue, ownerRecord } from './wire-codec';
@@ -77,6 +83,7 @@ export class RuntimeOwnerServer {
     string,
     { sandboxId?: string; method: RuntimeOwnerMethod }
   >();
+  private closing?: Promise<void>;
   constructor(private readonly options: RuntimeOwnerServerOptions) {
     if (options.key.length < 32)
       throw new Error('RuntimeOwner requires a separate coordinator key of at least 32 characters');
@@ -87,7 +94,9 @@ export class RuntimeOwnerServer {
       options.clock,
     );
     this.server = createServer((request, response) => {
-      void this.handle(request, response).catch((error) => this.failure(response, error));
+      void this.handle(request, response).catch((error: unknown) => {
+        this.failure(response, error);
+      });
     });
     this.server.requestTimeout = 120000;
     this.server.headersTimeout = 10000;
@@ -102,18 +111,29 @@ export class RuntimeOwnerServer {
     });
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return (this.closing ??= this.closeOnce());
+  }
+
+  private async closeOnce(): Promise<void> {
     // Detach only transport attachments. Do not stop SDK, VM, jobs or tmux sessions.
     for (const stream of this.streams.values()) {
       for (const observer of stream.observers) observer.end();
       stream.native?.detach();
       stream.dispose?.();
     }
-    this.server.closeAllConnections();
-    await new Promise<void>((resolve, reject) =>
-      this.server.close((error) => (error ? reject(error) : resolve())),
-    );
-    this.journal.close();
+    try {
+      this.server.closeAllConnections();
+      if (this.server.listening)
+        await new Promise<void>((resolve, reject) =>
+          this.server.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          }),
+        );
+    } finally {
+      this.journal.close();
+    }
   }
 
   metadata(): RuntimeOwnerMetadata {
@@ -204,7 +224,10 @@ export class RuntimeOwnerServer {
           true,
         );
       this.json(response, 200, {
-        handle: owned?.state === 'owned' ? JSON.parse(owned.handle) : null,
+        handle:
+          owned?.state === 'owned'
+            ? RuntimeOwnerHandleSchema.parse(JSON.parse(owned.handle) as unknown)
+            : null,
       });
       return;
     }
@@ -318,7 +341,7 @@ export class RuntimeOwnerServer {
           'content-type': 'application/octet-stream',
           'cache-control': 'no-store',
         });
-        await pipeline(stream as NodeJS.ReadableStream, response);
+        await pipeline(stream, response);
         return;
       }
       const value = await this.call(call);
@@ -395,8 +418,8 @@ export class RuntimeOwnerServer {
       const assignment =
         call.method === 'create'
           ? {
-              sandboxId: (call.args[0] as SandboxProviderContext).sandboxId,
-              handle: value as SandboxHandle,
+              sandboxId: RuntimeOwnerContextSchema.parse(call.args[0]).sandboxId,
+              handle: RuntimeOwnerHandleSchema.parse(value),
             }
           : undefined;
       let destroyed: string | undefined;
@@ -438,7 +461,7 @@ export class RuntimeOwnerServer {
     }
     if (call.method === 'imageStaged') {
       if (!provider.imageStaged) this.unsupported();
-      return provider.imageStaged(a[0] as ResolvedImageSpec);
+      return provider.imageStaged(RuntimeOwnerImageSchema.parse(a[0]));
     }
     if (call.method === 'watchEvents') {
       if (!provider.watchEvents) this.unsupported();
@@ -466,12 +489,16 @@ export class RuntimeOwnerServer {
       const progress = this.newStream(provider.name);
       progress.blockingEffect = true;
       void provider
-        .stageImage(a[0] as ResolvedImageSpec, (bytes) =>
-          this.emit(progress, { type: 'progress', bytes }),
-        )
+        .stageImage(RuntimeOwnerImageSchema.parse(a[0]), (bytes) => {
+          this.emit(progress, { type: 'progress', bytes });
+        })
         .then(
-          () => this.emit(progress, { type: 'exit', code: 0 }),
-          () => this.emit(progress, { type: 'error', code: 'IMAGE_PULL_FAILED' }),
+          () => {
+            this.emit(progress, { type: 'exit', code: 0 });
+          },
+          () => {
+            this.emit(progress, { type: 'error', code: 'IMAGE_PULL_FAILED' });
+          },
         );
       return { streamId: progress.id, ref: progress.id };
     }
@@ -484,8 +511,7 @@ export class RuntimeOwnerServer {
     }
     if (call.method.startsWith('stream.')) {
       const stream = this.streams.get(this.string(a[0]));
-      if (!stream || stream.provider !== provider.name)
-        throw new Error('Unconfirmed runtime stream');
+      if (stream?.provider !== provider.name) throw new Error('Unconfirmed runtime stream');
       if (stream.sandboxId !== call.fence.sandboxId) throw new Error('Stream assignment mismatch');
       if (call.method === 'stream.detach') {
         stream.native?.detach();
@@ -498,15 +524,14 @@ export class RuntimeOwnerServer {
       }
       if (!stream.native) throw new Error('Unconfirmed native stream');
       if (call.method === 'stream.write') {
-        stream.native.write(a[1] as string | Buffer);
+        stream.native.write(OwnerBytesSchema.parse(a[1]));
         return;
       }
       if (call.method === 'stream.resize') {
         stream.native.resize(this.dimension(a[1]), this.dimension(a[2]));
         return;
       }
-      if (call.method === 'stream.kill')
-        return stream.native.kill(a[1] as NodeJS.Signals | undefined);
+      if (call.method === 'stream.kill') return stream.native.kill(ownerSignal(a[1]));
       this.unsupported();
     }
     const handle = this.handleFor(call);
@@ -514,7 +539,7 @@ export class RuntimeOwnerServer {
       case 'start':
         return provider.start(handle);
       case 'stop':
-        return provider.stop(handle, a[1] as { timeoutSec?: number } | undefined);
+        return provider.stop(handle, OwnerStopOptionsSchema.optional().parse(a[1]));
       case 'destroy':
         return provider.destroy(handle);
       case 'inspect': {
@@ -531,13 +556,16 @@ export class RuntimeOwnerServer {
         // BoxLite exec can resume an exited VM. An attach is observation of an
         // existing running sandbox, so confirm the physical state before exec.
         const runtime = await this.requireRunning(provider, handle, call.fence.sandboxId);
-        const native = await provider.spawn(handle, a[1] as ProcessSpec);
+        const spec = OwnerProcessSpecSchema.parse(a[1]);
+        const native = await provider.spawn(handle, spec);
         const stream = this.newStream(provider.name, call.fence.sandboxId, native);
-        stream.blockingEffect = (a[1] as ProcessSpec).tty !== true;
-        native.onData((chunk) =>
-          this.emit(stream, { type: 'data', data: chunk.toString('base64') }),
-        );
-        native.onExit((code) => this.emit(stream, { type: 'exit', code }));
+        stream.blockingEffect = !spec.tty;
+        native.onData((chunk) => {
+          this.emit(stream, { type: 'data', data: chunk.toString('base64') });
+        });
+        native.onExit((code) => {
+          this.emit(stream, { type: 'exit', code });
+        });
         return {
           streamId: stream.id,
           ref: native.ref,
@@ -546,39 +574,39 @@ export class RuntimeOwnerServer {
       }
       case 'updateResources':
         if (!provider.updateResources) this.unsupported();
-        return provider.updateResources(handle, a[1] as ResourceQuota);
+        return provider.updateResources(handle, RuntimeOwnerContextSchema.shape.quota.parse(a[1]));
       case 'jobs.startJob':
         if (!provider.jobs) this.unsupported();
-        return provider.jobs.startJob(handle, a[1] as JobSpec);
+        return provider.jobs.startJob(handle, OwnerJobSpecSchema.parse(a[1]));
       case 'jobs.readJob':
         if (!provider.jobs) this.unsupported();
         await this.requireRunning(provider, handle, call.fence.sandboxId);
         return provider.jobs.readJob(
           handle,
-          a[1] as JobHandle,
-          a[2] as string | undefined,
-          a[3] as JobReadOptions | undefined,
+          OwnerJobHandleSchema.parse(a[1]),
+          a[2] === undefined ? undefined : this.string(a[2]),
+          OwnerJobReadOptionsSchema.optional().parse(a[3]),
         );
       case 'jobs.killJob':
         if (!provider.jobs) this.unsupported();
-        return provider.jobs.killJob(handle, a[1] as JobHandle, a[2] as NodeJS.Signals | undefined);
+        return provider.jobs.killJob(handle, OwnerJobHandleSchema.parse(a[1]), ownerSignal(a[2]));
       case 'jobs.releaseJob':
         if (!provider.jobs) this.unsupported();
-        return provider.jobs.releaseJob(handle, a[1] as JobHandle);
+        return provider.jobs.releaseJob(handle, OwnerJobHandleSchema.parse(a[1]));
       case 'files.readFile':
         if (!provider.files) this.unsupported();
         await this.requireRunning(provider, handle, call.fence.sandboxId);
         return provider.files.readFile(handle, this.string(a[1]));
       case 'files.writeFile':
         if (!provider.files) this.unsupported();
-        return provider.files.writeFile(handle, this.string(a[1]), a[2] as string | Buffer);
+        return provider.files.writeFile(handle, this.string(a[1]), OwnerBytesSchema.parse(a[2]));
       case 'files.listFiles':
         if (!provider.files) this.unsupported();
         await this.requireRunning(provider, handle, call.fence.sandboxId);
         return provider.files.listFiles(
           handle,
           this.string(a[1]),
-          a[2] as { recursive?: boolean; maxEntries?: number } | undefined,
+          OwnerFileOptionsSchema.optional().parse(a[2]),
         );
       default:
         this.unsupported();
@@ -682,7 +710,7 @@ export class RuntimeOwnerServer {
       : never,
   ): void {
     if (stream.ended) return;
-    const frame = { ...value, seq: ++stream.seq } as RuntimeOwnerStreamFrame;
+    const frame = { ...value, seq: ++stream.seq };
     const line = JSON.stringify(frame) + '\n';
     stream.frames.push(frame);
     stream.bytes += Buffer.byteLength(line);
@@ -702,7 +730,7 @@ export class RuntimeOwnerServer {
     const chunks: Buffer[] = [];
     let length = 0;
     for await (const item of request) {
-      const chunk = Buffer.isBuffer(item) ? item : Buffer.from(item as string);
+      const chunk = ownerBytes(item);
       length += chunk.length;
       if (length > BODY_LIMIT) throw new Error('Runtime request exceeds limit');
       chunks.push(chunk);

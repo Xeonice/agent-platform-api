@@ -1,9 +1,17 @@
+import {
+  OwnerJobHandleSchema,
+  OwnerJobChunkSchema,
+  OwnerFileEntriesSchema,
+  OwnerRuntimeStatusSchema,
+  ownerBytes,
+} from './owner-values';
 import { createHash, randomBytes } from 'node:crypto';
 import { request, type IncomingMessage } from 'node:http';
 import { EventEmitter } from 'node:events';
 import type { Clock } from '@platform/shared-kernel';
 import {
   RuntimeOwnerMetadataSchema,
+  RuntimeOwnerHandleSchema,
   RuntimeOwnerLeaseSchema,
   RuntimeOwnerStreamFrameSchema,
   SandboxProviderError,
@@ -236,10 +244,16 @@ export class RuntimeOwnerConnection {
       const value = ownerRecord(
         await this.json('/runtime/operations/' + encodeURIComponent(operationId)),
       );
-      if (!['pending', 'complete', 'failed', 'absent', 'unknown'].includes(String(value.state)))
+      if (
+        value.state !== 'pending' &&
+        value.state !== 'complete' &&
+        value.state !== 'failed' &&
+        value.state !== 'absent' &&
+        value.state !== 'unknown'
+      )
         return { state: 'unknown' };
       return {
-        state: value.state as 'pending' | 'complete' | 'failed' | 'absent' | 'unknown',
+        state: value.state,
         ...(typeof value.digest === 'string' ? { digest: value.digest } : {}),
         ...(value.result === null || value.result === undefined
           ? {}
@@ -302,7 +316,7 @@ export class RuntimeOwnerConnection {
     while (!signal.aborted) {
       try {
         const response = await this.http(
-          `/runtime/streams/${encodeURIComponent(streamId)}?fromSeq=${seq}`,
+          `/runtime/streams/${encodeURIComponent(streamId)}?fromSeq=${String(seq)}`,
           'GET',
           undefined,
           signal,
@@ -311,7 +325,7 @@ export class RuntimeOwnerConnection {
         onState?.('connected');
         let pending = '';
         for await (const item of response) {
-          pending += (Buffer.isBuffer(item) ? item : Buffer.from(item as string)).toString('utf8');
+          pending += ownerBytes(item).toString('utf8');
           if (pending.length > 4 * 1024 * 1024)
             throw new Error('Runtime stream frame exceeds limit');
           let index: number;
@@ -332,7 +346,7 @@ export class RuntimeOwnerConnection {
         if (pending) throw new Error('Truncated runtime stream frame');
         throw new Error('Runtime transport ended without a process exit');
       } catch (error) {
-        if (signal.aborted) return;
+        if (aborted(signal)) return;
         onState?.('unconfirmed');
         if (
           error instanceof SandboxProviderError &&
@@ -432,9 +446,9 @@ export class RuntimeOwnerConnection {
         () =>
           outgoing.destroy(unconfirmedTransport(new Error('RuntimeOwner HTTP response timeout'))),
       );
-      outgoing.on('error', (error) =>
-        reject(error instanceof SandboxProviderError ? error : unconfirmedTransport(error)),
-      );
+      outgoing.on('error', (error) => {
+        reject(error instanceof SandboxProviderError ? error : unconfirmedTransport(error));
+      });
       outgoing.end(body);
     });
   }
@@ -448,7 +462,7 @@ export class RuntimeOwnerConnection {
     let bytes = 0;
     try {
       for await (const item of response) {
-        const chunk = Buffer.isBuffer(item) ? item : Buffer.from(item as string);
+        const chunk = ownerBytes(item);
         bytes += chunk.length;
         if (bytes > 32 * 1024 * 1024)
           throw new Error('Runtime response exceeds control-message limit');
@@ -475,10 +489,8 @@ export class RuntimeOwnerConnection {
       /* Never include raw upstream body in logs/errors. */
     }
     const code =
-      typeof error.code === 'string' &&
-      Object.values(SandboxProviderErrorCode).includes(error.code as SandboxProviderErrorCode)
-        ? (error.code as SandboxProviderErrorCode)
-        : SandboxProviderErrorCode.PROVIDER_UNAVAILABLE;
+      Object.values(SandboxProviderErrorCode).find((code) => code === error.code) ??
+      SandboxProviderErrorCode.PROVIDER_UNAVAILABLE;
     throw new SandboxProviderError(
       code,
       typeof error.message === 'string' ? error.message : 'RuntimeOwner state is not confirmed',
@@ -526,13 +538,17 @@ export class RuntimeOwnerProcessStream implements ProcessStream {
     if (!this.detached)
       void this.connection
         .call(this.provider, 'stream.write', [this.id, data], this.sandboxId)
-        .catch((error) => this.unconfirmed(error));
+        .catch((error: unknown) => {
+          this.unconfirmed(error);
+        });
   }
   resize(cols: number, rows: number): void {
     if (!this.detached)
       void this.connection
         .call(this.provider, 'stream.resize', [this.id, cols, rows], this.sandboxId)
-        .catch((error) => this.unconfirmed(error));
+        .catch((error: unknown) => {
+          this.unconfirmed(error);
+        });
   }
   async kill(signal?: NodeJS.Signals): Promise<void> {
     await this.connection.call(this.provider, 'stream.kill', [this.id, signal], this.sandboxId);
@@ -611,13 +627,9 @@ export class RuntimeOwnerProvider implements SandboxProvider {
     if (descriptor.methods.includes('jobs.startJob'))
       this.jobs = {
         startJob: async (h, spec) =>
-          (await this.call(h, 'jobs.startJob', [spec])) as Awaited<
-            ReturnType<SandboxJobs['startJob']>
-          >,
+          OwnerJobHandleSchema.parse(await this.call(h, 'jobs.startJob', [spec])),
         readJob: async (h, job, cursor, opts) =>
-          (await this.call(h, 'jobs.readJob', [job, cursor, opts])) as Awaited<
-            ReturnType<SandboxJobs['readJob']>
-          >,
+          OwnerJobChunkSchema.parse(await this.call(h, 'jobs.readJob', [job, cursor, opts])),
         killJob: async (h, job, signal) => {
           await this.call(h, 'jobs.killJob', [job, signal]);
         },
@@ -627,8 +639,11 @@ export class RuntimeOwnerProvider implements SandboxProvider {
       };
     if (descriptor.methods.includes('files.readFile'))
       this.files = {
-        readFile: async (h, path) =>
-          (await this.call(h, 'files.readFile', [path])) as Buffer | null,
+        readFile: async (h, path) => {
+          const result = await this.call(h, 'files.readFile', [path]);
+          if (result === null || Buffer.isBuffer(result)) return result;
+          throw new Error('Invalid owner file result');
+        },
         openFileStream: async (h, path) => {
           const ref = runtimeReference(h);
           return this.registry.connection(ref.ownerId).file(this.name, h, path, ref.sandboxId);
@@ -637,13 +652,14 @@ export class RuntimeOwnerProvider implements SandboxProvider {
           await this.call(h, 'files.writeFile', [path, content]);
         },
         listFiles: async (h, path, opts) =>
-          (await this.call(h, 'files.listFiles', [path, opts])) as Awaited<
-            ReturnType<SandboxFiles['listFiles']>
-          >,
+          OwnerFileEntriesSchema.parse(await this.call(h, 'files.listFiles', [path, opts])),
       };
     if (descriptor.methods.includes('imageStaged'))
-      this.imageStaged = async (image) =>
-        (await this.registry.active.call(this.name, 'imageStaged', [image])) as boolean;
+      this.imageStaged = async (image) => {
+        const result = await this.registry.active.call(this.name, 'imageStaged', [image]);
+        if (typeof result !== 'boolean') throw new Error('Invalid owner image observation');
+        return result;
+      };
     if (descriptor.methods.includes('stageImage'))
       this.stageImage = async (image, progress) => {
         const connection = this.registry.active;
@@ -677,12 +693,9 @@ export class RuntimeOwnerProvider implements SandboxProvider {
   async create(context: SandboxProviderContext): Promise<SandboxHandle> {
     const connection = this.registry.assignedOwner(context.sandboxId) ?? this.registry.active;
     this.registry.noteAssignment(context.sandboxId, connection.metadata.ownerId);
-    const handle = (await connection.call(
-      this.name,
-      'create',
-      [context],
-      context.sandboxId,
-    )) as SandboxHandle;
+    const handle = RuntimeOwnerHandleSchema.parse(
+      await connection.call(this.name, 'create', [context], context.sandboxId),
+    );
     this.registry.noteAssignment(context.sandboxId, connection.metadata.ownerId);
     return {
       ...handle,
@@ -744,7 +757,7 @@ export class RuntimeOwnerProvider implements SandboxProvider {
     await this.call(handle, 'destroy', []);
   }
   async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
-    return (await this.call(handle, 'inspect', [])) as SandboxRuntimeStatus;
+    return OwnerRuntimeStatusSchema.parse(await this.call(handle, 'inspect', []));
   }
   async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
     const reference = runtimeReference(handle);
@@ -889,4 +902,8 @@ export class RuntimeOwnerProviderRegistry implements ProviderRegistry {
   onModuleDestroy(): void {
     for (const owner of this.owners.values()) owner.close();
   }
+}
+
+function aborted(signal: AbortSignal): boolean {
+  return signal.aborted;
 }

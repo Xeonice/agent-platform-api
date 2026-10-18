@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ImageSpecError, REF_NOT_FOUND, REGISTRY_UNREACHABLE } from '@platform/contracts';
+import { parseOciManifest, parseOciConfig, parseOciToken } from './oci-json';
 
 /**
  * Minimal OCI Distribution v2 client — METADATA ONLY (docs/backend/04 §3 / §7).
@@ -170,7 +171,7 @@ export class OciRegistryClient {
 
     const raw = Buffer.from(await res.arrayBuffer());
     const digest = this.digestOf(res, raw, host);
-    const doc = parseJson<OciManifestDoc>(raw, `manifest of ${name}:${reference}`);
+    const doc = parseOciManifest(raw, `manifest of ${name}:${reference}`);
 
     const mediaType = doc.mediaType ?? res.headers.get('content-type') ?? '';
     const target = INDEX_TYPES.has(mediaType.split(';')[0].trim())
@@ -219,7 +220,7 @@ export class OciRegistryClient {
       );
     }
     const raw = Buffer.from(await res.arrayBuffer());
-    const doc = parseJson<OciManifestDoc>(raw, `manifest of ${name}:${reference}`);
+    const doc = parseOciManifest(raw, `manifest of ${name}:${reference}`);
     return {
       raw,
       mediaType: doc.mediaType ?? res.headers.get('content-type') ?? MANIFEST_ACCEPT.split(',')[0],
@@ -378,7 +379,7 @@ export class OciRegistryClient {
     const chosen =
       entries.find((m) => m.platform?.os === 'linux' && m.platform.architecture === wantArch) ??
       entries.find((m) => m.platform?.os === 'linux') ??
-      entries[0];
+      entries.at(0);
     if (!chosen) {
       throw new ImageSpecError(REF_NOT_FOUND, `image index of '${name}' lists no usable platform`);
     }
@@ -394,10 +395,7 @@ export class OciRegistryClient {
         `registry ${host} answered ${String(res.status)} for manifest ${chosen.digest}`,
       );
     }
-    return parseJson<OciManifestDoc>(
-      Buffer.from(await res.arrayBuffer()),
-      `platform manifest of ${name}`,
-    );
+    return parseOciManifest(Buffer.from(await res.arrayBuffer()), `platform manifest of ${name}`);
   }
 
   private async fetchConfigBlob(
@@ -419,10 +417,7 @@ export class OciRegistryClient {
         `registry ${host} answered ${String(res.status)} for the config blob of '${name}'`,
       );
     }
-    return parseJson<OciImageConfigDoc>(
-      Buffer.from(await res.arrayBuffer()),
-      `config blob of ${name}`,
-    );
+    return parseOciConfig(Buffer.from(await res.arrayBuffer()), `config blob of ${name}`);
   }
 
   /**
@@ -496,11 +491,7 @@ export class OciRegistryClient {
         `token endpoint for ${host} answered ${String(res.status)}`,
       );
     }
-    const body = parseJson<{ token?: string; access_token?: string }>(
-      Buffer.from(await res.arrayBuffer()),
-      `token response from ${host}`,
-    );
-    return body.token ?? body.access_token ?? null;
+    return parseOciToken(Buffer.from(await res.arrayBuffer()), `token response from ${host}`);
   }
 
   private async send(
@@ -515,7 +506,11 @@ export class OciRegistryClient {
     //    去卡它，表现是每次推到一半 AbortError —— 而那看起来像 registry 挂了。
     //    ⇒ 有 body 的请求交给底层 socket 超时管，我们只管读侧那条。
     const streaming = opts.body !== undefined;
-    const timer = streaming ? null : setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = streaming
+      ? null
+      : setTimeout(() => {
+          controller.abort();
+        }, this.timeoutMs);
     try {
       return await fetch(url, {
         method: opts.method ?? 'GET',
@@ -544,8 +539,8 @@ function headersOf(opts: { contentType?: string }): Record<string, string> {
 }
 
 /** `Bearer realm="https://…",service="x",scope="repository:y:pull"` → a record. */
-export function parseChallenge(header: string): Record<string, string> {
-  const out: Record<string, string> = {};
+export function parseChallenge(header: string): Partial<Record<string, string>> {
+  const out: Partial<Record<string, string>> = {};
   for (const m of header.matchAll(/([a-zA-Z_]+)="([^"]*)"/g)) out[m[1]] = m[2];
   return out;
 }
@@ -563,13 +558,5 @@ function safeHost(url: string): string {
     return new URL(url).host;
   } catch {
     return url;
-  }
-}
-
-function parseJson<T>(raw: Buffer, what: string): T {
-  try {
-    return JSON.parse(raw.toString('utf8')) as T;
-  } catch {
-    throw new ImageSpecError(REGISTRY_UNREACHABLE, `${what} is not valid JSON`);
   }
 }

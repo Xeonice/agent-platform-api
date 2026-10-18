@@ -254,8 +254,7 @@ export class FsWorkspacePreparer implements WorkspacePreparer {
  * checkout touches no credential, no transport and no remote.
  */
 function checkoutEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  for (const key of [
+  const omitted = new Set([
     'GIT_DIR',
     'GIT_WORK_TREE',
     'GIT_COMMON_DIR',
@@ -264,10 +263,11 @@ function checkoutEnv(): NodeJS.ProcessEnv {
     'GIT_ALTERNATE_OBJECT_DIRECTORIES',
     'GIT_NAMESPACE',
     'GIT_CEILING_DIRECTORIES',
-  ]) {
-    delete env[key];
-  }
-  return env;
+  ]);
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !omitted.has(key))),
+    GIT_TERMINAL_PROMPT: '0',
+  };
 }
 
 /**

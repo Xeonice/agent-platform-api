@@ -1,3 +1,6 @@
+import { requiredUpgradeValue } from './upgrade-values';
+import { isRecord } from '@platform/shared-kernel';
+import { upgradeRecord } from './upgrade-values';
 import { lstat, readFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
@@ -30,13 +33,15 @@ function newer(a: string, b: string): boolean {
   const apre = aa.slice(1).join('-').split('.'),
     bpre = bb.slice(1).join('-').split('.');
   for (let i = 0; i < Math.max(apre.length, bpre.length); i++) {
-    if (apre[i] === undefined) return false;
-    if (bpre[i] === undefined) return true;
-    if (apre[i] === bpre[i]) continue;
-    const an = /^\d+$/.test(apre[i]),
-      bn = /^\d+$/.test(bpre[i]);
+    const a = apre.at(i),
+      b = bpre.at(i);
+    if (a === undefined) return false;
+    if (b === undefined) return true;
+    if (a === b) continue;
+    const an = /^\d+$/.test(a),
+      bn = /^\d+$/.test(b);
     if (an !== bn) return !an;
-    return an ? Number(apre[i]) > Number(bpre[i]) : apre[i] > bpre[i];
+    return an ? Number(a) > Number(b) : a > b;
   }
   return false;
 }
@@ -114,7 +119,7 @@ export class UpgradeCatalog {
             (!process.getuid || stat.uid === process.getuid()),
           'INSECURE_QUALIFICATION_INSTALLATION',
         );
-        const proof = JSON.parse(await readFile(proofPath, 'utf8')) as Record<string, unknown>;
+        const proof = upgradeRecord(JSON.parse(await readFile(proofPath, 'utf8')));
         requireUpgrade(
           proof.purpose === 'qualification' &&
             proof.instanceId === this.store.instanceId &&
@@ -184,10 +189,11 @@ export class UpgradeCatalog {
       }[] = [];
       const envelopes: SignedUpgradeManifest[] = [];
       let incompatibleReason: string | null = null;
-      for (const entry of raw.releases) {
-        if (!entry || typeof entry !== 'object' || !('envelope' in entry)) continue;
+      const entries: unknown[] = raw.releases;
+      for (const entry of entries) {
+        if (!isRecord(entry) || !('envelope' in entry)) continue;
         const envelope = entry.envelope;
-        if (!envelope || typeof envelope !== 'object' || !('manifest' in envelope)) continue;
+        if (!isRecord(envelope) || !('manifest' in envelope)) continue;
         const manifest = envelope.manifest;
         // Separate qualification instances may share a catalog. This only
         // selects the intended signed envelope; verification is still mandatory.
@@ -281,7 +287,7 @@ export class UpgradeCatalog {
       targets.sort((a, b) =>
         newer(a.envelope.manifest.releaseId, b.envelope.manifest.releaseId) ? -1 : 1,
       );
-      this.verified = targets[0] ?? null;
+      this.verified = targets.at(0) ?? null;
       const target = this.verified?.envelope;
       this.projection = {
         state: target ? 'verified' : incompatibleReason ? 'unavailable' : 'no-update',
@@ -294,7 +300,7 @@ export class UpgradeCatalog {
               webRevision: target.manifest.components.web.webRevision,
               webArtifactDigest: target.manifest.components.web.artifactDigest,
               installable: true,
-              supportsAsync: this.verified!.chain.every((stage) =>
+              supportsAsync: requiredUpgradeValue(this.verified).chain.every((stage) =>
                 stage.envelope.manifest.components.coordinator.upgradeOperationFormats?.includes(
                   'upgrade-plan-v1',
                 ),

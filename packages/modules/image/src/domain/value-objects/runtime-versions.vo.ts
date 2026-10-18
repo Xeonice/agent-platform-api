@@ -1,3 +1,5 @@
+import { isRecord } from '@platform/shared-kernel/pure';
+
 /** Optional build declarations, never proof that a CLI exists in a running Guest. */
 const RUNTIME_IDS = ['codex', 'claude-code'] as const;
 const NUMERIC = '(0|[1-9][0-9]*)';
@@ -8,11 +10,11 @@ const EXACT_VERSION = new RegExp(
 
 /** Untrusted/missing metadata degrades to unknown without blocking image registration. */
 export function normalizeRuntimeVersions(input: unknown): Record<string, string> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) return {};
+  if (!isRecord(input)) return {};
   const result: Record<string, string> = {};
   for (const id of RUNTIME_IDS) {
     if (!Object.prototype.hasOwnProperty.call(input, id)) continue;
-    const value = (input as Record<string, unknown>)[id];
+    const value = input[id];
     if (
       typeof value === 'string' &&
       value.length <= 128 &&

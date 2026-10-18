@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 
 export type SandboxStartupStage =
   | 'workspace-preparation'

@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 
 /** Immutable reservation, committed with the occurrence before any external work. */
 export interface AutomationLaunchIntent {

@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -282,10 +283,10 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
         return restoredRead.promise;
       };
       await f.scheduler().runOnce();
-      const run = (await f.runs.findLatest(f.rule.id))!;
-      const intent = (await f.intents.find(run.id, 0))!;
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
       await waitForStatus(f.h.service, intent.sandboxId, 'running');
-      const originalJobs = f.h.registry.get(f.h.provider.name).jobs!;
+      const originalJobs = assertDefined(f.h.registry.get(f.h.provider.name).jobs);
       const originalRead = originalJobs.readJob.bind(originalJobs);
       originalJobs.readJob = async (...args) => {
         try {
@@ -299,7 +300,7 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
       const b = await f.replacement(2);
       await b.resumeRunning();
       await vi.waitFor(() => expect(cursors).toHaveLength(3));
-      const progressed = (await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)))!;
+      const progressed = assertDefined(await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)));
       expect(progressed.cursor).toBe('b-cursor');
       expect(progressed.lastSeq).toBeGreaterThan(0);
       const a = await f.replacement(3, true);
@@ -313,7 +314,7 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
         status: 'running',
       });
       await vi.waitFor(() => expect(oldResponseReturned).toBe(true));
-      const after = (await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)))!;
+      const after = assertDefined(await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)));
       expect({ cursor: after.cursor, seq: after.lastSeq, bytes: after.stdoutBytes }).toEqual({
         cursor: progressed.cursor,
         seq: progressed.lastSeq,
@@ -344,10 +345,10 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
     const f = await fixture();
     try {
       await f.scheduler().runOnce();
-      const run = (await f.runs.findLatest(f.rule.id))!;
-      const intent = (await f.intents.find(run.id, 0))!;
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
       await waitForStatus(f.h.service, intent.sandboxId, 'running');
-      const jobs = f.h.registry.get(f.h.provider.name).jobs!;
+      const jobs = assertDefined(f.h.registry.get(f.h.provider.name).jobs);
       const originalStart = jobs.startJob.bind(jobs);
       jobs.startJob = async (...args) => {
         await originalStart(...args);
@@ -400,7 +401,7 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
         ),
       );
       const proof = await f.h.jobCompletions.find(intent.taskId);
-      const finalized = (await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)))!;
+      const finalized = assertDefined(await f.h.taskRepo.findById(asAgentTaskId(intent.taskId)));
       expect(proof).toMatchObject({
         taskId: intent.taskId,
         sandboxId: intent.sandboxId,
@@ -410,7 +411,7 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
         lastSeq: finalized.lastSeq,
         cursor: finalized.cursor,
       });
-      expect(proof?.evidenceDigest).toBe(jobCompletionEvidenceDigest(proof!));
+      expect(proof?.evidenceDigest).toBe(jobCompletionEvidenceDigest(assertDefined(proof)));
       expect(f.h.provider.jobs.jobs.size).toBe(1);
     } finally {
       await f.close();
@@ -421,8 +422,8 @@ describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automatio
     const f = await fixture();
     try {
       await f.scheduler().runOnce();
-      const run = (await f.runs.findLatest(f.rule.id))!;
-      const intent = (await f.intents.find(run.id, 0))!;
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
       await waitForStatus(f.h.service, intent.sandboxId, 'running');
       const externalStart = f.h.provider.jobs.startJob.bind(f.h.provider.jobs);
       f.h.provider.jobs.startJob = async (...args) => {

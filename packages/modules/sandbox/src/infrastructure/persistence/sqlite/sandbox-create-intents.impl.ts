@@ -1,3 +1,4 @@
+import { readSqlite } from './read-sqlite';
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
@@ -10,9 +11,7 @@ import type {
 
 @Injectable()
 export class SqliteSandboxCreateIntents implements SandboxCreateIntents {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
   reserveSync(
     _tx: Tx,
     sandboxId: string,
@@ -23,7 +22,7 @@ export class SqliteSandboxCreateIntents implements SandboxCreateIntents {
   ): SandboxCreateIntent {
     // Hash credentials in memory; never persist provider-create environment secrets.
     const requestDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex');
-    const prior = this.db.get<{ operation_id: string; request_digest: string }>(
+    const prior = this.db.get<{ operation_id: string; request_digest: string } | undefined>(
       sql`SELECT * FROM sandbox_create_intents WHERE sandbox_id=${sandboxId}`,
     );
     if (prior && (prior.operation_id !== operationId || prior.request_digest !== requestDigest))
@@ -50,23 +49,25 @@ export class SqliteSandboxCreateIntents implements SandboxCreateIntents {
       sql`UPDATE sandbox_create_intents SET state='finished' WHERE sandbox_id=${sandboxId}`,
     );
   }
-  async pending(): Promise<SandboxCreateIntent[]> {
-    return this.db
-      .all<{
-        sandbox_id: string;
-        operation_id: string;
-        request_digest: string;
-        workspace_path: string;
-        state: 'pending' | 'bound';
-        created_at: number;
-      }>(sql`SELECT * FROM sandbox_create_intents WHERE state IN ('pending','bound')`)
-      .map((row) => ({
-        sandboxId: row.sandbox_id,
-        operationId: row.operation_id,
-        requestDigest: row.request_digest,
-        workspacePath: row.workspace_path,
-        state: row.state,
-        createdAt: fromEpochMs(row.created_at),
-      }));
+  pending(): Promise<SandboxCreateIntent[]> {
+    return readSqlite(() => {
+      return this.db
+        .all<{
+          sandbox_id: string;
+          operation_id: string;
+          request_digest: string;
+          workspace_path: string;
+          state: 'pending' | 'bound';
+          created_at: number;
+        }>(sql`SELECT * FROM sandbox_create_intents WHERE state IN ('pending','bound')`)
+        .map((row) => ({
+          sandboxId: row.sandbox_id,
+          operationId: row.operation_id,
+          requestDigest: row.request_digest,
+          workspacePath: row.workspace_path,
+          state: row.state,
+          createdAt: fromEpochMs(row.created_at),
+        }));
+    });
   }
 }

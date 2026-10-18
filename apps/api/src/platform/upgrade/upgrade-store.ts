@@ -1,3 +1,6 @@
+import { SignedUpgradeManifestSchema } from '@platform/contracts';
+import { z } from 'zod';
+import { requiredUpgradeValue, upgradeRecord } from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import type Database from 'better-sqlite3';
 import {
@@ -112,9 +115,11 @@ export class UpgradeStore {
     return fromEpochMs(value).toISOString();
   }
   instance(): InstanceRow {
-    return this.sqlite
-      .prepare('SELECT * FROM upgrade_instances WHERE instance_id=?')
-      .get(this.instanceId) as InstanceRow;
+    return requiredUpgradeValue(
+      this.sqlite
+        .prepare<unknown[], InstanceRow>('SELECT * FROM upgrade_instances WHERE instance_id=?')
+        .get(this.instanceId),
+    );
   }
   confirmed(): ConfirmedServiceRelease | null {
     const value = this.instance().confirmed_release;
@@ -122,13 +127,13 @@ export class UpgradeStore {
   }
   appliedBridges(): string[] {
     const rows = this.sqlite
-      .prepare(
+      .prepare<unknown[], { target_release_id: string }>(
         "SELECT target_release_id FROM upgrade_attempts WHERE instance_id=? AND state='activation-confirmed'",
       )
-      .all(this.instanceId) as { target_release_id: string }[];
+      .all(this.instanceId);
     return [
       ...new Set([
-        ...(this.confirmed() ? [this.confirmed()!.releaseId] : []),
+        ...(this.confirmed() ? [requiredUpgradeValue(this.confirmed()).releaseId] : []),
         ...rows.map((r) => r.target_release_id),
       ]),
     ];
@@ -152,8 +157,10 @@ export class UpgradeStore {
   }
   private row(id: string): AttemptRow {
     const row = this.sqlite
-      .prepare('SELECT * FROM upgrade_attempts WHERE attempt_id=? AND instance_id=?')
-      .get(id, this.instanceId) as AttemptRow | undefined;
+      .prepare<unknown[], AttemptRow>(
+        'SELECT * FROM upgrade_attempts WHERE attempt_id=? AND instance_id=?',
+      )
+      .get(id, this.instanceId);
     requireUpgrade(row, 'UPGRADE_ATTEMPT_NOT_FOUND', 404);
     return row;
   }
@@ -162,8 +169,8 @@ export class UpgradeStore {
   }
   private steps(id: string): StepRow[] {
     return this.sqlite
-      .prepare('SELECT * FROM upgrade_steps WHERE attempt_id=?')
-      .all(id) as StepRow[];
+      .prepare<unknown[], StepRow>('SELECT * FROM upgrade_steps WHERE attempt_id=?')
+      .all(id);
   }
   attempt(id: string): UpgradeAttempt {
     const row = this.row(id),
@@ -191,9 +198,9 @@ export class UpgradeStore {
           Number.isFinite(actual.applied_at)
         ) {
           try {
-            const receipt = JSON.parse(actual.evidence) as Record<string, unknown>;
+            const receipt = upgradeRecord(JSON.parse(actual.evidence));
             if (
-              receipt?.commitKnown === true &&
+              receipt.commitKnown === true &&
               receipt.complete === true &&
               receipt.integrityValid === true &&
               receipt.budgetExceeded === false &&
@@ -241,10 +248,10 @@ export class UpgradeStore {
   }
   private latestAttemptId(): string | null {
     const row = this.sqlite
-      .prepare(
+      .prepare<unknown[], { attempt_id: string }>(
         'SELECT attempt_id FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
       )
-      .get(this.instanceId) as { attempt_id: string } | undefined;
+      .get(this.instanceId);
     return row?.attempt_id ?? null;
   }
   latest(): UpgradeAttempt | null {
@@ -258,16 +265,18 @@ export class UpgradeStore {
     if (!stage) return null;
     const actual = this.steps(id).find((step) => step.step_id === stage.stepId);
     const saved = this.sqlite
-      .prepare(
+      .prepare<unknown[], { result: string }>(
         "SELECT result FROM platform_operations WHERE operation_id=? AND instance_id=? AND role='upgrade-stage-progress'",
       )
-      .get('upgrade-stage-progress:' + id, this.instanceId) as { result: string } | undefined;
+      .get('upgrade-stage-progress:' + id, this.instanceId);
     const timing = saved
-      ? (JSON.parse(saved.result) as {
-          stage: string;
-          enteredAt: string | null;
-          lastProgressAt: string | null;
-        })
+      ? z
+          .object({
+            stage: z.string(),
+            enteredAt: z.string().nullable(),
+            lastProgressAt: z.string().nullable(),
+          })
+          .parse(JSON.parse(saved.result))
       : null;
     const work = actual?.completed_work ?? 0;
     return {
@@ -295,11 +304,9 @@ export class UpgradeStore {
    * each; the 20 Hz sampler must never load or decode them to choose a lane. */
   latestProbeSnapshot() {
     const row = this.sqlite
-      .prepare(
-        'SELECT attempt_id,fence,lease_expires_at,plan,manifest,source_activation,source_actual FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
-      )
-      .get(this.instanceId) as
-      | Pick<
+      .prepare<
+        unknown[],
+        Pick<
           AttemptRow,
           | 'attempt_id'
           | 'fence'
@@ -309,20 +316,25 @@ export class UpgradeStore {
           | 'source_activation'
           | 'source_actual'
         >
-      | undefined;
+      >(
+        'SELECT attempt_id,fence,lease_expires_at,plan,manifest,source_activation,source_actual FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
+      )
+      .get(this.instanceId);
     if (!row) return null;
     const candidate = this.sqlite
-      .prepare(
+      .prepare<
+        unknown[],
+        Pick<StepRow, 'step_id' | 'receipt_digest' | 'completed_work' | 'evidence'>
+      >(
         "SELECT step_id,receipt_digest,completed_work,evidence FROM upgrade_steps WHERE attempt_id=? AND step_id='candidate' AND applied=1",
       )
-      .get(row.attempt_id) as
-      Pick<StepRow, 'step_id' | 'receipt_digest' | 'completed_work' | 'evidence'> | undefined;
+      .get(row.attempt_id);
     return {
       attempt: { attemptId: row.attempt_id },
       fence: row.fence,
       leaseExpiresAt: row.lease_expires_at,
       plan: UpgradePlanSchema.parse(JSON.parse(row.plan)),
-      manifest: (JSON.parse(row.manifest) as SignedUpgradeManifest).manifest,
+      manifest: SignedUpgradeManifestSchema.parse(JSON.parse(row.manifest)).manifest,
       sourceActivation: ConfirmedServiceReleaseSchema.parse(JSON.parse(row.source_activation)),
       sourceActual: row.source_actual
         ? UpgradeSourceActualSchema.parse(JSON.parse(row.source_actual))
@@ -341,17 +353,19 @@ export class UpgradeStore {
   }
   lookup(actorId: string, requestId: string): UpgradeAttempt {
     const row = this.sqlite
-      .prepare(
+      .prepare<unknown[], { attempt_id: string }>(
         'SELECT attempt_id FROM upgrade_attempts WHERE instance_id=? AND actor_id=? AND request_id=?',
       )
-      .get(this.instanceId, actorId, requestId) as { attempt_id: string } | undefined;
+      .get(this.instanceId, actorId, requestId);
     requireUpgrade(row, 'UPGRADE_REQUEST_NOT_FOUND', 404);
     return this.attempt(row.attempt_id);
   }
   replay(actorId: string, request: UpgradeRequest): UpgradeAttempt | null {
     const prior = this.sqlite
-      .prepare('SELECT * FROM upgrade_attempts WHERE instance_id=? AND actor_id=? AND request_id=?')
-      .get(this.instanceId, actorId, request.requestId) as AttemptRow | undefined;
+      .prepare<unknown[], AttemptRow>(
+        'SELECT * FROM upgrade_attempts WHERE instance_id=? AND actor_id=? AND request_id=?',
+      )
+      .get(this.instanceId, actorId, request.requestId);
     if (!prior) return null;
     requireUpgrade(
       prior.request_digest === upgradeDigest(request),
@@ -373,10 +387,10 @@ export class UpgradeStore {
       .transaction(() => {
         const digest = upgradeDigest(request);
         const prior = this.sqlite
-          .prepare(
+          .prepare<unknown[], AttemptRow>(
             'SELECT * FROM upgrade_attempts WHERE instance_id=? AND actor_id=? AND request_id=?',
           )
-          .get(this.instanceId, actorId, request.requestId) as AttemptRow | undefined;
+          .get(this.instanceId, actorId, request.requestId);
         if (prior) {
           requireUpgrade(prior.request_digest === digest, 'UPGRADE_REQUEST_PAYLOAD_CONFLICT');
           return this.attempt(prior.attempt_id);
@@ -392,10 +406,10 @@ export class UpgradeStore {
           'TARGET_DATA_FORMAT_INCOMPATIBLE',
         );
         const activePlan = this.sqlite
-          .prepare(
+          .prepare<unknown[], { operation_id: string }>(
             "SELECT operation_id FROM platform_operations WHERE instance_id=? AND role='upgrade-plan' AND state IN ('accepted','preparing','running')",
           )
-          .get(this.instanceId) as { operation_id: string } | undefined;
+          .get(this.instanceId);
         requireUpgrade(
           !activePlan || activePlan.operation_id === operationId,
           'UPGRADE_ALREADY_ACTIVE',
@@ -467,11 +481,13 @@ export class UpgradeStore {
             .get(this.instanceId),
           'UPGRADE_ALREADY_ACTIVE',
         );
-        const max = this.sqlite
-          .prepare(
-            'SELECT coalesce(max(generation),0) AS generation FROM upgrade_attempts WHERE instance_id=?',
-          )
-          .get(this.instanceId) as { generation: number };
+        const max = requiredUpgradeValue(
+          this.sqlite
+            .prepare<unknown[], { generation: number }>(
+              'SELECT coalesce(max(generation),0) AS generation FROM upgrade_attempts WHERE instance_id=?',
+            )
+            .get(this.instanceId),
+        );
         const id = this.ids.next(),
           generation = Math.max(max.generation, installed.activation_generation) + 1,
           now = this.now();
@@ -483,9 +499,13 @@ export class UpgradeStore {
             'UPDATE upgrade_attempts SET lease_expires_at=0,controller_id=NULL WHERE instance_id=?',
           )
           .run(this.instanceId);
-        const highFence = this.sqlite
-          .prepare('SELECT coalesce(max(fence),0) AS n FROM upgrade_attempts WHERE instance_id=?')
-          .get(this.instanceId) as { n: number };
+        const highFence = requiredUpgradeValue(
+          this.sqlite
+            .prepare<unknown[], { n: number }>(
+              'SELECT coalesce(max(fence),0) AS n FROM upgrade_attempts WHERE instance_id=?',
+            )
+            .get(this.instanceId),
+        );
         requireUpgrade(
           entryFenceFloor === undefined ||
             (Number.isSafeInteger(entryFenceFloor) && entryFenceFloor >= 0),
@@ -542,14 +562,18 @@ export class UpgradeStore {
     const recovery = this.recovery();
     const activeRecovery = recovery?.triggeringAttemptId === id ? recovery : null;
     const recoveryRow = activeRecovery
-      ? (this.sqlite
-          .prepare('SELECT plan FROM upgrade_recoveries WHERE recovery_attempt_id=?')
-          .get(activeRecovery.recoveryAttemptId) as { plan: string })
+      ? requiredUpgradeValue(
+          this.sqlite
+            .prepare<unknown[], { plan: string }>(
+              'SELECT plan FROM upgrade_recoveries WHERE recovery_attempt_id=?',
+            )
+            .get(activeRecovery.recoveryAttemptId),
+        )
       : undefined;
     return {
       attempt: { ...this.attempt(id), actorId: row.actor_id },
-      signedManifest: JSON.parse(row.manifest) as SignedUpgradeManifest,
-      manifest: (JSON.parse(row.manifest) as SignedUpgradeManifest).manifest,
+      signedManifest: SignedUpgradeManifestSchema.parse(JSON.parse(row.manifest)),
+      manifest: SignedUpgradeManifestSchema.parse(JSON.parse(row.manifest)).manifest,
       plan: this.plan(id),
       sourceActivation: ConfirmedServiceReleaseSchema.parse(JSON.parse(row.source_activation)),
       sourceActual: row.source_actual
@@ -568,15 +592,15 @@ export class UpgradeStore {
       controllerId: row.controller_id,
       leaseExpiresAt: row.lease_expires_at,
       recovery: activeRecovery,
-      recoveryPlan: recoveryRow ? (JSON.parse(recoveryRow.plan) as Record<string, unknown>) : null,
+      recoveryPlan: recoveryRow ? upgradeRecord(JSON.parse(recoveryRow.plan)) : null,
     };
   }
   pending() {
     const rows = this.sqlite
-      .prepare(
+      .prepare<unknown[], { attempt_id: string }>(
         `SELECT attempt_id FROM upgrade_attempts a WHERE instance_id=? AND (state IN ${ACTIVE} OR EXISTS(SELECT 1 FROM upgrade_recoveries r WHERE r.triggering_attempt_id=a.attempt_id AND r.state='recovering')) ORDER BY generation DESC,rowid DESC`,
       )
-      .all(this.instanceId) as { attempt_id: string }[];
+      .all(this.instanceId);
     return {
       instanceId: this.instanceId,
       attempts: rows.map((row) => this.snapshot(row.attempt_id)),
@@ -635,11 +659,13 @@ export class UpgradeStore {
           !row.controller_id || row.controller_id === controllerId || row.lease_expires_at <= now,
           'UPGRADE_CONTROLLER_BUSY',
         );
-        const high = this.sqlite
-          .prepare(
-            'SELECT coalesce(max(fence),0) AS fence FROM upgrade_attempts WHERE instance_id=?',
-          )
-          .get(this.instanceId) as { fence: number };
+        const high = requiredUpgradeValue(
+          this.sqlite
+            .prepare<unknown[], { fence: number }>(
+              'SELECT coalesce(max(fence),0) AS fence FROM upgrade_attempts WHERE instance_id=?',
+            )
+            .get(this.instanceId),
+        );
         requireUpgrade(
           Number.isSafeInteger(entryFenceFloor) && entryFenceFloor >= 0,
           'ENTRY_FENCE_UNKNOWN',
@@ -734,8 +760,10 @@ export class UpgradeStore {
       .transaction(() => {
         const digest = upgradeDigest(command);
         const prior = this.sqlite
-          .prepare('SELECT event_digest FROM upgrade_events WHERE event_id=? AND attempt_id=?')
-          .get(command.eventId, id) as { event_digest: string } | undefined;
+          .prepare<unknown[], { event_digest: string }>(
+            'SELECT event_digest FROM upgrade_events WHERE event_id=? AND attempt_id=?',
+          )
+          .get(command.eventId, id);
         if (prior) {
           requireUpgrade(prior.event_digest === digest, 'UPGRADE_EVENT_PAYLOAD_CONFLICT');
           return this.snapshot(id);
@@ -916,12 +944,14 @@ export class UpgradeStore {
               typeof p.recoveryAttemptId === 'string' ? p.recoveryAttemptId : this.ids.next(),
             recoveryGeneration = row.generation + 1;
           requireUpgrade(/^[a-f0-9-]{36}$/.test(recoveryId), 'INVALID_RECOVERY_ID');
-          const high = this.sqlite
-            .prepare(
-              'SELECT coalesce(max(fence),0) AS fence FROM upgrade_attempts WHERE instance_id=?',
-            )
-            .get(this.instanceId) as { fence: number };
-          const fixedRecovery = p.recoveryPlan as Record<string, unknown>,
+          const high = requiredUpgradeValue(
+            this.sqlite
+              .prepare<unknown[], { fence: number }>(
+                'SELECT coalesce(max(fence),0) AS fence FROM upgrade_attempts WHERE instance_id=?',
+              )
+              .get(this.instanceId),
+          );
+          const fixedRecovery = upgradeRecord(p.recoveryPlan),
             { planDigest: declaredDigest, ...planInput } = fixedRecovery;
           const recoveryDigest = upgradeDigest(planInput);
           requireUpgrade(
@@ -958,11 +988,11 @@ export class UpgradeStore {
         } else {
           const recovery = this.recovery();
           requireUpgrade(
-            recovery && recovery.triggeringAttemptId === id && recovery.state === 'recovering',
+            recovery?.triggeringAttemptId === id && recovery.state === 'recovering',
             'RECOVERY_NOT_ACTIVE',
           );
           if (command.kind === 'recovery-confirmed') {
-            requireUpgrade(confirmed || restoredPartial, 'RECOVERY_UNCONFIRMED');
+            requireUpgrade(confirmed ?? restoredPartial, 'RECOVERY_UNCONFIRMED');
             if (restoredPartial) {
               restoredPartial = UpgradeSourceActualSchema.parse(restoredPartial);
               const { proofDigest, ...facts } = restoredPartial;
@@ -1035,11 +1065,9 @@ export class UpgradeStore {
   }
   recovery(): UpgradeRecovery | null {
     const row = this.sqlite
-      .prepare(
-        'SELECT * FROM upgrade_recoveries WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
-      )
-      .get(this.instanceId) as
-      | {
+      .prepare<
+        unknown[],
+        {
           recovery_attempt_id: string;
           triggering_attempt_id: string;
           generation: number;
@@ -1049,7 +1077,10 @@ export class UpgradeStore {
           reason: string;
           observed_at: number;
         }
-      | undefined;
+      >(
+        'SELECT * FROM upgrade_recoveries WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1',
+      )
+      .get(this.instanceId);
     return row
       ? {
           recoveryAttemptId: row.recovery_attempt_id,

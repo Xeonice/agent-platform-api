@@ -9,7 +9,7 @@ import type {
   SystemSettingsDto,
   UpdateSystemSettingsRequest,
 } from '@platform/contracts';
-import { ConnectivityResultSchema } from '@platform/contracts';
+import { ConnectivityResultSchema, ProxyConfigSchema } from '@platform/contracts';
 import { PasscodeService } from '../access-passcode/passcode.service';
 import {
   SYSTEM_SETTINGS_ROW_ID,
@@ -17,7 +17,7 @@ import {
   type SystemSettingsRow,
 } from './system-settings.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * 平台版本。**没有发布流程时说 `dev`，不编一个版本号。**
@@ -56,18 +56,20 @@ export class SystemSettingsService {
       .select()
       .from(systemSettings)
       .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
-      .all();
-    if (found.length > 0) return found[0]!;
+      .get();
+    if (found) return found;
     this.db
       .insert(systemSettings)
       .values({ id: SYSTEM_SETTINGS_ROW_ID, initialized: false })
       .onConflictDoNothing()
       .run();
-    return this.db
+    const created = this.db
       .select()
       .from(systemSettings)
       .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
-      .all()[0]!;
+      .get();
+    if (!created) throw new Error('System settings row is missing after initialization');
+    return created;
   }
 
   initialized(): boolean {
@@ -75,9 +77,7 @@ export class SystemSettingsService {
   }
 
   proxyConfig(): ProxyConfig | undefined {
-    const raw = this.row().proxyConfig;
-    if (raw === null || raw === undefined) return undefined;
-    return raw as ProxyConfig;
+    return parseProxy(this.row().proxyConfig);
   }
 
   /**
@@ -103,9 +103,10 @@ export class SystemSettingsService {
   /** `GET /api/system/settings`。⛔ 不出 hash，只出「启没启用」（见类注释纪律 2）。 */
   settings(): SystemSettingsDto {
     const row = this.row();
+    const proxyConfig = parseProxy(row.proxyConfig);
     return {
       initialized: row.initialized,
-      ...(row.proxyConfig ? { proxyConfig: row.proxyConfig as ProxyConfig } : {}),
+      ...(proxyConfig ? { proxyConfig } : {}),
       ...(row.publicBaseUrl ? { publicBaseUrl: row.publicBaseUrl } : {}),
       accessPasscodeEnabled: this.passcode.enabled,
       // ⚠️ 只在口令**来自库**时才有「上次生成时刻」——env 形态下这一列恒 NULL，而
@@ -202,4 +203,10 @@ function parseConnectivity(raw: unknown): ConnectivityResult[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
   const parsed = ConnectivityResultSchema.array().safeParse(raw);
   return parsed.success ? parsed.data : undefined;
+}
+
+/** JSON columns may contain a previous version or malformed external data. */
+function parseProxy(raw: unknown): ProxyConfig | undefined {
+  const result = ProxyConfigSchema.safeParse(raw);
+  return result.success ? result.data : undefined;
 }

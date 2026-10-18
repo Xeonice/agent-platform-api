@@ -1,3 +1,7 @@
+import { z } from 'zod';
+import { UpgradeStatusSchema } from '@platform/contracts';
+import { requiredUpgradeValue } from './upgrade-values';
+import { upgradeRecord } from './upgrade-values';
 import {
   Inject,
   Injectable,
@@ -24,6 +28,19 @@ interface PhysicalObservation {
   repairableCurrent: UpgradeStatus['repairableCurrent'];
   serviceAvailability: NonNullable<UpgradeStatus['serviceAvailability']>;
   confirmedAt: string;
+}
+const PhysicalObservationSchema = z.object({
+  activationGeneration: z.number(),
+  durableState: UpgradeStatusSchema.shape.serviceState,
+  durableReady: z.number(),
+  serviceState: UpgradeStatusSchema.shape.serviceState,
+  availableWeb: UpgradeStatusSchema.shape.availableWeb,
+  repairableCurrent: UpgradeStatusSchema.shape.repairableCurrent,
+  serviceAvailability: UpgradeStatusSchema.shape.serviceAvailability.unwrap(),
+  confirmedAt: z.string(),
+});
+function assertPhysicalObservation(value: unknown): asserts value is PhysicalObservation {
+  PhysicalObservationSchema.parse(value);
 }
 const ROLE = 'upgrade-observation';
 const FRESHNESS_MS = 5000;
@@ -55,7 +72,9 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
-    this.timer = setInterval(() => this.schedule(), 1000);
+    this.timer = setInterval(() => {
+      this.schedule();
+    }, 1000);
     this.timer.unref();
   }
   onModuleDestroy(): void {
@@ -77,24 +96,22 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
       if (this.stopped) return;
       try {
         void this.writer(() =>
-          withUpgradeObservation(async () => {
-            if (!this.physical)
-              this.physical = this.refreshPhysical()
-                .catch(() => undefined)
-                .finally(() => {
-                  this.physical = null;
-                });
-            if (!this.metadata)
-              this.metadata = this.catalog
-                .refresh()
-                .catch(() => undefined)
-                .finally(() => {
-                  this.metadata = null;
-                });
+          withUpgradeObservation(() => {
+            this.physical ??= this.refreshPhysical()
+              .catch(() => undefined)
+              .finally(() => {
+                this.physical = null;
+              });
+            this.metadata ??= this.catalog
+              .refresh()
+              .catch(() => undefined)
+              .finally(() => {
+                this.metadata = null;
+              });
             if (this.contracts && !this.contractRead)
               this.contractRead = (async () => {
                 const before = this.store.instance();
-                const value = await this.contracts!.status();
+                const value = await requiredUpgradeValue(this.contracts).status();
                 const after = this.store.instance();
                 this.contract =
                   before.activation_generation === after.activation_generation &&
@@ -115,6 +132,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
                 .finally(() => {
                   this.contractRead = null;
                 });
+            return Promise.resolve();
           }),
         ).catch(() => undefined);
       } catch {
@@ -125,13 +143,13 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   private saved(): PhysicalObservation | null {
     try {
       const row = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { result: string; request_digest: string }>(
           'SELECT result,request_digest FROM platform_operations WHERE operation_id=? AND instance_id=? AND role=?',
         )
-        .get(`${ROLE}:${this.store.instanceId}`, this.store.instanceId, ROLE) as
-        { result: string; request_digest: string } | undefined;
+        .get(`${ROLE}:${this.store.instanceId}`, this.store.instanceId, ROLE);
       if (!row) return null;
-      const observation = JSON.parse(row.result) as PhysicalObservation;
+      const observation: unknown = JSON.parse(row.result);
+      assertPhysicalObservation(observation);
       return upgradeDigest(observation) === row.request_digest ? observation : null;
     } catch {
       return null;
@@ -142,8 +160,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
       saved = this.saved();
     const age = saved ? this.clock.now().getTime() - Date.parse(saved.confirmedAt) : Infinity;
     const same =
-      saved &&
-      saved.activationGeneration === row.activation_generation &&
+      saved?.activationGeneration === row.activation_generation &&
       saved.durableState === row.service_state &&
       saved.durableReady === row.ready;
     const fresh = same && age >= 0 && age <= FRESHNESS_MS;
@@ -160,8 +177,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
       ? this.clock.now().getTime() - Date.parse(this.contract.confirmedAt)
       : Infinity;
     const contract =
-      this.contract &&
-      this.contract.activationGeneration === row.activation_generation &&
+      this.contract?.activationGeneration === row.activation_generation &&
       this.contract.durableState === row.service_state &&
       this.contract.durableReady === row.ready &&
       contractAge >= 0 &&
@@ -211,7 +227,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
         requireUpgrade(
           proof.qualified === true &&
             actual.webRevision === last.components.web.webRevision &&
-            (binding.web as Record<string, unknown>).digest === last.components.web.artifactDigest,
+            upgradeRecord(binding.web).digest === last.components.web.artifactDigest,
           'CURRENT_SERVICE_UNCONFIRMED',
         );
         if (row.ready === 1)

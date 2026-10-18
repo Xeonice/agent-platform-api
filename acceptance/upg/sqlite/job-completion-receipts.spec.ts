@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { describe, expect, it, vi } from 'vitest';
 import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
@@ -26,7 +27,7 @@ async function fixture() {
     prompt: 'original task',
     timeoutMinutes: 30,
   });
-  const original = (await h.taskRepo.findById(asAgentTaskId(task.id)))!;
+  const original = assertDefined(await h.taskRepo.findById(asAgentTaskId(task.id)));
   return { h, sandbox, task, original };
 }
 
@@ -36,7 +37,7 @@ describe('REQ-UPG-001/008 — genuine guest completion survives release of the o
     const release = f.h.provider.jobs.releaseJob.bind(f.h.provider.jobs);
     let checked = false;
     f.h.provider.jobs.releaseJob = async (handle, job) => {
-      const row = (await f.h.taskRepo.findById(asAgentTaskId(f.task.id)))!;
+      const row = assertDefined(await f.h.taskRepo.findById(asAgentTaskId(f.task.id)));
       const proof = await f.h.jobCompletions.find(f.task.id);
       expect(row.status).toBe('succeeded');
       expect(proof).toMatchObject({
@@ -49,8 +50,8 @@ describe('REQ-UPG-001/008 — genuine guest completion survives release of the o
         exitKind: 'natural',
         jobHandleDigest: completedJobHandleDigest(f.original.jobHandle),
       });
-      expect(proof?.evidenceDigest).toBe(jobCompletionEvidenceDigest(proof!));
-      expect(Object.keys(proof!).sort()).toEqual(
+      expect(proof?.evidenceDigest).toBe(jobCompletionEvidenceDigest(assertDefined(proof)));
+      expect(Object.keys(assertDefined(proof)).sort()).toEqual(
         [
           'cursor',
           'evidenceDigest',

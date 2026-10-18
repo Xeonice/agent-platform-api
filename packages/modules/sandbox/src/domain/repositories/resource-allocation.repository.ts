@@ -1,4 +1,4 @@
-import type { NodeId, SandboxId, Tx } from '@platform/shared-kernel';
+import type { NodeId, SandboxId, Tx } from '@platform/shared-kernel/pure';
 import type { ResourceAllocation } from '../entities/resource-allocation.entity';
 
 /**

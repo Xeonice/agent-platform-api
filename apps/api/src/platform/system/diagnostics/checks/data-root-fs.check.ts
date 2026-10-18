@@ -1,3 +1,5 @@
+import { isRecord } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -52,7 +54,7 @@ export class DataRootFsCheck implements DiagnoseCheck {
         status: 'fail',
         headline: '数据目录不可写，平台干不了活',
         detailText:
-          `${root} 写不进去：${(e as Error).message}。` +
+          `${root} 写不进去：${errorMessage(e)}。` +
           '平台的全部持久化（工作区副本 / 审计库 / 运行日志）都写在这里。',
         nextStep: '确认这个目录存在、属主是跑平台的那个账号。',
         command: `ls -ld ${root}`,
@@ -153,10 +155,11 @@ async function linuxFsType(probedPath: string): Promise<string | null> {
     const text = await readFile('/proc/self/mountinfo', 'utf8');
     let best: { point: string; type: string } | null = null;
     for (const line of text.split('\n')) {
-      const [before, after] = line.split(' - ');
-      if (after === undefined) continue;
-      const point = before.split(' ')[4];
-      const type = after.split(' ')[0];
+      const before = line.split(' - ').at(0),
+        after = line.split(' - ').at(1);
+      if (before === undefined || after === undefined) continue;
+      const point = before.split(' ').at(4);
+      const type = after.split(' ').at(0);
       if (point === undefined || type === undefined) continue;
       if (!isPrefixPath(point, probedPath)) continue;
       if (best === null || point.length > best.point.length) best = { point, type };
@@ -174,9 +177,9 @@ async function darwinFsType(probedPath: string, ctx: DiagnoseContext): Promise<s
   for (const line of out.split('\n')) {
     const m = /^\S+ on (.+?) \(([^,)]+)/.exec(line);
     if (m === null) continue;
-    const point = m[1]!;
+    const point = m[1];
     if (!isPrefixPath(point, probedPath)) continue;
-    if (best === null || point.length > best.point.length) best = { point, type: m[2]! };
+    if (best === null || point.length > best.point.length) best = { point, type: m[2] };
   }
   return best?.type ?? null;
 }
@@ -232,10 +235,10 @@ async function probeReflink(root: string, ctx: DiagnoseContext): Promise<Reflink
       ? { kind: 'supported' }
       : { kind: 'unsupported', reason: 'FICLONE 产出的内容对不上' };
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
+    const code = isRecord(e) && typeof e.code === 'string' ? e.code : undefined;
     // Linux 上的 ENOSYS 同样是「问不出来」而不是「不支持」（老内核 / 不认识的 fs）。
     if (code === 'ENOSYS') return { kind: 'unknown', reason: 'ENOSYS' };
-    return { kind: 'unsupported', reason: code ?? (e as Error).message };
+    return { kind: 'unsupported', reason: code ?? errorMessage(e) };
   } finally {
     await rm(src, { force: true }).catch(() => undefined);
     await rm(dst, { force: true }).catch(() => undefined);
@@ -269,7 +272,9 @@ function run(cmd: string, args: string[], ctx: DiagnoseContext): Promise<string 
       cmd,
       args,
       { timeout: Math.min(ctx.timeoutMs, 3000), signal: ctx.signal },
-      (error, stdout) => resolve(error ? null : stdout),
+      (error, stdout) => {
+        resolve(error ? null : stdout);
+      },
     );
   });
 }

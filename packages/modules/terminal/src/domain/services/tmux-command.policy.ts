@@ -394,8 +394,11 @@ export function parseShellSessionList(stdout: string): ShellSessionSummary[] {
     // ⚠️ 只削行尾的 `\r`，⛔ 不整行 trim：runtime 是**最后一列且可能为空**，
     //    整行 trim 在这里无害，但"先 trim 再 split"会让人以为空列是被清理掉的 ——
     //    实际是 `split` 给了空串，与"没这一列"在下面走同一条路。
-    const [name, created, runtimeId] = line.replace(/\r$/, '').split('\t');
-    if (name === undefined || !name.startsWith(PLATFORM_SHELL_SESSION_PREFIX)) continue;
+    const columns = line.replace(/\r$/, '').split('\t');
+    const name = columns.at(0),
+      created = columns.at(1),
+      runtimeId = columns.at(2);
+    if (!name?.startsWith(PLATFORM_SHELL_SESSION_PREFIX)) continue;
     const id = name.slice(PLATFORM_SHELL_SESSION_PREFIX.length);
     if (!SHELL_SESSION_ID_RE.test(id)) continue; // 别人的会话，静默跳过
     const t = Number(created);

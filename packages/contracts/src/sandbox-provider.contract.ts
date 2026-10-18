@@ -639,7 +639,7 @@ export class SandboxProviderError extends Error {
     readonly code: SandboxProviderErrorCode,
     message: string,
     override readonly cause?: unknown,
-    readonly retryable: boolean = false,
+    readonly retryable = false,
   ) {
     super(message);
     this.name = 'SandboxProviderError';

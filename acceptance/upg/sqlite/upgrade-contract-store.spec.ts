@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { randomUUID, generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -180,7 +181,7 @@ function accept(actor = 'actor-a', input = command(), floor = 0) {
   return contracts.accept(actor, input, fixed(), floor);
 }
 function upgrade() {
-  const source = upgrades.confirmed()!,
+  const source = assertDefined(upgrades.confirmed()),
     signed = envelope(source, '0.2.1'),
     plan = freezeUpgradePlan(signed, source);
   const intent = upgrades.accept(

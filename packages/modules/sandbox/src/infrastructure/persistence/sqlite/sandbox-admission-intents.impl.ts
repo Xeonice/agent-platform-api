@@ -1,3 +1,4 @@
+import { readSqlite } from './read-sqlite';
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
@@ -9,16 +10,17 @@ function digest(input: string): string {
 }
 @Injectable()
 export class SqliteSandboxAdmissionIntents implements SandboxAdmissionIntents {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
-  async find(sandboxId: string): Promise<string | null> {
-    const row = this.db.get<{ input: string; input_digest: string }>(
-      sql`SELECT * FROM sandbox_admission_intents WHERE sandbox_id=${sandboxId}`,
-    );
-    if (!row) return null;
-    if (digest(row.input) !== row.input_digest) throw new Error('SANDBOX_ADMISSION_INPUT_CORRUPT');
-    return row.input;
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
+  find(sandboxId: string): Promise<string | null> {
+    return readSqlite(() => {
+      const row = this.db.get<{ input: string; input_digest: string } | undefined>(
+        sql`SELECT * FROM sandbox_admission_intents WHERE sandbox_id=${sandboxId}`,
+      );
+      if (!row) return null;
+      if (digest(row.input) !== row.input_digest)
+        throw new Error('SANDBOX_ADMISSION_INPUT_CORRUPT');
+      return row.input;
+    });
   }
   reserveSync(_tx: Tx, sandboxId: string, input: string): void {
     this.db.run(

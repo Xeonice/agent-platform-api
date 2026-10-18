@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   app.enableShutdownHooks();
   await app.listen(env.port, env.host);
 }
-void main().catch((error) => {
+void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : 'COORDINATOR_BOOT_FAILED');
   process.exitCode = 1;
 });

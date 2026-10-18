@@ -26,16 +26,16 @@ export type GitCredentialType = z.infer<typeof GitCredentialTypeSchema>;
  * + the `'other'` escape hatch) — adding a platform there flows straight through to
  * this schema and thus to the emitted OpenAPI enum, with no hand-written list here.
  *
- * ZOD/OPENAPI NOTE: `z.enum` needs a `[string, ...string[]]` tuple; the registry gives
- * a `string[]`, so we cast to a `GitPlatform` tuple. The RUNTIME values are the real
- * `[...GIT_PLATFORM_IDS, 'other']` array, so `patchNestJsSwagger` reflects the correct
- * OpenAPI enum; the cast only fixes the STATIC type (`z.infer` = `GitPlatform`, the
- * literal union — not a widened `string`).
+ * `z.enum` needs a nonempty tuple. Check the registry's first entry before building
+ * the tuple, retaining registry order and the literal union without a type assertion.
  */
-const GIT_PLATFORM_ENUM_VALUES: string[] = [...GIT_PLATFORM_IDS, 'other'];
-export const GitPlatformSchema = z.enum(
-  GIT_PLATFORM_ENUM_VALUES as [string, ...string[]],
-) as z.ZodType<GitPlatform>;
+const FIRST_GIT_PLATFORM = GIT_PLATFORM_IDS.at(0);
+if (FIRST_GIT_PLATFORM === undefined) throw new Error('Git platform registry must not be empty');
+export const GitPlatformSchema = z.enum([
+  FIRST_GIT_PLATFORM,
+  ...GIT_PLATFORM_IDS.slice(1),
+  'other',
+]);
 export type { GitPlatform };
 
 /**

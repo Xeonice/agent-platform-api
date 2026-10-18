@@ -90,8 +90,14 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
    * broadcaster is what keeps gateway → service → workflow → broadcaster from closing
    * into a cycle (see `TaskEventHub`).
    */
+  private subscriptionLive(sub: { live: boolean }, client: Socket): boolean {
+    return sub.live && !this.retiring && client.connected;
+  }
+
   onModuleInit(): void {
-    this.hub.onFrame((taskId, frame) => this.publish(taskId, frame));
+    this.hub.onFrame((taskId, frame) => {
+      this.publish(taskId, frame);
+    });
   }
 
   /**
@@ -289,19 +295,21 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     let firstSeq: number | undefined;
     try {
       for (const { seq, event } of await this.app.replay(taskId, fromSeq)) {
-        if (!sub.live) return; // superseded (or the socket went away) mid-replay
+        if (!this.subscriptionLive(sub, client)) return; // superseded (or the socket went away) mid-replay
         firstSeq ??= seq;
         this.deliver(sub, { type: 'event', taskId, seq, event });
       }
     } catch (e) {
-      if (!sub.live || this.retiring || !client.connected) return;
-      this.logger.error(`replay for task ${taskId} failed: ${(e as Error).message}`);
+      if (!this.subscriptionLive(sub, client)) return;
+      this.logger.error(
+        `replay for task ${taskId} failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
       this.send(client, { type: 'error', taskId, code: 'REPLAY_FAILED' });
     }
 
     // everything after this frame is live (contract wording, and it is literally true:
     // the buffered frames flushed below all post-date the replay).
-    if (!sub.live || this.retiring || !client.connected) return;
+    if (!this.subscriptionLive(sub, client)) return;
     this.send(client, {
       type: 'caught_up',
       taskId,
@@ -309,7 +317,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
       seq: sub.deliveredSeq,
     });
     sub.replaying = false;
-    if (!sub.live) return;
+    if (!this.subscriptionLive(sub, client)) return;
     for (const frame of sub.pending.splice(0)) this.deliver(sub, frame);
 
     // A task that ALREADY finished will never publish an exit frame again, so a late
@@ -373,7 +381,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     const header = client.handshake.headers[X_SCHEMA_HASH_HEADER];
     if (header) return Array.isArray(header) ? header[0] : header;
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth = auth?.['xSchemaHash'];
+    const fromAuth = auth?.xSchemaHash;
     if (typeof fromAuth === 'string') return fromAuth;
     return this.readQuery(client, 'xSchemaHash');
   }
@@ -385,8 +393,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth =
-      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth = typeof auth?.passcode === 'string' ? auth.passcode : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;

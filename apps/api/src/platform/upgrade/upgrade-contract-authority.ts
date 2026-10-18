@@ -1,12 +1,13 @@
+import { requiredUpgradeValue } from './upgrade-values';
 import type Database from 'better-sqlite3';
 export const CONTRACT_ROLE = 'project-name-contract';
 export function contractFenceFloor(sqlite: Database.Database, instance: string): number {
-  return (
+  return requiredUpgradeValue(
     sqlite
-      .prepare(
+      .prepare<unknown[], { n: number }>(
         'SELECT coalesce(max(fence),0) n FROM platform_operations WHERE instance_id=? AND role=?',
       )
-      .get(instance, CONTRACT_ROLE) as { n: number }
+      .get(instance, CONTRACT_ROLE),
   ).n;
 }
 export function contractActive(sqlite: Database.Database, instance: string): boolean {

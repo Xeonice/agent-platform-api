@@ -54,10 +54,8 @@ export class UpgradeSecurity {
       requireUpgrade(this.secret.byteLength >= 32, 'UPGRADE_SESSION_SECRET_TOO_SHORT');
     }
   }
-  get canAuthenticate(): boolean {
-    // Retained for old Web clients: there is no separate authorization step.
-    return false;
-  }
+  // Retained for old Web clients: there is no separate authorization step.
+  readonly canAuthenticate = false;
   continuityFingerprint(instanceId: string): string {
     return createHmac('sha256', this.secret)
       .update(`session-continuity:${instanceId}`)
@@ -126,7 +124,7 @@ export class UpgradeSecurity {
         value.expiresAt <= this.clock.now().getTime()
       )
         return null;
-      return value as Record<string, unknown>;
+      return value;
     } catch {
       return null;
     }
@@ -135,12 +133,12 @@ export class UpgradeSecurity {
     const secure = process.env.PASSCODE_COOKIE_SECURE === 'true';
     res.append(
       'Set-Cookie',
-      `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${TTL / 1000}${secure ? '; Secure' : ''}`,
+      `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${String(TTL / 1000)}${secure ? '; Secure' : ''}`,
     );
   }
   principal(req: Request, res: Response, instanceId: string): UpgradePrincipal {
     let viewer = this.verify(readCookie(req, VIEWER_COOKIE));
-    if (!viewer || viewer.instanceId !== instanceId || typeof viewer.viewerId !== 'string') {
+    if (viewer?.instanceId !== instanceId || typeof viewer.viewerId !== 'string') {
       viewer = {
         instanceId,
         viewerId: this.ids.next(),

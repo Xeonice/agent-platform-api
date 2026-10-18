@@ -1,10 +1,9 @@
 import 'reflect-metadata';
-import { startRuntimeOwnerFromEnvironment } from '@platform/sandbox';
-import { SystemClock } from '../platform/time/system-clock';
+import { startRuntimeOwnerApplication } from './runtime-owner-application';
 
 async function main(): Promise<void> {
   process.env.PLATFORM_PROCESS_ROLE = 'runtime-owner';
-  const owner = await startRuntimeOwnerFromEnvironment(new SystemClock());
+  const owner = await startRuntimeOwnerApplication();
   let closing = false;
   const close = (): void => {
     if (closing) return;

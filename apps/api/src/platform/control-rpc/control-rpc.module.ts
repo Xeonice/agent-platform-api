@@ -1,3 +1,5 @@
+import { prototypeClone } from './types/shims/prototype-clone';
+import { isRecord } from '@platform/shared-kernel';
 import {
   Controller,
   Get,
@@ -31,7 +33,7 @@ import type { Request, Response } from 'express';
 import { PassThrough } from 'node:stream';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { z, ZodTypeAny } from 'zod';
+import { z, type ZodTypeAny } from 'zod';
 import { zodToOpenAPI, createZodDto } from 'nestjs-zod';
 import { ApiOkResponse } from '@nestjs/swagger';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -170,7 +172,8 @@ export class ControlApplicationRegistry implements OnModuleInit {
         instance: unknown = wrapper.instance;
       if (!type || !CONTROLLERS.has(type.name) || !instance || typeof instance !== 'object')
         continue;
-      const prototype = Object.getPrototypeOf(instance) as Record<string, unknown>;
+      const prototype: unknown = Object.getPrototypeOf(instance);
+      if (!isRecord(prototype)) continue;
       const prefix: unknown = Reflect.getMetadata(PATH_METADATA, type);
       if (typeof prefix !== 'string') continue;
       for (const name of Object.getOwnPropertyNames(prototype)) {
@@ -181,13 +184,20 @@ export class ControlApplicationRegistry implements OnModuleInit {
         if (typeof path !== 'string' || typeof method !== 'number') continue;
         const verb = RequestMethod[method];
         if (!verb || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].includes(verb)) continue;
-        const metadata = (Reflect.getMetadata(ROUTE_ARGS_METADATA, type, name) ?? {}) as Record<
-          string,
-          { index: number; data?: string; passthrough?: boolean; pipes?: unknown[] }
-        >;
+        const rawMetadata: unknown = Reflect.getMetadata(ROUTE_ARGS_METADATA, type, name);
+        const metadata = z
+          .record(
+            z.object({
+              index: z.number().int(),
+              data: z.string().optional(),
+              passthrough: z.boolean().optional(),
+              pipes: z.array(z.unknown()).optional(),
+            }),
+          )
+          .parse(rawMetadata ?? {});
         const args = Object.entries(metadata).map(([key, arg]) => ({
           index: arg.index,
-          type: Number(key.split(':')[0]),
+          type: z.nativeEnum(RouteParamtypes).parse(Number(key.split(':')[0])),
           name: arg.data,
           passthrough: Reflect.getMetadata('__responsePassthrough__', type, name) === true,
         }));
@@ -201,15 +211,25 @@ export class ControlApplicationRegistry implements OnModuleInit {
               .filter(Boolean)
               .join('/'),
           verb,
-          status:
-            Reflect.getMetadata(HTTP_CODE_METADATA, candidate) ?? (verb === 'POST' ? 201 : 200),
+          status: z
+            .number()
+            .int()
+            .parse(
+              Reflect.getMetadata(HTTP_CODE_METADATA, candidate) ?? (verb === 'POST' ? 201 : 200),
+            ),
           args,
         };
         this.bindings.set(operation, {
           route,
           instance,
-          handler: candidate as (...args: unknown[]) => unknown,
-          metatypes: Reflect.getMetadata(PARAMTYPES_METADATA, prototype, name) ?? [],
+          handler: (...args: unknown[]): unknown => Reflect.apply(candidate, instance, args),
+          metatypes: z
+            .array(
+              z.custom<new (...args: never[]) => unknown>(
+                (value: unknown) => typeof value === 'function' && isRecord(value.prototype),
+              ),
+            )
+            .parse(Reflect.getMetadata(PARAMTYPES_METADATA, prototype, name) ?? []),
         });
       }
     }
@@ -217,24 +237,34 @@ export class ControlApplicationRegistry implements OnModuleInit {
       const type = wrapper.metatype,
         instance: unknown = wrapper.instance;
       if (!type || !TOOLS.has(type.name) || !instance || typeof instance !== 'object') continue;
-      const prototype = Object.getPrototypeOf(instance) as Record<string, unknown>;
+      const prototype: unknown = Object.getPrototypeOf(instance);
+      if (!isRecord(prototype)) continue;
       for (const method of Object.getOwnPropertyNames(prototype)) {
         const handler = prototype[method];
         if (typeof handler !== 'function') continue;
-        const metadata = Reflect.getMetadata('mcp:tool', handler) as
-          { name: string; description: string; parameters: ZodTypeAny } | undefined;
+        const rawTool: unknown = Reflect.getMetadata('mcp:tool', handler);
+        const metadata =
+          rawTool === undefined
+            ? undefined
+            : z
+                .object({
+                  name: z.string(),
+                  description: z.string(),
+                  parameters: z.instanceof(z.ZodType),
+                })
+                .parse(rawTool);
         if (!metadata) continue;
         const operation = `mcp:${type.name}.${method}`;
         this.tools.set(operation, {
           instance,
-          handler: handler as (value: unknown) => unknown,
+          handler: (value: unknown): unknown => Reflect.apply(handler, instance, [value]),
           schema: metadata.parameters,
         });
         this.publicTools.push({
           operation,
           name: metadata.name,
           description: metadata.description,
-          inputSchema: zodToOpenAPI(metadata.parameters) as Record<string, unknown>,
+          inputSchema: z.record(z.unknown()).parse(zodToOpenAPI(metadata.parameters)),
         });
       }
     }
@@ -295,23 +325,24 @@ export class ControlApplicationRegistry implements OnModuleInit {
     this.accepting = true;
   }
   private actor(req: Request): string {
-    const cookie = String(req.headers.cookie ?? '');
+    const cookie = req.headers.cookie ?? '';
     const session = cookie
       .split(';')
       .map((part) => part.trim())
       .find((part) => part.startsWith('ap_session='));
     return createHash('sha256')
-      .update(session ?? String(req.headers.authorization ?? 'anonymous'))
+      .update(session ?? req.headers.authorization ?? 'anonymous')
       .digest('hex');
   }
   lookup(req: Request, operationId: string): z.infer<typeof ApplicationOperationSchema> {
     if (operationId.length < 1 || operationId.length > 180)
       throw new BadRequestException('Invalid operation identity');
     const row = this.db
-      .prepare('SELECT actor,state,result FROM application_operations WHERE id=?')
-      .get(operationId) as
-      | { actor: string; state: 'pending' | 'complete' | 'unknown'; result: string | null }
-      | undefined;
+      .prepare<
+        unknown[],
+        { actor: string; state: 'pending' | 'complete' | 'unknown'; result: string | null }
+      >('SELECT actor,state,result FROM application_operations WHERE id=?')
+      .get(operationId);
     if (row && row.actor !== this.actor(req)) throw new UnauthorizedException();
     return {
       operationId,
@@ -324,7 +355,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     };
   }
   private request(input: ApplicationRequest): Request {
-    const request: Request = Object.create(express.request);
+    const request: Request = prototypeClone(express.request);
     const events = new PassThrough();
     for (const [name, value] of Object.entries({
       headers: input.request.headers,
@@ -337,11 +368,18 @@ export class ControlApplicationRegistry implements OnModuleInit {
       socket: { remoteAddress: input.request.remoteAddress },
     }))
       Object.defineProperty(request, name, { value, writable: true, configurable: true });
-    request.get = ((name: string) => input.request.headers[name.toLowerCase()]) as Request['get'];
+    function get(name: 'set-cookie'): string[] | undefined;
+    function get(name: string): string | undefined;
+    function get(name: string): string | string[] | undefined {
+      const value = input.request.headers[name.toLowerCase()];
+      if (name.toLowerCase() === 'set-cookie') return typeof value === 'string' ? [value] : value;
+      return Array.isArray(value) ? value.join(', ') : value;
+    }
+    request.get = get;
     for (const method of ['on', 'once'] as const)
       Object.defineProperty(request, method, {
         value: (...args: Parameters<PassThrough['on']>) => {
-          Reflect.apply(events[method], events, args);
+          Reflect.apply(events[method].bind(events), events, args);
           return request;
         },
       });
@@ -351,9 +389,12 @@ export class ControlApplicationRegistry implements OnModuleInit {
   authenticate(input: ApplicationRequest): { headers: Record<string, string | number | string[]> } {
     const req = this.request(input),
       output = new RpcOutput(() => undefined);
-    const res: Response = Object.create(express.response);
+    const res: Response = prototypeClone(express.response);
     res.setHeader = (name, value) => {
-      output.setHeader(name, Array.isArray(value) ? [...value] : (value as string | number));
+      output.setHeader(
+        name,
+        typeof value === 'string' || typeof value === 'number' ? value : [...value],
+      );
       return res;
     };
     res.getHeader = output.getHeader.bind(output);
@@ -379,9 +420,8 @@ export class ControlApplicationRegistry implements OnModuleInit {
       );
     this.activeRequests++;
     try {
-      return await withCoordinatorBusinessEpoch(this.db, () =>
-        this.invokeWithinEpoch(input, response),
-      );
+      await withCoordinatorBusinessEpoch(this.db, () => this.invokeWithinEpoch(input, response));
+      return;
     } finally {
       this.activeRequests--;
     }
@@ -405,11 +445,10 @@ export class ControlApplicationRegistry implements OnModuleInit {
         425,
       );
     const req = this.request(input);
-    let emitted = false,
-      streamRegistered = false;
+    const streamState = { emitted: false, registered: false, bytes: false };
     const registerStream = (): void => {
-      if (streamRegistered) return;
-      streamRegistered = true;
+      if (streamState.registered) return;
+      streamState.registered = true;
       this.activeStreams++;
     };
     const frame = (value: ApplicationFrame): void => {
@@ -417,12 +456,15 @@ export class ControlApplicationRegistry implements OnModuleInit {
       response.write(JSON.stringify(value) + '\n');
     };
     const output = new RpcOutput((status, headers) => {
-      emitted = true;
+      streamState.emitted = true;
       frame({ type: 'headers', status, headers });
     });
-    const res: Response = Object.create(express.response);
+    const res: Response = prototypeClone(express.response);
     res.setHeader = (name, value) => {
-      output.setHeader(name, Array.isArray(value) ? [...value] : (value as string | number));
+      output.setHeader(
+        name,
+        typeof value === 'string' || typeof value === 'number' ? value : [...value],
+      );
       return res;
     };
     res.getHeader = output.getHeader.bind(output);
@@ -437,7 +479,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     res.write = output.write.bind(output);
     Object.defineProperty(res, 'end', {
       value: (...args: Parameters<PassThrough['end']>) => {
-        Reflect.apply(output.end, output, args);
+        Reflect.apply(output.end.bind(output), output, args);
         return res;
       },
     });
@@ -445,7 +487,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     for (const method of ['on', 'once'] as const)
       Object.defineProperty(res, method, {
         value: (...args: Parameters<PassThrough['on']>) => {
-          Reflect.apply(output[method], output, args);
+          Reflect.apply(output[method].bind(output), output, args);
           return res;
         },
       });
@@ -473,9 +515,11 @@ export class ControlApplicationRegistry implements OnModuleInit {
       .digest('hex');
     if (mutation) {
       const prior = this.db
-        .prepare('SELECT actor,digest,state,result FROM application_operations WHERE id=?')
-        .get(input.operationId) as
-        { actor: string; digest: string; state: string; result: string | null } | undefined;
+        .prepare<
+          unknown[],
+          { actor: string; digest: string; state: string; result: string | null }
+        >('SELECT actor,digest,state,result FROM application_operations WHERE id=?')
+        .get(input.operationId);
       if (prior) {
         if (prior.actor !== actor || prior.digest !== digest)
           throw new BadRequestException({
@@ -501,10 +545,9 @@ export class ControlApplicationRegistry implements OnModuleInit {
         .prepare("INSERT INTO application_operations VALUES(?,?,?,'pending',NULL,?)")
         .run(input.operationId, actor, digest, this.clock.now().getTime());
     }
-    let bytes = false;
     output.on('data', (data: Buffer) => {
       registerStream();
-      bytes = true;
+      streamState.bytes = true;
       frame({ type: 'bytes', data: data.toString('base64') });
     });
     response.once('close', () => {
@@ -553,13 +596,15 @@ export class ControlApplicationRegistry implements OnModuleInit {
         output.flushHeaders();
         for await (const chunk of value.getStream()) output.write(chunk);
       }
-      if (!emitted) output.flushHeaders();
-      if (!bytes) frame({ type: 'result', value });
+      if (!streamState.emitted) output.flushHeaders();
+      if (!streamState.bytes) frame({ type: 'result', value });
       if (mutation)
         this.db
           .prepare("UPDATE application_operations SET state='complete',result=? WHERE id=?")
           .run(
-            SENSITIVE.test(input.operation) || bytes ? null : JSON.stringify(value ?? null),
+            SENSITIVE.test(input.operation) || streamState.bytes
+              ? null
+              : JSON.stringify(value ?? null),
             input.operationId,
           );
       frame({ type: 'complete' });
@@ -571,14 +616,14 @@ export class ControlApplicationRegistry implements OnModuleInit {
             "UPDATE application_operations SET state='unknown' WHERE id=? AND state='pending'",
           )
           .run(input.operationId);
-      if (emitted) {
+      if (streamState.emitted) {
         frame({ type: 'error', code: 'APPLICATION_STREAM_UNCONFIRMED' });
         response.end();
         return;
       }
       throw error;
     } finally {
-      if (streamRegistered) this.activeStreams--;
+      if (streamState.registered) this.activeStreams--;
       if (mutation) this.activeMutations--;
     }
   }

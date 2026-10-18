@@ -1,3 +1,5 @@
+import { BoxliteInfoSchema } from './boxlite-values';
+import { errorMessage } from '@platform/shared-kernel';
 import { createServer, type Server } from 'node:net';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
@@ -236,7 +238,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     const tcp = exposed.filter((p) => p.protocol === 'tcp');
     if (tcp.length === 0) return [];
     const hostPorts = await allocateHostPorts(tcp.length);
-    return tcp.map((p, i) => ({ hostPort: hostPorts[i]!, guestPort: p.port }));
+    return tcp.map((p, i) => ({ hostPort: hostPorts[i], guestPort: p.port }));
   }
 
   /**
@@ -377,10 +379,12 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     try {
       const runtime = await this.getRuntime();
       const box = await runtime.get(name);
-      if (box === null || box.info().state.running !== true) return;
+      if (!box?.info().state.running) return;
       const outcome = await new Promise<'stopped' | 'timed-out'>((resolve, reject) => {
-        const timer = setTimeout(() => resolve('timed-out'), COURTESY_STOP_MS);
-        timer.unref?.();
+        const timer = setTimeout(() => {
+          resolve('timed-out');
+        }, COURTESY_STOP_MS);
+        timer.unref();
         box.stop().then(
           () => {
             clearTimeout(timer);
@@ -414,7 +418,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
       await runtime.remove(idOrName, true);
       return true;
     } catch (e: unknown) {
-      if (!/not found|no such|unknown/i.test((e as Error).message)) throw e;
+      if (!/not found|no such|unknown/i.test(errorMessage(e))) throw e;
       return false;
     }
   }
@@ -443,11 +447,13 @@ export class BoxliteSandboxProvider implements SandboxProvider {
   async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
     try {
       const runtime = await this.getRuntime();
-      const info = await runtime.getInfo(handle.providerSandboxId);
+      const info = BoxliteInfoSchema.nullable().parse(
+        await runtime.getInfo(handle.providerSandboxId),
+      );
       if (!info) return { lifecycleState: 'instance_missing' };
       const shimGone =
-        info.state.running === true && (await shimLiveness(handle.providerSandboxId)) === 'gone';
-      const running = info.state.running === true && !shimGone;
+        info.state.running && (await shimLiveness(handle.providerSandboxId)) === 'gone';
+      const running = info.state.running && !shimGone;
       // SDK metrics() acquires live state and can implicitly start a stopped VM.
       // Reconciliation must preserve stopped tasks and their retained registrations.
       const execErrorsTotal = running ? await this.execErrorsTotal(handle) : undefined;
@@ -493,7 +499,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     try {
       const box = await this.findBox(handle);
       // A concurrent stop may finish between getInfo() and acquiring this fresh handle.
-      if (!box || box.info().state.running !== true) return undefined;
+      if (!box?.info().state.running) return undefined;
       const metrics = await box.metrics();
       return typeof metrics.execErrorsTotal === 'number' ? metrics.execErrorsTotal : undefined;
     } catch {
@@ -548,7 +554,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     // ⚠️ 只管平台自持的这一类：任务沙箱的数据面今天就依赖这次隐式拉起（例如读一个已停止任务
     //    的产物），收不收紧是另一件事，不夹带在这里。
     const info = box.info();
-    if (info.state.running !== true && this.isPlatformOwnedBox(info.name)) {
+    if (!info.state.running && this.isPlatformOwnedBox(info.name)) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
         `platform box ${info.name ?? handle.providerSandboxId} is ${info.state.status}, not running; ` +
@@ -651,7 +657,7 @@ export class BoxliteSandboxProvider implements SandboxProvider {
     // Retrying and editing the address are both useless — the way out is [检查更新].
     // Different thing to do ⇒ different code (04 §4 四类分类法). It is checked before
     // the generic `not found` rule because that rule would otherwise swallow it.
-    if (/manifest unknown|not found|no such/i.test(msg) && /@sha256:/.test(msg)) {
+    if (/manifest unknown|not found|no such/i.test(msg) && msg.includes('@sha256:')) {
       return new SandboxProviderError(SandboxProviderErrorCode.IMAGE_DIGEST_GONE, msg, e);
     }
     if (/not found|no such|unknown/i.test(msg)) {
@@ -715,7 +721,14 @@ async function allocateHostPorts(count: number): Promise<number[]> {
     return ports;
   } finally {
     await Promise.all(
-      servers.map((srv) => new Promise<void>((resolve) => srv.close(() => resolve()))),
+      servers.map(
+        (srv) =>
+          new Promise<void>((resolve) =>
+            srv.close(() => {
+              resolve();
+            }),
+          ),
+      ),
     );
   }
 }

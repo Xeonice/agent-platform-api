@@ -35,6 +35,11 @@ export function isGitObtainedVia(v: string): v is GitObtainedVia {
   return v === 'git-ssh-key' || v === 'git-https-token';
 }
 
+export function requireGitObtainedVia(value: string): GitObtainedVia {
+  if (!isGitObtainedVia(value)) throw new TypeError('Expected a Git credential method');
+  return value;
+}
+
 /**
  * Derive the runtime `mode` from `obtained_via` (13 §2.5.1): `api-key` → `api-key`;
  * every account-class method (`setup-token`/`oauth-device`/`access-token-paste`) →
@@ -48,7 +53,7 @@ export function modeForRuntimeMethod(via: RuntimeAuthMethod): RuntimeMode {
 // Single source of truth lives in the shared kernel's git-platform registry; re-export
 // so domain code keeps its familiar `./obtained-via.vo` import site without a duplicate
 // literal union (the domain boundary allows `domain → shared-kernel`, not `→ contracts`).
-export type { GitPlatform } from '@platform/shared-kernel';
+export type { GitPlatform } from '@platform/shared-kernel/pure';
 
 /** Wire `type` (27 §5) ↔ domain `obtained_via`. */
 export function obtainedViaFromType(type: 'ssh-key' | 'https-token'): GitObtainedVia {

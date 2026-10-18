@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 /**
  * 把「回调报进度」的操作变成 `AsyncIterable` —— 让 `async function*` 能**边跑边 yield**。
  *
@@ -57,7 +58,10 @@ export class CallbackStream<T> {
 
   async *drain(): AsyncGenerator<T> {
     for (;;) {
-      while (this.queue.length > 0) yield this.queue.shift()!;
+      while (this.queue.length > 0) {
+        const pending = this.queue.splice(0, 1);
+        yield* pending;
+      }
       if (this.done) break;
       await new Promise<void>((resolve) => {
         this.waiting = resolve;
@@ -65,7 +69,8 @@ export class CallbackStream<T> {
     }
     // ⚠️ 队列先排空再抛：失败前已经发生的进度对排障有用（「推到 80% 才断」与
     //    「一开始就断」是两个不同的问题），丢掉它们等于把线索一起丢了。
-    if (this.failure !== null) throw this.failure;
+    if (this.failure !== null)
+      throw this.failure instanceof Error ? this.failure : new Error(errorMessage(this.failure));
   }
 }
 

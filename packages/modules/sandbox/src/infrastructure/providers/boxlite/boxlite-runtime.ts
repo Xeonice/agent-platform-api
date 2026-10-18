@@ -1,3 +1,7 @@
+import type * as BoxliteSdkModule from '@boxlite-ai/boxlite';
+import type { JsImageRegistry } from '@boxlite-ai/boxlite';
+export type { JsImageRegistry } from '@boxlite-ai/boxlite';
+import { errorMessage } from '@platform/shared-kernel';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
@@ -11,7 +15,7 @@ import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contra
  * boots (and `aio` works) even where BoxLite is absent (Linux CI w/o KVM, missing
  * native dep). Failures surface as a retryable PROVIDER_UNAVAILABLE.
  */
-export type BoxliteSdk = typeof import('@boxlite-ai/boxlite');
+export type BoxliteSdk = typeof BoxliteSdkModule;
 export type BoxliteRuntime = InstanceType<BoxliteSdk['JsBoxlite']>;
 export type BoxliteBox = Awaited<ReturnType<BoxliteRuntime['create']>>;
 /**
@@ -30,7 +34,6 @@ export type BoxliteExecution = Awaited<ReturnType<BoxliteBox['exec']>>;
  * （不需要 hypervisor），而不必为了满足类型去桩十几个用不到的成员。
  */
 export type ExecCapableBox = Pick<BoxliteBox, 'exec'>;
-export type JsImageRegistry = import('@boxlite-ai/boxlite').JsImageRegistry;
 
 let cached: BoxliteSdk | null = null;
 
@@ -43,7 +46,7 @@ export async function loadBoxliteSdk(): Promise<BoxliteSdk> {
   } catch (e) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-      `BoxLite SDK unavailable (native binary not installed / unsupported platform): ${(e as Error).message}`,
+      `BoxLite SDK unavailable (native binary not installed / unsupported platform): ${errorMessage(e)}`,
       e,
       true,
     );
@@ -88,15 +91,17 @@ export function boxliteImageRegistries(): JsImageRegistry[] {
  * 都只会退到「读不到」。
  */
 export function boxliteHome(): string {
-  const configured = (process.env['BOXLITE_HOME'] ?? '').trim();
+  const configured = (process.env.BOXLITE_HOME ?? '').trim();
   return configured !== '' ? configured : join(homedir(), '.boxlite');
 }
 
 const RUNTIME_KEY = Symbol.for('platform.sandbox.boxlite.runtime');
-type RuntimeGlobal = { [RUNTIME_KEY]?: Promise<BoxliteRuntime> };
+interface RuntimeGlobal {
+  [RUNTIME_KEY]?: Promise<BoxliteRuntime>;
+}
 
 export async function getSharedBoxliteRuntime(): Promise<BoxliteRuntime> {
-  const g = globalThis as RuntimeGlobal;
+  const g: typeof globalThis & RuntimeGlobal = globalThis;
   let runtime = g[RUNTIME_KEY];
   if (!runtime) {
     runtime = loadBoxliteSdk().then(

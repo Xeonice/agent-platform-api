@@ -2,11 +2,12 @@ import { Inject, Injectable } from '@nestjs/common';
 import { setImmediate } from 'node:timers/promises';
 import { and, asc, desc, eq, gt, gte, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { DATABASE } from '@platform/shared-kernel';
+import { DATABASE, isRecord } from '@platform/shared-kernel';
+import { AuditCategorySchema, AuditSeveritySchema, AuditOutcomeSchema } from '@platform/contracts';
 import type { AuditCategory, AuditEventDto, AuditSeverity } from '@platform/contracts';
 import { auditEvents, type AuditEventInsert, type AuditEventRow } from './audit-events.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** 一次裁剪批次的条数。⛔ 硬纪律，别改大 —— 见 `pruneBatch` 的注释。 */
 export const PRUNE_BATCH_SIZE = 1000;
@@ -185,15 +186,15 @@ function buildConditions(criteria: AuditListCriteria): SQL[] {
     conditions.push(inArray(auditEvents.severity, [...criteria.severity]));
   if (criteria.subjectId !== undefined) {
     // 成果记录对象是成果，但完整任务时间线也应包含它的来源任务。
-    conditions.push(
-      or(
-        eq(auditEvents.subjectId, criteria.subjectId),
-        and(
-          eq(auditEvents.subjectType, 'retained_volume'),
-          sql`json_extract(${auditEvents.detail}, '$.sandboxId') = ${criteria.subjectId}`,
-        ),
-      )!,
+    const subjectCondition = or(
+      eq(auditEvents.subjectId, criteria.subjectId),
+      and(
+        eq(auditEvents.subjectType, 'retained_volume'),
+        sql`json_extract(${auditEvents.detail}, '$.sandboxId') = ${criteria.subjectId}`,
+      ),
     );
+    if (subjectCondition === undefined) throw new Error('Audit subject condition unavailable');
+    conditions.push(subjectCondition);
   }
   return conditions;
 }
@@ -207,20 +208,23 @@ function toDto(row: AuditEventRow): AuditEventDto {
   return {
     seq: row.seq,
     at: row.at.toISOString(),
-    // 列上有 CHECK 兜着，这里的断言不会说谎；写成 as 是因为 drizzle 把 text 列反射成
-    // 宽 string（枚举活在 CHECK 里，13 §1 的跨方言纪律不允许 pgEnum）。
-    category: row.category as AuditCategory,
+    category: AuditCategorySchema.parse(row.category),
     type: row.type,
-    severity: row.severity as AuditSeverity,
+    severity: AuditSeveritySchema.parse(row.severity),
     ...(row.subjectType === null ? {} : { subjectType: row.subjectType }),
     ...(row.subjectId === null ? {} : { subjectId: row.subjectId }),
     actor: row.actor,
     summary: row.summary,
     ...(row.detail === null || row.detail === undefined
       ? {}
-      : { detail: row.detail as Record<string, unknown> }),
+      : { detail: requireDetail(row.detail) }),
     ...(row.durationMs === null ? {} : { durationMs: row.durationMs }),
-    ...(row.outcome === null ? {} : { outcome: row.outcome as 'ok' | 'failed' | 'skipped' }),
+    ...(row.outcome === null ? {} : { outcome: AuditOutcomeSchema.parse(row.outcome) }),
     ...(row.errorCode === null ? {} : { errorCode: row.errorCode }),
   };
+}
+
+function requireDetail(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error('Invalid persisted audit detail');
+  return value;
 }

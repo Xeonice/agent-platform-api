@@ -2,17 +2,16 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, readlink, realpath, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isRecord } from '../types/value-guards';
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value && typeof value === 'object')
+  if (isRecord(value))
     return (
       '{' +
       Object.keys(value)
         .sort()
-        .map(
-          (key) => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key]),
-        )
+        .map((key) => JSON.stringify(key) + ':' + canonical(value[key]))
         .join(',') +
       '}'
     );
@@ -60,6 +59,7 @@ export async function verifyInstalledArtifactTree(
         const hash = createHash('sha256');
         let bytes = 0;
         for await (const chunk of createReadStream(path)) {
+          if (!Buffer.isBuffer(chunk)) throw new Error('INSTALLED_ARTIFACT_INVALID_BYTES');
           hash.update(chunk);
           bytes += chunk.length;
         }

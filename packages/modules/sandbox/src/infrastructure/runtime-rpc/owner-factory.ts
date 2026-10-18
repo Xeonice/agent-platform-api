@@ -1,3 +1,5 @@
+import { isRecord } from '@platform/shared-kernel';
+import { ownerRecord } from './wire-codec';
 import { randomBytes } from 'node:crypto';
 import {
   existsSync,
@@ -12,10 +14,6 @@ import {
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { Clock } from '@platform/shared-kernel';
 import type { ProviderRegistry } from '@platform/contracts';
-import { AioSandboxProvider } from '../providers/aio/aio-sandbox.provider';
-import { BoxliteSandboxProvider } from '../providers/boxlite/boxlite-sandbox.provider';
-import { createDockerClient } from '../providers/docker/docker-client';
-import { SandboxProviderRegistry } from '../registry/provider-registry';
 import { RuntimeOwnerServer } from './owner-server';
 import { ownerArtifactIdentity } from './artifact-identity';
 import { RuntimeOwnerProviderRegistry } from './owner-client';
@@ -25,8 +23,8 @@ export class RuntimeOwnerHomeLock {
   private readonly nonce = randomBytes(20).toString('hex');
   constructor(
     private readonly path: string,
-    instanceId: string,
-    ownerId: string,
+    private readonly instanceId: string,
+    private readonly ownerId: string,
   ) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const acquire = (): void => {
@@ -44,19 +42,17 @@ export class RuntimeOwnerHomeLock {
       acquire();
     } catch (error) {
       if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error;
-      const old = JSON.parse(readFileSync(path, 'utf8')) as {
-        pid?: unknown;
-        instanceId?: unknown;
-        ownerId?: unknown;
-      };
+      const old = ownerRecord(JSON.parse(readFileSync(path, 'utf8')) as unknown);
       if (
+        typeof old.pid !== 'number' ||
         !Number.isSafeInteger(old.pid) ||
+        old.pid <= 0 ||
         old.instanceId !== instanceId ||
         old.ownerId !== ownerId
       )
         throw new Error('RuntimeOwner home has an unconfirmed process lock');
       try {
-        process.kill(old.pid as number, 0);
+        process.kill(old.pid, 0);
         throw new Error('RuntimeOwner home is already owned by a live process');
       } catch (probe) {
         if (!(probe instanceof Error) || !('code' in probe) || probe.code !== 'ESRCH') throw probe;
@@ -65,11 +61,35 @@ export class RuntimeOwnerHomeLock {
       acquire();
     }
   }
+  assertHeld(): void {
+    const current = ownerRecord(JSON.parse(readFileSync(this.path, 'utf8')) as unknown);
+    const home = process.env.RUNTIME_OWNER_HOME;
+    if (
+      !home ||
+      this.path !== resolve(home, 'owner-process.lock') ||
+      current.pid !== process.pid ||
+      current.nonce !== this.nonce ||
+      current.instanceId !== this.instanceId ||
+      current.ownerId !== this.ownerId ||
+      current.instanceId !== process.env.PLATFORM_INSTANCE_ID?.trim() ||
+      current.ownerId !== process.env.RUNTIME_OWNER_ID?.trim()
+    )
+      throw new Error('RuntimeOwner home lock is not authoritative');
+  }
   release(): void {
     if (!existsSync(this.path)) return;
-    const current = JSON.parse(readFileSync(this.path, 'utf8')) as { nonce?: unknown };
+    const current = ownerRecord(JSON.parse(readFileSync(this.path, 'utf8')) as unknown);
     if (current.nonce === this.nonce) unlinkSync(this.path);
   }
+}
+
+/** The lock precedes DI: a second process must not construct a plugin SDK or run
+ * its registration hook while the original Owner still owns the private home. */
+export function acquireRuntimeOwnerHomeLock(): RuntimeOwnerHomeLock {
+  const { home, instanceId, ownerId } = assertRuntimeOwnerEnvironment();
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  chmodSync(home, 0o700);
+  return new RuntimeOwnerHomeLock(resolve(home, 'owner-process.lock'), instanceId, ownerId);
 }
 
 export async function createRuntimeOwnerProviderRegistry(
@@ -94,19 +114,21 @@ export async function createRuntimeOwnerProviderRegistry(
       (stat.mode & 0o022) !== 0
     )
       throw new Error('UNTRUSTED_OWNER_BINDING');
-    const binding = JSON.parse(await readFile(bindingPath, 'utf8')) as {
-      instanceId?: string;
-      activeOwnerId?: string;
-      owners?: { ownerId: string; endpoint: string }[];
-    };
+    const binding = ownerRecord(JSON.parse(await readFile(bindingPath, 'utf8')) as unknown);
     if (
       binding.instanceId !== instanceId ||
+      typeof binding.activeOwnerId !== 'string' ||
       !Array.isArray(binding.owners) ||
       !binding.owners.length ||
-      !binding.owners.some((owner) => owner.ownerId === binding.activeOwnerId)
+      !binding.owners.some(
+        (owner: unknown) => isRecord(owner) && owner.ownerId === binding.activeOwnerId,
+      )
     )
       throw new Error('INVALID_OWNER_BINDING');
-    for (const owner of binding.owners) {
+    for (const value of binding.owners) {
+      const owner = ownerRecord(value);
+      if (typeof owner.ownerId !== 'string' || typeof owner.endpoint !== 'string')
+        throw new Error('INVALID_OWNER_BINDING');
       await registry.addOwner(
         { endpoint: owner.endpoint, instanceId, key, generation, clock, deferClaim },
         false,
@@ -118,7 +140,7 @@ export async function createRuntimeOwnerProviderRegistry(
       )
         throw new Error('OWNER_BINDING_IDENTITY_MISMATCH');
     }
-    registry.activateOwner(binding.activeOwnerId!);
+    registry.activateOwner(binding.activeOwnerId);
     return registry;
   }
   await registry.addOwner({ endpoint, instanceId, key, generation, clock, deferClaim }, true);
@@ -128,29 +150,23 @@ export async function createRuntimeOwnerProviderRegistry(
     if (!Array.isArray(extra))
       throw new Error('RUNTIME_OWNER_ROUTES must be an installed owner route list');
     for (const route of extra) {
-      if (
-        route === null ||
-        typeof route !== 'object' ||
-        typeof (route as { endpoint?: unknown }).endpoint !== 'string'
-      )
+      if (!isRecord(route) || typeof route.endpoint !== 'string')
         throw new Error('Invalid installed owner route');
-      const endpoint = (route as { endpoint: string }).endpoint;
+      const endpoint = route.endpoint;
       await registry.addOwner({ endpoint, instanceId, key, generation, clock, deferClaim });
     }
   }
   return registry;
 }
 
-export function createLocalRuntimeOwnerRegistry(clock: Clock): ProviderRegistry {
-  return new SandboxProviderRegistry(
-    new AioSandboxProvider(createDockerClient(), undefined, clock),
-    new BoxliteSandboxProvider(clock),
-  );
-}
-
-export async function startRuntimeOwnerFromEnvironment(
-  clock: Clock,
-): Promise<{ server: RuntimeOwnerServer; close(): Promise<void> }> {
+/** Run before constructing an installation's DI context: even a provider's
+ * constructor must not run under a Coordinator or business-database identity. */
+export function assertRuntimeOwnerEnvironment(): {
+  instanceId: string;
+  ownerId: string;
+  key: string;
+  home: string;
+} {
   if (process.env.PLATFORM_PROCESS_ROLE !== 'runtime-owner')
     throw new Error('Only RuntimeOwner may instantiate SDK providers');
   for (const key of [
@@ -172,6 +188,7 @@ export async function startRuntimeOwnerFromEnvironment(
     !instanceId ||
     !ownerId ||
     !key ||
+    key.length < 32 ||
     !home ||
     !sdkHome ||
     !isAbsolute(home) ||
@@ -180,31 +197,36 @@ export async function startRuntimeOwnerFromEnvironment(
   ) {
     throw new Error('RuntimeOwner requires an explicit instance, owner id and private SDK home');
   }
-  mkdirSync(home, { recursive: true, mode: 0o700 });
-  chmodSync(home, 0o700);
-  const lock = new RuntimeOwnerHomeLock(resolve(home, 'owner-process.lock'), instanceId, ownerId);
-  const server = new RuntimeOwnerServer({
-    instanceId,
-    ownerId,
-    key,
-    clock,
-    artifactIdentity: await ownerArtifactIdentity(),
-    startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
-    privateDatabaseIsolation: true,
-    journalPath: resolve(home, 'runtime-owner.sqlite'),
-    registry: createLocalRuntimeOwnerRegistry(clock),
-  });
+  return { instanceId, ownerId, key, home };
+}
+
+export async function startRuntimeOwnerFromEnvironment(
+  clock: Clock,
+  registry: ProviderRegistry,
+  lock: RuntimeOwnerHomeLock,
+): Promise<{ server: RuntimeOwnerServer; close(): Promise<void> }> {
+  const { instanceId, ownerId, key, home } = assertRuntimeOwnerEnvironment();
+  lock.assertHeld();
+  let server: RuntimeOwnerServer | undefined;
   try {
+    server = new RuntimeOwnerServer({
+      instanceId,
+      ownerId,
+      key,
+      clock,
+      artifactIdentity: await ownerArtifactIdentity(),
+      startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
+      privateDatabaseIsolation: true,
+      journalPath: resolve(home, 'runtime-owner.sqlite'),
+      registry,
+    });
     await server.listen(Number(process.env.RUNTIME_OWNER_PORT ?? '3231'));
   } catch (error) {
-    lock.release();
+    await server?.close();
     throw error;
   }
   return {
     server,
-    close: async () => {
-      await server.close();
-      lock.release();
-    },
+    close: () => server.close(),
   };
 }

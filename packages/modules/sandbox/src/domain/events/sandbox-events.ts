@@ -1,4 +1,4 @@
-import type { DomainEvent, SandboxId, ProjectId } from '@platform/shared-kernel';
+import type { DomainEvent, SandboxId, ProjectId } from '@platform/shared-kernel/pure';
 import type { SandboxStatus } from '../value-objects/sandbox-status.vo';
 import type { TriggeredBy } from '../entities/state-transition.entity';
 

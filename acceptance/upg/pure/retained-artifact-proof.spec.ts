@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -23,7 +24,7 @@ import { sourceArtifactProof } from '../../../apps/api/src/platform/upgrade/upgr
 import { verifyUpgradeArtifact } from '../../../apps/api/src/platform/upgrade/verify-upgrade-artifact';
 import { withUpgradeObservation } from '../../../apps/api/src/platform/upgrade/upgrade-observation';
 import { upgradeDigest } from '../../../apps/api/src/platform/upgrade/upgrade-trust';
-import { useEnv } from '../../support/strict-ports';
+import { useEnv, stub, unused } from '../../support/strict-ports';
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
 import { UpgradeInspector } from '../../../apps/api/src/platform/upgrade/upgrade-inspector';
 import type { UpgradeSecurity } from '../../../apps/api/src/platform/access-passcode/upgrade-security.service';
@@ -114,7 +115,7 @@ describe('retained source proof copies never replace the executing installation 
       verificationRoot: f.mirror,
       mirrored: true,
     });
-    const other = join(f.root, 'other', f.source.split('/').at(-1)!);
+    const other = join(f.root, 'other', assertDefined(f.source.split('/').at(-1)));
     await expect(sourceArtifactProof(other, f.components)).rejects.toThrow(
       'RETAINED_ARTIFACT_MIRROR_UNAVAILABLE',
     );
@@ -233,13 +234,20 @@ describe('retained source proof copies never replace the executing installation 
     };
     // This boundary fixture measures status orchestration and real tree I/O;
     // it deliberately grants no live-health, repair or runtime qualification.
-    const store = {
+    const store = stub<ConstructorParameters<typeof UpgradeInspector>[0]>({
       instanceId: 'status-tree-proof',
       confirmed: () => last,
-      instance: () => ({ service_state: 'unknown', activation_generation: 1, ready: 0 }),
+      instance: () => ({
+        instance_id: 'status-tree-proof',
+        service_state: 'unknown',
+        activation_generation: 1,
+        ready: 0,
+        updated_at: clock.now().getTime(),
+        confirmed_release: JSON.stringify(last),
+      }),
       latest: () => null,
       recovery: () => null,
-    } as never;
+    });
     const inspector = new UpgradeInspector(
       store,
       clock,
@@ -256,7 +264,7 @@ describe('retained source proof copies never replace the executing installation 
       await inspector.verifySourceArtifact(f.source, f.components);
       return null;
     });
-    const catalog = {
+    const catalog = stub<ConstructorParameters<typeof UpgradeService>[1]>({
       refresh: async () => {
         await inspector.sourceActual();
       },
@@ -266,16 +274,18 @@ describe('retained source proof copies never replace the executing installation 
         reason: 'BOUNDARY_FIXTURE',
         availableRelease: null,
       }),
-    } as never;
-    const security = { canAuthenticate: false } as UpgradeSecurity;
+    });
+    const security = stub<UpgradeSecurity>({ canAuthenticate: false });
     const service = new UpgradeService(store, catalog, security, inspector, clock);
-    const req = {} as Parameters<UpgradeService['status']>[0],
-      res = { setHeader: () => {} } as never;
-    const granted = {
+    const req = unused<Parameters<UpgradeService['status']>[0]>('unused status request'),
+      res = stub<Parameters<UpgradeService['status']>[1]>({ setHeader: vi.fn() });
+    const granted: ReturnType<UpgradeSecurity['principal']> = {
+      actorId: 'status-test-user',
+      viewerId: 'status-test-user',
       userScope: 'status-test-user',
       canUpgrade: false,
       csrfToken: '',
-    } as ReturnType<UpgradeSecurity['principal']>;
+    };
     expect((await service.status(req, res, granted)).repairableCurrent).toBeNull();
     expect(trees).toHaveBeenCalledTimes(1);
     await service.status(req, res, granted);
@@ -287,7 +297,7 @@ describe('retained source proof copies never replace the executing installation 
   it('memoizes sourceActual only within the current observation, including unqualified measurements', async () => {
     const confirmed = vi.fn(() => null),
       latest = vi.fn(() => null);
-    const store = { confirmed, latest } as never;
+    const store = stub<ConstructorParameters<typeof UpgradeInspector>[0]>({ confirmed, latest });
     const inspector = new UpgradeInspector(
       store,
       { now: () => new Date() },

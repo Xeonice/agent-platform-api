@@ -25,7 +25,7 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
   private retiring = false;
 
   @WebSocketServer()
-  private readonly server!: Namespace;
+  private readonly server?: Namespace;
 
   constructor(@Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator) {}
 
@@ -99,13 +99,12 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth =
-      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth = typeof auth?.passcode === 'string' ? auth.passcode : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;
     const fromBearer = authz?.startsWith('Bearer ') ? authz.slice('Bearer '.length) : undefined;
-    const query = client.handshake.query['passcode'];
+    const query = client.handshake.query.passcode;
     const fromQuery = Array.isArray(query) ? query[0] : query;
     return {
       passcode: fromAuth ?? fromHeader ?? fromBearer ?? fromQuery,

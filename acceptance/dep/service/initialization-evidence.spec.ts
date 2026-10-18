@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { type ConnectivityResult, ProxyConfigSchema } from '@platform/contracts';
 import { InitializationService } from '../../../apps/api/src/platform/system/initialization.service';
+import { stub } from '../../support/strict-ports';
 
 function harness(rows: ConnectivityResult[]) {
   const mark = vi.fn();
@@ -11,8 +12,10 @@ function harness(rows: ConnectivityResult[]) {
   };
   const service = new InitializationService(
     settings as never,
-    { run: async () => rows } as never,
-    { record: vi.fn() } as never,
+    stub<ConstructorParameters<typeof InitializationService>[1]>({
+      run: () => Promise.resolve(rows),
+    }),
+    stub<ConstructorParameters<typeof InitializationService>[2]>({ record: vi.fn() }),
   );
   return { service, mark };
 }

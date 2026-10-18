@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
@@ -95,7 +96,7 @@ async function startControl(coordinatorUrl: string): Promise<string> {
       out += String(bytes);
       const match = /OBS_CONTROL:(\{[^\n]+\})/.exec(out);
       if (!match) return;
-      const value = JSON.parse(match[1]!) as { port: number };
+      const value = JSON.parse(assertDefined(match[1])) as { port: number };
       clearTimeout(timer);
       ok('http://127.0.0.1:' + String(value.port));
     });
@@ -359,7 +360,7 @@ describe('UPG actual concurrent HTTP observer, independent ControlAPI and origin
     }
     await delay(1500);
     const measured = samples(2),
-      window = measured.at(-1)!.observed_at - measured[0]!.observed_at;
+      window = assertDefined(measured.at(-1)).observed_at - assertDefined(measured[0]).observed_at;
     expect(measured.length).toBeGreaterThanOrEqual(50);
     expect((1000 * (measured.length - 1)) / window).toBeGreaterThanOrEqual(10);
     expect(measured.every((row) => row.success === 1)).toBe(true);

@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import {
@@ -9,7 +10,6 @@ import {
 import type {
   AuditRecorder,
   DiagnoseCheckFrame,
-  DiagnoseCheckId,
   DiagnoseServerFrame,
   DiagnoseStatus,
 } from '@platform/contracts';
@@ -61,7 +61,11 @@ export class DiagnosticsService {
           '契约是权威（sse-protocol.ts），装配要跟着改。',
       );
     }
-    return DIAGNOSE_CHECK_IDS.map((id) => byId.get(id)!);
+    return DIAGNOSE_CHECK_IDS.map((id) => {
+      const check = byId.get(id);
+      if (!check) throw new Error(`Missing diagnostic check: ${id}`);
+      return check;
+    });
   }
 
   async run(emit: (frame: DiagnoseServerFrame) => void, signal: AbortSignal): Promise<void> {
@@ -113,7 +117,7 @@ export class DiagnosticsService {
   /** 单项：计时 + 超时竞速 + 兜底 catch。 */
   private async runOne(check: DiagnoseCheck, signal: AbortSignal): Promise<DiagnoseCheckFrame> {
     const started = this.clock.now().getTime();
-    const base = { event: 'check' as const, id: check.id as DiagnoseCheckId, label: check.label };
+    const base = { event: 'check' as const, id: check.id, label: check.label };
     try {
       const result = await withTimeout(
         check.run({ timeoutMs: DIAGNOSE_TIMEOUT_MS, signal }),
@@ -134,12 +138,12 @@ export class DiagnosticsService {
     } catch (e) {
       // 防御，不是设计：`DiagnoseCheck.run()` 契约上不许抛（它是唯一知道刚才在做什么的
       // 人，翻译成人话是它的责任）。真抛了也不能让整轮塌掉。
-      this.logger.error(`诊断项 ${check.id} 抛出异常：${(e as Error).message}`);
+      this.logger.error(`诊断项 ${check.id} 抛出异常：${errorMessage(e)}`);
       return {
         ...base,
         status: 'fail',
         headline: '这一项检查自己出错了',
-        detailText: `${(e as Error).message}`,
+        detailText: errorMessage(e),
         durationMs: this.clock.now().getTime() - started,
       };
     }
@@ -188,7 +192,9 @@ const TIMED_OUT = Symbol('diagnose-timeout');
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    timer = setTimeout(() => {
+      resolve(TIMED_OUT);
+    }, ms);
     timer.unref();
   });
   work.catch(() => undefined);

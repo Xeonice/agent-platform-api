@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 
 /** Actual guest exit observation, with no output, command, credentials or runtime token. */
 export interface JobCompletionObservation {

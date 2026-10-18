@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { isRecord } from '@platform/shared-kernel';
 import type Database from 'better-sqlite3';
 import { lstat, realpath, statfs } from 'node:fs/promises';
 import { dirname, isAbsolute } from 'node:path';
@@ -8,7 +10,9 @@ export async function sqliteStorageObservation(sqlite: Database.Database): Promi
   availableBytes: number;
   walBytes: number;
 }> {
-  const databases = sqlite.pragma('database_list') as { name: string; file: string }[];
+  const databases = z
+    .array(z.object({ name: z.string(), file: z.string() }))
+    .parse(sqlite.pragma('database_list'));
   const main = databases.filter((database) => database.name === 'main');
   requireUpgrade(
     main.length === 1 && typeof main[0].file === 'string' && isAbsolute(main[0].file),
@@ -23,8 +27,8 @@ export async function sqliteStorageObservation(sqlite: Database.Database): Promi
     'SQLITE_STORAGE_LOCATION_UNCONFIRMED',
   );
   const capacity = await statfs(directory);
-  const wal = await lstat(databasePath + '-wal').catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return null;
+  const wal = await lstat(databasePath + '-wal').catch((error: unknown) => {
+    if (isRecord(error) && error.code === 'ENOENT') return null;
     throw error;
   });
   requireUpgrade(
@@ -32,7 +36,7 @@ export async function sqliteStorageObservation(sqlite: Database.Database): Promi
     'SQLITE_WAL_LOCATION_UNCONFIRMED',
   );
   return {
-    availableBytes: Number(capacity.bavail) * Number(capacity.bsize),
+    availableBytes: capacity.bavail * capacity.bsize,
     walBytes: wal?.size ?? 0,
   };
 }

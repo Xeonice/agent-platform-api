@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { verifyInstalledArtifactTree } from '@platform/shared-kernel';
+import { verifyInstalledArtifactTree, isRecord } from '@platform/shared-kernel';
 import { ownerRecord } from './wire-codec';
 export interface OwnerArtifactIdentity {
   artifactDigest: string;
@@ -27,12 +27,9 @@ export async function ownerArtifactIdentity(): Promise<OwnerArtifactIdentity | n
   )
     throw new Error('OWNER_ARTIFACT_IDENTITY_UNKNOWN');
   const files = bundle.files.filter(
-    (file) =>
-      typeof file === 'object' &&
-      file !== null &&
-      'path' in file &&
-      String(file.path).startsWith('api/'),
-  ) as Record<string, unknown>[];
+    (file): file is Record<string, unknown> =>
+      isRecord(file) && typeof file.path === 'string' && file.path.startsWith('api/'),
+  );
   if (!files.length) throw new Error('OWNER_ARTIFACT_EMPTY');
   const actual = await verifyInstalledArtifactTree(root, 'api', files);
   if (

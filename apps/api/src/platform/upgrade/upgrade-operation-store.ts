@@ -1,3 +1,6 @@
+import { z } from 'zod';
+import { UpgradePlanSchema } from '@platform/contracts';
+import {} from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, ID_GENERATOR, type Clock, type IdGenerator } from '@platform/shared-kernel';
 import {
@@ -30,6 +33,33 @@ export interface UpgradeOperationRecord {
   defaultImagesBefore: DefaultImageSnapshot[];
 }
 
+const OperationRecordSchema = z.object({
+  operation: UpgradeOperationSchema,
+  actorId: z.string(),
+  command: UpgradeRequestSchema,
+  chain: z.array(
+    z.object({
+      envelope: SignedUpgradeManifestSchema,
+      plan: UpgradePlanSchema,
+      requestId: z.string(),
+    }),
+  ),
+  chainDigest: z.string(),
+  defaultImagesBefore: z.array(
+    z.object({
+      provider: z.string(),
+      managed: z.boolean(),
+      ref: z.string(),
+      digest: z.string(),
+      runtimeVersions: z.record(z.string()),
+    }),
+  ),
+});
+function assertOperationRecord(value: unknown): asserts value is UpgradeOperationRecord {
+  // Validate without replacing signed envelopes or the bytes used by chainDigest.
+  OperationRecordSchema.parse(value);
+}
+
 /** Reuses the existing intent ledger. No invented Drizzle migration or second executor. */
 @Injectable()
 export class UpgradeOperationStore {
@@ -43,13 +73,13 @@ export class UpgradeOperationStore {
   }
   read(id: string): UpgradeOperationRecord {
     const row = this.sqlite
-      .prepare(
+      .prepare<unknown[], { result: string; actor_id: string; request_digest: string }>(
         'SELECT result,actor_id,request_digest FROM platform_operations WHERE operation_id=? AND instance_id=? AND role=?',
       )
-      .get(id, this.upgrades.instanceId, UPGRADE_PLAN_ROLE) as
-      { result: string; actor_id: string; request_digest: string } | undefined;
+      .get(id, this.upgrades.instanceId, UPGRADE_PLAN_ROLE);
     requireUpgrade(row, 'UPGRADE_OPERATION_NOT_FOUND', 404);
-    const record = JSON.parse(row.result) as UpgradeOperationRecord;
+    const record: unknown = JSON.parse(row.result);
+    assertOperationRecord(record);
     record.operation = UpgradeOperationSchema.parse(record.operation);
     record.command = UpgradeRequestSchema.parse(record.command);
     requireUpgrade(
@@ -83,19 +113,18 @@ export class UpgradeOperationStore {
   }
   latest(): UpgradeOperationRecord | null {
     const row = this.sqlite
-      .prepare(
+      .prepare<unknown[], { operation_id: string }>(
         'SELECT operation_id FROM platform_operations WHERE instance_id=? AND role=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
       )
-      .get(this.upgrades.instanceId, UPGRADE_PLAN_ROLE) as { operation_id: string } | undefined;
+      .get(this.upgrades.instanceId, UPGRADE_PLAN_ROLE);
     return row ? this.read(row.operation_id) : null;
   }
   find(actor: string, requestId: string): UpgradeOperationRecord | null {
     const row = this.sqlite
-      .prepare(
+      .prepare<unknown[], { operation_id: string }>(
         "SELECT operation_id FROM platform_operations WHERE instance_id=? AND role=? AND actor_id=? AND json_extract(result,'$.command.requestId')=?",
       )
-      .get(this.upgrades.instanceId, UPGRADE_PLAN_ROLE, actor, requestId) as
-      { operation_id: string } | undefined;
+      .get(this.upgrades.instanceId, UPGRADE_PLAN_ROLE, actor, requestId);
     return row ? this.read(row.operation_id) : null;
   }
   replay(actor: string, command: UpgradeRequest): UpgradeOperationRecord | null {

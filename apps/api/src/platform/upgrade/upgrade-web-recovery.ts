@@ -1,11 +1,14 @@
+import { UpgradePlanSchema } from '@platform/contracts';
+import { optionalUpgradeRecord, upgradeRecord, upgradeRecords } from './upgrade-values';
 import { statfs } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { freemem } from 'node:os';
 import { getHeapStatistics } from 'node:v8';
 import type { Clock } from '@platform/shared-kernel';
 import { ConfirmedServiceReleaseSchema, SignedUpgradeManifestSchema } from '@platform/contracts';
-import { UpgradeStore } from './upgrade-store';
-import { UpgradeInspector, loopbackOrigin } from './upgrade-inspector';
+import type { UpgradeStore } from './upgrade-store';
+import type { UpgradeInspector } from './upgrade-inspector';
+import { loopbackOrigin } from './upgrade-inspector';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { env } from '../config/env';
 import { initialSourceActivation } from './upgrade-artifact-proof';
@@ -22,13 +25,13 @@ export function assertRecoveryTargets(plan: Json, eligibility: Json): void {
 /** A measured failure domain cannot expand a fixed user's recovery authority. */
 export function persistedFaultScope(store: UpgradeStore, id: string): string[] {
   const row = store.sqlite
-    .prepare(
+    .prepare<unknown[], { payload: string }>(
       "SELECT payload FROM upgrade_events WHERE attempt_id=? AND kind IN ('failed','ready-revoked') ORDER BY sequence DESC LIMIT 1",
     )
-    .get(id) as { payload: string } | undefined;
+    .get(id);
   if (!row) return [];
-  const payload = JSON.parse(row.payload) as Json,
-    fault = payload.evidence as Json | undefined;
+  const payload = upgradeRecord(JSON.parse(row.payload)),
+    fault = optionalUpgradeRecord(payload.evidence);
   const scope = fault?.componentScope;
   return Array.isArray(scope) && scope.length === 1 && scope[0] === 'web' ? ['web'] : [];
 }
@@ -51,17 +54,17 @@ export async function qualifyWebRecovery(
   );
   requireUpgrade(fallback, 'WEB_FALLBACK_POLICY_UNQUALIFIED');
   const binding = await inspector.entryBinding();
-  const retained = [
+  const retained = upgradeRecords([
     binding.web,
-    ...(Array.isArray(binding.retainedWeb) ? binding.retainedWeb : []),
-  ] as Json[];
-  const web = retained.find((w) => w?.digest === sourceWeb.artifactDigest);
+    ...(Array.isArray(binding.retainedWeb) ? upgradeRecords(binding.retainedWeb) : []),
+  ]);
+  const web = retained.find((w) => w.digest === sourceWeb.artifactDigest);
   requireUpgrade(web, 'RETAINED_WEB_UNAVAILABLE');
   const producerResponse = await fetch(loopbackOrigin(web.origin) + '/web-process', {
     signal: AbortSignal.timeout(2000),
   });
   requireUpgrade(producerResponse.ok, 'RETAINED_WEB_PROCESS_UNCONFIRMED');
-  const producer = (await producerResponse.json()) as Json;
+  const producer = upgradeRecord(await producerResponse.json());
   requireUpgrade(
     producer.instanceId === store.instanceId &&
       producer.artifactDigest === sourceWeb.artifactDigest &&
@@ -86,7 +89,7 @@ export async function qualifyWebRecovery(
   });
   const proof = await inspector.installedProof(expected, { ...binding, web });
   requireUpgrade(proof.qualified === true, 'HEALTHY_CURRENT_API_COMBINATION_UNCONFIRMED');
-  const api = (binding.weight === 100 ? binding.candidateApi : binding.oldApi) as Json;
+  const api = upgradeRecord(binding.weight === 100 ? binding.candidateApi : binding.oldApi);
   const auth = await inspector.authenticationContinuity(id, fence, api.origin);
   const continuity = await inspector.continuity(id, fence);
   const compatible = [sourceWeb, m.components.web].every(
@@ -101,12 +104,12 @@ export async function qualifyWebRecovery(
       store.sqlite.pragma('quick_check', { simple: true }) === 'ok',
     'WEB_RECOVERY_SHARED_STATE_UNCONFIRMED',
   );
-  const owners = (continuity.owner as Json | undefined)?.owners;
+  const owners = optionalUpgradeRecord(continuity.owner)?.owners;
   const allOwnersCompatible =
     Array.isArray(owners) &&
     owners.length > 0 &&
     owners.every((o) => {
-      const range = (o as Json).protocol as Json | undefined;
+      const range = optionalUpgradeRecord(upgradeRecord(o).protocol);
       return (
         range &&
         Number(range.min) <= m.components.coordinator.protocol.max &&
@@ -115,9 +118,11 @@ export async function qualifyWebRecovery(
     });
   const migration = snapshot.plan.migrationPath.migrationPlanDigest;
   const migrationRow = migration
-    ? (store.sqlite
-        .prepare('SELECT stage,degraded FROM upgrade_online_migrations WHERE plan_digest=?')
-        .get(migration) as { stage: string; degraded: number } | undefined)
+    ? store.sqlite
+        .prepare<unknown[], { stage: string; degraded: number }>(
+          'SELECT stage,degraded FROM upgrade_online_migrations WHERE plan_digest=?',
+        )
+        .get(migration)
     : null;
   const pending = migration
     ? store.sqlite
@@ -133,24 +138,25 @@ export async function qualifyWebRecovery(
     'WEB_RECOVERY_DATA_OR_OWNER_UNCONFIRMED',
   );
   const baseline = store.sqlite
-    .prepare('SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?')
-    .get(id) as { snapshot: string; digest: string } | undefined;
+    .prepare<unknown[], { snapshot: string; digest: string }>(
+      'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
+    )
+    .get(id);
+  requireUpgrade(baseline, 'CONTINUITY_BASELINE_CORRUPT');
   requireUpgrade(
-    baseline && upgradeDigest(JSON.parse(baseline.snapshot)) === baseline.digest,
+    baseline.digest === upgradeDigest(JSON.parse(baseline.snapshot)),
     'CONTINUITY_BASELINE_CORRUPT',
   );
   const previous = store.sqlite
-    .prepare(
+    .prepare<unknown[], { manifest: string; plan: string }>(
       "SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
     )
-    .get(store.instanceId, fallback.releaseId) as { manifest: string; plan: string } | undefined;
+    .get(store.instanceId, fallback.releaseId);
   const root = previous
     ? resolve(
         process.env.UPGRADE_INSTALLER_ROOT ?? '',
         'artifacts',
-        String((JSON.parse(previous.plan) as { package: { digest: string } }).package.digest).slice(
-          7,
-        ),
+        UpgradePlanSchema.parse(JSON.parse(previous.plan)).package.digest.slice(7),
       )
     : process.env.UPGRADE_INITIAL_ARTIFACT_ROOT;
   requireUpgrade(root, 'RETAINED_WEB_ARTIFACT_UNKNOWN');
@@ -167,7 +173,7 @@ export async function qualifyWebRecovery(
   const fs = await statfs(env.dataRoot),
     memory = process.memoryUsage();
   const capacity =
-    Number(fs.bavail) * Number(fs.bsize) >= snapshot.plan.policy.minFreeBytes &&
+    fs.bavail * fs.bsize >= snapshot.plan.policy.minFreeBytes &&
     freemem() > memory.rss &&
     getHeapStatistics().heap_size_limit > memory.heapUsed;
   const rehearsal = m.evidence.find((e) => e.kind === 'fault-recovery' && e.result === 'passed');

@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import {
   Inject,
   Injectable,
@@ -282,8 +283,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
         if (actual.lifecycleState !== 'instance_exited') continue;
         const current = await this.repo.findById(sandbox.id);
         this.assertEpoch(epoch);
-        if (!current || current.status !== 'stopping' || current.version !== sandbox.version)
-          continue;
+        if (current?.status !== 'stopping' || current.version !== sandbox.version) continue;
         current.transitionTo('stopped', 'user', this.clock.now());
         this.uow.run((tx) => {
           this.repo.saveSync(tx, current);
@@ -328,7 +328,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       await this.run(sandbox, provider, source);
     } catch (e) {
       // run() already marked `failed`, recorded the reason and tore down any orphan.
-      this.logger.error(`provision failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
+      this.logger.error(`provision failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
     }
   }
 
@@ -392,7 +392,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     const at = this.clock.now();
     const instant = at.toISOString();
     const progress: SandboxStartupProgress = {
-      operationId: `sandbox-startup:${sandbox.id}:${sandbox.version}`,
+      operationId: `sandbox-startup:${sandbox.id}:${String(sandbox.version)}`,
       sequence: 0,
       state: 'inflight',
       stage,
@@ -470,8 +470,9 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       stageStartedAt = this.clock.now().getTime();
       stageDetail = {};
     };
-    const done = (): void =>
+    const done = (): void => {
       this.recordStage(sandbox, stage, stageStartedAt, 'ok', undefined, stageDetail);
+    };
     try {
       this.beginStartup(sandbox, 'workspace-preparation');
       this.advance(sandbox, 'scheduling', 'scheduler');
@@ -599,13 +600,16 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
               providerState: handle.providerState,
               workspacePath,
             });
-            this.uow.run((tx) => this.repo.saveSync(tx, current));
+            this.uow.run((tx) => {
+              this.repo.saveSync(tx, current);
+            });
           } else {
             await withTeardownDeadline(provider.destroy(handle), sandbox.id).catch(
-              (error: unknown) =>
+              (error: unknown) => {
                 this.logger.error(
                   `late cancelled instance cleanup pending for ${sandbox.id}: ${String(error)}`,
-                ),
+                );
+              },
             );
           }
         }
@@ -613,13 +617,11 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
         // may have removed its row while a copy/create was suspended. Initial
         // preparation has no user成果 to preserve; its late directory must go.
         if (!bound && workspacePath && current?.status !== 'destroying')
-          await this.workspace
-            .cleanup(sandbox.id, { keep: false })
-            .catch((error: unknown) =>
-              this.logger.error(
-                `late cancelled workspace cleanup failed for ${sandbox.id}: ${String(error)}`,
-              ),
+          await this.workspace.cleanup(sandbox.id, { keep: false }).catch((error: unknown) => {
+            this.logger.error(
+              `late cancelled workspace cleanup failed for ${sandbox.id}: ${String(error)}`,
             );
+          });
         return;
       }
       // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
@@ -672,7 +674,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     try {
       await this.restart(sandbox, provider, resumeOriginal);
     } catch (e) {
-      this.logger.error(`restart failed for sandbox ${sandbox.id}: ${(e as Error).message}`);
+      this.logger.error(`restart failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
     }
   }
 
@@ -833,7 +835,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     } catch (e) {
       this.logger.warn(
         `provider '${provider.name}' could not report image staging for '${image.ref}' ` +
-          `(${(e as Error).message}); the startup card falls back to generic copy`,
+          `(${errorMessage(e)}); the startup card falls back to generic copy`,
       );
       return {};
     }
@@ -1016,7 +1018,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     } catch (e) {
       this.logger.warn(
         `sandbox ${sandbox.id}: seeding '${sandbox.runtime}' startup files failed ` +
-          `(${(e as Error).message}); the agent may stop at an interactive prompt`,
+          `(${errorMessage(e)}); the agent may stop at an interactive prompt`,
       );
     }
   }
@@ -1063,7 +1065,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
           throw e;
         this.logger.warn(
           `sandbox ${sandbox.id}: injecting '${runtimeId}' credential failed ` +
-            `(${(e as Error).message}); it will not be offered as a terminal tab`,
+            `(${errorMessage(e)}); it will not be offered as a terminal tab`,
         );
       }
     }

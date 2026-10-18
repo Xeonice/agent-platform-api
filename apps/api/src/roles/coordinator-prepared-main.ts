@@ -1,9 +1,12 @@
+import { HttpException } from '@nestjs/common';
+import { upgradeRecord, requiredUpgradeValue } from '../platform/upgrade/upgrade-values';
+import type { HandoffRow } from '../platform/upgrade/coordinator-handoff';
 import 'reflect-metadata';
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { NestFactory } from '@nestjs/core';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
-import { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
+import type { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
 import { ImageSeeder } from '@platform/image';
 import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
 import { supportedDataFormats } from '../platform/data-format-capabilities';
@@ -90,8 +93,8 @@ export async function startPreparedCoordinator(): Promise<void> {
     store.assertFence(id, fence);
     const snapshot = store.snapshot(id);
     const row = store.sqlite
-      .prepare('SELECT * FROM coordinator_handoffs WHERE attempt_id=?')
-      .get(id) as Record<string, unknown> | undefined;
+      .prepare<unknown[], HandoffRow>('SELECT * FROM coordinator_handoffs WHERE attempt_id=?')
+      .get(id);
     requireUpgrade(
       row &&
         row.operation_id === input.operationId &&
@@ -100,11 +103,10 @@ export async function startPreparedCoordinator(): Promise<void> {
       'FIXED_HANDOFF_INTENT_REQUIRED',
     );
     if (adopting) {
-      requireUpgrade(adoptedIntent === String(input.operationId), 'HANDOFF_INTENT_CONFLICT');
+      requireUpgrade(adoptedIntent === input.operationId, 'HANDOFF_INTENT_CONFLICT');
       return adopting;
     }
-    if (row.stage === 'adopted' && row.evidence)
-      return JSON.parse(String(row.evidence)) as Record<string, unknown>;
+    if (row.stage === 'adopted' && row.evidence) return upgradeRecord(JSON.parse(row.evidence));
     requireUpgrade(
       state === 'prepared' &&
         row.stage === 'releasing' &&
@@ -131,13 +133,16 @@ export async function startPreparedCoordinator(): Promise<void> {
       const continuity = await app
         .get((await import('../platform/upgrade/upgrade-inspector')).UpgradeInspector)
         .continuity(id, fence);
-      await writeInstalledBinding(process.env.PLATFORM_COORDINATOR_BINDING_PATH!, {
-        state: 'ready',
-        instanceId,
-        origin: `http://${env.host}:${env.port}`,
-        generation,
-        artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
-      });
+      await writeInstalledBinding(
+        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+        {
+          state: 'ready',
+          instanceId,
+          origin: `http://${env.host}:${String(env.port)}`,
+          generation,
+          artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
+        },
+      );
       const activatedAt = clock.now().getTime(),
         maxControlPauseMs = activatedAt - Number(row.quiesced_at);
       const evidence = {
@@ -161,13 +166,16 @@ export async function startPreparedCoordinator(): Promise<void> {
         .run(activatedAt, JSON.stringify(evidence), id);
       state = 'ready';
       return { commitKnown: true, stage: 'adopted', evidence };
-    })().catch((error) => {
+    })().catch((error: unknown) => {
       state = 'unknown';
       throw error;
     });
     return adopting;
   }
-  const management = createServer(async (req, res) => {
+  const management = createServer((req, res) => {
+    void managementRequest(req, res).catch(() => res.destroy());
+  });
+  async function managementRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       requireUpgrade(authorized(req), 'PREPARED_INTERNAL_AUTH', 403);
       let value: unknown;
@@ -178,20 +186,14 @@ export async function startPreparedCoordinator(): Promise<void> {
           body += String(chunk);
           requireUpgrade(body.length <= 8192, 'HANDOFF_COMMAND_TOO_LARGE', 413);
         }
-        value = await adopt(JSON.parse(body) as Record<string, unknown>);
+        value = await adopt(upgradeRecord(JSON.parse(body)));
       } else if (req.method === 'GET' && req.url === '/internal/coordinator/status')
         value = identity();
       else requireUpgrade(false, 'PREPARED_METHOD_FORBIDDEN', 404);
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify(value));
     } catch (error) {
-      res.statusCode =
-        error &&
-        typeof error === 'object' &&
-        'getStatus' in error &&
-        typeof error.getStatus === 'function'
-          ? Number(error.getStatus())
-          : 409;
+      res.statusCode = error instanceof HttpException ? error.getStatus() : 409;
       res.setHeader('content-type', 'application/json');
       res.end(
         JSON.stringify({
@@ -203,7 +205,7 @@ export async function startPreparedCoordinator(): Promise<void> {
         }),
       );
     }
-  });
+  }
   await new Promise<void>((ok, fail) => {
     management.once('error', fail);
     management.listen(Number(process.env.COORDINATOR_PREPARED_PORT), '127.0.0.1', ok);
@@ -211,29 +213,25 @@ export async function startPreparedCoordinator(): Promise<void> {
   const recoveryWatch = setInterval(() => {
     if (state !== 'prepared' || adopting) return;
     const row = store.sqlite
-      .prepare(
+      .prepare<unknown[], HandoffRow>(
         "SELECT * FROM coordinator_handoffs WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
       )
-      .get() as Record<string, unknown> | undefined;
+      .get();
     if (!row) return;
-    const candidate = JSON.parse(String(row.candidate)) as Record<string, unknown>;
+    const candidate = upgradeRecord(JSON.parse(row.candidate));
     if (
       candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
       candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
     )
       return;
     const writer = store.sqlite
-      .prepare(
+      .prepare<unknown[], { generation: number; expires_at: number }>(
         "SELECT generation,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
       )
-      .get() as { generation: number; expires_at: number };
-    if (
-      !writer ||
-      writer.generation !== row.source_generation ||
-      writer.expires_at > clock.now().getTime()
-    )
+      .get();
+    if (writer?.generation !== row.source_generation || writer.expires_at > clock.now().getTime())
       return;
-    const attempt = store.snapshot(String(row.attempt_id));
+    const attempt = store.snapshot(row.attempt_id);
     void adopt({
       instanceId,
       attemptId: row.attempt_id,

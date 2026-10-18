@@ -112,7 +112,7 @@ export function isManagedBuiltinImageDefault(provider: string): boolean {
  * ⚠️ 第三方 provider 不在这张表里 ⇒ 回落到 `builtinImageRef()`，与改动前一字不差：
  * 平台不知道一个外部 provider 该用哪张镜像，**猜一个比让它响亮失败更糟**。
  */
-const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Record<string, string>> = {
+const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Partial<Record<string, string>>> = {
   aio: 'ghcr.io/xeonice/agent-platform-sandbox:v0.3.12-cli.20261017.1',
   boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:v0.3.12-cli.20261017.1',
 };
@@ -139,6 +139,7 @@ export function publishedImageFor(provider: string): string | undefined {
 export function isPublishedImageRef(ref: string): boolean {
   const path = repositoryPathOf(ref);
   return Object.values(PUBLISHED_IMAGE_BY_PROVIDER).some((published) => {
+    if (published === undefined) return false;
     const repo = repositoryPathOf(published);
     return path === repo || path.endsWith(`/${repo.split('/').pop() ?? repo}`);
   });

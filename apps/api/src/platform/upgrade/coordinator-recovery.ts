@@ -1,4 +1,10 @@
 import {
+  nullableUpgradeRecord,
+  requiredUpgradeValue,
+  upgradeRecord,
+  upgradeRecords,
+} from './upgrade-values';
+import {
   Inject,
   Injectable,
   Optional,
@@ -79,12 +85,12 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     this.watch = setInterval(() => {
       if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'true' || this.resuming) return;
       const row = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], Row>(
           "SELECT * FROM coordinator_recoveries WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
         )
-        .get() as Row | undefined;
+        .get();
       if (!row) return;
-      const candidate = JSON.parse(row.candidate) as Json;
+      const candidate = upgradeRecord(JSON.parse(row.candidate));
       if (
         candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
         candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
@@ -103,26 +109,31 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
   }
   private baseline(id: string): Json {
     const row = this.store.sqlite
-      .prepare('SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string; digest: string } | undefined;
+      .prepare<unknown[], { snapshot: string; digest: string }>(
+        'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
+      )
+      .get(id);
     requireUpgrade(row, 'CONTINUITY_BASELINE_MISSING');
-    const baseline = JSON.parse(row.snapshot) as Json;
+    const baseline = upgradeRecord(JSON.parse(row.snapshot));
     requireUpgrade(upgradeDigest(baseline) === row.digest, 'CONTINUITY_BASELINE_CORRUPT');
     return baseline;
   }
   private recoveryPlan(id: string, digest: string): Json {
     const recovery = this.store.recovery();
     requireUpgrade(
-      recovery &&
-        recovery.triggeringAttemptId === id &&
+      recovery?.triggeringAttemptId === id &&
         recovery.state === 'recovering' &&
         recovery.planDigest === digest,
       'FIXED_RECOVERY_INTENT_REQUIRED',
     );
-    const row = this.store.sqlite
-      .prepare('SELECT plan FROM upgrade_recoveries WHERE recovery_attempt_id=?')
-      .get(recovery.recoveryAttemptId) as { plan: string };
-    const plan = JSON.parse(row.plan) as Json;
+    const row = requiredUpgradeValue(
+      this.store.sqlite
+        .prepare<unknown[], { plan: string }>(
+          'SELECT plan FROM upgrade_recoveries WHERE recovery_attempt_id=?',
+        )
+        .get(recovery.recoveryAttemptId),
+    );
+    const plan = upgradeRecord(JSON.parse(row.plan));
     const { planDigest, ...input } = plan;
     requireUpgrade(
       planDigest === digest && upgradeDigest(input) === digest,
@@ -134,14 +145,14 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     this.store.assertFence(id, fence);
     const snapshot = this.store.snapshot(id),
       baseline = this.baseline(id),
-      source = baseline.coordinator as Json;
+      source = upgradeRecord(baseline.coordinator);
     const retainedBinary =
-      source?.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
+      source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
       source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY;
     let columnsCompatible = true;
-    for (const [table, columns] of Object.entries(baseline.columns as Json)) {
+    for (const [table, columns] of Object.entries(upgradeRecord(baseline.columns))) {
       requireUpgrade(/^[a-zA-Z0-9_]+$/.test(table), 'SCHEMA_BASELINE_INVALID');
-      const names = (columns as Json[]).map((c) => String(c.name));
+      const names = upgradeRecords(columns).map((c) => String(c.name));
       try {
         this.store.sqlite
           .prepare(
@@ -153,10 +164,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           )
           .get();
         const current = this.store.sqlite
-          .prepare('PRAGMA table_info("' + table + '")')
-          .all() as Json[];
+          .prepare<unknown[], Json>('PRAGMA table_info("' + table + '")')
+          .all();
         if (
-          (columns as Json[]).some(
+          upgradeRecords(columns).some(
             (c) => !current.some((n) => n.name === c.name && n.type === c.type && n.pk === c.pk),
           )
         )
@@ -178,13 +189,18 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     if (contracted && formats.includes('project-name-v2-authority')) {
       try {
         const rows = this.store.sqlite
-          .prepare('SELECT id,name FROM projects LIMIT 10001')
-          .all() as { id: string; name: string }[];
+          .prepare<unknown[], { id: string; name: string }>(
+            'SELECT id,name FROM projects LIMIT 10001',
+          )
+          .all();
         newAuthorityHealthy =
           rows.length <= 10000 &&
           rows.every((row) => {
-            const name = this.projection!.name(row.id, row.name);
-            return typeof name === 'string' && this.projection!.findIdByName!(name) === row.id;
+            const name = requiredUpgradeValue(this.projection).name(row.id, row.name);
+            return (
+              typeof name === 'string' &&
+              requiredUpgradeValue(this.projection).findIdByName?.(name) === row.id
+            );
           });
       } catch {
         /* Missing new authority is never a safe old-data fallback. */
@@ -245,34 +261,37 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       signal: AbortSignal.timeout(2000),
     });
     requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
-    return (await response.json()) as Json;
+    return upgradeRecord(await response.json());
   }
   async execute(id: string, input: Json): Promise<Json> {
     const fence = Number(input.fence);
     this.store.assertControllerFence(id, fence);
     requireUpgrade(typeof input.recoveryPlanDigest === 'string', 'RECOVERY_PLAN_REQUIRED');
     const plan = this.recoveryPlan(id, input.recoveryPlanDigest),
-      recovery = this.store.recovery()!,
-      source = plan.coordinator as Json | null;
+      recovery = requiredUpgradeValue(this.store.recovery()),
+      source = nullableUpgradeRecord(plan.coordinator);
     if (!source) {
       if (plan.owner) {
-        const owner = plan.owner as Json;
+        const owner = upgradeRecord(plan.owner);
         requireUpgrade(
           typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
           'FIXED_OWNER_ROUTE_REQUIRED',
         );
         const current = this.owners.installedRoutes();
         requireUpgrade(
-          (owner.owners as Json[]).every((r) =>
+          upgradeRecords(owner.owners).every((r) =>
             current.some((c) => c.ownerId === r.ownerId && c.endpoint === r.endpoint),
           ),
           'ORIGINAL_OWNER_ROUTE_UNKNOWN',
         );
-        await writeInstalledBinding(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH!, {
-          instanceId: this.store.instanceId,
-          activeOwnerId: owner.activeOwnerId,
-          owners: current,
-        });
+        await writeInstalledBinding(
+          requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+          {
+            instanceId: this.store.instanceId,
+            activeOwnerId: owner.activeOwnerId,
+            owners: current,
+          },
+        );
         this.owners.activateOwner(owner.activeOwnerId);
       }
       return {
@@ -281,15 +300,12 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         originalResourcesPreserved: (await this.inspector.continuity(id, fence)).qualified,
       };
     }
-    requireUpgrade(
-      source && typeof source.startIdentity === 'string',
-      'RETAINED_COORDINATOR_REQUIRED',
-    );
+    requireUpgrade(typeof source.startIdentity === 'string', 'RETAINED_COORDINATOR_REQUIRED');
     const existing = this.store.sqlite
-      .prepare('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
-      .get(recovery.recoveryAttemptId) as Row | undefined;
+      .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
+      .get(recovery.recoveryAttemptId);
     if (existing?.stage === 'adopted' && existing.evidence)
-      return { commitKnown: true, ...(JSON.parse(existing.evidence) as Json) };
+      return { commitKnown: true, ...upgradeRecord(JSON.parse(existing.evidence)) };
     if (existing && ['releasing', 'adopting'].includes(existing.stage))
       return this.rpc(source.origin, '/internal/upgrades/' + id + '/coordinator-resume', {
         fence,
@@ -320,16 +336,19 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         quiescedAt,
       );
     try {
-      await writeInstalledBinding(process.env.PLATFORM_COORDINATOR_BINDING_PATH!, {
-        state: 'quiescing',
-        instanceId: this.store.instanceId,
-        origin: `http://${env.host}:${env.port}`,
-        generation: Number(process.env.COORDINATOR_GENERATION),
-        artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-        attemptId: id,
-        fence,
-        nextOrigin: source.origin,
-      });
+      await writeInstalledBinding(
+        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+        {
+          state: 'quiescing',
+          instanceId: this.store.instanceId,
+          origin: `http://${env.host}:${String(env.port)}`,
+          generation: Number(process.env.COORDINATOR_GENERATION),
+          artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+          attemptId: id,
+          fence,
+          nextOrigin: source.origin,
+        },
+      );
       await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
       requireUpgrade(
         this.provisions.pauseOwnership() &&
@@ -361,13 +380,16 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.store.sqlite
         .prepare("UPDATE coordinator_recoveries SET stage='quiesced' WHERE recovery_attempt_id=?")
         .run(recovery.recoveryAttemptId);
-      await writeInstalledBinding(process.env.PLATFORM_COORDINATOR_BINDING_PATH!, {
-        state: 'ready',
-        instanceId: this.store.instanceId,
-        origin: `http://${env.host}:${env.port}`,
-        generation: Number(process.env.COORDINATOR_GENERATION),
-        artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-      });
+      await writeInstalledBinding(
+        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+        {
+          state: 'ready',
+          instanceId: this.store.instanceId,
+          origin: `http://${env.host}:${String(env.port)}`,
+          generation: Number(process.env.COORDINATOR_GENERATION),
+          artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+        },
+      );
       throw error;
     }
     return this.rpc(source.origin, '/internal/upgrades/' + id + '/coordinator-resume', {
@@ -379,19 +401,19 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     const fence = Number(input.fence);
     this.store.assertFence(id, fence);
     const plan = this.recoveryPlan(id, String(input.recoveryPlanDigest)),
-      recovery = this.store.recovery()!,
-      source = plan.coordinator as Json;
+      recovery = requiredUpgradeValue(this.store.recovery()),
+      source = upgradeRecord(plan.coordinator);
     requireUpgrade(
       source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
         source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY,
       'RECOVERY_BINARY_CHANGED',
     );
     const row = this.store.sqlite
-      .prepare('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
-      .get(recovery.recoveryAttemptId) as Row | undefined;
+      .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
+      .get(recovery.recoveryAttemptId);
     requireUpgrade(row && row.plan_digest === input.recoveryPlanDigest, 'RECOVERY_INTENT_UNKNOWN');
     if (row.stage === 'adopted' && row.evidence)
-      return { commitKnown: true, ...(JSON.parse(row.evidence) as Json) };
+      return { commitKnown: true, ...upgradeRecord(JSON.parse(row.evidence)) };
     if (this.resuming) return this.resuming;
     requireUpgrade(row.stage === 'releasing', 'RECOVERY_WRITER_NOT_RELEASED');
     const compatibility = await this.compatibility(id, fence);
@@ -403,14 +425,19 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           "UPDATE coordinator_recoveries SET stage='adopting',target_generation=? WHERE recovery_attempt_id=?",
         )
         .run(generation, recovery.recoveryAttemptId);
-      const currentBinding = JSON.parse(
-        await readFile(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH!, 'utf8'),
-      ) as Json;
+      const currentBinding = upgradeRecord(
+        JSON.parse(
+          await readFile(
+            requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+            'utf8',
+          ),
+        ),
+      );
       requireUpgrade(
         currentBinding.instanceId === this.store.instanceId && Array.isArray(currentBinding.owners),
         'OWNER_BINDING_SCOPE_MISMATCH',
       );
-      for (const route of currentBinding.owners as Json[])
+      for (const route of upgradeRecords(currentBinding.owners))
         if (!this.owners.installedRoutes().some((r) => r.ownerId === route.ownerId))
           await this.owners.addOwner(
             {
@@ -424,23 +451,26 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           );
       await this.owners.activateBusinessAuthority(generation);
       if (plan.owner) {
-        const owner = plan.owner as Json;
+        const owner = upgradeRecord(plan.owner);
         requireUpgrade(
           typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
           'FIXED_OWNER_ROUTE_REQUIRED',
         );
-        for (const route of owner.owners as Json[])
+        for (const route of upgradeRecords(owner.owners))
           requireUpgrade(
             this.owners
               .installedRoutes()
               .some((r) => r.ownerId === route.ownerId && r.endpoint === route.endpoint),
             'ORIGINAL_OWNER_ROUTE_UNKNOWN',
           );
-        await writeInstalledBinding(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH!, {
-          instanceId: this.store.instanceId,
-          activeOwnerId: owner.activeOwnerId,
-          owners: this.owners.installedRoutes(),
-        });
+        await writeInstalledBinding(
+          requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+          {
+            instanceId: this.store.instanceId,
+            activeOwnerId: owner.activeOwnerId,
+            owners: this.owners.installedRoutes(),
+          },
+        );
         this.owners.activateOwner(owner.activeOwnerId);
       }
       this.applications.resume();
@@ -452,13 +482,16 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       this.events.resumeAfterHandoff();
       this.tasks.resumeAfterHandoff();
       const continuity = await this.inspector.continuity(id, fence);
-      await writeInstalledBinding(process.env.PLATFORM_COORDINATOR_BINDING_PATH!, {
-        state: 'ready',
-        instanceId: this.store.instanceId,
-        origin: source.origin,
-        generation,
-        artifactDigest: source.artifactDigest,
-      });
+      await writeInstalledBinding(
+        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+        {
+          state: 'ready',
+          instanceId: this.store.instanceId,
+          origin: source.origin,
+          generation,
+          artifactDigest: source.artifactDigest,
+        },
+      );
       const maxControlPauseMs = this.clock.now().getTime() - Number(row.quiesced_at),
         evidence = {
           commitKnown: true,

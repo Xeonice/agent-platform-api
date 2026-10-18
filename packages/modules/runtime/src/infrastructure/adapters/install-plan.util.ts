@@ -93,7 +93,7 @@ export async function runInstallCommands(exec: SandboxExecFn, cmds: string[]): P
     if (r.exitCode !== 0) {
       throw new AdapterAuthError(
         'INSTALL_FAILED',
-        `'${cmd}' exited ${r.exitCode}: ${tail(r.stdout)}`,
+        `'${cmd}' exited ${String(r.exitCode)}: ${tail(r.stdout)}`,
       );
     }
   }

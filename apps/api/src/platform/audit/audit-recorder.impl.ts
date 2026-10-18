@@ -4,6 +4,7 @@ import type { Clock } from '@platform/shared-kernel';
 import type { AuditRecorder, AuditRecordInput } from '@platform/contracts';
 import { AuditRepository } from './audit.repository';
 import { redactAuditDetail, redactAuditText } from './audit-redaction';
+import { errorMessage } from '@platform/shared-kernel';
 
 /**
  * `AuditRecorder` 的落库实现 —— 审计流的**写入口**，两个入口（projector / 应用层
@@ -43,7 +44,7 @@ export class DbAuditRecorder implements AuditRecorder {
       });
     } catch (e) {
       this.logger.error(
-        `audit write dropped (${input.category}/${input.type}): ${(e as Error).message}`,
+        `audit write dropped (${input.category}/${input.type}): ${errorMessage(e)}`,
       );
     }
   }

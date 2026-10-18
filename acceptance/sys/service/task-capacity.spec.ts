@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SandboxFacadeAdapter } from '../../../packages/modules/sandbox/src/application/sandbox-facade.adapter';
 import { harness, waitForStatus } from '../../support/sandbox-rig';
@@ -50,14 +51,14 @@ describe('readonly default task capacity shares the actual admission rules', () 
       expect((await facade.defaultCapacity()).remainingTasks).toBe(expected - n - 1);
     }
     await Promise.all(ids.map((id) => waitForStatus(h.service, id, 'running')));
-    await h.service.stop(ids[0]!);
+    await h.service.stop(assertDefined(ids[0]));
     expect(await facade.defaultCapacity()).toMatchObject({
       remainingTasks: 0,
       registeredTasks: expected,
       maxTasks: expected,
     });
     await expect(h.service.create(input)).rejects.toMatchObject({ status: 429 });
-    await h.service.destroy(ids[0]!);
+    await h.service.destroy(assertDefined(ids[0]));
     expect(await facade.defaultCapacity()).toMatchObject({
       remainingTasks: 1,
       registeredTasks: expected - 1,

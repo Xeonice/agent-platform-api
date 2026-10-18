@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import { HttpException } from '@nestjs/common';
@@ -34,11 +35,11 @@ export function canonicalUpgrade(value: unknown): string {
   }
   if (Array.isArray(value)) return `[${value.map(canonicalUpgrade).join(',')}]`;
   requireUpgrade(
-    typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype,
+    isRecord(value) && Object.getPrototypeOf(value) === Object.prototype,
     'INVALID_JSON',
     400,
   );
-  const obj = value as Record<string, unknown>;
+  const obj = value;
   return `{${Object.keys(obj)
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalUpgrade(obj[key])}`)
@@ -280,9 +281,9 @@ export function freezeUpgradePlan(
   if (!apiReused) {
     for (const weight of manifest.policy.weights)
       steps.push(
-        { stepId: `route-${weight}`, kind: 'route', weight, totalWork: 1 },
+        { stepId: `route-${String(weight)}`, kind: 'route', weight, totalWork: 1 },
         {
-          stepId: `observe-${weight}`,
+          stepId: `observe-${String(weight)}`,
           kind: 'observe',
           weight,
           totalWork: manifest.policy.minRequests,

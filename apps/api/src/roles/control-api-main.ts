@@ -1,18 +1,26 @@
+import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import 'reflect-metadata';
 import express, { type Request, type Response } from 'express';
-import { request as httpRequest, createServer } from 'node:http';
+import { request as httpRequest, createServer, type IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { connect } from 'node:net';
 import { timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { UuidIdGenerator } from '../platform/time/uuid-id-generator';
-import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { createLegacyMcpServer, createLegacySseTransport } from './types/shims/mcp-legacy';
+import { z } from 'zod';
+import { isRecord } from '@platform/shared-kernel';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  CallToolResultSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import {
   type ApplicationCatalog,
   type ApplicationRequest,
-  type ApplicationFrame,
+  ApplicationFrameSchema,
+  ApplicationCatalogSchema,
 } from '../platform/control-rpc/control-rpc.contract';
 import { readPublicNetworkConfig } from '../platform/config/public-network';
 import { isRequestOriginAllowed } from '../bootstrap/public-origin-policy';
@@ -26,6 +34,11 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   process.env.PLATFORM_PROCESS_ROLE = 'control';
   const ids = new UuidIdGenerator();
   const clock = new SystemClock();
+  function coordinatorDeadline(response: Response): number | undefined {
+    const deadline: unknown = response.locals.coordinatorResolutionDeadline;
+    return typeof deadline === 'number' ? deadline : undefined;
+  }
+
   const installedArtifact = await installedApiIdentity('api');
   const instanceId = process.env.PLATFORM_INSTANCE_ID,
     key = process.env.PLATFORM_CONTROL_RPC_KEY;
@@ -58,7 +71,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     signal: AbortSignal.timeout(2000),
   });
   if (!catalogResponse.ok) throw new Error('APPLICATION_CATALOG_NOT_READY');
-  let catalog = (await catalogResponse.json()) as ApplicationCatalog;
+  let catalog = ApplicationCatalogSchema.parse(await catalogResponse.json());
   let catalogOrigin = initialTarget.origin;
   if (!catalog.routes.length || catalog.protocol.min > 2 || catalog.protocol.max < 1)
     throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
@@ -148,7 +161,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
           signal: AbortSignal.timeout(1000),
         },
       );
-      if (response.ok) authority = (await response.json()) as Record<string, unknown>;
+      if (response.ok) authority = z.record(z.unknown()).parse(await response.json());
     } catch {
       /* Missing authority evidence stays unknown. */
     }
@@ -210,8 +223,10 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   ): Promise<void> {
     const payload: ApplicationRequest = { operation, operationId, args, request: original(req) };
     const abort = new AbortController();
-    res.once('close', () => abort.abort());
-    const rpc = await dispatch(payload, abort.signal, res.locals.coordinatorResolutionDeadline);
+    res.once('close', () => {
+      abort.abort();
+    });
+    const rpc = await dispatch(payload, abort.signal, coordinatorDeadline(res));
     if (!rpc.ok) {
       const contentType = rpc.headers.get('content-type');
       if (contentType) res.setHeader('content-type', contentType);
@@ -229,7 +244,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
         if (!line) continue;
-        const frame = JSON.parse(line) as ApplicationFrame;
+        const frame = ApplicationFrameSchema.parse(JSON.parse(line));
         if (frame.type === 'headers' && !res.headersSent) {
           res.status(frame.status);
           for (const [name, value] of Object.entries(frame.headers)) {
@@ -273,7 +288,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     // Only an explicit rejection before journaling permits routing the SAME
     // operation to the new writer. A lost response is never an instruction to
     // retry a business effect.
-    while (true) {
+    for (;;) {
       const target = await coordinatorTarget(deadline);
       const response = await fetch(target.origin + '/internal/application/invoke', {
         method: 'POST',
@@ -282,10 +297,11 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         signal,
       });
       if (response.status !== 425) return response;
-      const rejection = (await response
+      const rawRejection: unknown = await response
         .clone()
         .json()
-        .catch(() => null)) as { code?: string; sideEffectFree?: boolean } | null;
+        .catch(() => null);
+      const rejection = isRecord(rawRejection) ? rawRejection : null;
       if (
         rejection?.code !== 'APPLICATION_WRITER_QUIESCED' ||
         rejection.sideEffectFree !== true ||
@@ -307,7 +323,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         signal: AbortSignal.timeout(Math.max(1, deadline - clock.now().getTime())),
       });
       if (!response.ok) throw new Error('APPLICATION_CATALOG_NOT_READY');
-      const next = (await response.json()) as ApplicationCatalog;
+      const next = ApplicationCatalogSchema.parse(await response.json());
       if (!next.routes.length || next.protocol.min > 2 || next.protocol.max < 1)
         throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
       const router = buildApplicationRouter(next);
@@ -334,14 +350,21 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       const handler = (req: Request, res: Response): void => {
         const args: unknown[] = [];
         for (const arg of route.args) {
-          if (arg.type === 3) args[arg.index] = arg.name ? req.body?.[arg.name] : req.body;
-          else if (arg.type === 4) args[arg.index] = arg.name ? req.query[arg.name] : req.query;
-          else if (arg.type === 5) args[arg.index] = arg.name ? req.params[arg.name] : req.params;
-          else if (arg.type === 6) args[arg.index] = arg.name ? req.headers[arg.name] : req.headers;
-          else if (arg.type === 11) args[arg.index] = req.socket.remoteAddress;
+          if (arg.type === RouteParamtypes.BODY) {
+            const body: unknown = req.body;
+            args[arg.index] = arg.name ? (isRecord(body) ? body[arg.name] : undefined) : body;
+          } else if (arg.type === RouteParamtypes.QUERY)
+            args[arg.index] = arg.name ? req.query[arg.name] : req.query;
+          else if (arg.type === RouteParamtypes.PARAM)
+            args[arg.index] = arg.name ? req.params[arg.name] : req.params;
+          else if (arg.type === RouteParamtypes.HEADERS)
+            args[arg.index] = arg.name ? req.headers[arg.name] : req.headers;
+          else if (arg.type === RouteParamtypes.IP) args[arg.index] = req.socket.remoteAddress;
           else args[arg.index] = null;
         }
-        void invoke(route.operation, args, req, res).catch(() => failure(res));
+        void invoke(route.operation, args, req, res).catch(() => {
+          failure(res);
+        });
       };
       if (verb === 'get') router.get(route.path, handler);
       else if (verb === 'post') router.post(route.path, handler);
@@ -358,25 +381,24 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       return;
     }
     try {
-      await refreshCatalog(res.locals.coordinatorResolutionDeadline);
+      await refreshCatalog(coordinatorDeadline(res));
       applicationRouter(req, res, next);
     } catch {
       failure(res);
     }
   });
   const mcpRequestScope = new AsyncLocalStorage<Request>();
-  function mcp(): McpServer {
-    const server = new McpServer(
-      { name: 'agent-platform-mcp', version: '0.0.1' },
-      { capabilities: { tools: {} } },
+  function mcp(): ReturnType<typeof createLegacyMcpServer> {
+    const server = createLegacyMcpServer();
+    server.setRequestHandler(ListToolsRequestSchema, async () =>
+      Promise.resolve({
+        tools: catalog.tools.map(({ name, description, inputSchema }) => ({
+          name,
+          description,
+          inputSchema,
+        })),
+      }),
     );
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: catalog.tools.map(({ name, description, inputSchema }) => ({
-        name,
-        description,
-        inputSchema: inputSchema as { type: 'object' },
-      })),
-    }));
     server.setRequestHandler(CallToolRequestSchema, async (input) => {
       const req = mcpRequestScope.getStore();
       if (!req) throw new Error('MCP_REQUEST_IDENTITY_UNCONFIRMED');
@@ -391,21 +413,21 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       if (!result.ok) throw new Error('MCP_APPLICATION_REJECTED');
       let value: unknown;
       for (const line of (await result.text()).split('\n').filter(Boolean)) {
-        const frame = JSON.parse(line) as ApplicationFrame;
+        const frame = ApplicationFrameSchema.parse(JSON.parse(line));
         if (frame.type === 'headers' && frame.status >= 400)
           throw new Error('MCP_APPLICATION_REJECTED');
         if (frame.type === 'error') throw new Error(frame.code);
         if (frame.type === 'result') value = frame.value;
       }
-      return value as { content: { type: 'text'; text: string }[] };
+      return CallToolResultSchema.parse(value);
     });
     return server;
   }
   const streams = new Map<string, StreamableHTTPServerTransport>(),
-    sses = new Map<string, SSEServerTransport>();
+    sses = new Map<string, ReturnType<typeof createLegacySseTransport>>();
   app.use(['/mcp', '/sse', '/messages'], async (req, res, next) => {
     try {
-      await refreshCatalog(res.locals.coordinatorResolutionDeadline);
+      await refreshCatalog(coordinatorDeadline(res));
       const auth = await fetch(
         (await coordinatorTarget()).origin + '/internal/application/authenticate',
         {
@@ -425,7 +447,9 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         res.status(auth.status).send(await auth.text());
         return;
       }
-      const result = (await auth.json()) as { headers: Record<string, string | number | string[]> };
+      const result = z
+        .object({ headers: z.record(z.union([z.string(), z.number(), z.array(z.string())])) })
+        .parse(await auth.json());
       for (const [name, value] of Object.entries(result.headers)) res.setHeader(name, value);
       next();
     } catch {
@@ -444,7 +468,8 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => ids.next(),
           onsessioninitialized: (sessionId) => {
-            streams.set(sessionId, transport!);
+            if (!transport) throw new Error('MCP_TRANSPORT_NOT_INITIALIZED');
+            streams.set(sessionId, transport);
           },
         });
         await mcp().connect(transport);
@@ -456,7 +481,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   });
   app.get('/sse', async (_req, res) => {
     try {
-      const transport = new SSEServerTransport('/messages', res);
+      const transport = createLegacySseTransport('/messages', res);
       sses.set(transport.sessionId, transport);
       res.once('close', () => sses.delete(transport.sessionId));
       await mcp().connect(transport);
@@ -496,13 +521,20 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         upstream.pipe(res);
       },
     );
-    proxy.once('error', () => failure(res));
+    proxy.once('error', () => {
+      failure(res);
+    });
     if (req.body !== undefined) proxy.end(JSON.stringify(req.body));
     else req.pipe(proxy);
   });
   const server = createServer(app);
-  server.on('upgrade', async (req, socket, head) => {
-    if (!req.url?.startsWith('/socket.io') || !isRequestOriginAllowed(req, network)) {
+  server.on('upgrade', (req, socket, head) => {
+    void proxyUpgrade(req, socket, head).catch(() => socket.destroy());
+  });
+  async function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const method = req.method,
+      url = req.url;
+    if (!method || !url?.startsWith('/socket.io') || !isRequestOriginAllowed(req, network)) {
       socket.destroy();
       return;
     }
@@ -515,7 +547,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     }
     const target = connect({ host: actual.hostname, port: Number(actual.port) });
     target.once('connect', () => {
-      let headers = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+      let headers = `${method} ${url} HTTP/${req.httpVersion}\r\n`;
       for (let i = 0; i < req.rawHeaders.length; i += 2)
         headers += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
       target.write(headers + '\r\n');
@@ -526,7 +558,7 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     target.once('close', () => socket.destroy());
     target.once('error', () => socket.destroy());
     socket.once('error', () => target.destroy());
-  });
+  }
   await new Promise<void>((ok, fail) => {
     server.once('error', fail);
     server.listen(Number(process.env.PORT ?? 3001), process.env.HOST ?? '127.0.0.1', ok);

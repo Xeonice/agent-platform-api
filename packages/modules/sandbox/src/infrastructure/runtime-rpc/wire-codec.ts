@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 /** JSON control messages retain binary bytes; streams use a separate response. */
 export function encodeOwnerValue(value: unknown): unknown {
   if (Buffer.isBuffer(value)) return { $ownerBytes: value.toString('base64') };
@@ -18,8 +19,8 @@ export function encodeOwnerValue(value: unknown): unknown {
 
 export function decodeOwnerValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(decodeOwnerValue);
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
+  if (isRecord(value)) {
+    const record = value;
     if (Object.keys(record).length === 1 && typeof record.$ownerBytes === 'string') {
       const bytes = Buffer.from(record.$ownerBytes, 'base64');
       if (bytes.toString('base64') !== record.$ownerBytes)
@@ -35,7 +36,6 @@ export function decodeOwnerValue(value: unknown): unknown {
 }
 
 export function ownerRecord(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Expected owner record');
-  return value as Record<string, unknown>;
+  if (!isRecord(value)) throw new Error('Expected owner record');
+  return value;
 }

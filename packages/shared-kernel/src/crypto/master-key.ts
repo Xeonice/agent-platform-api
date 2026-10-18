@@ -63,7 +63,7 @@ export class MasterKeySource {
     try {
       fd = openSync(path, 'wx', 0o600); // exclusive create
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      if (e instanceof Error && 'code' in e && e.code === 'EEXIST') {
         return readFileSync(path);
       }
       throw e;

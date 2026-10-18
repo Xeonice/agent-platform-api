@@ -1,3 +1,4 @@
+import { errorMessage, isRecord, asSandboxId } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   CLOCK,
@@ -184,7 +185,7 @@ export class RunAgentTaskWorkflow {
       actor: accepted.actor,
     });
     const pending = this.acceptedStarts.get(accepted.taskId);
-    if (pending && pending.epoch === epoch)
+    if (pending?.epoch === epoch)
       return pending.input === key
         ? pending.promise
         : Promise.reject(new Error('TASK_START_INTENT_CONFLICT'));
@@ -328,7 +329,7 @@ export class RunAgentTaskWorkflow {
       // this write, and the FK cascade rejects the insert. Leaving it would burn a
       // sandbox slot on an agent nobody can read, stop or account for — so the job is
       // stopped and released on the way out, and the caller learns the start failed.
-      this.logger.error(`task ${taskId} could not be persisted: ${(e as Error).message}`);
+      this.logger.error(`task ${taskId} could not be persisted: ${errorMessage(e)}`);
       // A durable accepted command and owner receipt can reconcile this job. A lost
       // writer lease/DB acknowledgement must not turn upgrade recovery into SIGKILL.
       if (this.startIntents) throw e;
@@ -400,7 +401,7 @@ export class RunAgentTaskWorkflow {
         // Same reasoning: a task that cannot even be re-attached is not "still
         // running", and leaving it that way is the orphan row this method exists to
         // prevent. `RESUME_FAILED` names the fact that recovery — not the run — broke.
-        this.logger.warn(`could not resume task ${task.id}: ${(e as Error).message}`);
+        this.logger.warn(`could not resume task ${task.id}: ${errorMessage(e)}`);
         if (!this.authority)
           this.landAndAnnounce(task, { status: 'failed', errorCode: 'RESUME_FAILED' });
         else
@@ -426,7 +427,7 @@ export class RunAgentTaskWorkflow {
           this.uow.run((tx) => this.startIntents?.completeSync(tx, id));
           continue;
         }
-        const sandbox = await this.sandboxes.findById(intent.sandboxId as Sandbox['id']);
+        const sandbox = await this.sandboxes.findById(asSandboxId(intent.sandboxId));
         if (this.retired(epoch)) return;
         if (!sandbox || !['running', 'idle'].includes(sandbox.status)) continue;
         const payload = DurableAgentTaskStartSchema.parse(JSON.parse(intent.payload));
@@ -459,7 +460,7 @@ export class RunAgentTaskWorkflow {
       } catch (error) {
         // Keep the accepted command queryable. Uncertainty is not a guest failure.
         this.logger.warn(
-          `pending task ${intent.taskId} awaits confirmation: ${(error as Error).message}`,
+          `pending task ${intent.taskId} awaits confirmation: ${errorMessage(error)}`,
         );
       }
     }
@@ -521,7 +522,7 @@ export class RunAgentTaskWorkflow {
       // Reached only when the pump could not be SET UP at all (a provider with no
       // job plane, an unreadable job handle). Nothing was acquired, so there is
       // nothing to release — the branches that DID acquire release inside `pump`.
-      this.logger.error(`task ${task.id} pump failed: ${(e as Error).message}`);
+      this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
       this.failWith(task, e);
     } finally {
       if (this.pumping.get(task.id) === epoch) this.pumping.delete(task.id);
@@ -552,7 +553,7 @@ export class RunAgentTaskWorkflow {
       // task and walk away, leaving the sandbox-side session and its attached
       // websocket alive for the life of the sandbox — while the row, now terminal, was
       // invisible to `findRunning()` and could never be cleaned up by anything else.
-      this.logger.error(`task ${task.id} pump failed: ${(e as Error).message}`);
+      this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
       this.failWith(task, e);
       await this.releaseAndForget(task.id, jobs, handle, job);
     }
@@ -648,7 +649,9 @@ export class RunAgentTaskWorkflow {
       // ignores it, or one that stopped answering). SIGTERM once, then SIGKILL on the
       // next pass — never a tight loop of signals.
       if (this.overdue(task)) {
-        this.logger.warn(`task ${task.id} exceeded ${task.timeoutMs}ms — forcing termination`);
+        this.logger.warn(
+          `task ${task.id} exceeded ${String(task.timeoutMs)}ms — forcing termination`,
+        );
         // ⚠️ REMEMBER WHY IT DIED. A signal-killed process has no exit code, so without
         // this flag `verdictFromExitCode(undefined)` lands the run as a generic
         // `failed` — and `timed_out` would then be reachable ONLY through the
@@ -691,8 +694,8 @@ export class RunAgentTaskWorkflow {
         if (!isRetryable(e) || attempt >= READ_RETRY_LIMIT) throw e;
         const backoff = Math.min(READ_RETRY_BASE_MS * 2 ** attempt, READ_RETRY_MAX_MS);
         this.logger.warn(
-          `task ${task.id} read failed (${(e as Error).message}); ` +
-            `retry ${attempt + 1}/${READ_RETRY_LIMIT} in ${backoff}ms`,
+          `task ${task.id} read failed (${errorMessage(e)}); ` +
+            `retry ${String(attempt + 1)}/${String(READ_RETRY_LIMIT)} in ${String(backoff)}ms`,
         );
         await sleep(backoff);
         if (this.retired(epoch)) return null;
@@ -729,7 +732,7 @@ export class RunAgentTaskWorkflow {
     const artifacts = await this.collectArtifacts(files, handle).catch((e: unknown) => {
       // artifact collection must never turn a SUCCEEDED run into a failure — the work
       // is done, we merely could not enumerate what it left behind.
-      this.logger.warn(`task ${task.id} artifact listing failed: ${(e as Error).message}`);
+      this.logger.warn(`task ${task.id} artifact listing failed: ${errorMessage(e)}`);
       return [] as TaskArtifact[];
     });
     if (this.retired(epoch)) return;
@@ -800,7 +803,7 @@ export class RunAgentTaskWorkflow {
     job: JobHandle,
   ): Promise<void> {
     await jobs.releaseJob(handle, job).catch((e: unknown) => {
-      this.logger.warn(`task ${taskId} releaseJob failed: ${(e as Error).message}`);
+      this.logger.warn(`task ${taskId} releaseJob failed: ${errorMessage(e)}`);
     });
     this.seqIndex.delete(taskId);
     await this.logs.release?.(taskId).catch(() => undefined);
@@ -926,14 +929,14 @@ export class RunAgentTaskWorkflow {
   /** Pull the facts the aggregate cares about out of the event stream. */
   private absorb(task: AgentTask, event: RuntimeEvent): void {
     if (event.type !== 'session-started') return;
-    const ref = (event.data as { ref?: unknown })?.ref;
+    const ref = isRecord(event.data) ? event.data.ref : undefined;
     if (typeof ref !== 'string') return;
     try {
       task.bindSessionRef(ref);
     } catch (e) {
       // a resume that attached to a DIFFERENT conversation is a real failure, but not
       // one worth throwing the running job away for — record it and let the run finish.
-      this.logger.error(`task ${task.id}: ${(e as Error).message}`);
+      this.logger.error(`task ${task.id}: ${errorMessage(e)}`);
     }
   }
 
@@ -1033,7 +1036,7 @@ function normalizedStartInput(input: StartAgentTaskInput) {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => {
     const t = setTimeout(r, ms);
-    t.unref?.();
+    t.unref();
   });
 }
 

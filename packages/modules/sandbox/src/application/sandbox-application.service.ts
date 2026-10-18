@@ -38,7 +38,6 @@ import type {
   SandboxDto,
   ProviderRegistry,
   SandboxProvider,
-  SandboxProviderCapabilities,
   SandboxHandle,
   WorkspacePreparer,
   ProjectAccessErrorCode,
@@ -266,9 +265,9 @@ export class SandboxApplicationService {
       if (e instanceof ProjectAccessError) {
         // The final project check precedes every write in this transaction. It
         // closes deletion/reclone races after the asynchronous admission reads.
-        return atDoor(async () => {
-          throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
-        });
+        return atDoor(() =>
+          Promise.reject(doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message)),
+        );
       }
       throw this.mapProviderError(e);
     }
@@ -471,7 +470,7 @@ export class SandboxApplicationService {
       throw doorRejection(
         HttpStatus.BAD_REQUEST,
         INVALID_IMAGE_REFERENCE_CODE,
-        `invalid image reference '${requested}'`,
+        `invalid image reference '${String(requested)}'`,
       );
     }
     try {
@@ -576,8 +575,14 @@ export class SandboxApplicationService {
     headless: boolean,
   ): void {
     const caps = provider.capabilities;
-    for (const [bit, demanded] of Object.entries(require ?? {})) {
-      if (demanded === true && !caps[bit as keyof SandboxProviderCapabilities]) {
+    for (const bit of [
+      'spawnTty',
+      'volumeMount',
+      'updateResources',
+      'pauseResume',
+      'snapshot',
+    ] as const) {
+      if (require?.[bit] && !caps[bit]) {
         throw this.unsupported(
           `provider '${provider.name}' does not support '${bit}', which this request requires`,
         );
@@ -730,7 +735,7 @@ export class SandboxApplicationService {
     const provider = this.registry.get(sandbox.provider);
     const handle = this.handleOf(sandbox);
     const operation = {
-      operationId: `sandbox-stop-${sandbox.id}:${sandbox.version + 1}`,
+      operationId: `sandbox-stop-${sandbox.id}:${String(sandbox.version + 1)}`,
       actor: this.authority?.current?.()?.actor ?? { kind: 'user' as const, id: 'platform-user' },
     };
     try {
@@ -760,13 +765,13 @@ export class SandboxApplicationService {
         this.uow.run((tx) =>
           this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
         );
-        return this.toDto(current);
+        return await this.toDto(current);
       }
       current.transitionTo('stopped', 'user', this.clock.now());
       this.persist(current, (tx) =>
         this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
       );
-      return this.toDto(current);
+      return await this.toDto(current);
     } catch (e) {
       const current = await this.repo.findById(sandbox.id);
       if (
@@ -847,18 +852,16 @@ export class SandboxApplicationService {
   private async withDeadline(work: Promise<ExecResult>, id: string): Promise<ExecResult> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new SandboxProviderError(
-              SandboxProviderErrorCode.TIMEOUT,
-              `command in sandbox ${id} did not finish within ${EXEC_TIMEOUT_MS / 1000}s`,
-              undefined,
-              true,
-            ),
+      timer = setTimeout(() => {
+        reject(
+          new SandboxProviderError(
+            SandboxProviderErrorCode.TIMEOUT,
+            `command in sandbox ${id} did not finish within ${String(EXEC_TIMEOUT_MS / 1000)}s`,
+            undefined,
+            true,
           ),
-        EXEC_TIMEOUT_MS,
-      );
+        );
+      }, EXEC_TIMEOUT_MS);
     });
     try {
       return await Promise.race([work, deadline]);

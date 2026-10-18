@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { asProjectId } from '@platform/shared-kernel';
@@ -126,9 +127,9 @@ function fixture() {
 describe('REQ-UPG-006/008 — real business reads consume the bridge representation', () => {
   it('reads the renamed column through production project repository while the retained source reader stays usable', async () => {
     const f = fixture();
-    expect((await f.oldReader.findById(f.project.id))!.name).toBe('Original project');
+    expect(assertDefined(await f.oldReader.findById(f.project.id)).name).toBe('Original project');
     expect(f.migration.projectionReadEvidence()).toEqual([]);
-    expect((await f.newReader.findById(f.project.id))!.name).toBe('Original project');
+    expect(assertDefined(await f.newReader.findById(f.project.id)).name).toBe('Original project');
     expect((await f.newReader.findAll())[0].id).toBe(f.project.id);
     expect(f.migration.projectionReadEvidence()).toMatchObject([
       {
@@ -145,17 +146,17 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
   it('withdraws a corrupt isolated new read and returns complete old authority without claiming a confirmed projection', async () => {
     const f = fixture();
     f.db.sqlite.prepare('UPDATE upg_shadow_project_display SET display_name=?').run('tampered');
-    expect((await f.newReader.findById(f.project.id))!.name).toBe('Original project');
+    expect(assertDefined(await f.newReader.findById(f.project.id)).name).toBe('Original project');
     expect(
       f.db.sqlite.prepare('SELECT read_epoch,degraded FROM upgrade_online_migrations').get(),
     ).toEqual({ read_epoch: 0, degraded: 1 });
     expect(f.migration.projectionReadEvidence()).toEqual([]);
-    expect((await f.oldReader.findById(f.project.id))!.name).toBe('Original project');
+    expect(assertDefined(await f.oldReader.findById(f.project.id)).name).toBe('Original project');
   });
   it('isolates missing shadow structure while a healthy source row continues to be served', async () => {
     const f = fixture();
     f.db.sqlite.exec('DROP TABLE upg_shadow_project_display');
-    expect((await f.newReader.findById(f.project.id))!.name).toBe('Original project');
+    expect(assertDefined(await f.newReader.findById(f.project.id)).name).toBe('Original project');
     expect(
       f.db.sqlite.prepare('SELECT read_epoch,degraded,reason FROM upgrade_online_migrations').get(),
     ).toEqual({ read_epoch: 0, degraded: 1, reason: 'SHADOW_READ_UNAVAILABLE' });
@@ -180,8 +181,8 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
       .prepare('SELECT name FROM projects WHERE id=?')
       .get(f.project.id) as { name: string };
     expect(physical.name).toMatch(/^~r[a-f0-9]{8}v0:[a-f0-9]{24}$/);
-    expect((await f.newReader.findById(f.project.id))!.name).toBe(f.project.name);
-    expect((await f.newReader.findByName(f.project.name))!.id).toBe(f.project.id);
+    expect(assertDefined(await f.newReader.findById(f.project.id)).name).toBe(f.project.name);
+    expect(assertDefined(await f.newReader.findByName(f.project.name)).id).toBe(f.project.id);
     const created = Project.create({
       id: asProjectId('post-contract'),
       name: 'After cleanup',
@@ -190,7 +191,7 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
       now: NOW,
     });
     f.db.uow.run((tx) => f.newReader.saveSync(tx, created));
-    expect((await f.newReader.findByName('After cleanup'))!.id).toBe(created.id);
+    expect(assertDefined(await f.newReader.findByName('After cleanup')).id).toBe(created.id);
     f.db.uow.run((tx) =>
       f.newReader.saveSync(
         tx,
@@ -204,7 +205,9 @@ describe('REQ-UPG-006/008 — real business reads consume the bridge representat
       ),
     );
     expect(await f.newReader.findByName('After cleanup')).toBeNull();
-    expect((await f.newReader.findByName('Updated after cleanup'))!.id).toBe(created.id);
+    expect(assertDefined(await f.newReader.findByName('Updated after cleanup')).id).toBe(
+      created.id,
+    );
     f.db.uow.run((tx) => f.newReader.deleteSync(tx, created.id));
     expect(await f.newReader.findByName('Updated after cleanup')).toBeNull();
     expect(

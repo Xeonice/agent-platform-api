@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import {
   Body,
   ConflictException,
@@ -233,10 +234,14 @@ export class SystemController {
   async diagnose(@Res() res: SseResponse): Promise<void> {
     const writer = new SseWriter(res);
     const controller = new AbortController();
-    writer.onClose(() => controller.abort());
+    writer.onClose(() => {
+      controller.abort();
+    });
     writer.open();
     try {
-      await this.diagnostics.run((frame) => writer.send(frame), controller.signal);
+      await this.diagnostics.run((frame) => {
+        writer.send(frame);
+      }, controller.signal);
     } finally {
       writer.close();
     }
@@ -300,7 +305,7 @@ export class SystemController {
     } catch (e) {
       // ⚠️ 流已经开了 ⇒ 失败只能在流里说，但**必须说得出是哪一阶段**。
       //    `done { ok: false }` 而不是静静断开：断开在前端看来与网络抖动无法区分。
-      writer.send({ event: 'done', ok: false, error: (e as Error).message });
+      writer.send({ event: 'done', ok: false, error: errorMessage(e) });
     } finally {
       writer.close();
     }

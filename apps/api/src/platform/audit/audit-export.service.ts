@@ -18,6 +18,7 @@ import { env } from '../config/env';
 import { AuditRepository } from './audit.repository';
 import { DiagnosticSnapshotService } from './diagnostic-snapshot.service';
 import { redactAuditDetail } from './audit-redaction';
+import { errorMessage } from '@platform/shared-kernel';
 
 /** P21-5 §10.3：取「最近 24h」与「50MB」中先到的那个。 */
 export const EXPORT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -149,8 +150,8 @@ export class AuditExportService {
     lines.reverse();
     await writeFile(join(dir, 'audit.jsonl'), lines.join(''), 'utf8');
 
-    const first = lines[0];
-    const last = lines[lines.length - 1];
+    const first = lines.at(0);
+    const last = lines.at(-1);
     return {
       included: true,
       events: lines.length,
@@ -186,7 +187,7 @@ export class AuditExportService {
     try {
       stream = this.runtimeLog.read({ from, to, maxBytes: budget });
     } catch (e) {
-      this.logger.warn(`runtime log reader threw: ${(e as Error).message}`);
+      this.logger.warn(`runtime log reader threw: ${errorMessage(e)}`);
       return {
         included: false,
         omittedReason: '读取运行日志失败，已省略这一份；审计与诊断快照仍包含在包内。',
@@ -202,7 +203,7 @@ export class AuditExportService {
     try {
       await pipeline(stream, createWriteStream(target));
     } catch (error) {
-      this.logger.warn(`runtime log stream failed: ${(error as Error).message}`);
+      this.logger.warn(`runtime log stream failed: ${errorMessage(error)}`);
       return {
         included: false,
         omittedReason: '读取运行日志失败，已省略这一份；审计与诊断快照仍包含在包内。',

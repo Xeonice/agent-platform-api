@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { lstat, readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { SystemClock } from '../time/system-clock';
@@ -8,6 +9,13 @@ export interface CoordinatorBinding {
   generation: number;
   artifactDigest: string;
 }
+const CoordinatorBindingSchema = z.object({
+  instanceId: z.string(),
+  state: z.enum(['ready', 'quiescing']),
+  origin: z.string(),
+  generation: z.number().int().positive(),
+  artifactDigest: z.string(),
+});
 export function createCoordinatorResolver(
   initial: URL,
   instanceId: string,
@@ -18,13 +26,13 @@ export function createCoordinatorResolver(
   return async (logicalDeadline) => {
     if (!path) return initial;
     const deadline = Math.min(clock.now().getTime() + 1750, logicalDeadline ?? Infinity);
-    while (true) {
+    for (;;) {
       const stat = await lstat(path);
       if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0)
         throw new Error('UNTRUSTED_COORDINATOR_BINDING');
       const value: unknown = JSON.parse(await readFile(path, 'utf8'));
       if (!value || typeof value !== 'object') throw new Error('INVALID_COORDINATOR_BINDING');
-      const binding = value as CoordinatorBinding,
+      const binding = CoordinatorBindingSchema.parse(value),
         target = new URL(binding.origin);
       if (
         binding.instanceId !== instanceId ||
@@ -41,8 +49,7 @@ export function createCoordinatorResolver(
       )
         throw new Error('INVALID_COORDINATOR_BINDING');
       if (binding.state === 'ready') return target;
-      if (binding.state !== 'quiescing' || clock.now().getTime() >= deadline)
-        throw new Error('COORDINATOR_HANDOFF_BUDGET_EXCEEDED');
+      if (clock.now().getTime() >= deadline) throw new Error('COORDINATOR_HANDOFF_BUDGET_EXCEEDED');
       // No application command has been dispatched while waiting here.
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }

@@ -1,12 +1,11 @@
+import { readSqlite } from './read-sqlite';
 import { Inject, Injectable } from '@nestjs/common';
 import { eq, ne, and, inArray, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { DATABASE } from '@platform/shared-kernel';
+import { DATABASE, isRecord, asSandboxId, asProjectId } from '@platform/shared-kernel';
 import type { SandboxId, ProjectId, Tx } from '@platform/shared-kernel';
 import { Sandbox } from '../../../domain/entities/sandbox.entity';
 import { InitialTask } from '../../../domain/value-objects/initial-task.vo';
-import type { SandboxStatus } from '../../../domain/value-objects/sandbox-status.vo';
-import type { TriggeredBy } from '../../../domain/entities/state-transition.entity';
 import {
   isProjectTaskActive,
   type SandboxRepository,
@@ -25,7 +24,7 @@ import {
   type SandboxTransitionRow,
 } from '../schema/sandbox.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * SQLite (better-sqlite3 + Drizzle) implementation of the SandboxRepository port.
@@ -37,71 +36,81 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 export class SqliteSandboxRepository implements SandboxRepository {
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
-  async findImageReferences(manifestId: string): Promise<SandboxImageReference[]> {
-    // A narrow projection via the sandbox application facade, without importing project internals.
-    return this.db
-      .all<SandboxImageReference>(
-        sql`
+  findImageReferences(manifestId: string): Promise<SandboxImageReference[]> {
+    return readSqlite(() => {
+      // A narrow projection via the sandbox application facade, without importing project internals.
+      return this.db
+        .all<Omit<SandboxImageReference, 'headless'> & { headless: number }>(
+          sql`
       select s.id, s.name, s.status, s.project_id as projectId,
              coalesce(p.name, '项目已删除') as projectName, s.headless
       from sandboxes s left join projects p on p.id = s.project_id
       where s.image_ref = ${manifestId} and s.status != 'destroyed'
       order by s.created_at, s.id
     `,
-      )
-      .map((row) => ({ ...row, headless: Boolean(row.headless) }));
+        )
+        .map((row) => ({ ...row, headless: Boolean(row.headless) }));
+    });
   }
 
-  async findById(id: SandboxId): Promise<Sandbox | null> {
-    const row = this.db.select().from(sandboxes).where(eq(sandboxes.id, id)).get();
-    if (!row) return null;
-    const transitions = this.db
-      .select()
-      .from(sandboxStateTransitions)
-      .where(eq(sandboxStateTransitions.sandboxId, id))
-      .orderBy(sql`${sandboxStateTransitions}.rowid`)
-      .all();
-    return this.toDomain(row, transitions);
-  }
-
-  async findByProject(projectId: ProjectId): Promise<Sandbox[]> {
-    const rows = this.db.select().from(sandboxes).where(eq(sandboxes.projectId, projectId)).all();
-    return rows.map((row) => {
+  findById(id: SandboxId): Promise<Sandbox | null> {
+    return readSqlite(() => {
+      const row = this.db.select().from(sandboxes).where(eq(sandboxes.id, id)).get();
+      if (!row) return null;
       const transitions = this.db
         .select()
         .from(sandboxStateTransitions)
-        .where(eq(sandboxStateTransitions.sandboxId, row.id))
+        .where(eq(sandboxStateTransitions.sandboxId, id))
         .orderBy(sql`${sandboxStateTransitions}.rowid`)
         .all();
       return this.toDomain(row, transitions);
     });
   }
 
-  async findAll(): Promise<Sandbox[]> {
-    const rows = this.db.select().from(sandboxes).all();
-    return rows.map((row) => {
-      const transitions = this.db
-        .select()
-        .from(sandboxStateTransitions)
-        .where(eq(sandboxStateTransitions.sandboxId, row.id))
-        .orderBy(sql`${sandboxStateTransitions}.rowid`)
-        .all();
-      return this.toDomain(row, transitions);
+  findByProject(projectId: ProjectId): Promise<Sandbox[]> {
+    return readSqlite(() => {
+      const rows = this.db.select().from(sandboxes).where(eq(sandboxes.projectId, projectId)).all();
+      return rows.map((row) => {
+        const transitions = this.db
+          .select()
+          .from(sandboxStateTransitions)
+          .where(eq(sandboxStateTransitions.sandboxId, row.id))
+          .orderBy(sql`${sandboxStateTransitions}.rowid`)
+          .all();
+        return this.toDomain(row, transitions);
+      });
     });
   }
 
-  async countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
-    const out: Record<string, number> = {};
-    for (const id of projectIds) out[id] = 0; // ensure every requested id is present
-    if (projectIds.length === 0) return out;
-    const rows = this.db
-      .select({ projectId: sandboxes.projectId, n: sql<number>`count(*)` })
-      .from(sandboxes)
-      .where(and(inArray(sandboxes.projectId, projectIds), ne(sandboxes.status, 'destroyed')))
-      .groupBy(sandboxes.projectId)
-      .all();
-    for (const row of rows) out[row.projectId] = row.n;
-    return out;
+  findAll(): Promise<Sandbox[]> {
+    return readSqlite(() => {
+      const rows = this.db.select().from(sandboxes).all();
+      return rows.map((row) => {
+        const transitions = this.db
+          .select()
+          .from(sandboxStateTransitions)
+          .where(eq(sandboxStateTransitions.sandboxId, row.id))
+          .orderBy(sql`${sandboxStateTransitions}.rowid`)
+          .all();
+        return this.toDomain(row, transitions);
+      });
+    });
+  }
+
+  countActiveByProject(projectIds: string[]): Promise<Record<string, number>> {
+    return readSqlite(() => {
+      const out: Record<string, number> = {};
+      for (const id of projectIds) out[id] = 0; // ensure every requested id is present
+      if (projectIds.length === 0) return out;
+      const rows = this.db
+        .select({ projectId: sandboxes.projectId, n: sql<number>`count(*)` })
+        .from(sandboxes)
+        .where(and(inArray(sandboxes.projectId, projectIds), ne(sandboxes.status, 'destroyed')))
+        .groupBy(sandboxes.projectId)
+        .all();
+      for (const row of rows) out[row.projectId] = row.n;
+      return out;
+    });
   }
 
   deleteByProjectSync(_tx: Tx, projectId: ProjectId): DeletedProjectSandbox[] {
@@ -136,18 +145,20 @@ export class SqliteSandboxRepository implements SandboxRepository {
     }));
   }
 
-  async listPendingProjectCleanup(): Promise<DeletedProjectSandbox[]> {
-    return this.db
-      .select()
-      .from(sandboxProjectCleanupJobs)
-      .all()
-      .map((row) => ({
-        id: row.sandboxId,
-        provider: row.provider,
-        providerSandboxId: row.providerSandboxId,
-        providerState: decodeProviderState(row.providerState),
-        workspacePath: row.workspacePath,
-      }));
+  listPendingProjectCleanup(): Promise<DeletedProjectSandbox[]> {
+    return readSqlite(() => {
+      return this.db
+        .select()
+        .from(sandboxProjectCleanupJobs)
+        .all()
+        .map((row) => ({
+          id: row.sandboxId,
+          provider: row.provider,
+          providerSandboxId: row.providerSandboxId,
+          providerState: decodeProviderState(row.providerState),
+          workspacePath: row.workspacePath,
+        }));
+    });
   }
 
   completeProjectCleanupSync(_tx: Tx, sandboxId: string): void {
@@ -245,7 +256,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
     for (const [offset, t] of sandbox.pendingTransitions.entries()) {
       db.insert(sandboxStateTransitions)
         .values({
-          id: `${sandbox.id}-transition-${history.length - sandbox.pendingTransitions.length + offset}`,
+          id: `${sandbox.id}-transition-${String(history.length - sandbox.pendingTransitions.length + offset)}`,
           sandboxId: sandbox.id as string,
           fromStatus: t.from,
           toStatus: t.to,
@@ -260,13 +271,13 @@ export class SqliteSandboxRepository implements SandboxRepository {
 
   private toDomain(row: SandboxRow, transitions: SandboxTransitionRow[]): Sandbox {
     return Sandbox.rehydrate({
-      id: row.id as SandboxId,
-      projectId: row.projectId as ProjectId,
+      id: asSandboxId(row.id),
+      projectId: asProjectId(row.projectId),
       runtime: row.runtime,
       imageRef: row.imageRef ?? '',
       provider: row.provider,
       name: row.name ?? '',
-      status: row.status as SandboxStatus,
+      status: row.status,
       headless: row.headless,
       timeoutMinutes: row.timeoutMinutes,
       idleTimeoutSec: row.idleTimeoutSec,
@@ -280,17 +291,17 @@ export class SqliteSandboxRepository implements SandboxRepository {
       }),
       failureCode: row.failureCode,
       failureReason: row.failureReason,
-      failureOperation: row.failureOperation as Sandbox['failureOperation'],
+      failureOperation: decodeFailureOperation(row.failureOperation),
       sourceAutomationId: row.sourceAutomationId,
       sourceAutomationName: row.sourceAutomationName,
-      artifactRetentionDays: row.artifactRetentionDays as 3 | 7 | 30 | null,
+      artifactRetentionDays: decodeRetentionDays(row.artifactRetentionDays),
       automationFinishedAt: row.automationFinishedAt,
       version: row.version,
       transitions: transitions.map((t) => ({
-        from: t.fromStatus as SandboxStatus | null,
-        to: t.toStatus as SandboxStatus,
+        from: t.fromStatus,
+        to: t.toStatus,
         at: t.at,
-        triggeredBy: t.triggeredBy as TriggeredBy,
+        triggeredBy: t.triggeredBy,
       })),
     });
   }
@@ -345,11 +356,27 @@ function decodeProviderState(raw: string | null): Record<string, unknown> | null
   if (raw === null || raw === '') return null;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+    if (isRecord(parsed)) {
+      return parsed;
     }
   } catch {
     /* fall through — 见上面的注释：null 比半个状态诚实 */
   }
   return null;
+}
+
+function decodeFailureOperation(value: string | null): Sandbox['failureOperation'] {
+  if (
+    value === null ||
+    value === 'provision' ||
+    value === 'start' ||
+    value === 'stop' ||
+    value === 'destroy'
+  )
+    return value;
+  throw new Error('INVALID_SANDBOX_FAILURE_OPERATION');
+}
+function decodeRetentionDays(value: number | null): 3 | 7 | 30 | null {
+  if (value === null || value === 3 || value === 7 || value === 30) return value;
+  throw new Error('INVALID_SANDBOX_ARTIFACT_RETENTION');
 }

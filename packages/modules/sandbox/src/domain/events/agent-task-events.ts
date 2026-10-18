@@ -1,4 +1,4 @@
-import type { AgentTaskId, DomainEvent, SandboxId } from '@platform/shared-kernel';
+import type { AgentTaskId, DomainEvent, SandboxId } from '@platform/shared-kernel/pure';
 import type { AgentTaskStatus } from '../value-objects/agent-task-status.vo';
 
 /**

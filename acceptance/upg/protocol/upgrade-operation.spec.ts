@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -31,7 +32,7 @@ import {
 import type { UpgradeInspector } from '../../../apps/api/src/platform/upgrade/upgrade-inspector';
 import type { UpgradeCatalog } from '../../../apps/api/src/platform/upgrade/upgrade-catalog';
 import { currentDatabase } from '../../support/sqlite';
-import { deferred, useEnv } from '../../support/strict-ports';
+import { deferred, useEnv, unused } from '../../support/strict-ports';
 import {
   planFixtureEnvelope,
   planFixtureRoots,
@@ -254,7 +255,7 @@ function confirmTechnicalStage(f: Awaited<ReturnType<typeof fixture>>, attemptId
     });
   }
   const snapshot = f.store.snapshot(attemptId),
-    before = f.store.confirmed()!;
+    before = assertDefined(f.store.confirmed());
   commit(
     'activation-confirmed',
     {},
@@ -323,7 +324,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     const accepted = (await f.post().expect(202)).body;
     f.preparation.resolve({ resources: [] });
     await f.service.advanceOperation();
-    const first = f.store.latest()!;
+    const first = assertDefined(f.store.latest());
     confirmTechnicalStage(f, first.attemptId);
     const resumed = new UpgradeService(
       f.store,
@@ -335,7 +336,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
       new UpgradeOperationStore(f.store, f.clock, f.ids),
     );
     await resumed.advanceOperation();
-    expect(f.operations.latest()!.operation).toMatchObject({
+    expect(assertDefined(f.operations.latest()).operation).toMatchObject({
       operationId: accepted.operationId,
       currentStageIndex: 1,
       state: 'preparing',
@@ -343,12 +344,12 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     });
     expect(f.store.attempt(first.attemptId).percent).toBe(100);
     await resumed.advanceOperation();
-    const final = f.store.latest()!;
+    const final = assertDefined(f.store.latest());
     expect(final.attemptId).not.toBe(first.attemptId);
     expect(final.targetDigest).toBe(f.command.targetDigest);
     confirmTechnicalStage(f, final.attemptId);
     await resumed.advanceOperation();
-    expect(f.operations.latest()!.operation).toMatchObject({
+    expect(assertDefined(f.operations.latest()).operation).toMatchObject({
       state: 'completed',
       percent: 100,
       currentStageIndex: 1,
@@ -362,11 +363,11 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     await f.post().expect(202);
     f.preparation.resolve({ resources: [] });
     await f.service.advanceOperation();
-    const first = f.store.latest()!;
+    const first = assertDefined(f.store.latest());
     confirmTechnicalStage(f, first.attemptId);
     f.installedProof.mockResolvedValue({ qualified: false });
     await f.service.advanceOperation();
-    expect(f.operations.latest()!.operation).toMatchObject({
+    expect(assertDefined(f.operations.latest()).operation).toMatchObject({
       state: 'deferred',
       reason: 'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
       percent: null,
@@ -436,7 +437,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
           expectedActivationGeneration: 1,
           acknowledgeRollbackClosure: true,
         },
-        {} as never,
+        unused<Parameters<UpgradeContractStore['accept']>[2]>('unused contract plan'),
         0,
       ),
     ).toThrow('UPGRADE_ALREADY_ACTIVE');
@@ -470,7 +471,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     await f.post().expect(202);
     f.preparation.resolve({ resources: [] });
     await f.service.advanceOperation();
-    const attempt = f.store.latest()!;
+    const attempt = assertDefined(f.store.latest());
     confirmTechnicalStage(f, attempt.attemptId);
     const checking = deferred<{ qualified: boolean }>();
     f.installedProof.mockImplementation(() => checking.promise);
@@ -488,7 +489,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     });
     checking.resolve({ qualified: true });
     await advancing;
-    expect(f.operations.latest()!.operation).toMatchObject({
+    expect(assertDefined(f.operations.latest()).operation).toMatchObject({
       state: 'deferred',
       percent: null,
       reason: 'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
@@ -516,7 +517,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
       await f.post().expect(202);
       f.preparation.resolve({ resources: [] });
       await f.service.advanceOperation();
-      const attempt = f.store.latest()!;
+      const attempt = assertDefined(f.store.latest());
       confirmTechnicalStage(f, attempt.attemptId);
       images.mockReturnValue([
         {
@@ -528,7 +529,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
         },
       ]);
       await f.service.advanceOperation();
-      const update = f.operations.latest()!.operation.defaultImageUpdate;
+      const update = assertDefined(f.operations.latest()).operation.defaultImageUpdate;
       if (managed)
         expect(update).toMatchObject({
           scope: 'managed-default',
@@ -552,9 +553,9 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     await f.post().expect(202);
     f.preparation.resolve({ resources: [] });
     await f.service.advanceOperation();
-    confirmTechnicalStage(f, f.store.latest()!.attemptId);
+    confirmTechnicalStage(f, assertDefined(f.store.latest()).attemptId);
     await f.service.advanceOperation();
-    expect(f.operations.latest()!.operation).toMatchObject({
+    expect(assertDefined(f.operations.latest()).operation).toMatchObject({
       state: 'completed',
       percent: 100,
       defaultImageUpdate: null,
@@ -562,7 +563,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
   });
   it('keeps the measured partial source tuple consistent between the catalog plan and actual attempt admission', async () => {
     const f = await fixture();
-    const source = f.store.confirmed()!,
+    const source = assertDefined(f.store.confirmed()),
       failed = planFixtureEnvelope(source, '0.2.9');
     const failedPlan = freezeUpgradeChain(failed, source, [failed])[0].plan;
     const old = f.store.accept(
@@ -611,7 +612,7 @@ describe('one explicit final-target operation with fast authenticated reads', ()
     await f.post().expect(202);
     f.preparation.resolve({ resources: [] });
     await f.service.advanceOperation();
-    const accepted = f.store.latest()!;
+    const accepted = assertDefined(f.store.latest());
     expect(accepted.state).toBe('accepted');
     expect(
       f.store.snapshot(accepted.attemptId).sourceActual?.components.installer.artifactDigest,

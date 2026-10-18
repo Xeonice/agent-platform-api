@@ -52,7 +52,7 @@ export class WaitingInputDetector implements WaitingInputObserver, OnModuleInit,
     // 06 §8.1: bounded tail for the last nonempty line, not a scrollback buffer.
     let start = Math.max(0, bytes.length - 4096);
     // Start at a UTF-8 boundary so decoding cannot expand a cut byte into a replacement character.
-    while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
     observation.tailBuffer = bytes.subarray(start).toString('utf8');
     observation.waiting = false;
     this.recompute(observation.sandboxId, sessionId);
@@ -109,7 +109,9 @@ export class WaitingInputDetector implements WaitingInputObserver, OnModuleInit,
   }
 
   onModuleInit(): void {
-    this.timer = setInterval(() => this.tick(), 1000);
+    this.timer = setInterval(() => {
+      this.tick();
+    }, 1000);
     this.timer.unref();
   }
   onModuleDestroy(): void {

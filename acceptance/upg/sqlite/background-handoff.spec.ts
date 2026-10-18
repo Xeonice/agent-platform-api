@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { asProjectId } from '@platform/shared-kernel';
 import { CloneProjectWorkflow } from '../../../packages/modules/project/src/application/clone-project.workflow';
@@ -53,13 +54,13 @@ describe('REQ-UPG-001/006 — accepted background clone drains before a writer h
     const operation = await entered.promise;
     expect(flow.pauseOwnership()).toBe(false);
     expect(operation.signal.aborted).toBe(false);
-    expect((await repo.findById(project.id))!.cloneStatus).toBe('cloning');
+    expect(assertDefined(await repo.findById(project.id)).cloneStatus).toBe('cloning');
     expect(
       broadcaster.events.some((event) => 'errorCode' in event && event.errorCode === 'INTERRUPTED'),
     ).toBe(false);
     finish.resolve();
     await vi.waitFor(async () =>
-      expect((await repo.findById(project.id))!.cloneStatus).toBe('ready'),
+      expect(assertDefined(await repo.findById(project.id)).cloneStatus).toBe('ready'),
     );
     await vi.waitFor(() => expect(flow.pauseOwnership()).toBe(true));
     expect(baseline.removed).toEqual([project.baselinePath]);

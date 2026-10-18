@@ -45,7 +45,11 @@ export const resourceAllocations = sqliteTable(
     allocatedAt: integer('allocated_at', { mode: 'timestamp' }).notNull(),
     /** **NULL = 当前活跃占用**；置值后不可回退（23 I-RA-1）。 */
     releasedAt: integer('released_at', { mode: 'timestamp' }),
-    reconciliationStatus: text('reconciliation_status').notNull().default('pending'),
+    reconciliationStatus: text('reconciliation_status', {
+      enum: ['confirmed', 'pending', 'orphaned'],
+    })
+      .notNull()
+      .default('pending'),
   },
   (t) => ({
     sandboxIdx: index('idx_alloc_sandbox').on(t.sandboxId),

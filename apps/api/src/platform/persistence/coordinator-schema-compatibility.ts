@@ -11,13 +11,17 @@ export function assertCoordinatorMigrationCompatibility(
   allowEmpty = false,
 ): void {
   const journal = sqlite
-    .prepare("SELECT 1 FROM sqlite_master WHERE name='__drizzle_migrations'")
+    .prepare<unknown[], { found: number }>(
+      "SELECT 1 AS found FROM sqlite_master WHERE name='__drizzle_migrations'",
+    )
     .get();
-  requireUpgrade(journal || allowEmpty, 'ONLINE_MIGRATION_REQUIRED');
+  requireUpgrade(journal ?? allowEmpty, 'ONLINE_MIGRATION_REQUIRED');
   if (!journal) return;
-  const applied = (
-    sqlite.prepare('SELECT count(*) n FROM __drizzle_migrations').get() as { n: number }
-  ).n;
+  const count = sqlite
+    .prepare<unknown[], { n: number }>('SELECT count(*) n FROM __drizzle_migrations')
+    .get();
+  requireUpgrade(count, 'ONLINE_MIGRATION_REQUIRED');
+  const applied = count.n;
   requireUpgrade(
     (allowEmpty && applied === 0) ||
       applied === localMigrationCount ||

@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import type { RuntimeEvent } from '@platform/contracts';
 import { extractOsc8Urls, stripAnsi } from '../ansi.util';
 
@@ -185,29 +186,23 @@ function flattenContent(raw: unknown): string {
   if (typeof raw === 'string') return raw;
   if (!Array.isArray(raw)) return '';
   return raw
-    .map((b) =>
-      typeof b === 'object' && b !== null ? str((b as Record<string, unknown>).text) : '',
-    )
+    .map((b) => (isRecord(b) ? str(b.text) : ''))
     .filter((t) => t !== '')
     .join('');
 }
 
 function contentBlocks(e: Record<string, unknown>): Record<string, unknown>[] {
   const message = e.message;
-  if (typeof message !== 'object' || message === null) return [];
-  const content = (message as Record<string, unknown>).content;
+  if (!isRecord(message)) return [];
+  const content = message.content;
   if (!Array.isArray(content)) return [];
-  return content.filter(
-    (b): b is Record<string, unknown> => typeof b === 'object' && b !== null && !Array.isArray(b),
-  );
+  return content.filter(isRecord);
 }
 
 function safeJsonObject(line: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(line);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }

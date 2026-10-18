@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 
 /** A durable command reservation preceding any guest start side effect. */
 export interface AgentTaskStartIntent {

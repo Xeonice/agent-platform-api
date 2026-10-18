@@ -78,7 +78,7 @@ import { RuntimeController } from './http/runtime.controller';
       provide: AUTH_HELPER,
       inject: [ContainerAuthHelper, HostAuthHelper],
       useFactory: (container: ContainerAuthHelper, host: HostAuthHelper): unknown =>
-        (process.env['AUTH_HELPER_MODE'] ?? 'container') === 'host' ? host : container,
+        (process.env.AUTH_HELPER_MODE ?? 'container') === 'host' ? host : container,
     },
     {
       /**

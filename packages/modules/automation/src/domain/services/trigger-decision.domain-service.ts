@@ -55,8 +55,8 @@ export interface TriggerDecisionInput {
  * 后面，会让一次两小时的宕机在历史里显示成一串 `PREVIOUS_RUNNING`，把停机这件事
  * 彻底掩盖掉。
  */
-export class TriggerDecisionService {
-  static decide(input: TriggerDecisionInput): TriggerDecision {
+export const TriggerDecisionService = Object.freeze({
+  decide(input: TriggerDecisionInput): TriggerDecision {
     const { automation, previousRun, now } = input;
     const thresholdMin = input.missedThresholdMin ?? DEFAULT_MISSED_THRESHOLD_MIN;
 
@@ -90,5 +90,5 @@ export class TriggerDecisionService {
 
     // ── 4. 创建标准无头 Task（行 4）─────────────────────────────────────────
     return Decisions.trigger();
-  }
-}
+  },
+});

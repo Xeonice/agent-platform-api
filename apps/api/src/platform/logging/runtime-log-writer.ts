@@ -82,7 +82,7 @@ export class RuntimeLogWriter {
 
   /** 第 n 份已轮转文件（n ≥ 1，n 越大越旧）。 */
   rotatedPath(n: number): string {
-    return `${this.currentPath}.${n}`;
+    return `${this.currentPath}.${String(n)}`;
   }
 
   /** 现存日志文件，**从旧到新** —— reader 按这个顺序拼接就是时间序。 */
@@ -147,7 +147,9 @@ export class RuntimeLogWriter {
       return;
     }
     // ⛔ 顺序不可换：先 end()，rename 只能发生在它的 callback 里。见类注释。
-    old.end(() => this.finishRotate());
+    old.end(() => {
+      this.finishRotate();
+    });
   }
 
   private finishRotate(): void {
@@ -213,7 +215,9 @@ export class RuntimeLogWriter {
     // **未捕获的 'error' 事件 ⇒ 进程退出**。日志是观察设施,绝不许它把平台带走。
     // 降级路径:停止落盘、往 stderr 说一次为什么 —— stdout/stderr 那条出口还在
     //(落盘与 stdout 并存的另一半价值,shared/11 §1.2.1)。
-    ws.on('error', (err: Error) => this.disable(err.message));
+    ws.on('error', (err: Error) => {
+      this.disable(err.message);
+    });
     this.ws = ws;
   }
 

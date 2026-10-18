@@ -1,3 +1,4 @@
+import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { z } from 'zod';
 
 export const ApplicationRequestSchema = z
@@ -29,7 +30,7 @@ export interface ApplicationRoute {
   path: string;
   verb: string;
   status: number;
-  args: { index: number; type: number; name?: string; passthrough?: boolean }[];
+  args: { index: number; type: RouteParamtypes; name?: string; passthrough?: boolean }[];
 }
 export type ApplicationFrame =
   | { type: 'headers'; status: number; headers: Record<string, string | number | string[]> }
@@ -47,3 +48,43 @@ export interface ApplicationCatalog {
     operation: string;
   }[];
 }
+
+/** Private transport is still an external input boundary after serialization. */
+export const ApplicationFrameSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('headers'),
+    status: z.number().int(),
+    headers: z.record(z.union([z.string(), z.number(), z.array(z.string())])),
+  }),
+  z.object({ type: z.literal('result'), value: z.unknown().optional() }),
+  z.object({ type: z.literal('bytes'), data: z.string() }),
+  z.object({ type: z.literal('error'), code: z.string() }),
+  z.object({ type: z.literal('complete') }),
+]);
+export const ApplicationCatalogSchema = z.object({
+  protocol: z.object({ min: z.number().int(), max: z.number().int() }),
+  routes: z.array(
+    z.object({
+      operation: z.string(),
+      path: z.string(),
+      verb: z.string(),
+      status: z.number().int(),
+      args: z.array(
+        z.object({
+          index: z.number().int().nonnegative(),
+          type: z.nativeEnum(RouteParamtypes),
+          name: z.string().optional(),
+          passthrough: z.boolean().optional(),
+        }),
+      ),
+    }),
+  ),
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      description: z.string(),
+      inputSchema: z.object({ type: z.literal('object') }).passthrough(),
+      operation: z.string(),
+    }),
+  ),
+});

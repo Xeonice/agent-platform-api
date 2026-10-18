@@ -1,8 +1,9 @@
+import { readSqlite } from './read-sqlite';
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { DATABASE, fromEpochMs, type Tx } from '@platform/shared-kernel';
+import { DATABASE, fromEpochMs, isRecord, type Tx } from '@platform/shared-kernel';
 import type {
   JobCompletionObservation,
   JobCompletionReceipt,
@@ -16,8 +17,8 @@ function canonical(value: unknown): string {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
       .join(',')}}`;
-  const encoded = JSON.stringify(value);
-  if (encoded === undefined) throw new Error('JOB_COMPLETION_INVALID_FACT');
+  const encoded: unknown = JSON.stringify(value);
+  if (typeof encoded !== 'string') throw new Error('JOB_COMPLETION_INVALID_FACT');
   return encoded;
 }
 
@@ -50,7 +51,7 @@ export function jobCompletionEvidenceDigest(
     .digest('hex')}`;
 }
 
-type Row = {
+interface Row {
   task_id: string;
   sandbox_id: string;
   provider: string;
@@ -61,7 +62,7 @@ type Row = {
   exit_kind: JobCompletionReceipt['exitKind'];
   observed_at: number;
   evidence_digest: string;
-};
+}
 function decode(row: Row): JobCompletionReceipt {
   return {
     taskId: row.task_id,
@@ -79,9 +80,7 @@ function decode(row: Row): JobCompletionReceipt {
 
 @Injectable()
 export class SqliteJobCompletionReceipts implements JobCompletionReceipts {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
   saveObservedSync(_tx: Tx, observation: JobCompletionObservation): JobCompletionReceipt {
     const receipt: JobCompletionReceipt = {
       taskId: observation.taskId,
@@ -96,7 +95,7 @@ export class SqliteJobCompletionReceipts implements JobCompletionReceipts {
       evidenceDigest: '',
     };
     receipt.evidenceDigest = jobCompletionEvidenceDigest(receipt);
-    const existing = this.db.get<Row>(
+    const existing = this.db.get<Row | undefined>(
       sql`SELECT * FROM agent_task_job_completions WHERE task_id=${receipt.taskId}`,
     );
     if (existing) {
@@ -104,24 +103,25 @@ export class SqliteJobCompletionReceipts implements JobCompletionReceipts {
         throw new Error('JOB_COMPLETION_RECEIPT_CONFLICT');
       return decode(existing);
     }
-    const task = this.db.get<{
-      sandbox_id: string;
-      job_handle: string;
-      cursor: string | null;
-      last_seq: number;
-      status: string;
-      exit_code: number | null;
-      cancel_requested_at: number | null;
-    }>(
+    const task = this.db.get<
+      | {
+          sandbox_id: string;
+          job_handle: string;
+          cursor: string | null;
+          last_seq: number;
+          status: string;
+          exit_code: number | null;
+          cancel_requested_at: number | null;
+        }
+      | undefined
+    >(
       sql`SELECT sandbox_id,job_handle,cursor,last_seq,status,exit_code,cancel_requested_at FROM agent_tasks WHERE id=${receipt.taskId}`,
     );
     if (
       !task ||
       task.status === 'running' ||
       task.sandbox_id !== receipt.sandboxId ||
-      completedJobHandleDigest(
-        JSON.parse(task.job_handle) as JobCompletionObservation['jobHandle'],
-      ) !== receipt.jobHandleDigest ||
+      completedJobHandleDigest(decodeJobHandle(task.job_handle)) !== receipt.jobHandleDigest ||
       task.cursor !== receipt.cursor ||
       task.last_seq !== receipt.lastSeq ||
       task.exit_code !== receipt.exitCode ||
@@ -138,14 +138,23 @@ export class SqliteJobCompletionReceipts implements JobCompletionReceipts {
       VALUES(${receipt.taskId},${receipt.sandboxId},${receipt.provider},${receipt.jobHandleDigest},${receipt.cursor},${receipt.lastSeq},${receipt.exitCode},${receipt.exitKind},${receipt.observedAt.getTime()},${receipt.evidenceDigest})`);
     return receipt;
   }
-  async find(taskId: string): Promise<JobCompletionReceipt | null> {
-    const row = this.db.get<Row>(
-      sql`SELECT * FROM agent_task_job_completions WHERE task_id=${taskId}`,
-    );
-    if (!row) return null;
-    const receipt = decode(row);
-    if (jobCompletionEvidenceDigest(receipt) !== receipt.evidenceDigest)
-      throw new Error('JOB_COMPLETION_RECEIPT_CORRUPT');
-    return receipt;
+  find(taskId: string): Promise<JobCompletionReceipt | null> {
+    return readSqlite(() => {
+      const row = this.db.get<Row | undefined>(
+        sql`SELECT * FROM agent_task_job_completions WHERE task_id=${taskId}`,
+      );
+      if (!row) return null;
+      const receipt = decode(row);
+      if (jobCompletionEvidenceDigest(receipt) !== receipt.evidenceDigest)
+        throw new Error('JOB_COMPLETION_RECEIPT_CORRUPT');
+      return receipt;
+    });
   }
+}
+
+function decodeJobHandle(raw: string): JobCompletionObservation['jobHandle'] {
+  const value: unknown = JSON.parse(raw);
+  if (!isRecord(value) || typeof value.provider !== 'string' || typeof value.jobId !== 'string')
+    throw new Error('JOB_COMPLETION_INVALID_HANDLE');
+  return { provider: value.provider, jobId: value.jobId };
 }

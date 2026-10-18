@@ -1,4 +1,5 @@
 import type { Buffer } from 'node:buffer';
+import { z } from 'zod';
 
 /**
  * 跨 registry 拷贝一张镜像 —— 搬运的第三条源（`upstream-copy`）。
@@ -33,21 +34,33 @@ export interface RegistryCopyPort {
   putManifest(name: string, reference: string, raw: Buffer, mediaType: string): Promise<void>;
 }
 
-export interface CopyProgress {
-  (done: number, total: number, what: string): void;
-}
+export type CopyProgress = (done: number, total: number, what: string) => void;
 
 /** manifest 里我们要读的那几格。 */
-interface ManifestDoc {
-  mediaType?: string;
-  config?: { digest?: string };
-  layers?: { digest?: string; size?: number }[];
-  manifests?: {
-    digest?: string;
-    mediaType?: string;
-    platform?: { os?: string; architecture?: string };
-  }[];
-}
+const ManifestDocSchema = z
+  .object({
+    mediaType: z.string().optional(),
+    config: z.object({ digest: z.string().optional() }).passthrough().optional(),
+    layers: z
+      .array(z.object({ digest: z.string().optional(), size: z.number().optional() }).passthrough())
+      .optional(),
+    manifests: z
+      .array(
+        z
+          .object({
+            digest: z.string().optional(),
+            mediaType: z.string().optional(),
+            platform: z
+              .object({ os: z.string().optional(), architecture: z.string().optional() })
+              .passthrough()
+              .optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+type ManifestDoc = z.infer<typeof ManifestDocSchema>;
 
 /** index 里挑这台机器该用的那一份 —— 判据与 `OciRegistryClient.descend` 同源。 */
 export function pickPlatformEntry(doc: ManifestDoc, arch: string): { digest: string } | null {
@@ -58,7 +71,7 @@ export function pickPlatformEntry(doc: ManifestDoc, arch: string): { digest: str
   const chosen =
     entries.find((m) => m.platform?.os === 'linux' && m.platform.architecture === want) ??
     entries.find((m) => m.platform?.os === 'linux') ??
-    entries[0];
+    entries.at(0);
   return chosen?.digest === undefined ? null : { digest: chosen.digest };
 }
 
@@ -68,7 +81,7 @@ const INDEX_TYPES = new Set([
 ]);
 
 export function isIndex(mediaType: string): boolean {
-  return INDEX_TYPES.has(mediaType.split(';')[0]!.trim());
+  return INDEX_TYPES.has(mediaType.split(';')[0].trim());
 }
 
 /**
@@ -94,12 +107,12 @@ export async function compressedSizeBytes(
 ): Promise<number | null> {
   try {
     let { raw, mediaType } = await reg.fetchRawManifest(name, reference);
-    let doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+    let doc = ManifestDocSchema.parse(JSON.parse(raw.toString('utf8')));
     if (isIndex(mediaType)) {
       const entry = pickPlatformEntry(doc, arch);
       if (entry === null) return null;
       ({ raw, mediaType } = await reg.fetchRawManifest(name, entry.digest));
-      doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+      doc = ManifestDocSchema.parse(JSON.parse(raw.toString('utf8')));
     }
     const layers = doc.layers ?? [];
     if (layers.length === 0) return null;
@@ -124,7 +137,7 @@ export async function copyImage(
   onProgress: CopyProgress = () => undefined,
 ): Promise<{ digest: string; layers: number; skipped: number }> {
   let { raw, mediaType, digest } = await reg.fetchRawManifest(from.name, from.reference);
-  let doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+  let doc = ManifestDocSchema.parse(JSON.parse(raw.toString('utf8')));
 
   if (isIndex(mediaType)) {
     const entry = pickPlatformEntry(doc, arch);
@@ -132,7 +145,7 @@ export async function copyImage(
       throw new Error(`'${from.name}:${from.reference}' 的 index 里没有可用平台（要 ${arch}）`);
     }
     ({ raw, mediaType, digest } = await reg.fetchRawManifest(from.name, entry.digest));
-    doc = JSON.parse(raw.toString('utf8')) as ManifestDoc;
+    doc = ManifestDocSchema.parse(JSON.parse(raw.toString('utf8')));
   }
 
   // config 与 layers 一起搬 —— config 也是一个 blob，漏了它 manifest 推上去也拉不动。

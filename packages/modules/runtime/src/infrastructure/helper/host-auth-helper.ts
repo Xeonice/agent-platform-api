@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -116,7 +117,7 @@ export class HostAuthHelper implements AuthHelper {
       //    内部命令行，而它同时可能带出这台机器上的路径。真正需要它的人在日志里 ——
       //    技术细节走 `cause`，上屏那句只说发生了什么、以及这是本机环境的问题。
       throw new Error(
-        `没能为登录程序分配伪终端：${(e as Error).message}。` +
+        `没能为登录程序分配伪终端：${errorMessage(e)}。` +
           '登录 CLI 会检查有没有终端，拿不到伪终端时它一个字节都不会输出。',
       );
     }
@@ -135,9 +136,9 @@ export class HostAuthHelper implements AuthHelper {
         } catch {
           /* already gone */
         }
-        await rm(homeDir, { recursive: true, force: true }).catch((e) =>
-          this.logger.warn(`failed to remove helper HOME ${homeDir}: ${(e as Error).message}`),
-        );
+        await rm(homeDir, { recursive: true, force: true }).catch((e: unknown) => {
+          this.logger.warn(`failed to remove helper HOME ${homeDir}: ${errorMessage(e)}`);
+        });
       },
     };
   }
@@ -158,7 +159,9 @@ class PtyProcessStream implements ProcessStream {
     this.ref = `helper-${String(term.pid)}`;
   }
   onData(cb: (chunk: Buffer) => void): void {
-    this.term.onData((s) => cb(Buffer.from(s, 'utf8')));
+    this.term.onData((s) => {
+      cb(Buffer.from(s, 'utf8'));
+    });
   }
   write(data: string | Buffer): void {
     this.term.write(typeof data === 'string' ? data : data.toString('utf8'));
@@ -168,10 +171,15 @@ class PtyProcessStream implements ProcessStream {
     this.term.resize(cols, rows);
   }
   onExit(cb: (code: number | null) => void): void {
-    this.term.onExit(({ exitCode }) => cb(exitCode));
+    this.term.onExit(({ exitCode }) => {
+      cb(exitCode);
+    });
   }
-  async kill(signal?: NodeJS.Signals): Promise<void> {
-    this.term.kill(signal);
+  kill(signal?: NodeJS.Signals): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.term.kill(signal);
+      resolve();
+    });
   }
 
   /**

@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -129,7 +130,7 @@ function startRole(coordinatorUrl: string): Promise<string> {
       output += String(bytes);
       const match = /CONTROL_READY:(\{[^\n]+\})/.exec(output);
       if (!match) return;
-      const address: unknown = JSON.parse(match[1]!);
+      const address: unknown = JSON.parse(assertDefined(match[1]));
       if (
         !address ||
         typeof address !== 'object' ||
@@ -206,7 +207,7 @@ beforeAll(async () => {
     .expect(200);
   const issued = cookies(unlock.headers['set-cookie']);
   expect(issued).toHaveLength(1);
-  cookie = issued[0]!.split(';')[0]!;
+  cookie = assertDefined(assertDefined(issued[0]).split(';')[0]);
 });
 afterAll(async () => {
   role?.kill('SIGTERM');
@@ -381,7 +382,9 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
       .set('Origin', ORIGIN)
       .send({ passcode: PASSCODE })
       .expect(200);
-    const otherActor = cookies(another.headers['set-cookie'])[0]!.split(';')[0]!;
+    const otherActor = assertDefined(
+      assertDefined(cookies(another.headers['set-cookie'])[0]).split(';')[0],
+    );
     expect(otherActor).not.toBe(cookie);
     await request(url)
       .get(`/api/operations/${operation}`)
@@ -705,7 +708,7 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
     const chain = freezeUpgradeChain(envelope, source, [envelope]);
     const target = vi.spyOn(catalog, 'target').mockReturnValue({
       envelope,
-      plan: chain[0]!.plan,
+      plan: assertDefined(chain[0]).plan,
       sourceActual: null,
       chain,
     });

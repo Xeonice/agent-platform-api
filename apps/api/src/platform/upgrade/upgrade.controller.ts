@@ -22,7 +22,6 @@ import {
 import type { Request, Response } from 'express';
 import { UpgradeService } from './upgrade-service';
 import { requireUpgrade } from './upgrade-trust';
-import type { UpgradeCommit } from './upgrade-store';
 import { CoordinatorHandoff } from './coordinator-handoff';
 import { UpgradeRoleHandoffs } from './upgrade-role-handoffs';
 import { UpgradeObserver } from './upgrade-observer';
@@ -254,7 +253,7 @@ export class UpgradeInternalController {
     @Body() raw: unknown,
   ) {
     this.auth(req);
-    return this.upgrades.commit(id, CommitSchema.parse(raw) as UpgradeCommit);
+    return this.upgrades.commit(id, CommitSchema.parse(raw));
   }
   @Get(':attemptId/steps/:stepId') step(
     @Req() req: Request,

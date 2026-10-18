@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { StartupObservationSchema } from '@platform/contracts';
-import { DATABASE, type Tx } from '@platform/shared-kernel';
+import { DATABASE, isRecord, type Tx } from '@platform/shared-kernel';
 import type {
   SandboxStartupProgress,
   SandboxStartupProgressStore,
@@ -12,20 +12,20 @@ import type {
 /** Reuses the existing operation ledger; no change to historical create intents. */
 @Injectable()
 export class SqliteSandboxStartupProgress implements SandboxStartupProgressStore {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
 
   readSync(sandboxId: string): SandboxStartupProgress | undefined {
-    const row = this.db.get<{ result: string }>(
+    const row = this.db.get<{ result: string } | undefined>(
       sql`SELECT result FROM platform_operations
           WHERE operation_id=${this.key(sandboxId)} AND role='sandbox-provisioning'`,
     );
     if (!row) return undefined;
     // Old/malformed observation degrades to unavailable, never a guessed stage.
     try {
+      const value: unknown = JSON.parse(row.result);
+      if (!isRecord(value)) return undefined;
       const parsed = StartupObservationSchema.safeParse({
-        ...(JSON.parse(row.result) as object),
+        ...value,
         observedAt: null,
       });
       if (!parsed.success) return undefined;
@@ -38,7 +38,7 @@ export class SqliteSandboxStartupProgress implements SandboxStartupProgressStore
 
   saveSync(_tx: Tx, sandboxId: string, progress: SandboxStartupProgress, at: Date): void {
     const key = this.key(sandboxId);
-    const cycleVersion = Number(progress.operationId.match(/:(\d+)$/)?.[1]);
+    const cycleVersion = Number(/:(\d+)$/.exec(progress.operationId)?.[1]);
     if (!Number.isSafeInteger(cycleVersion) || cycleVersion < 0)
       throw new Error('INVALID_STARTUP_CYCLE_VERSION');
     const digest = createHash('sha256').update(progress.operationId).digest('hex');

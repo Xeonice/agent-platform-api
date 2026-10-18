@@ -12,9 +12,12 @@ export interface UpgradeProbeApiIdentity {
 }
 
 export function matchesProbeIdentity(headers: Headers, identity: UpgradeProbeApiIdentity): boolean {
-  return Object.entries(UPGRADE_PROBE_IDENTITY_HEADERS).every(
-    ([key, name]) => headers.get(name) === identity[key as keyof UpgradeProbeApiIdentity],
-  );
+  const fields: readonly (keyof UpgradeProbeApiIdentity)[] = [
+    'instanceId',
+    'artifactDigest',
+    'startIdentity',
+  ];
+  return fields.every((key) => headers.get(UPGRADE_PROBE_IDENTITY_HEADERS[key]) === identity[key]);
 }
 
 export function hasProbeIdentity(headers: Headers): boolean {

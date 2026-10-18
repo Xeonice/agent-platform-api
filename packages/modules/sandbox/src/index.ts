@@ -1,5 +1,6 @@
 // Public surface of the sandbox context consumed by the app assembly.
 export { SandboxModule } from './interface/sandbox.module';
+export { RuntimeOwnerModule } from './interface/runtime-owner.module';
 export {
   SANDBOX_CREATE_INTENTS,
   type SandboxCreateIntents,
@@ -67,6 +68,8 @@ export {
 } from './infrastructure/runtime-rpc/owner-client';
 export {
   startRuntimeOwnerFromEnvironment,
+  assertRuntimeOwnerEnvironment,
+  acquireRuntimeOwnerHomeLock,
   createRuntimeOwnerProviderRegistry,
 } from './infrastructure/runtime-rpc/owner-factory';
 export { withRuntimeBusinessAuthority } from './infrastructure/runtime-rpc/authority-context';

@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import {
   BadRequestException,
   ConflictException,
@@ -80,7 +81,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
     this.sweepTimer = setInterval(() => {
       void this.sweepAuthSessions();
     }, 30_000);
-    this.sweepTimer.unref?.();
+    this.sweepTimer.unref();
   }
   async onModuleDestroy(): Promise<void> {
     this.shuttingDown = true;
@@ -103,7 +104,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
   }
   async cancelAuth(runtimeId: string, challengeRef: string): Promise<void> {
     const entry = this.sessions.get(challengeRef);
-    if (!entry || entry.runtimeId !== runtimeId) {
+    if (entry?.runtimeId !== runtimeId) {
       const cleanup = this.retiring.get(challengeRef);
       if (cleanup?.entry.runtimeId === runtimeId) await this.disposeSession(cleanup.entry);
       return;
@@ -129,8 +130,10 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
         await Promise.race([
           entry.session.dispose(),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('login cleanup timed out')), 10_000);
-            timer.unref?.();
+            timer = setTimeout(() => {
+              reject(new Error('login cleanup timed out'));
+            }, 10_000);
+            timer.unref();
           }),
         ]);
         this.disposedSessions.add(entry.session);
@@ -263,7 +266,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
         retryable: true,
         // 门口就失败了：`openSession` 抛错时什么都没建起来（下面的 `sessions.put` 还没走到）。
         sideEffectFree: true,
-        details: [{ code: 'HELPER_SESSION_OPEN_FAILED', message: (e as Error).message }],
+        details: [{ code: 'HELPER_SESSION_OPEN_FAILED', message: errorMessage(e) }],
       });
     }
 
@@ -327,7 +330,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
   ): Promise<{ status: 'pending' | 'success' | 'expired' | 'error'; maskedIdentifier?: string }> {
     const now = this.clock.now();
     const entry = this.sessions.get(challengeRef);
-    if (entry && entry.runtimeId === runtimeId) {
+    if (entry?.runtimeId === runtimeId) {
       // still live: a pending challenge past its TTL reads as `expired`.
       if (entry.status === 'pending' && entry.expiresAt.getTime() <= now.getTime()) {
         await this.cancelAuth(runtimeId, challengeRef);
@@ -339,7 +342,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
     // (success/error/expired) so the frontend's next poll still sees a TRUE terminal
     // state instead of a bare 404 (P2; the frontend's assumed-dead fix depends on this).
     const outcome = this.sessions.outcome(challengeRef, now);
-    if (outcome && outcome.runtimeId === runtimeId) {
+    if (outcome?.runtimeId === runtimeId) {
       return { status: outcome.status, maskedIdentifier: outcome.maskedIdentifier };
     }
     throw new NotFoundException(`unknown challengeRef ${challengeRef}`);
@@ -352,7 +355,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
     pastedText?: string,
   ): Promise<{ maskedIdentifier: string }> {
     const entry = this.sessions.getLive(challengeRef, this.clock.now());
-    if (!entry || entry.runtimeId !== runtimeId) {
+    if (entry?.runtimeId !== runtimeId) {
       throw new NotFoundException(`challenge ${challengeRef} expired or unknown`);
     }
     const adapter = this.adapter(runtimeId);
@@ -416,8 +419,8 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
       });
       await this.finishChallenge(runtimeId, challengeRef, cred);
     } catch (e) {
-      this.logger.debug?.(
-        `self-completion for ${challengeRef} did not happen (${(e as Error).message}) —— ` +
+      this.logger.debug(
+        `self-completion for ${challengeRef} did not happen (${errorMessage(e)}) —— ` +
           '正常情况：浏览器与 helper 不在同一台机器时，用户会走粘贴那条路',
       );
     }
@@ -447,7 +450,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
       return await inflight;
     }
     const entry = this.sessions.get(challengeRef);
-    if (!entry || entry.status !== 'pending') {
+    if (entry?.status !== 'pending') {
       cred.zeroize();
       return null;
     }
@@ -504,7 +507,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
       // adapter's plain Error carrying this code must produce the same 「码过期，请重来」
       // terminal a built-in's does, not a generic failure.
       status = adapterAuthErrorCodeOf(e) === 'AUTH_CHALLENGE_EXPIRED' ? 'expired' : 'error';
-      this.logger.warn(`device login ${challengeRef} failed: ${(e as Error).message}`);
+      this.logger.warn(`device login ${challengeRef} failed: ${errorMessage(e)}`);
     } finally {
       await this.disposeSession(entry);
       // Drop the heavy live entry (releasing the pty session) and retain only the tiny
@@ -724,7 +727,7 @@ export class RuntimeApplicationService implements OnModuleInit, OnModuleDestroy 
 function messageOf(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === 'object' && e !== null && 'message' in e) {
-    const m: unknown = (e as { message: unknown }).message;
+    const m: unknown = e.message;
     if (typeof m === 'string') return m;
   }
   return String(e);

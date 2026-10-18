@@ -1,4 +1,5 @@
 export * from './types/branded';
+export * from './types/value-guards';
 export * from './ports/clock.port';
 export * from './ports/business-writer-authority.port';
 export * from './ports/time.util';

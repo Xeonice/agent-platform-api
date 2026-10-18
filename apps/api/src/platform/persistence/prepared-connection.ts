@@ -25,23 +25,22 @@ export function preparedConnection(
   }
   let activated = false;
   const proxy = new Proxy(target, {
-    get(_unused, property) {
+    get(_unused, property): unknown {
       if (property === 'prepare')
         return (source: string) => {
           let current = target,
             statement = target.prepare(source);
           const configuration: { method: string; args: unknown[] }[] = [];
           const routed = new Proxy(statement, {
-            get(_unusedStatement, member) {
+            get(_unusedStatement, member): unknown {
               if (current !== target) {
                 current = target;
                 statement = target.prepare(source);
-                for (const c of configuration)
-                  Reflect.apply(
-                    Reflect.get(statement, c.method) as (...args: unknown[]) => unknown,
-                    statement,
-                    c.args,
-                  );
+                for (const c of configuration) {
+                  const configured: unknown = Reflect.get(statement, c.method);
+                  requireUpgrade(typeof configured === 'function', 'PREPARED_METHOD_FORBIDDEN');
+                  Reflect.apply(configured, statement, c.args);
+                }
               }
               const value: unknown = Reflect.get(statement, member, statement);
               if (typeof value !== 'function') return value;
@@ -83,7 +82,7 @@ export function preparedConnection(
         };
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === 'function'
-        ? (...args: unknown[]) => Reflect.apply(value, target, args)
+        ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
         : value;
     },
   });

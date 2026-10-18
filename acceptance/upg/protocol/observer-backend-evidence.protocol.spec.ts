@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { createServer, type Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -14,8 +15,11 @@ import {
   type UpgradeProbeLane,
 } from '../../../apps/api/src/platform/upgrade/upgrade-probe-evidence';
 import { UPGRADE_PROBE_IDENTITY_HEADERS } from '../../../apps/api/src/platform/upgrade/upgrade-probe-identity';
-import { useEnv } from '../../support/strict-ports';
-import { COORDINATOR_WRITER_CONTROL } from '../../../apps/api/src/platform/persistence/coordinator-lease';
+import { useEnv, stub, unused } from '../../support/strict-ports';
+import {
+  COORDINATOR_WRITER_CONTROL,
+  type CoordinatorWriterControl,
+} from '../../../apps/api/src/platform/persistence/coordinator-lease';
 import * as integrity from '../../../apps/api/src/platform/upgrade/migration-database-integrity';
 
 type Json = Record<string, unknown>;
@@ -51,7 +55,7 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
   };
   const records = new Map<string, Json>();
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url!, 'http://127.0.0.1');
+    const url = new URL(assertDefined(req.url), 'http://127.0.0.1');
     res.setHeader('content-type', 'application/json');
     if (url.pathname === '/internal/control/identity') {
       state.identities++;
@@ -78,7 +82,7 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
       if (state.mode !== 'partial')
         res.setHeader(UPGRADE_PROBE_IDENTITY_HEADERS.startIdentity, state.start);
     }
-    let requestId = url.searchParams.get('requestId')!;
+    let requestId: string;
     if (req.method === 'POST') {
       let body = '';
       for await (const bytes of req) body += String(bytes);
@@ -90,9 +94,9 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
         revision: records.size + 1,
       });
       if (state.rotateAfterWrite) state.start = randomUUID();
-    }
+    } else requestId = assertDefined(url.searchParams.get('requestId'));
     state.requests.push({
-      method: req.method!,
+      method: assertDefined(req.method),
       operationId: String(req.headers['x-operation-id']),
       requestId,
     });
@@ -166,7 +170,13 @@ async function fixture() {
     assert: () => {
       if (!writerValid) throw new Error('COORDINATOR_WRITER_FENCE_EXPIRED');
     },
-  };
+    release: () => {
+      throw new Error('Observer fixture must not release the writer');
+    },
+    reacquire: () => {
+      throw new Error('Observer fixture must not reacquire the writer');
+    },
+  } satisfies CoordinatorWriterControl;
   const store = {
     instanceId,
     latest: () => ({ attemptId: 'attempt' }),
@@ -225,8 +235,8 @@ async function fixture() {
     inspector as never,
     clock,
     ids,
-    {} as never,
-    { projectionReadEvidence: () => ({}) } as never,
+    unused<ConstructorParameters<typeof UpgradeObserver>[4]>('unused pty'),
+    stub<ConstructorParameters<typeof UpgradeObserver>[5]>({ projectionReadEvidence: () => [] }),
     evidence,
   );
   const sample = (lane: UpgradeProbeLane) => observer['sample'](lane);

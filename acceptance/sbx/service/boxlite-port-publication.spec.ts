@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -126,7 +127,7 @@ function context(image: ResolvedImageSpec, sandboxId = 'task-1'): SandboxProvide
 async function createdWith(image: ResolvedImageSpec, sandboxId?: string) {
   await new BoxliteSandboxProvider().create(context(image, sandboxId));
   expect(native.creates).toHaveLength(1);
-  return native.creates[0]!;
+  return assertDefined(native.creates[0]);
 }
 
 describe('BoxLite publishes host ports only for ports the image itself declares', () => {
@@ -143,10 +144,12 @@ describe('BoxLite publishes host ports only for ports the image itself declares'
     const ports = options.ports as { hostPort: number; guestPort: number }[];
     expect(ports).toHaveLength(1);
     expect(ports[0]).toMatchObject({ guestPort: 8080 });
-    expect(Number.isInteger(ports[0]!.hostPort) && ports[0]!.hostPort > 0).toBe(true);
+    expect(
+      Number.isInteger(assertDefined(ports[0]).hostPort) && assertDefined(ports[0]).hostPort > 0,
+    ).toBe(true);
     // An ephemeral port is never the declared one: publishing 8080 on 8080 is exactly the
     // fixed-port collision that kept a second box from starting.
-    expect(ports[0]!.hostPort).not.toBe(8080);
+    expect(assertDefined(ports[0]).hostPort).not.toBe(8080);
     expect(ports[0]).not.toHaveProperty('hostIp');
   });
 

@@ -100,7 +100,7 @@ export class ProjectController {
   @ApiOperation({ summary: 'Delete a project (optionally keeping its baseline)' })
   @ApiNoContentResponse()
   delete(@Param('id') id: string, @Body() body: DeleteProjectDto): Promise<void> {
-    return this.app.delete(id, body ?? {});
+    return this.app.delete(id, deleteOptions(body));
   }
 
   @Get(':id/deletion-preview')
@@ -109,4 +109,8 @@ export class ProjectController {
   deletionPreview(@Param('id') id: string) {
     return this.app.deletionPreview(id);
   }
+}
+
+function deleteOptions(body: DeleteProjectDto | undefined): DeleteProjectDto {
+  return body ?? {};
 }

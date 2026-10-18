@@ -22,6 +22,7 @@ import { BASELINE_MANAGER } from '../domain/ports/baseline-manager.port';
 import type { BaselineManager } from '../domain/ports/baseline-manager.port';
 import type { CloneErrorCode, Project } from '../domain/entities/project.entity';
 import { prepareGitAuth } from './git-auth';
+import { errorMessage } from '@platform/shared-kernel';
 
 const MAX_CONCURRENT_CLONES = 2;
 const CLONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard cap (03 §7.2)
@@ -82,7 +83,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     try {
       await this.reconcileInterrupted();
     } catch (e) {
-      this.logger.warn(`interrupted-clone reconcile skipped: ${(e as Error).message}`);
+      this.logger.warn(`interrupted-clone reconcile skipped: ${errorMessage(e)}`);
     }
   }
 
@@ -116,7 +117,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     const idx = this.waiting.indexOf(projectId);
     if (idx < 0) return false;
     this.waiting.splice(idx, 1);
-    void this.mutate(projectId, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+    void this.mutate(projectId, (p) => {
+      p.markCloneFailed('INTERRUPTED', this.clock.now());
+    });
     this.broadcaster.broadcast({
       event: 'project.clone_progress',
       projectId,
@@ -137,7 +140,7 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
 
   private async runClone(projectId: string): Promise<void> {
     const project = await this.repo.findById(asProjectId(projectId));
-    if (!project || project.cloneStatus !== 'cloning' || !project.repoUrl) {
+    if (project?.cloneStatus !== 'cloning' || !project.repoUrl) {
       this.startNext();
       return;
     }
@@ -233,7 +236,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         },
       });
       const sizeBytes = await this.baseline.directorySizeBytes(dest);
-      await this.mutate(projectId, (p) => p.markCloneReady(sizeBytes, this.clock.now()));
+      await this.mutate(projectId, (p) => {
+        p.markCloneReady(sizeBytes, this.clock.now());
+      });
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId,
@@ -243,7 +248,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     } catch (e) {
       const code = this.classifyFailure(e, timedOut, controller.signal.aborted);
       await this.baseline.removeDir(dest).catch(() => undefined);
-      await this.mutate(projectId, (p) => p.markCloneFailed(code, this.clock.now()));
+      await this.mutate(projectId, (p) => {
+        p.markCloneFailed(code, this.clock.now());
+      });
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId,
@@ -303,10 +310,12 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
         } catch {
           return; // e.g. already cancelled/failed — nothing to persist
         }
-        this.uow.run((tx) => this.repo.saveSync(tx, project));
+        this.uow.run((tx) => {
+          this.repo.saveSync(tx, project);
+        });
       })
       .catch((e: unknown) => {
-        this.logger.warn(`clone-status persist failed for ${projectId}: ${(e as Error).message}`);
+        this.logger.warn(`clone-status persist failed for ${projectId}: ${errorMessage(e)}`);
       });
   }
 
@@ -314,7 +323,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     const all = await this.repo.findAll();
     for (const project of all) {
       if (project.cloneStatus !== 'cloning') continue;
-      await this.mutate(project.id, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+      await this.mutate(project.id, (p) => {
+        p.markCloneFailed('INTERRUPTED', this.clock.now());
+      });
       this.broadcaster.broadcast({
         event: 'project.clone_progress',
         projectId: project.id,

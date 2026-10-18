@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK, shiftMs } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -75,7 +76,7 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
     if (process.env.DISABLE_CREDENTIAL_REFRESH_SCANNER === '1') return;
     this.timer = setInterval(() => void this.runOnce(), SCAN_INTERVAL_MS);
     // do not keep the event loop alive purely for the scanner
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /** One scan pass. Idempotent under the single-instance lock. */
@@ -99,7 +100,7 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
             );
             return;
           }
-          this.logger.warn(`refresh failed for ${item.credentialId}: ${(e as Error).message}`);
+          this.logger.warn(`refresh failed for ${item.credentialId}: ${errorMessage(e)}`);
           await this.credentials.recordRefreshFailure(item.credentialId);
         } finally {
           this.inFlight.delete(item.credentialId);
@@ -186,7 +187,9 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
         done = true;
         resolve();
       };
-      pty.onExit(() => finish());
+      pty.onExit(() => {
+        finish();
+      });
       setTimeout(finish, timeoutMs);
     });
   }

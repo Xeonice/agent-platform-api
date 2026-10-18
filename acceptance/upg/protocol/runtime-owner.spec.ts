@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,7 +99,7 @@ describe('RuntimeOwner real socket, durable SQLite and external process boundary
     const { provider, handle } = await sandbox(old);
     const job = await withRuntimeBusinessAuthority(
       { operationId: 'original-persisted-run', actor: { kind: 'user', id: 'test-viewer' } },
-      () => provider.jobs!.startJob(handle, { cmd: [] }),
+      () => assertDefined(provider.jobs).startJob(handle, { cmd: [] }),
     );
     const original = f.external.instances.get(handle.providerSandboxId)?.child?.pid;
     const prepared = new RuntimeOwnerProviderRegistry();
@@ -131,9 +132,9 @@ describe('RuntimeOwner real socket, durable SQLite and external process boundary
       expect(f.external.instances.get(handle.providerSandboxId)?.child?.pid).toBe(original);
       expect(f.external.stops).toBe(0);
       expect(f.external.starts).toBe(1);
-      expect((await prepared.get('counter-process').jobs!.readJob(handle, job)).status).toBe(
-        'running',
-      );
+      expect(
+        (await assertDefined(prepared.get('counter-process').jobs).readJob(handle, job)).status,
+      ).toBe('running');
     } finally {
       prepared.onModuleDestroy();
     }
@@ -227,29 +228,29 @@ describe('RuntimeOwner real socket, durable SQLite and external process boundary
     const registry = await f.client();
     const { provider, handle } = await sandbox(registry);
     const bytes = Buffer.from(Array.from({ length: 65536 }, (_, i) => i % 256));
-    await provider.files!.writeFile(handle, '/artifact.bin', bytes);
-    expect(await provider.files!.readFile(handle, '/artifact.bin')).toEqual(bytes);
-    const stream = await provider.files!.openFileStream(handle, '/artifact.bin');
+    await assertDefined(provider.files).writeFile(handle, '/artifact.bin', bytes);
+    expect(await assertDefined(provider.files).readFile(handle, '/artifact.bin')).toEqual(bytes);
+    const stream = await assertDefined(provider.files).openFileStream(handle, '/artifact.bin');
     expect(stream).not.toBeNull();
     const chunks: Buffer[] = [];
-    for await (const chunk of stream!)
+    for await (const chunk of assertDefined(stream))
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
     expect(Buffer.concat(chunks)).toEqual(bytes);
-    expect(await provider.files!.readFile(handle, '/missing')).toBeNull();
-    expect(await provider.files!.openFileStream(handle, '/missing')).toBeNull();
+    expect(await assertDefined(provider.files).readFile(handle, '/missing')).toBeNull();
+    expect(await assertDefined(provider.files).openFileStream(handle, '/missing')).toBeNull();
   });
 
   it('persists a run intent and returns its original job for duplicate delivery [AC-UPG-001.2] [AC-UPG-006.5]', async () => {
     const f = await fixture();
     const registry = await f.client();
     const { provider, handle } = await sandbox(registry);
-    await expect(provider.jobs!.startJob(handle, { cmd: [] })).rejects.toThrow(
+    await expect(assertDefined(provider.jobs).startJob(handle, { cmd: [] })).rejects.toThrow(
       'persisted run intent',
     );
     const execute = () =>
       withRuntimeBusinessAuthority(
         { operationId: 'persisted-run-id', actor: { kind: 'automation', id: 'occurrence-1' } },
-        () => provider.jobs!.startJob(handle, { cmd: [] }),
+        () => assertDefined(provider.jobs).startJob(handle, { cmd: [] }),
       );
     const first = await execute();
     const dispatches = f.requests.filter(
@@ -261,7 +262,7 @@ describe('RuntimeOwner real socket, durable SQLite and external process boundary
     ).toHaveLength(dispatches);
     expect(duplicate).toEqual(first);
     expect(f.external.jobsStarted).toBe(1);
-    const chunk = await provider.jobs!.readJob(handle, first);
+    const chunk = await assertDefined(provider.jobs).readJob(handle, first);
     expect(chunk.status).toBe('running');
     expect(f.external.stops).toBe(0);
   });

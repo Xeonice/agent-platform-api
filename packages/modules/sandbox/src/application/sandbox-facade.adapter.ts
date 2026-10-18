@@ -168,7 +168,7 @@ export class SandboxFacadeAdapter
         throw new Error('PROJECT_CLEANUP_OWNERSHIP_SUPERSEDED');
       if (
         ['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '') &&
-        (!this.writer || !this.writer.run)
+        !this.writer?.run
       )
         throw new Error('PROJECT_CLEANUP_WRITER_AUTHORITY_REQUIRED');
       this.writer?.assert();
@@ -235,9 +235,9 @@ export class SandboxFacadeAdapter
 
   onApplicationBootstrap(): void {
     const recover = (): void => {
-      void this.retryPending().catch((error: unknown) =>
-        this.logger.error(`project cleanup recovery failed: ${String(error)}`),
-      );
+      void this.retryPending().catch((error: unknown) => {
+        this.logger.error(`project cleanup recovery failed: ${String(error)}`);
+      });
     };
     recover();
     this.retry = setInterval(recover, 15_000);

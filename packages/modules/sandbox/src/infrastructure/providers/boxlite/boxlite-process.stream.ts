@@ -65,7 +65,7 @@ export function toSignalNumber(signal?: NodeJS.Signals): number {
 export async function spawnNative(
   box: ExecCapableBox,
   spec: ProcessSpec,
-  readRuntimeIdentity: () => Promise<string | null> = async () => null,
+  readRuntimeIdentity: () => Promise<string | null> = () => Promise.resolve(null),
 ): Promise<ProcessStream> {
   return spec.tty
     ? openPty(box, spec, readRuntimeIdentity)
@@ -238,7 +238,7 @@ const KILL_POLL_MS = 250;
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    timer.unref();
   });
 }
 
@@ -284,7 +284,7 @@ class BoxliteExecStream extends BoxliteStreamBase {
       const timer = setTimeout(() => {
         this.timedOut = true;
       }, opts.timeoutMs);
-      timer.unref?.();
+      timer.unref();
     }
     void this.run(opts.stdin);
   }
@@ -363,7 +363,9 @@ class BoxliteExecStream extends BoxliteStreamBase {
    * 一次性 exec 没有 stdin 上行：payload 在 `ProcessSpec.stdin` 里一次交付，随后 fd 0
    * 就被关掉换 EOF 了（见 `feedStdin`）。与 `AioExecProcessStream.write()` 同为 no-op。
    */
-  write(): void {}
+  write(): void {
+    /* One-shot input was delivered before closing stdin. */
+  }
 
   resize(): void {
     /* 不是 pty */

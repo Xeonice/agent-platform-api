@@ -1,5 +1,5 @@
-import { parseGitRemote, isBlockedGitHost } from '@platform/shared-kernel';
-import type { GitRemoteScheme, ParsedGitRemote } from '@platform/shared-kernel';
+import { parseGitRemote, isBlockedGitHost } from '@platform/shared-kernel/pure';
+import type { GitRemoteScheme, ParsedGitRemote } from '@platform/shared-kernel/pure';
 import { InvalidRepoUrlError } from '../errors/project-errors';
 
 /**

@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import type Database from 'better-sqlite3';
 import type { Clock, IdGenerator } from '@platform/shared-kernel';
 import { UpgradeError } from '../upgrade/upgrade-trust';
@@ -12,6 +13,22 @@ export interface CoordinatorWriterControl {
   generation: number;
   fence: number;
 }
+function assertWriterControl(value: unknown): asserts value is CoordinatorWriterControl {
+  if (
+    !isRecord(value) ||
+    typeof value.instanceId !== 'string' ||
+    typeof value.generation !== 'number' ||
+    !Number.isSafeInteger(value.generation) ||
+    value.generation < 1 ||
+    typeof value.fence !== 'number' ||
+    !Number.isSafeInteger(value.fence) ||
+    value.fence < 1 ||
+    typeof value.assert !== 'function' ||
+    typeof value.release !== 'function' ||
+    typeof value.reacquire !== 'function'
+  )
+    throw new UpgradeError('COORDINATOR_WRITER_CONTROL_REQUIRED');
+}
 /** Capture one actual admitted application epoch, not the process ENV label.
  * The legacy application mode has no role control; production role assembly
  * must provide it and fails closed if it is absent. */
@@ -22,7 +39,8 @@ export function withCoordinatorBusinessEpoch<T>(sqlite: Database.Database, work:
       throw new UpgradeError('COORDINATOR_WRITER_CONTROL_REQUIRED');
     return work();
   }
-  const control = actual as CoordinatorWriterControl;
+  assertWriterControl(actual);
+  const control = actual;
   control.assert();
   return withBusinessWriterEpoch(
     { instanceId: control.instanceId, generation: control.generation, fence: control.fence },
@@ -33,7 +51,8 @@ export function coordinatorWriterControl(sqlite: Database.Database): Coordinator
   const control: unknown = Reflect.get(sqlite, COORDINATOR_WRITER_CONTROL);
   if (!control || typeof control !== 'object')
     throw new UpgradeError('COORDINATOR_WRITER_CONTROL_REQUIRED');
-  return control as CoordinatorWriterControl;
+  assertWriterControl(control);
+  return control;
 }
 
 /** One durable business-writer epoch; checks guard every actual mutating statement. */
@@ -57,18 +76,20 @@ export function fenceCoordinatorConnection(
   sqlite.exec(
     'CREATE TABLE IF NOT EXISTS platform_role_leases(role TEXT PRIMARY KEY NOT NULL,instance_id TEXT NOT NULL,holder_id TEXT NOT NULL,generation INTEGER NOT NULL,fence INTEGER NOT NULL,expires_at INTEGER NOT NULL)',
   );
-  type Lease = {
+  interface Lease {
     instance_id: string;
     holder_id: string;
     generation: number;
     fence: number;
     expires_at: number;
-  };
-  const read = sqlite.prepare("SELECT * FROM platform_role_leases WHERE role='state-coordinator'");
+  }
+  const read = sqlite.prepare<unknown[], Lease>(
+    "SELECT * FROM platform_role_leases WHERE role='state-coordinator'",
+  );
   const holder = ids.next();
   const lease = sqlite
     .transaction(() => {
-      const previous = read.get() as Lease | undefined;
+      const previous = read.get();
       const now = clock.now().getTime();
       if (previous && (previous.instance_id !== instanceId || previous.expires_at > now))
         throw new UpgradeError('COORDINATOR_WRITER_ALREADY_ACTIVE');
@@ -93,10 +114,9 @@ export function fenceCoordinatorConnection(
         admitted.fence !== lease.fence)
     )
       throw new UpgradeError('COORDINATOR_OPERATION_EPOCH_SUPERSEDED');
-    const current = read.get() as Lease | undefined;
+    const current = read.get();
     if (
-      !current ||
-      current.instance_id !== instanceId ||
+      current?.instance_id !== instanceId ||
       current.holder_id !== holder ||
       current.generation !== lease.generation ||
       current.fence !== lease.fence ||
@@ -131,10 +151,10 @@ export function fenceCoordinatorConnection(
   startRenewal();
   const wrap = (statement: Database.Statement): Database.Statement =>
     new Proxy(statement, {
-      get(target, property) {
+      get(target, property): unknown {
         const value: unknown = Reflect.get(target, property, target);
         if (typeof value !== 'function') return value;
-        return (...args: unknown[]) => {
+        return (...args: unknown[]): unknown => {
           if (['run', 'get', 'all', 'iterate'].includes(String(property)) && !target.readonly) {
             assertWriter();
             // A lazy mutating iterator could execute its first SQLite step only
@@ -155,7 +175,7 @@ export function fenceCoordinatorConnection(
       },
     });
   const proxy = new Proxy(sqlite, {
-    get(target, property) {
+    get(target, property): unknown {
       if (property === COORDINATOR_WRITER_CONTROL)
         return {
           instanceId,
@@ -169,10 +189,9 @@ export function fenceCoordinatorConnection(
           reacquire: () => {
             const next = sqlite
               .transaction(() => {
-                const previous = read.get() as Lease | undefined;
+                const previous = read.get();
                 if (
-                  !previous ||
-                  previous.instance_id !== instanceId ||
+                  previous?.instance_id !== instanceId ||
                   previous.expires_at > clock.now().getTime()
                 )
                   throw new UpgradeError('COORDINATOR_WRITER_ALREADY_ACTIVE');

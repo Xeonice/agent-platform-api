@@ -1,4 +1,4 @@
-import type { CredentialId, SandboxId } from '@platform/shared-kernel';
+import type { CredentialId, SandboxId } from '@platform/shared-kernel/pure';
 
 /**
  * CredentialSandboxBinding (docs/backend/23 §8.4). An injection ledger row — two IDs

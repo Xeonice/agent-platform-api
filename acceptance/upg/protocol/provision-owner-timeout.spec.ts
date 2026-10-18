@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { ClientRequest, createServer, request } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -446,7 +447,9 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
         lastProgressAt: timedOut?.lastProgressAt,
         heartbeatAt: f.h.clock.now().toISOString(),
       });
-      expect(stillPending!.sequence).toBeGreaterThan(timedOut!.sequence);
+      expect(assertDefined(stillPending).sequence).toBeGreaterThan(
+        assertDefined(timedOut).sequence,
+      );
       expect(f.h.provider.calls.filter((v) => v === 'create')).toHaveLength(1);
       expect(f.h.provider.calls.filter((v) => v === 'start')).toHaveLength(1);
       expect(f.h.provider.calls).not.toContain('destroy');
@@ -566,14 +569,17 @@ describe('Owner start acknowledgement loss preserves the original provision [AC-
       expect((await f.h.allocations.listAll())[0].isActive).toBe(true);
       const originalOperation = operations(f.owner).find((v) => v.method === 'stop');
       expect(originalOperation).toMatchObject({ state: 'pending', sandboxId: dto.id });
-      expect(originalOperation!.id).toMatch(/^stop:sandbox-stop-/);
+      expect(assertDefined(originalOperation).id).toMatch(/^stop:sandbox-stop-/);
       await f.h.provision.resumeUnconfirmed();
       await f.h.provision.resumeUnconfirmed();
       expect((await f.h.service.get(dto.id)).status).toBe('stopping');
       expect(f.h.provider.calls.filter((v) => v === 'stop')).toHaveLength(1);
       release.resolve();
       await expect
-        .poll(() => operations(f.owner).find((v) => v.id === originalOperation!.id)?.state)
+        .poll(
+          () =>
+            operations(f.owner).find((v) => v.id === assertDefined(originalOperation).id)?.state,
+        )
         .toBe('complete');
       await f.h.provision.resumeUnconfirmed();
       await f.h.provision.resumeUnconfirmed();

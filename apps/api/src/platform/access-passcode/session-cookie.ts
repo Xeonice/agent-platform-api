@@ -13,7 +13,7 @@ export function setSessionCookie(res: Response, value: string): void {
   const secure = process.env.PASSCODE_COOKIE_SECURE === 'true' ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${SESSION_COOKIE}=${encodeURIComponent(value)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE_SEC}${secure}`,
+    `${SESSION_COOKIE}=${encodeURIComponent(value)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${String(COOKIE_MAX_AGE_SEC)}${secure}`,
   );
 }
 
@@ -39,6 +39,6 @@ export function presentedAccessPasscode(req: Request): string | undefined {
   if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length);
   const header = req.headers['x-access-passcode'];
   if (header) return Array.isArray(header) ? header[0] : header;
-  const query = req.query?.['passcode'];
+  const query = req.query.passcode;
   return typeof query === 'string' ? query : undefined;
 }

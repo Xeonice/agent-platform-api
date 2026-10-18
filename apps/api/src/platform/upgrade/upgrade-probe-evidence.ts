@@ -1,3 +1,4 @@
+import { requiredUpgradeValue } from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   CLOCK,
@@ -19,6 +20,13 @@ export interface UpgradeProbeScope {
   origin: string;
   artifactDigest: string;
   startIdentity: string;
+}
+export function matchesProbeScope(
+  scope: UpgradeProbeScope,
+  expected: Partial<UpgradeProbeScope>,
+): boolean {
+  const values: Record<string, unknown> = { ...scope };
+  return Object.entries(expected).every(([field, value]) => values[field] === value);
 }
 export interface UpgradeHttpSample {
   observed_at: number;
@@ -63,11 +71,11 @@ export class UpgradeProbeEvidence {
         verified: false,
         keepMs: 0,
       });
-    return this.cohorts.get(lane)!.key;
+    return requiredUpgradeValue(this.cohorts.get(lane)).key;
   }
   record(lane: UpgradeProbeLane, key: string, sample: UpgradeHttpSample, keepMs: number): boolean {
     const cohort = this.cohorts.get(lane);
-    if (!cohort || cohort.key !== key || sample.observed_at < cohort.resetAt) return false;
+    if (cohort?.key !== key || sample.observed_at < cohort.resetAt) return false;
     cohort.keepMs = keepMs;
     cohort.samples.push(sample);
     cohort.samples = cohort.samples.filter(
@@ -83,7 +91,7 @@ export class UpgradeProbeEvidence {
     keepMs: number,
   ): boolean {
     const cohort = this.cohorts.get(lane);
-    if (!cohort || cohort.key !== key || sample.observed_at < cohort.resetAt) return false;
+    if (cohort?.key !== key || sample.observed_at < cohort.resetAt) return false;
     cohort.keepMs = keepMs;
     cohort.transportFailures.push(sample);
     cohort.transportFailures = cohort.transportFailures.filter(
@@ -93,7 +101,7 @@ export class UpgradeProbeEvidence {
   }
   unknown(lane: UpgradeProbeLane, key: string): void {
     const cohort = this.cohorts.get(lane);
-    if (!cohort || cohort.key !== key) return;
+    if (cohort?.key !== key) return;
     cohort.samples = [];
     cohort.transportFailures = [];
     cohort.verified = false;
@@ -103,12 +111,7 @@ export class UpgradeProbeEvidence {
   }
   currentKey(lane: UpgradeProbeLane, expected: Partial<UpgradeProbeScope>): string | undefined {
     const cohort = this.cohorts.get(lane);
-    return cohort &&
-      Object.entries(expected).every(
-        ([field, value]) => cohort.scope[field as keyof UpgradeProbeScope] === value,
-      )
-      ? cohort.key
-      : undefined;
+    return cohort && matchesProbeScope(cohort.scope, expected) ? cohort.key : undefined;
   }
   read(
     lane: UpgradeProbeLane,
@@ -117,11 +120,7 @@ export class UpgradeProbeEvidence {
     durationMs = 60000,
   ) {
     const cohort = this.cohorts.get(lane);
-    const matches =
-      cohort &&
-      Object.entries(expected).every(
-        ([key, value]) => cohort.scope[key as keyof UpgradeProbeScope] === value,
-      );
+    const matches = cohort && matchesProbeScope(cohort.scope, expected);
     if (cohort && matches) {
       const cutoff = this.clock.now().getTime() - cohort.keepMs;
       cohort.samples = cohort.samples.filter((row) => row.observed_at >= cutoff);
@@ -148,7 +147,9 @@ export class UpgradeProbeEvidence {
     // Keep a real pair before the cutoff as coverage evidence. Counting only
     // the rolling rows would otherwise remain at 59.95s at a 20Hz cadence.
     const windowMs =
-      retained.length > 1 ? Math.min(durationMs, last!.observed_at - retained[0]!.observed_at) : 0;
+      retained.length > 1
+        ? Math.min(durationMs, requiredUpgradeValue(last).observed_at - retained[0].observed_at)
+        : 0;
     return {
       known,
       scope: matches ? cohort.scope : null,
@@ -160,7 +161,7 @@ export class UpgradeProbeEvidence {
           ? samples.filter((row) => row.success !== 1).length / samples.length
           : null,
       p95Ms:
-        known && samples.length ? sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)]! : null,
+        known && samples.length ? sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] : null,
       maxLatencyMs: Math.max(0, ...sorted, ...hardFailures.map((row) => row.latency_ms)),
       windowMs,
       observedAt: last ? fromEpochMs(last.completed_at).toISOString() : null,

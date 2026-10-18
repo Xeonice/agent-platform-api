@@ -1,7 +1,9 @@
+import { z } from 'zod';
+import { UpgradePlanSchema } from '@platform/contracts';
+import { requiredUpgradeValue, upgradeRecord } from './upgrade-values';
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
 import { readFile, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { z } from 'zod';
 import type { UpgradeContractPlan } from '@platform/contracts';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SystemClock } from '../time/system-clock';
@@ -63,14 +65,13 @@ interface Row {
   reason: string | null;
 }
 const q = (v: string) => '"' + v.replaceAll('"', '""') + '"';
-const sqlValue = (v: unknown): string =>
-  v === null
-    ? 'NULL'
-    : typeof v === 'number'
-      ? String(v)
-      : typeof v === 'boolean'
-        ? String(Number(v))
-        : "'" + String(v).replaceAll("'", "''") + "'";
+const sqlValue = (v: unknown): string => {
+  if (v === null) return 'NULL';
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return String(Number(v));
+  requireUpgrade(typeof v === 'string', 'SHADOW_VALUE_INVALID');
+  return "'" + v.replaceAll("'", "''") + "'";
+};
 
 @Injectable()
 export class UpgradeOnlineMigration implements OnApplicationBootstrap {
@@ -89,10 +90,10 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   >();
   private authorityRow(): Row | undefined {
     return this.store.sqlite
-      .prepare(
+      .prepare<unknown[], Row>(
         'SELECT * FROM upgrade_online_migrations WHERE read_epoch=2 ORDER BY rowid DESC LIMIT 1',
       )
-      .get() as Row | undefined;
+      .get();
   }
   projectNameAuthoritative(): boolean {
     return Boolean(this.authorityRow());
@@ -110,20 +111,20 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   projectIdByName(name: string): string | null {
     const { projection, field } = this.authorityMapping();
     const row = this.store.sqlite
-      .prepare(
+      .prepare<unknown[], { row_key: string }>(
         'SELECT row_key FROM ' +
           q(projection.targetTable) +
           ' WHERE ' +
           q(field.name) +
           '=? AND tombstone=0',
       )
-      .get(name) as { row_key: string } | undefined;
+      .get(name);
     return row?.row_key ?? null;
   }
   saveProjectName(id: string, name: string): string {
     requireUpgrade(this.store.sqlite.inTransaction, 'PROJECT_NAME_AUTHORITY_TRANSACTION_REQUIRED');
     requireUpgrade(
-      [...name].length >= 1 && [...name].length <= 40 && !name.includes('\0'),
+      Array.from(name).length >= 1 && Array.from(name).length <= 40 && !name.includes('\0'),
       'PROJECT_NAME_LENGTH_INVALID',
     );
     const { projection, field } = this.authorityMapping();
@@ -145,7 +146,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   private projectAuthoritySlot(id: string): string {
     const row = this.authorityRow();
     requireUpgrade(row, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
-    const checkpoint = JSON.parse(row.checkpoint) as Json;
+    const checkpoint = upgradeRecord(JSON.parse(row.checkpoint));
     requireUpgrade(
       typeof checkpoint.authorityMarkerPrefix === 'string' &&
         /^~r[a-f0-9]{8}v[0-9]{1,2}:$/.test(checkpoint.authorityMarkerPrefix),
@@ -169,10 +170,12 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     const key = this.readReceiptKey(planDigest);
     if (!key) return false;
     const receipt = this.store.sqlite
-      .prepare('SELECT result FROM upgrade_migration_operations WHERE operation_id=?')
-      .get(key) as { result: string } | undefined;
+      .prepare<unknown[], { result: string }>(
+        'SELECT result FROM upgrade_migration_operations WHERE operation_id=?',
+      )
+      .get(key);
     if (!receipt) return false;
-    const facts = JSON.parse(receipt.result) as Json;
+    const facts = upgradeRecord(JSON.parse(receipt.result));
     return (
       facts.planDigest === planDigest &&
       facts.coordinatorArtifactDigest === process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST &&
@@ -183,7 +186,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
   contractFacts(contract: UpgradeContractPlan) {
     const row = this.row(contract.expandPlanDigest);
     requireUpgrade(
-      row && row.stage === 'complete' && !row.degraded && row.read_epoch >= 1,
+      row?.stage === 'complete' && !row.degraded && row.read_epoch >= 1,
       'CONTRACT_EXPAND_UNCONFIRMED',
     );
     const projection = this.plan(row).projections.find(
@@ -193,8 +196,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         p.targetTable === contract.targetTable,
     );
     requireUpgrade(
-      projection &&
-        projection.fields.length === 1 &&
+      projection?.fields.length === 1 &&
         projection.fields[0].source === 'name' &&
         projection.fields[0].name === contract.nameColumn &&
         projection.fields[0].type === 'text',
@@ -274,7 +276,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         // placeholder. Persist an empty internal namespace before ownership changes.
         let marker: string | undefined;
         for (let candidate = 0; candidate < 32; candidate++) {
-          const prefix = '~r' + contract.planDigest.slice(7, 15) + 'v' + candidate + ':';
+          const prefix = '~r' + contract.planDigest.slice(7, 15) + 'v' + String(candidate) + ':';
           if (
             !this.store.sqlite
               .prepare('SELECT 1 FROM projects WHERE substr(name,1,?)=? LIMIT 1')
@@ -285,8 +287,11 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
           }
         }
         requireUpgrade(marker, 'CONTRACT_RESERVED_NAMESPACE_UNAVAILABLE');
-        const before = this.row(contract.expandPlanDigest)!;
-        const checkpoint = { ...JSON.parse(before.checkpoint), authorityMarkerPrefix: marker };
+        const before = requiredUpgradeValue(this.row(contract.expandPlanDigest));
+        const checkpoint = {
+          ...upgradeRecord(JSON.parse(before.checkpoint)),
+          authorityMarkerPrefix: marker,
+        };
         this.store.sqlite.exec(
           'CREATE UNIQUE INDEX ' +
             q('upg_name_authority_' + contract.planDigest.slice(7, 23)) +
@@ -321,8 +326,10 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         );
         this.contractFacts(contract);
         const all = this.store.sqlite
-          .prepare('SELECT id,name FROM projects ORDER BY id LIMIT ?')
-          .all(contract.maxValidationRows + 1) as { id: string; name: string }[];
+          .prepare<unknown[], { id: string; name: string }>(
+            'SELECT id,name FROM projects ORDER BY id LIMIT ?',
+          )
+          .all(contract.maxValidationRows + 1);
         requireUpgrade(
           all.length <= contract.maxValidationRows,
           'CONTRACT_VALIDATION_BUDGET_EXCEEDED',
@@ -355,11 +362,11 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     if (authority) requireUpgrade(!authority.degraded, 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
     const rows = authority
       ? [authority]
-      : (this.store.sqlite
-          .prepare(
+      : this.store.sqlite
+          .prepare<unknown[], Row>(
             "SELECT * FROM upgrade_online_migrations WHERE read_epoch=1 AND degraded=0 AND stage='complete' ORDER BY rowid DESC",
           )
-          .all() as Row[]);
+          .all();
     for (const row of rows) {
       const plan = this.plan(row),
         projection = plan.projections.find(
@@ -370,14 +377,14 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
       let actual: Json | undefined;
       try {
         actual = this.store.sqlite
-          .prepare(
+          .prepare<unknown[], Json>(
             'SELECT ' +
               q(field.name) +
               ',"tombstone" FROM ' +
               q(projection.targetTable) +
               ' WHERE row_key=?',
           )
-          .get(id) as Json | undefined;
+          .get(id);
       } catch (error) {
         if (row.read_epoch >= 2) throw error;
         // Only the independently rebuildable shadow is allowed to degrade. A
@@ -426,10 +433,10 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
           coordinatorArtifactDigest: process.env.PLATFORM_COORDINATOR_ACTUAL_DIGEST,
         });
         const before = this.store.sqlite
-          .prepare(
+          .prepare<unknown[], { request_digest: string; result: string }>(
             'SELECT request_digest,result FROM upgrade_migration_operations WHERE operation_id=?',
           )
-          .get(receiptKey) as { request_digest: string; result: string } | undefined;
+          .get(receiptKey);
         requireUpgrade(
           !before || before.request_digest === requestDigest,
           'PROJECTION_READ_RECEIPT_CONFLICT',
@@ -457,7 +464,9 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         count: (prior?.count ?? 0) + 1,
         lastReadAt: this.clock.now().toISOString(),
       });
-      return actual[field.name] as string;
+      const currentName = actual[field.name];
+      requireUpgrade(typeof currentName === 'string', 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
+      return currentName;
     }
     requireUpgrade(!authority, 'PROJECT_NAME_AUTHORITY_UNAVAILABLE');
     return undefined;
@@ -467,21 +476,28 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     @Inject(CLOCK) private readonly clock: Clock = new SystemClock(),
   ) {}
   onApplicationBootstrap(): void {
-    registerBusinessTransactionHook(this.store.sqlite, () => this.projectCommittedChanges());
+    registerBusinessTransactionHook(this.store.sqlite, () => {
+      this.projectCommittedChanges();
+    });
   }
   schema(): number {
-    const count = (
-      this.store.sqlite.prepare('SELECT count(*) n FROM __drizzle_migrations').get() as {
-        n: number;
-      }
+    const count = requiredUpgradeValue(
+      this.store.sqlite
+        .prepare<
+          unknown[],
+          {
+            n: number;
+          }
+        >('SELECT count(*) n FROM __drizzle_migrations')
+        .get(),
     ).n;
     // A representation read epoch is not a committed global SQL migration.
     return count;
   }
   private row(digest: string): Row | undefined {
     return this.store.sqlite
-      .prepare('SELECT * FROM upgrade_online_migrations WHERE plan_digest=?')
-      .get(digest) as Row | undefined;
+      .prepare<unknown[], Row>('SELECT * FROM upgrade_online_migrations WHERE plan_digest=?')
+      .get(digest);
   }
   private plan(row: Row): Plan {
     const plan = OnlineMigrationPlanSchema.parse(JSON.parse(row.plan));
@@ -501,8 +517,8 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
       requireUpgrade(!targets.has(projection.targetTable), 'DUPLICATE_PROJECTION');
       targets.add(projection.targetTable);
       const columns = this.store.sqlite
-        .prepare('PRAGMA table_info(' + q(projection.sourceTable) + ')')
-        .all() as Json[];
+        .prepare<unknown[], Json>('PRAGMA table_info(' + q(projection.sourceTable) + ')')
+        .all();
       requireUpgrade(
         columns.filter((c) => Number(c.pk) > 0).length === 1 &&
           columns.some((c) => c.name === projection.primaryKey && Number(c.pk) === 1),
@@ -537,8 +553,8 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
           ')',
       );
       const columns = this.store.sqlite
-        .prepare('PRAGMA table_info(' + q(p.sourceTable) + ')')
-        .all() as Json[];
+        .prepare<unknown[], Json>('PRAGMA table_info(' + q(p.sourceTable) + ')')
+        .all();
       const json = columns
         .flatMap((c) => [
           sqlValue(c.name),
@@ -571,14 +587,14 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
             ' AS TEXT),' +
             (event === 'DELETE' ? 'NULL' : 'json_object(' + json + ')') +
             ',' +
-            Number(event === 'DELETE') +
+            String(Number(event === 'DELETE')) +
             '); END',
         );
       }
     }
   }
   private projected(p: Plan['projections'][number], payload: string | null): unknown[] {
-    const object = payload ? (JSON.parse(payload) as Json) : {};
+    const object = payload ? upgradeRecord(JSON.parse(payload)) : {};
     return p.fields.map((f) => {
       const value = f.source ? object[f.source] : f.default;
       if (value == null) return null;
@@ -589,7 +605,13 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         );
         return Buffer.from(value, 'hex');
       }
-      if (f.type === 'text') return String(value);
+      if (f.type === 'text') {
+        requireUpgrade(
+          typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean',
+          'SHADOW_VALUE_INVALID',
+        );
+        return String(value);
+      }
       const number = Number(value);
       requireUpgrade(
         Number.isFinite(number) && (f.type !== 'integer' || Number.isSafeInteger(number)),
@@ -613,8 +635,10 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
       const field = p.fields.find((f) => f.source === 'name');
       requireUpgrade(field, 'PROJECT_NAME_AUTHORITY_UNCONFIRMED');
       const current = this.store.sqlite
-        .prepare('SELECT ' + q(field.name) + ' FROM ' + q(p.targetTable) + ' WHERE row_key=?')
-        .get(key) as Json | undefined;
+        .prepare<unknown[], Json>(
+          'SELECT ' + q(field.name) + ' FROM ' + q(p.targetTable) + ' WHERE row_key=?',
+        )
+        .get(key);
       requireUpgrade(
         current && typeof current[field.name] === 'string',
         'PROJECT_NAME_AUTHORITY_UNCONFIRMED',
@@ -646,15 +670,17 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     this.projecting = true;
     try {
       const rows = this.store.sqlite
-        .prepare("SELECT * FROM upgrade_online_migrations WHERE stage NOT IN ('contracted')")
-        .all() as Row[];
+        .prepare<unknown[], Row>(
+          "SELECT * FROM upgrade_online_migrations WHERE stage NOT IN ('contracted')",
+        )
+        .all();
       for (const row of rows) {
         const plan = this.plan(row);
         const changes = this.store.sqlite
-          .prepare(
+          .prepare<unknown[], Json>(
             'SELECT * FROM upgrade_projection_changes WHERE plan_digest=? AND projected=0 ORDER BY id LIMIT ?',
           )
-          .all(row.plan_digest, plan.maxBatchRows) as Json[];
+          .all(row.plan_digest, plan.maxBatchRows);
         if (!changes.length) continue;
         this.store.sqlite.exec('SAVEPOINT upg_projection');
         try {
@@ -666,7 +692,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
               projection,
               String(c.row_key),
               Number(c.id),
-              c.payload as string | null,
+              z.string().nullable().parse(c.payload),
               Number(c.tombstone),
             );
             this.store.sqlite
@@ -674,12 +700,12 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
               .run(c.id);
           }
           this.store.sqlite.exec('RELEASE upg_projection');
-          const pending = (
+          const pending = requiredUpgradeValue(
             this.store.sqlite
-              .prepare(
+              .prepare<unknown[], { n: number }>(
                 'SELECT count(*) n FROM upgrade_projection_changes WHERE plan_digest=? AND projected=0',
               )
-              .get(row.plan_digest) as { n: number }
+              .get(row.plan_digest),
           ).n;
           if (pending > 0) {
             requireUpgrade(row.read_epoch < 2, 'PROJECT_NAME_AUTHORITY_BACKLOG');
@@ -723,17 +749,17 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     degraded: boolean;
   } {
     const attempt = this.store.sqlite
-      .prepare('SELECT plan FROM upgrade_attempts WHERE attempt_id=?')
-      .get(id) as { plan: string } | undefined;
+      .prepare<unknown[], { plan: string }>('SELECT plan FROM upgrade_attempts WHERE attempt_id=?')
+      .get(id);
     if (
       attempt &&
-      (JSON.parse(attempt.plan) as { migrationPath: { migrationPlanDigest: string | null } })
-        .migrationPath.migrationPlanDigest === IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST
+      UpgradePlanSchema.parse(JSON.parse(attempt.plan)).migrationPath.migrationPlanDigest ===
+        IMAGE_RUNTIME_SCHEMA_PLAN_DIGEST
     )
       return imageRuntimeSchemaMetrics(this.store.sqlite);
     const row = this.store.sqlite
-      .prepare('SELECT * FROM upgrade_online_migrations WHERE attempt_id=?')
-      .get(id) as Row | undefined;
+      .prepare<unknown[], Row>('SELECT * FROM upgrade_online_migrations WHERE attempt_id=?')
+      .get(id);
     if (!row)
       return {
         known: false,
@@ -742,12 +768,12 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
         readEpoch: 0,
         degraded: false,
       };
-    const pending = (
+    const pending = requiredUpgradeValue(
       this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { n: number }>(
           'SELECT count(*) n FROM upgrade_projection_changes WHERE plan_digest=? AND projected=0',
         )
-        .get(row.plan_digest) as { n: number }
+        .get(row.plan_digest),
     ).n;
     return {
       known: true,
@@ -778,13 +804,13 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
       checkpoint: input.checkpoint ?? null,
     });
     const prior = this.store.sqlite
-      .prepare(
+      .prepare<unknown[], { request_digest: string; result: string }>(
         'SELECT request_digest,result FROM upgrade_migration_operations WHERE operation_id=?',
       )
-      .get(input.operationId) as { request_digest: string; result: string } | undefined;
+      .get(input.operationId);
     if (prior) {
       requireUpgrade(prior.request_digest === requestDigest, 'MIGRATION_OPERATION_CONFLICT');
-      return JSON.parse(prior.result) as Json;
+      return upgradeRecord(JSON.parse(prior.result));
     }
     let row = this.row(digest);
     if (input.action === 'status')
@@ -844,7 +870,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
             );
         })
         .immediate();
-      row = this.row(digest)!;
+      row = requiredUpgradeValue(this.row(digest));
     }
     if (row.attempt_id !== id) {
       const previous = this.store.snapshot(row.attempt_id);
@@ -855,9 +881,9 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
           this.store.latest()?.attemptId === id,
         'MIGRATION_OWNED_BY_OTHER_ATTEMPT',
       );
+      this.plan(row); // Revalidate the signed retention invariant before adopting its old data.
       requireUpgrade(
         this.store.step(id, 'package-verify').applied &&
-          this.plan(row).oldRepresentationRetained &&
           snapshot.plan.migrationPath.minSchema <= this.schema() &&
           snapshot.plan.migrationPath.maxSchema >= this.schema(),
         'MIGRATION_ADOPTION_UNQUALIFIED',
@@ -869,11 +895,11 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
             .prepare(
               'UPDATE upgrade_online_migrations SET attempt_id=?,updated_at=? WHERE plan_digest=? AND attempt_id=?',
             )
-            .run(id, this.clock.now().getTime(), digest, row!.attempt_id);
+            .run(id, this.clock.now().getTime(), digest, requiredUpgradeValue(row).attempt_id);
           requireUpgrade(update.changes === 1, 'MIGRATION_ADOPTION_CONFLICT');
         })
         .immediate();
-      row = this.row(digest)!;
+      row = requiredUpgradeValue(this.row(digest));
     }
     const plan = this.plan(row);
     if (input.action !== 'prepare')
@@ -892,19 +918,17 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
               "UPDATE upgrade_online_migrations SET stage='backfill',checkpoint=?,read_epoch=0,degraded=0,reason=NULL WHERE plan_digest=?",
             )
             .run(canonicalUpgrade({ projection: 0, cursor: null, phase: 'backfill' }), digest);
-          row = this.row(digest)!;
+          row = requiredUpgradeValue(this.row(digest));
         }
-        let checkpoint = JSON.parse(row!.checkpoint) as {
-            projection: number;
-            cursor: string | null;
-            phase: string;
-          },
-          completed = row!.completed_work;
+        let checkpoint = z
+            .object({ projection: z.number(), cursor: z.string().nullable(), phase: z.string() })
+            .parse(JSON.parse(requiredUpgradeValue(row).checkpoint)),
+          completed = requiredUpgradeValue(row).completed_work;
         if (checkpoint.phase === 'backfill' || checkpoint.phase === 'reconcile') {
-          const p = plan.projections[checkpoint.projection];
+          const p = plan.projections.at(checkpoint.projection);
           if (p) {
             const records = this.store.sqlite
-              .prepare(
+              .prepare<unknown[], Json>(
                 'SELECT * FROM ' +
                   q(p.sourceTable) +
                   ' WHERE (? IS NULL OR CAST(' +
@@ -913,7 +937,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
                   q(p.primaryKey) +
                   ' AS TEXT) LIMIT ?',
               )
-              .all(checkpoint.cursor, checkpoint.cursor, plan.maxBatchRows) as Json[];
+              .all(checkpoint.cursor, checkpoint.cursor, plan.maxBatchRows);
             let count = 0;
             for (const record of records) {
               const key = String(record[p.primaryKey]);
@@ -923,23 +947,26 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
                   Buffer.isBuffer(v) ? v.toString('hex').toUpperCase() : v,
                 ]),
               );
-              const change = this.store.sqlite
-                .prepare(
-                  'SELECT coalesce(max(id),0) revision FROM upgrade_projection_changes WHERE plan_digest=? AND projection=? AND row_key=?',
-                )
-                .get(digest, p.targetTable, key) as { revision: number };
+              const change = requiredUpgradeValue(
+                this.store.sqlite
+                  .prepare<unknown[], { revision: number }>(
+                    'SELECT coalesce(max(id),0) revision FROM upgrade_projection_changes WHERE plan_digest=? AND projection=? AND row_key=?',
+                  )
+                  .get(digest, p.targetTable, key),
+              );
               if (checkpoint.phase === 'backfill')
                 this.apply(plan, p, key, change.revision, canonicalUpgrade(serial), 0);
               else {
                 const actual = this.store.sqlite
-                  .prepare('SELECT * FROM ' + q(p.targetTable) + ' WHERE row_key=?')
-                  .get(key) as Json | undefined;
+                  .prepare<unknown[], Json>(
+                    'SELECT * FROM ' + q(p.targetTable) + ' WHERE row_key=?',
+                  )
+                  .get(key);
                 const expected = this.projected(p, canonicalUpgrade(serial));
                 const normalized = (value: unknown) =>
                   Buffer.isBuffer(value) ? { hex: value.toString('hex') } : value;
                 requireUpgrade(
-                  actual &&
-                    actual.tombstone === 0 &&
+                  actual?.tombstone === 0 &&
                     Number(actual.row_revision) >= change.revision &&
                     p.fields.every(
                       (f, i) =>
@@ -968,15 +995,15 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
             };
           }
         } else if (checkpoint.phase === 'reconcile-deletions') {
-          const p = plan.projections[checkpoint.projection];
+          const p = plan.projections.at(checkpoint.projection);
           if (p) {
             const shadow = this.store.sqlite
-              .prepare(
+              .prepare<unknown[], Json>(
                 'SELECT row_key,tombstone FROM ' +
                   q(p.targetTable) +
                   ' WHERE (? IS NULL OR row_key>?) ORDER BY row_key LIMIT ?',
               )
-              .all(checkpoint.cursor, checkpoint.cursor, plan.maxBatchRows) as Json[];
+              .all(checkpoint.cursor, checkpoint.cursor, plan.maxBatchRows);
             let count = 0;
             for (const item of shadow) {
               const exists = this.store.sqlite
@@ -1007,12 +1034,12 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
             checkpoint = { projection: 0, cursor: null, phase: 'read-switch' };
         } else if (checkpoint.phase === 'read-switch') {
           this.projectCommittedChanges();
-          const pending = (
+          const pending = requiredUpgradeValue(
             this.store.sqlite
-              .prepare(
+              .prepare<unknown[], { n: number }>(
                 'SELECT count(*) n FROM upgrade_projection_changes WHERE plan_digest=? AND projected=0',
               )
-              .get(digest) as { n: number }
+              .get(digest),
           ).n;
           requireUpgrade(
             pending === 0 && !this.row(digest)?.degraded,

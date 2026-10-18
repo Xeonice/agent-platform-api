@@ -1,3 +1,11 @@
+import { UpgradePlanSchema } from '@platform/contracts';
+import {
+  nullableUpgradeRecord,
+  optionalUpgradeRecord,
+  requiredUpgradeValue,
+  upgradeRecord,
+  upgradeRecords,
+} from './upgrade-values';
 import {
   Inject,
   Injectable,
@@ -79,7 +87,9 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         }
       }
     });
-    this.operationTimer = setInterval(() => this.scheduleOperation(), 250);
+    this.operationTimer = setInterval(() => {
+      this.scheduleOperation();
+    }, 250);
     this.operationTimer.unref();
   }
   onModuleDestroy(): void {
@@ -121,7 +131,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       );
       const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
       const receipt =
-        raw && typeof raw === 'object' && 'release' in raw ? (raw as Json) : { release: raw };
+        raw && typeof raw === 'object' && 'release' in raw ? upgradeRecord(raw) : { release: raw };
       const release = ConfirmedServiceReleaseSchema.parse(receipt.release);
       const artifactRoot =
         typeof receipt.artifactRoot === 'string'
@@ -195,7 +205,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
           proof = await this.inspector.installedProof(last, binding),
           actual = await this.inspector.webBuild(binding);
         requireUpgrade(proof.qualified === true, 'CURRENT_SERVICE_UNCONFIRMED');
-        const web = binding.web as Json;
+        const web = upgradeRecord(binding.web);
         requireUpgrade(
           web.digest === last.components.web.artifactDigest &&
             actual.webRevision === last.components.web.webRevision,
@@ -372,7 +382,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     return attempt;
   }
   private preferAsync(req: Request): boolean {
-    return String(req.headers?.prefer ?? '')
+    return String(req.headers.prefer ?? '')
       .split(',')
       .some((preference) => preference.trim().toLowerCase() === 'respond-async');
   }
@@ -415,8 +425,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         const current = this.store.confirmed(),
           instance = this.store.instance();
         requireUpgrade(
-          current &&
-            current.releaseId === stage.releaseId &&
+          current?.releaseId === stage.releaseId &&
             instance.service_state === 'confirmed' &&
             instance.ready === 1,
           'UPGRADE_STAGE_ACTIVATION_UNCONFIRMED',
@@ -522,7 +531,9 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         next.operation.stages[index].state = 'running';
         next.operation.state = 'running';
       });
-      await this.syncIntentBarrier(accepted.operation.stages[index].attemptId!);
+      await this.syncIntentBarrier(
+        requiredUpgradeValue(accepted.operation.stages[index].attemptId),
+      );
     } catch (error) {
       // An epoch loss cannot commit even this failure. A new actual writer resumes
       // the same immutable record; it never replays an already-created attempt.
@@ -536,7 +547,9 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         });
       } else if (current) {
         const actual = this.store.attempt(
-          current.operation.stages[current.operation.currentStageIndex].attemptId!,
+          requiredUpgradeValue(
+            current.operation.stages[current.operation.currentStageIndex].attemptId,
+          ),
         );
         if (actual.state === 'activation-confirmed')
           this.operations.update(current.operation.operationId, (next) => {
@@ -580,7 +593,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       const snapshot = this.store.snapshot(id),
         actual = await this.inspector.entryBinding();
       requireUpgrade(
-        canonicalUpgrade(persistedBinding(command.payload.actual as Json)) ===
+        canonicalUpgrade(persistedBinding(upgradeRecord(command.payload.actual))) ===
           canonicalUpgrade(persistedBinding(actual)),
         'ENTRY_BINDING_CHANGED',
       );
@@ -603,7 +616,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         channel: snapshot.manifest.channel,
         components: snapshot.manifest.components,
         commits: snapshot.manifest.commits,
-        productionWebBinding: String((actual.web as Json).origin ?? ''),
+        productionWebBinding: loopbackOrigin(upgradeRecord(actual.web).origin),
       });
       const installed = await this.inspector.installedProof(confirmed, actual);
       requireUpgrade(installed.qualified === true, 'ACTUAL_COMPONENTS_UNCONFIRMED');
@@ -614,7 +627,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       requireUpgrade(eligibility.qualified === true, 'FALLBACK_UNQUALIFIED');
       const recoveryPlan =
         command.kind === 'recovery-started'
-          ? (command.payload.recoveryPlan as Json)
+          ? upgradeRecord(command.payload.recoveryPlan)
           : this.store.snapshot(id).recoveryPlan;
       requireUpgrade(recoveryPlan, 'RECOVERY_FIXED_PLAN_MISSING');
       assertRecoveryTargets(recoveryPlan, eligibility);
@@ -628,7 +641,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         if (current) restoredPartial = current;
         else {
           const source = this.store.snapshot(id).sourceActivation;
-          const web = (await this.inspector.entryBinding()).web as Json;
+          const web = upgradeRecord((await this.inspector.entryBinding()).web);
           const full = ConfirmedServiceReleaseSchema.parse({
             ...source,
             activationGeneration: this.store.instance().activation_generation + 1,
@@ -727,13 +740,15 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       (e) => e.kind === 'fault-recovery' && e.result === 'passed',
     );
     const baselineRow = this.store.sqlite
-      .prepare('SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string; digest: string } | undefined;
+      .prepare<unknown[], { snapshot: string; digest: string }>(
+        'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
+      )
+      .get(id);
     requireUpgrade(baselineRow, 'CONTINUITY_BASELINE_MISSING');
-    const baseline = JSON.parse(baselineRow.snapshot) as Json;
+    const baseline = upgradeRecord(JSON.parse(baselineRow.snapshot));
     requireUpgrade(upgradeDigest(baseline) === baselineRow.digest, 'CONTINUITY_BASELINE_CORRUPT');
-    const coordinator = baseline.coordinator as Json,
-      owner = baseline.ownerBinding as Json;
+    const coordinator = upgradeRecord(baseline.coordinator),
+      owner = upgradeRecord(baseline.ownerBinding);
     let live: Json = {},
       immutable = false;
     try {
@@ -754,19 +769,17 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         },
       );
       requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
-      live = (await response.json()) as Json;
+      live = upgradeRecord(await response.json());
       const prior = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { plan: string }>(
           "SELECT plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
         )
-        .get(this.store.instanceId, source.releaseId) as { plan: string } | undefined;
+        .get(this.store.instanceId, source.releaseId);
       const root = prior
         ? resolve(
             process.env.UPGRADE_INSTALLER_ROOT ?? '',
             'artifacts',
-            String(
-              (JSON.parse(prior.plan) as { package: { digest: string } }).package.digest,
-            ).slice(7),
+            UpgradePlanSchema.parse(JSON.parse(prior.plan)).package.digest.slice(7),
           )
         : process.env.UPGRADE_INITIAL_ARTIFACT_ROOT;
       requireUpgrade(root, 'SOURCE_ARTIFACT_UNKNOWN');
@@ -776,7 +789,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       /* Old process/schema/artifact absent is not a safe rollback. */
     }
     let healthy = false;
-    const api = binding.oldApi as Json;
+    const api = upgradeRecord(binding.oldApi);
     try {
       const identity = await this.inspector.controlIdentity(api.origin);
       healthy =
@@ -788,10 +801,10 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     } catch {
       /* Unknown fallback remains disqualified. */
     }
-    const webCandidates = [
+    const webCandidates = upgradeRecords([
       binding.web,
-      ...(Array.isArray(binding.retainedWeb) ? binding.retainedWeb : []),
-    ] as Json[];
+      ...(Array.isArray(binding.retainedWeb) ? upgradeRecords(binding.retainedWeb) : []),
+    ]);
     const web =
       webCandidates.find((w) => w.digest === source.components.web.artifactDigest) ?? null;
     let webHealthy = false;
@@ -807,12 +820,14 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     const loadedWebCompatible = [source.components.web, snapshot.manifest.components.web].every(
       (w) => sourceApiProtocol.min <= w.protocol.max && sourceApiProtocol.max >= w.protocol.min,
     );
-    const ownersEvidence = continuity.owner as Json | null,
-      allOwners = Array.isArray(ownersEvidence?.owners) ? (ownersEvidence.owners as Json[]) : [];
+    const ownersEvidence = nullableUpgradeRecord(continuity.owner),
+      allOwners = Array.isArray(ownersEvidence?.owners)
+        ? upgradeRecords(ownersEvidence.owners)
+        : [];
     const allOwnersCompatible =
       allOwners.length > 0 &&
       allOwners.every((o) => {
-        const range = o.protocol as Json | undefined,
+        const range = optionalUpgradeRecord(o.protocol),
           coor = (source.components.coordinator ?? source.components.api).protocol;
         return range && Number(range.min) <= coor.max && Number(range.max) >= coor.min;
       }) &&
@@ -873,17 +888,21 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.store.sqlite
       .transaction(() => {
         const prior = this.store.sqlite
-          .prepare('SELECT request_id,value,revision FROM upgrade_probe_records WHERE request_id=?')
-          .get(input.requestId) as Json | undefined;
+          .prepare<unknown[], Json>(
+            'SELECT request_id,value,revision FROM upgrade_probe_records WHERE request_id=?',
+          )
+          .get(input.requestId);
         if (prior) {
           requireUpgrade(prior.value === input.value, 'PROBE_ID_CONFLICT');
           return prior;
         }
         const revision =
-          (
+          requiredUpgradeValue(
             this.store.sqlite
-              .prepare('SELECT count(*) AS n FROM upgrade_probe_records WHERE attempt_id=?')
-              .get(input.attemptId) as { n: number }
+              .prepare<unknown[], { n: number }>(
+                'SELECT count(*) AS n FROM upgrade_probe_records WHERE attempt_id=?',
+              )
+              .get(input.attemptId),
           ).n + 1;
         this.store.sqlite
           .prepare('INSERT INTO upgrade_probe_records VALUES(?,?,?,?,?)')

@@ -7,18 +7,16 @@ export async function withTeardownDeadline(
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new SandboxProviderError(
-            SandboxProviderErrorCode.TIMEOUT,
-            `任务 ${sandboxId} 的运行环境没有在限定时间内删除。`,
-            undefined,
-            true,
-          ),
+    timer = setTimeout(() => {
+      reject(
+        new SandboxProviderError(
+          SandboxProviderErrorCode.TIMEOUT,
+          `任务 ${sandboxId} 的运行环境没有在限定时间内删除。`,
+          undefined,
+          true,
         ),
-      15_000,
-    );
+      );
+    }, 15_000);
   });
   try {
     await Promise.race([removal, timeout]);

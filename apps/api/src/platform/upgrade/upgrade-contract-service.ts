@@ -1,3 +1,7 @@
+import { z } from 'zod';
+import { isRecord } from '@platform/shared-kernel';
+import { requiredUpgradeValue } from './upgrade-values';
+import { optionalUpgradeRecord, upgradeRecord, upgradeRecords } from './upgrade-values';
 import {
   Inject,
   Injectable,
@@ -76,7 +80,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       signal: AbortSignal.timeout(2000),
     });
     requireUpgrade(r.ok, 'CONTRACT_SUPERVISOR_UNCONFIRMED');
-    return (await r.json()) as Json;
+    return upgradeRecord(await r.json());
   }
   private async installedPlan(digest?: string) {
     const latest = this.store.upgrades.latest(),
@@ -133,7 +137,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       response.instanceId === this.store.upgrades.instanceId && Array.isArray(response.readers),
       'CONTRACT_READERS_UNKNOWN',
     );
-    const records = response.readers as Json[];
+    const records = upgradeRecords(response.readers);
     const ids = new Set<string>();
     for (const r of records) {
       requireUpgrade(
@@ -165,8 +169,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
   ): Promise<Json> {
     const current = this.store.upgrades.confirmed();
     requireUpgrade(
-      current &&
-        current.activationGeneration === generation &&
+      current?.activationGeneration === generation &&
         this.store.upgrades.instance().service_state === 'confirmed' &&
         this.store.upgrades.pending().attempts.length === 0 &&
         this.store.upgrades.recovery()?.state !== 'recovering',
@@ -177,11 +180,13 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       'CONTRACT_CURRENT_WRITER_UNCONFIRMED',
     );
     const expand = this.store.sqlite
-      .prepare('SELECT attempt_id FROM upgrade_online_migrations WHERE plan_digest=?')
-      .get(plan.expandPlanDigest) as { attempt_id: string } | undefined;
+      .prepare<unknown[], { attempt_id: string }>(
+        'SELECT attempt_id FROM upgrade_online_migrations WHERE plan_digest=?',
+      )
+      .get(plan.expandPlanDigest);
     requireUpgrade(expand, 'CONTRACT_EXPAND_UNCONFIRMED');
     const upgrade = this.store.upgrades.snapshot(expand.attempt_id);
-    const windowKey = generation + ':' + plan.planDigest;
+    const windowKey = String(generation) + ':' + plan.planDigest;
     const anchor = this.windows.get(windowKey) ?? performance.now();
     this.windows.set(windowKey, anchor);
     const windowMs = Math.max(plan.rollbackWindowMs, upgrade.plan.policy.retentionMs);
@@ -190,24 +195,24 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
     const facts = this.migration.contractFacts(plan);
     requireUpgrade(facts.newReadsConfirmed, 'CONTRACT_NEW_READS_UNCONFIRMED');
     const baseline = this.store.sqlite
-      .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(expand.attempt_id) as { snapshot: string } | undefined;
+      .prepare<unknown[], { snapshot: string }>(
+        'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
+      )
+      .get(expand.attempt_id);
     requireUpgrade(baseline, 'CONTRACT_READER_INVENTORY_UNCONFIRMED');
-    const source = (JSON.parse(baseline.snapshot) as Json).coordinator as Json;
+    const source = upgradeRecord(upgradeRecord(JSON.parse(baseline.snapshot)).coordinator);
     requireUpgrade(
-      source &&
-        (source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY ||
-          readers.some(
-            (r) =>
-              r.startIdentity === source.startIdentity &&
-              r.artifactDigest === source.artifactDigest,
-          )),
+      source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY ||
+        readers.some(
+          (r) =>
+            r.startIdentity === source.startIdentity && r.artifactDigest === source.artifactDigest,
+        ),
       'CONTRACT_READER_INVENTORY_UNCONFIRMED',
     );
     for (const reader of readers) {
       if (retired[String(reader.readerId)]) {
         const fresh = await this.supervisor('/retire-reader', {
-          ...((retired[String(reader.readerId)] as Json).lookup as Json),
+          ...upgradeRecord(upgradeRecord(retired[String(reader.readerId)]).lookup),
           readerId: String(reader.readerId),
         });
         requireUpgrade(
@@ -217,7 +222,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
         continue;
       }
       if (reader.retired === true) {
-        const physical = reader.retirementEvidence as Json | undefined;
+        const physical = optionalUpgradeRecord(reader.retirementEvidence);
         requireUpgrade(
           physical?.qualified === true && physical.definitelyAbsent === true,
           'CONTRACT_RETIREMENT_UNKNOWN',
@@ -241,7 +246,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
         signal: AbortSignal.timeout(1500),
       });
       requireUpgrade(response.ok, 'CONTRACT_READER_UNCONFIRMED');
-      const identity = (await response.json()) as Json;
+      const identity = upgradeRecord(await response.json());
       requireUpgrade(
         identity.instanceId === this.store.upgrades.instanceId &&
           identity.role === 'coordinator' &&
@@ -269,7 +274,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
         signal: AbortSignal.timeout(1500),
       });
       requireUpgrade(response.ok, 'CONTRACT_OWNER_DEPENDENCY_UNKNOWN');
-      const actual = (await response.json()) as Json;
+      const actual = upgradeRecord(await response.json());
       requireUpgrade(
         actual.instanceId === this.store.upgrades.instanceId &&
           actual.ownerId === owner.ownerId &&
@@ -288,7 +293,8 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       isolation.instanceId === this.store.upgrades.instanceId &&
         isolation.qualified === true &&
         Array.isArray(isolation.ownerIds) &&
-        JSON.stringify([...isolation.ownerIds].sort()) === JSON.stringify(ownerIds) &&
+        JSON.stringify(z.array(z.string()).parse(isolation.ownerIds).sort()) ===
+          JSON.stringify(ownerIds) &&
         typeof isolation.evidenceDigest === 'string',
       'CONTRACT_OWNER_ISOLATION_UNCONFIRMED',
     );
@@ -312,7 +318,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
     if (base.authority === 'new' && (!last || last.attempt.state === 'completed')) return base;
     try {
       const fixed = await this.installedPlan();
-      const key = fixed.current.activationGeneration + ':' + fixed.plan.planDigest;
+      const key = String(fixed.current.activationGeneration) + ':' + fixed.plan.planDigest;
       if (!this.windows.has(key)) this.windows.set(key, performance.now());
       let records: Json[] = [];
       let eligible = false,
@@ -334,7 +340,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
         expandPlanDigest: fixed.plan.expandPlanDigest,
         rollbackWindowClosesAt: fromEpochMs(
           this.clock.now().getTime() +
-            Math.max(0, ms - (performance.now() - this.windows.get(key)!)),
+            Math.max(0, ms - (performance.now() - requiredUpgradeValue(this.windows.get(key)))),
         ).toISOString(),
         eligible,
         reason,
@@ -433,11 +439,11 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
   }
   private async budget(plan: UpgradeContractPlan) {
     const fs = await statfs(env.dataRoot);
-    const available = Number(fs.bavail) * Number(fs.bsize);
+    const available = fs.bavail * fs.bsize;
     const path = typeof this.store.sqlite.name === 'string' ? this.store.sqlite.name + '-wal' : '';
     const wal = path
-      ? await lstat(path).catch((error) => {
-          if (error.code === 'ENOENT') return null;
+      ? await lstat(path).catch((error: unknown) => {
+          if (isRecord(error) && error.code === 'ENOENT') return null;
           throw error;
         })
       : null;

@@ -12,6 +12,7 @@ export function observeUpgradeOnce<T>(
   owner: object,
   key: string,
   read: () => Promise<T>,
+  decode: (value: unknown) => T,
 ): Promise<T> {
   const scope = observation.getStore();
   if (!scope) return read();
@@ -21,7 +22,7 @@ export function observeUpgradeOnce<T>(
     scope.set(owner, proofs);
   }
   const prior = proofs.get(key);
-  if (prior) return prior as Promise<T>;
+  if (prior) return prior.then(decode);
   const proof = read();
   proofs.set(key, proof);
   return proof;

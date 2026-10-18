@@ -1,3 +1,5 @@
+import { errorMessage, isRecord } from '@platform/shared-kernel';
+import { z } from 'zod';
 import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
 import { authHeader } from './agent-auth';
 import type { AgentSignal } from './aio-process.stream';
@@ -63,7 +65,7 @@ export class AioAgentHttp {
     } catch (e) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-        `AIO agent ${path} unreachable: ${(e as Error).message}`,
+        `AIO agent ${path} unreachable: ${errorMessage(e)}`,
         e,
         true,
       );
@@ -81,7 +83,7 @@ export class AioAgentHttp {
     } catch (e) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-        `AIO agent ${path} unreachable: ${(e as Error).message}`,
+        `AIO agent ${path} unreachable: ${errorMessage(e)}`,
         e,
         true,
       );
@@ -102,7 +104,7 @@ export class AioAgentHttp {
     if (!res.ok || !parsed.success) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INTERNAL,
-        `AIO agent exec failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+        `AIO agent exec failed: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
       );
     }
     return parsed.data ?? {};
@@ -121,7 +123,7 @@ export class AioAgentHttp {
     if (!res.ok || !parsed.success) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INTERNAL,
-        `AIO agent file write failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+        `AIO agent file write failed: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
       );
     }
   }
@@ -161,12 +163,12 @@ export class AioAgentHttp {
     const res = await this.post('/tickets', {});
     const ticket = await res
       .json()
-      .then((d) => (d as { ticket?: unknown }).ticket)
+      .then((d: unknown) => (isRecord(d) ? d.ticket : undefined))
       .catch(() => undefined);
     if (!res.ok || typeof ticket !== 'string' || ticket === '') {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-        `AIO agent refused to mint a websocket ticket (HTTP ${res.status}); ` +
+        `AIO agent refused to mint a websocket ticket (HTTP ${String(res.status)}); ` +
           'the terminal cannot be opened without one',
         undefined,
         true,
@@ -192,11 +194,38 @@ export function exitCodeOf(data: BashExecResult): number | null {
 
 export async function readEnvelope(res: Response): Promise<AgentEnvelope> {
   try {
-    return (await res.json()) as AgentEnvelope;
+    return agentEnvelopeSchema.parse(await res.json());
   } catch {
     return { success: false };
   }
 }
+
+const commandStateSchema = z
+  .object({
+    status: z.string().optional(),
+    exit_code: z.number().nullable().optional(),
+  })
+  .passthrough();
+const agentDataSchema = commandStateSchema.extend({
+  stdout: z.string().nullable().optional(),
+  stderr: z.string().nullable().optional(),
+  command_id: z.string().optional(),
+  command: commandStateSchema.optional(),
+  files: z.unknown().optional(),
+  entries: z.unknown().optional(),
+  items: z.unknown().optional(),
+});
+const agentEnvelopeSchema = z
+  .object({
+    success: z.boolean().optional(),
+    message: z.string().optional(),
+    error_type: z.string().optional(),
+    data: z
+      .union([agentDataSchema, z.array(z.unknown()).transform((files) => ({ files }))])
+      .nullish()
+      .transform((data) => data ?? undefined),
+  })
+  .passthrough();
 
 export interface AgentEnvelope {
   success?: boolean;
@@ -258,9 +287,12 @@ export function isNotFoundEnvelope(res: Response, body: Buffer): boolean {
   if (!isJsonResponse(res)) return false;
   try {
     const parsed: unknown = JSON.parse(body.toString('utf8'));
-    if (typeof parsed !== 'object' || parsed === null) return false;
-    const o = parsed as Record<string, unknown>;
-    return o.success === false && isNotFoundMessage(String(o.error_type ?? o.message ?? ''));
+    if (!isRecord(parsed)) return false;
+    const message = parsed.error_type ?? parsed.message;
+    return (
+      parsed.success === false &&
+      isNotFoundMessage(typeof message === 'string' ? message : undefined)
+    );
   } catch {
     return false;
   }

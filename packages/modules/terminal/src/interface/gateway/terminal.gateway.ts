@@ -14,6 +14,7 @@ import {
   RUNTIME_ID_RE,
   isTerminalShellId,
   SandboxProviderError,
+  SandboxProviderErrorCode,
   TERMINAL_AUTHENTICATOR,
   TERMINAL_PROTOCOL_RANGE,
   WS_SCHEMA_HASH,
@@ -258,7 +259,7 @@ export class TerminalGateway
       // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
       const detectWaiting = await this.sessions.waitingInputEligible(sandboxId);
       const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse, target });
-      if (client.disconnected === true) {
+      if (client.disconnected) {
         stream.detach();
         return;
       }
@@ -343,7 +344,9 @@ export class TerminalGateway
           await Promise.race([
             guestOutput,
             new Promise<never>((_, reject) => {
-              deadline = setTimeout(() => reject(new TerminalAttachError('RUNTIME_UNKNOWN')), 5000);
+              deadline = setTimeout(() => {
+                reject(new TerminalAttachError('RUNTIME_UNKNOWN'));
+              }, 5000);
             }),
           ]);
           const runtimeIdentity = await this.sessions.confirmedIdentity(
@@ -352,9 +355,10 @@ export class TerminalGateway
             bookmark.terminalIdentity,
             stream.runtimeIdentity,
           );
-          if (this.attachments.get(client.id)?.stream !== stream || client.disconnected) return;
+          const attachment = this.attachments.get(client.id);
+          if (attachment?.stream !== stream || disconnected(client)) return;
           if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
-          this.attachments.get(client.id)!.confirmed = true;
+          attachment.confirmed = true;
           this.send(client, {
             type: 'ready',
             sandboxId,
@@ -370,7 +374,9 @@ export class TerminalGateway
         }
       }
     } catch (e) {
-      this.logger.error(`openSession failed for sandbox ${sandboxId}: ${(e as Error).message}`);
+      this.logger.error(
+        `openSession failed for sandbox ${sandboxId}: ${e instanceof Error ? e.message : String(e)}`,
+      );
       // ⚠️ **先说一声再挂断,但只对不可重试的失败说。**
       //
       // 此前这里是一句不说的 `disconnect(true)`,而"连上又断"与网络抖动在客户端看来
@@ -390,7 +396,9 @@ export class TerminalGateway
       const code =
         e instanceof TerminalAttachError
           ? e.code
-          : e instanceof SandboxProviderError && !e.retryable && e.code === 'NOT_FOUND'
+          : e instanceof SandboxProviderError &&
+              !e.retryable &&
+              e.code === SandboxProviderErrorCode.NOT_FOUND
             ? 'TERMINAL_GONE'
             : 'RUNTIME_UNKNOWN';
       this.send(client, { type: 'error', code, sandboxId });
@@ -428,7 +436,7 @@ export class TerminalGateway
     const att = this.attachments.get(clientId);
     if (!att) return;
     this.attachments.delete(clientId);
-    att.batcher?.close();
+    att.batcher.close();
     this.waiting.detach(att.socketSessionKey);
     if (detach) att.stream.detach();
   }
@@ -462,7 +470,7 @@ export class TerminalGateway
     if (!att.confirmed && frame.type !== 'ping' && frame.type !== 'resize') return;
     switch (frame.type) {
       case 'input':
-        att.batcher?.flush();
+        att.batcher.flush();
         this.waiting.input(att.socketSessionKey);
         att.stream.write(frame.data);
         break;
@@ -504,7 +512,7 @@ export class TerminalGateway
     } catch (e) {
       // 走到这里说明是 `listShellSessions` 之外的意外（它自己已经把已知失败折成 null）。
       this.logger.error(
-        `sandbox ${sandboxId}: push shell inventory failed: ${(e as Error).message}`,
+        `sandbox ${sandboxId}: push shell inventory failed: ${e instanceof Error ? e.message : String(e)}`,
       );
       this.send(client, { type: 'shells', shells: null });
     }
@@ -532,9 +540,7 @@ export class TerminalGateway
       }
     } catch (e) {
       this.logger.error(
-        `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${
-          (e as Error).message
-        }`,
+        `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
@@ -569,8 +575,7 @@ export class TerminalGateway
   /** Pull the passcode (auth/query/header) + `ap_session` cookie off the handshake. */
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth =
-      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth = typeof auth?.passcode === 'string' ? auth.passcode : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;
@@ -597,8 +602,12 @@ export class TerminalGateway
     const header = client.handshake.headers[X_SCHEMA_HASH_HEADER];
     if (header) return Array.isArray(header) ? header[0] : header;
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth = auth?.['xSchemaHash'];
+    const fromAuth = auth?.xSchemaHash;
     if (typeof fromAuth === 'string') return fromAuth;
     return this.readQuery(client, 'xSchemaHash');
   }
+}
+
+function disconnected(client: Socket): boolean {
+  return client.disconnected;
 }

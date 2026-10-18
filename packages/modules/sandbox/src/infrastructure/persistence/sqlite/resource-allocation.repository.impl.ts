@@ -1,51 +1,57 @@
+import { readSqlite } from './read-sqlite';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { DATABASE, asSandboxId } from '@platform/shared-kernel';
+import { DATABASE, asSandboxId, asNodeId } from '@platform/shared-kernel';
 import type { NodeId, SandboxId, Tx } from '@platform/shared-kernel';
 import { ResourceAllocation } from '../../../domain/entities/resource-allocation.entity';
-import type { ReconciliationStatus } from '../../../domain/entities/resource-allocation.entity';
 import type { ResourceAllocationRepository } from '../../../domain/repositories/resource-allocation.repository';
 import {
   resourceAllocations,
   type ResourceAllocationRow,
 } from '../schema/resource-allocation.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** SQLite (better-sqlite3 + Drizzle) implementation of `ResourceAllocationRepository`. */
 @Injectable()
 export class SqliteResourceAllocationRepository implements ResourceAllocationRepository {
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
-  async listActive(nodeId: NodeId): Promise<ResourceAllocation[]> {
-    return this.db
-      .select()
-      .from(resourceAllocations)
-      .where(and(eq(resourceAllocations.nodeId, nodeId), isNull(resourceAllocations.releasedAt)))
-      .orderBy(asc(resourceAllocations.allocatedAt))
-      .all()
-      .map(toDomain);
+  listActive(nodeId: NodeId): Promise<ResourceAllocation[]> {
+    return readSqlite(() => {
+      return this.db
+        .select()
+        .from(resourceAllocations)
+        .where(and(eq(resourceAllocations.nodeId, nodeId), isNull(resourceAllocations.releasedAt)))
+        .orderBy(asc(resourceAllocations.allocatedAt))
+        .all()
+        .map(toDomain);
+    });
   }
 
-  async findActiveBySandbox(sandboxId: SandboxId): Promise<ResourceAllocation | null> {
-    const row = this.db
-      .select()
-      .from(resourceAllocations)
-      .where(
-        and(eq(resourceAllocations.sandboxId, sandboxId), isNull(resourceAllocations.releasedAt)),
-      )
-      .get();
-    return row ? toDomain(row) : null;
+  findActiveBySandbox(sandboxId: SandboxId): Promise<ResourceAllocation | null> {
+    return readSqlite(() => {
+      const row = this.db
+        .select()
+        .from(resourceAllocations)
+        .where(
+          and(eq(resourceAllocations.sandboxId, sandboxId), isNull(resourceAllocations.releasedAt)),
+        )
+        .get();
+      return row ? toDomain(row) : null;
+    });
   }
 
-  async listAll(): Promise<ResourceAllocation[]> {
-    return this.db
-      .select()
-      .from(resourceAllocations)
-      .orderBy(asc(resourceAllocations.allocatedAt))
-      .all()
-      .map(toDomain);
+  listAll(): Promise<ResourceAllocation[]> {
+    return readSqlite(() => {
+      return this.db
+        .select()
+        .from(resourceAllocations)
+        .orderBy(asc(resourceAllocations.allocatedAt))
+        .all()
+        .map(toDomain);
+    });
   }
 
   /**
@@ -83,12 +89,12 @@ function toDomain(row: ResourceAllocationRow): ResourceAllocation {
   return ResourceAllocation.rehydrate({
     id: row.id,
     sandboxId: asSandboxId(row.sandboxId),
-    nodeId: row.nodeId as NodeId,
+    nodeId: asNodeId(row.nodeId),
     coresReserved: row.coresReserved,
     ramMbReserved: row.ramMbReserved,
     diskMbReserved: row.diskMbReserved,
     allocatedAt: row.allocatedAt,
     releasedAt: row.releasedAt,
-    reconciliationStatus: row.reconciliationStatus as ReconciliationStatus,
+    reconciliationStatus: row.reconciliationStatus,
   });
 }

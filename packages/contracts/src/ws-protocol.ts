@@ -470,9 +470,5 @@ export function wsHandshakeError(
   code: WsHandshakeRejection,
   detail: string,
 ): Error & { data: { code: WsHandshakeRejection } } {
-  const err = new Error(`${code}: ${detail}`) as Error & {
-    data: { code: WsHandshakeRejection };
-  };
-  err.data = { code };
-  return err;
+  return Object.assign(new Error(`${code}: ${detail}`), { data: { code } });
 }

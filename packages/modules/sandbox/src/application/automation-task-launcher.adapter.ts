@@ -1,3 +1,4 @@
+import { errorMessage, isRecord } from '@platform/shared-kernel';
 import {
   HttpException,
   Inject,
@@ -102,7 +103,7 @@ export class AutomationTaskLauncherAdapter
     } catch (e) {
       this.logger.debug(
         `capacity probe for automation ${input.automationId} could not be answered ` +
-          `(${(e as Error).message}); letting the create path decide`,
+          `(${errorMessage(e)}); letting the create path decide`,
       );
       return 'ok';
     }
@@ -197,7 +198,9 @@ export class AutomationTaskLauncherAdapter
       return;
     }
     sandbox.recordAutomationFinished(input.finishedAt);
-    this.uow.run((tx) => this.repo.saveSync(tx, sandbox));
+    this.uow.run((tx) => {
+      this.repo.saveSync(tx, sandbox);
+    });
     await this.sandboxes.destroy(sandboxId, {
       keepVolume: task !== null,
       retained: {
@@ -214,19 +217,19 @@ export class AutomationTaskLauncherAdapter
   onApplicationBootstrap(): void {
     this.events.subscribe((batch) => {
       if (batch.some((event) => event.type === 'AgentTaskFinished'))
-        void this.reconcileFinished().catch((error: unknown) =>
-          this.logger.error(`automation cleanup scan failed: ${String(error)}`),
-        );
+        void this.reconcileFinished().catch((error: unknown) => {
+          this.logger.error(`automation cleanup scan failed: ${String(error)}`);
+        });
     });
     this.timer = setInterval(() => {
-      void this.reconcileFinished().catch((error: unknown) =>
-        this.logger.error(`automation cleanup scan failed: ${String(error)}`),
-      );
+      void this.reconcileFinished().catch((error: unknown) => {
+        this.logger.error(`automation cleanup scan failed: ${String(error)}`);
+      });
     }, 10_000);
     this.timer.unref();
-    void this.reconcileFinished().catch((error: unknown) =>
-      this.logger.error(`automation cleanup scan failed: ${String(error)}`),
-    );
+    void this.reconcileFinished().catch((error: unknown) => {
+      this.logger.error(`automation cleanup scan failed: ${String(error)}`);
+    });
   }
 
   /** Rule/run rows may have been deleted; the sandbox's snapshot owns cleanup. */
@@ -252,7 +255,7 @@ export class AutomationTaskLauncherAdapter
         });
       } catch (error) {
         this.logger.error(
-          `automation task cleanup pending for ${sandbox.id}: ${(error as Error).message}`,
+          `automation task cleanup pending for ${sandbox.id}: ${errorMessage(error)}`,
         );
       } finally {
         this.finishing.delete(sandbox.id);
@@ -363,8 +366,8 @@ export class AutomationTaskLauncherAdapter
     }
     if (e instanceof HttpException) {
       const body = e.getResponse();
-      if (typeof body === 'object' && body !== null && 'code' in body) {
-        const code = (body as { code?: unknown }).code;
+      if (isRecord(body)) {
+        const code = body.code;
         if (code === SandboxProviderErrorCode.RESOURCE_EXHAUSTED) {
           return new AutomationResourceExhausted(e.message);
         }

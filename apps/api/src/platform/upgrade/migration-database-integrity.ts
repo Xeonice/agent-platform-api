@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import type Database from 'better-sqlite3';
 import { lstat, realpath } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
@@ -73,7 +74,7 @@ async function verify(sqlite: Database.Database): Promise<void> {
     }, 20_000);
     worker.on('message', (message: unknown) => {
       if (outcome === 'timeout') return;
-      const result = message as { valid?: unknown; unavailable?: unknown } | null;
+      const result = isRecord(message) ? message : null;
       outcome =
         result?.valid === true ? 'valid' : result?.valid === false ? 'invalid' : 'unavailable';
     });

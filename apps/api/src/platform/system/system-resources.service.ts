@@ -12,7 +12,7 @@ import { env } from '../config/env';
 import { MEMORY_SOURCES, readMemory, type MemoryReading, type MemorySources } from './memory.probe';
 import { DISK_CRITICAL_PERCENT, DISK_WARN_PERCENT } from './diagnostics/checks/disk-space.check';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** CPU/RAM 三态（P21-5 §5）：<80% ✅ / 80–95% ⚠️ / ≥95% 🔴。 */
 const COMPUTE_WARN_PERCENT = 80;
@@ -143,7 +143,7 @@ export class SystemResourcesService {
       .from(sandboxes)
       .where(inArray(sandboxes.status, [...ACTIVE_STATUSES]))
       .all();
-    return Number(rows[0]?.n ?? 0);
+    return rows[0]?.n ?? 0;
   }
 
   /**
@@ -219,7 +219,8 @@ async function dirDiskUsage(
   const stack = [dir];
   while (stack.length > 0) {
     if (visited >= budget) return { bytes, visited, truncated: true };
-    const current = stack.pop()!;
+    const current = stack.pop();
+    if (current === undefined) break;
     let items;
     try {
       items = await readdir(current, { withFileTypes: true });

@@ -22,7 +22,7 @@ export async function runtimeStartIdentity(
         typeof started === 'string' &&
         Number.isFinite(Date.parse(started))
       )
-        return `aio:${handle.providerSandboxId}:pid:${pid}:start:${started}`;
+        return `aio:${handle.providerSandboxId}:pid:${String(pid)}:start:${started}`;
     }
   }
   // A provider may supply a verified native start identity. An ordinary id/PID

@@ -23,7 +23,9 @@ export class SandboxEventProjector implements OnApplicationBootstrap {
   ) {}
 
   onApplicationBootstrap(): void {
-    this.events.subscribe((batch) => this.onEvents(batch));
+    this.events.subscribe((batch) => {
+      this.onEvents(batch);
+    });
   }
 
   private onEvents(batch: DomainEvent[]): void {

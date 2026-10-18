@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { io, type Socket } from 'socket.io-client';
@@ -107,7 +108,7 @@ describe('complete Nest task lifecycle and shared transports', () => {
         arguments: { projectId, runtime: 'claude-code' },
       });
       const content = created.content as { type: string; text?: string }[];
-      const dto = SandboxDtoSchema.parse(JSON.parse(content[0].text!));
+      const dto = SandboxDtoSchema.parse(JSON.parse(assertDefined(content[0].text)));
       const list = await client.callTool({ name: 'list_sandboxes', arguments: { projectId } });
       expect(
         JSON.parse((list.content as { text: string }[])[0].text).map(
@@ -149,7 +150,7 @@ describe('complete Nest task lifecycle and shared transports', () => {
           ),
         ).toBe(true),
       );
-      const native = platform.provider.streams.at(-1)!;
+      const native = assertDefined(platform.provider.streams.at(-1));
       socket.disconnect();
       await vi.waitFor(() => expect(native.detached).toBe(true));
       expect(native.killed).toBe(false);

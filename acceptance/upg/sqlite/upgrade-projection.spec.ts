@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -93,7 +94,7 @@ describe('lightweight durable UI facts, separate from live installation gates', 
     });
     expect(f.projection.view().observation.confirmedAt).toBe(fresh.observation.confirmedAt);
     const resumed = new UpgradeProjection(f.store, undefined as never, undefined as never, {
-      now: () => new Date(Date.parse(fresh.observation.confirmedAt!) + 5002),
+      now: () => new Date(Date.parse(assertDefined(fresh.observation.confirmedAt)) + 5002),
     });
     expect(resumed.view().observation.state).toBe('stale');
   });

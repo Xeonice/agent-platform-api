@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtempSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,8 +70,8 @@ describe('Read-only deployment readiness and a file barrier owned by the release
         extraHeaders: { Cookie: unlocked.headers['set-cookie'][0].split(';')[0] },
       });
       await new Promise<void>((resolve, reject) => {
-        socket!.once('connect', resolve);
-        socket!.once('connect_error', reject);
+        assertDefined(socket).once('connect', resolve);
+        assertDefined(socket).once('connect_error', reject);
       });
       const connected = await request(server)
         .get('/api/deployment/status')

@@ -1,4 +1,4 @@
-import { AggregateRoot } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
 import {
   ImageActivated,
   ImageConfigUpdated,
@@ -7,7 +7,7 @@ import {
   ImageRegistered,
   ImageValidated,
 } from '../events/image-events';
-import { ValidationOutcome } from '../value-objects/validation-outcome.vo';
+import type { ValidationOutcome } from '../value-objects/validation-outcome.vo';
 import type { ValidationFinding } from '../value-objects/validation-outcome.vo';
 import { ImageStateError } from '../errors/image-errors';
 import { normalizeRuntimeVersions } from '../value-objects/runtime-versions.vo';

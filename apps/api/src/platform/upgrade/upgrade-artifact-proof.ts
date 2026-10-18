@@ -1,3 +1,6 @@
+import { isRecord } from '@platform/shared-kernel';
+import { z } from 'zod';
+import { upgradeRecord } from './upgrade-values';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { lstat, open, readFile, realpath } from 'node:fs/promises';
@@ -17,7 +20,7 @@ export interface SourceArtifactProof {
   mirrored: boolean;
 }
 const proofScope = {};
-const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+const missing = (error: unknown) => isRecord(error) && error.code === 'ENOENT';
 const owned = (uid: number) => !process.getuid || uid === process.getuid() || uid === 0;
 
 async function secureFile(path: string): Promise<void> {
@@ -66,10 +69,7 @@ export function sourceArtifactProof(
         requireUpgrade(mirror !== realSourceRoot, 'RETAINED_ARTIFACT_MIRROR_UNAVAILABLE');
         const installedPath = join(mirror, 'installed.json');
         await secureFile(installedPath);
-        const installed = JSON.parse(await readFile(installedPath, 'utf8')) as Record<
-          string,
-          unknown
-        >;
+        const installed = upgradeRecord(JSON.parse(await readFile(installedPath, 'utf8')));
         requireUpgrade(
           installed.packageDigest === 'sha256:' + hex &&
             canonicalUpgrade(installed.components) === canonicalUpgrade(expected),
@@ -90,16 +90,21 @@ export function sourceArtifactProof(
             'INSECURE_RETAINED_ARTIFACT_FILE',
           );
           const hash = createHash('sha256');
-          for await (const chunk of handle.createReadStream({ autoClose: false }))
+          for await (const chunk of handle.createReadStream({ autoClose: false })) {
+            requireUpgrade(
+              Buffer.isBuffer(chunk) || typeof chunk === 'string',
+              'INSTALLED_ARTIFACT_CHANGED',
+            );
             hash.update(chunk);
+          }
           requireUpgrade(hash.digest('hex') === hex, 'RETAINED_PACKAGE_DIGEST_CHANGED');
         } finally {
           await handle.close();
         }
         await verify(mirror, expected);
-        const bundle = JSON.parse(
-          await readFile(join(mirror, 'upgrade-artifact.json'), 'utf8'),
-        ) as Record<string, unknown>;
+        const bundle = upgradeRecord(
+          JSON.parse(await readFile(join(mirror, 'upgrade-artifact.json'), 'utf8')),
+        );
         requireUpgrade(
           installed.treeDigest === bundle.treeDigest,
           'RETAINED_ARTIFACT_IDENTITY_CHANGED',
@@ -109,6 +114,10 @@ export function sourceArtifactProof(
       await verify(realSourceRoot, expected);
       return { realSourceRoot, verificationRoot: realSourceRoot, mirrored: false };
     },
+    (value) =>
+      z
+        .object({ realSourceRoot: z.string(), verificationRoot: z.string(), mirrored: z.boolean() })
+        .parse(value),
   );
 }
 
@@ -118,10 +127,10 @@ export async function initialSourceActivation(
   store: UpgradeStore,
 ): Promise<ConfirmedServiceRelease> {
   const rows = store.sqlite
-    .prepare(
+    .prepare<unknown[], { source_activation: string }>(
       'SELECT source_activation FROM upgrade_attempts WHERE instance_id=? ORDER BY generation ASC',
     )
-    .all(store.instanceId) as { source_activation: string }[];
+    .all(store.instanceId);
   requireUpgrade(rows.length > 0, 'INITIAL_SOURCE_ACTIVATION_UNKNOWN');
   const initial = ConfirmedServiceReleaseSchema.parse(JSON.parse(rows[0].source_activation));
   requireUpgrade(initial.activationGeneration === 1, 'INITIAL_SOURCE_ACTIVATION_UNKNOWN');
@@ -148,7 +157,7 @@ export async function initialSourceActivation(
       return initial;
     }
     await secureFile(path);
-    const raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    const raw = upgradeRecord(JSON.parse(await readFile(path, 'utf8')));
     const receipt = ConfirmedServiceReleaseSchema.parse(raw.release ?? raw);
     requireUpgrade(
       canonicalUpgrade(receipt) === canonicalUpgrade(initial),

@@ -1,3 +1,11 @@
+import { matchesProbeScope } from './upgrade-probe-evidence';
+import {
+  nullableUpgradeRecord,
+  optionalUpgradeRecord,
+  requiredUpgradeValue,
+  upgradeRecord,
+  upgradeRecords,
+} from './upgrade-values';
 import {
   Inject,
   Injectable,
@@ -72,7 +80,14 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     this.retired = true;
     if (this.timer) clearInterval(this.timer);
   }
-  private currentScope(id: string, fence: number, binding: Json): Partial<UpgradeProbeScope> {
+  private acceptsSamples(): boolean {
+    return !this.retired && process.env.COORDINATOR_WRITER_FENCE_VALID === 'true';
+  }
+  private currentScope(
+    id: string,
+    fence: number,
+    binding: Json,
+  ): Omit<UpgradeProbeScope, 'origin' | 'artifactDigest' | 'startIdentity'> {
     return {
       instanceId: this.store.instanceId,
       attemptId: id,
@@ -87,9 +102,10 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     snapshot: Pick<ReturnType<UpgradeStore['snapshot']>, 'manifest' | 'appliedSteps'>,
     binding: Json,
   ): UpgradeProbeApiIdentity & { origin: string } {
-    const candidate = binding.candidateApi as Json | undefined;
-    const receipt = snapshot.appliedSteps.find((step) => step.stepId === 'candidate')?.evidence as
-      Json | undefined;
+    const candidate = optionalUpgradeRecord(binding.candidateApi);
+    const receipt = optionalUpgradeRecord(
+      snapshot.appliedSteps.find((step) => step.stepId === 'candidate')?.evidence,
+    );
     requireUpgrade(
       candidate &&
         receipt &&
@@ -102,8 +118,8 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     );
     return {
       instanceId: this.store.instanceId,
-      artifactDigest: String(candidate.digest),
-      startIdentity: String(receipt.startIdentity),
+      artifactDigest: candidate.digest,
+      startIdentity: receipt.startIdentity,
       origin: loopbackOrigin(candidate.origin),
     };
   }
@@ -112,7 +128,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     binding: Json,
     generation: number,
   ): UpgradeProbeApiIdentity & { origin: string } {
-    const source = binding.oldApi as Json;
+    const source = upgradeRecord(binding.oldApi);
     requireUpgrade(
       identity.instanceId === this.store.instanceId &&
         identity.role === 'control' &&
@@ -126,17 +142,12 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     return {
       instanceId: this.store.instanceId,
       artifactDigest: String(source.digest),
-      startIdentity: String(identity.startIdentity),
+      startIdentity: identity.startIdentity,
       origin: loopbackOrigin(source.origin),
     };
   }
   private async sample(lane: UpgradeProbeLane = 'gateway'): Promise<void> {
-    if (
-      this.inFlight[lane] >= this.maxInFlight ||
-      this.retired ||
-      process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
-    )
-      return;
+    if (this.inFlight[lane] >= this.maxInFlight || !this.acceptsSamples()) return;
     const row = this.store.latestProbeSnapshot();
     if (!row) return;
     const attempt = row.attempt;
@@ -146,9 +157,8 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     let key: string | undefined, scope: UpgradeProbeScope | undefined;
     let at = this.clock.now().getTime(),
       httpLatency = 0,
-      success = false,
-      verified = lane === 'gateway',
-      transportFailed = false;
+      success = false;
+    const sampleState = { verified: lane === 'gateway', transportFailed: false };
     let completedAt: number | undefined;
     let evidence: Json = {};
     const keepMs =
@@ -167,15 +177,15 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       key = this.probeEvidence.currentKey(lane, common);
       const sourceApi = row.sourceActual?.components.api ?? row.sourceActivation.components.api;
       requireUpgrade(
-        (binding.oldApi as Json).digest === sourceApi.artifactDigest,
+        upgradeRecord(binding.oldApi).digest === sourceApi.artifactDigest,
         'SOURCE_PROBE_ARTIFACT_MISMATCH',
       );
       let identity: (UpgradeProbeApiIdentity & { origin: string }) | undefined;
       if (lane === 'source')
         identity = this.sourceIdentity(
-          await this.inspector.controlIdentity((binding.oldApi as Json).origin),
+          await this.inspector.controlIdentity(upgradeRecord(binding.oldApi).origin),
           binding,
-          Number(common.coordinatorGeneration),
+          common.coordinatorGeneration,
         );
       if (lane === 'candidate') identity = this.candidateIdentity(row, binding);
       const origin = identity?.origin ?? loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN);
@@ -184,7 +194,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         origin,
         artifactDigest: identity?.artifactDigest ?? 'stable-entry',
         startIdentity: identity?.startIdentity ?? 'stable-entry',
-      } as UpgradeProbeScope;
+      };
       key = this.probeEvidence.begin(lane, scope);
       at = this.clock.now().getTime();
       const headers = {
@@ -204,7 +214,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         });
         let actual: Json = {};
         try {
-          actual = (await response.json()) as Json;
+          actual = upgradeRecord(await response.json());
         } catch {
           /* Invalid identified JSON is a failed pair. */
         }
@@ -225,7 +235,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         });
         readResult = await request(origin + '/api/system/upgrade/probe?requestId=' + requestId, {});
       } catch {
-        transportFailed = true;
+        sampleState.transportFailed = true;
         throw new Error('ACTUAL_PROBE_TRANSPORT_FAILED');
       }
       completedAt = this.clock.now().getTime();
@@ -242,17 +252,17 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
           const after = this.sourceIdentity(
             await this.inspector.controlIdentity(origin),
             binding,
-            Number(common.coordinatorGeneration),
+            common.coordinatorGeneration,
           );
-          verified =
+          sampleState.verified =
             after.startIdentity === identity.startIdentity &&
             after.artifactDigest === identity.artifactDigest;
         } else
-          verified =
+          sampleState.verified =
             matchesProbeIdentity(response.headers, identity) &&
             matchesProbeIdentity(read.headers, identity);
       }
-      if (!verified) {
+      if (!sampleState.verified) {
         this.probeEvidence.unknown(lane, key);
         return;
       }
@@ -275,27 +285,22 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       };
     } catch {
       completedAt ??= this.clock.now().getTime();
-      if (!transportFailed && !verified && key) this.probeEvidence.unknown(lane, key);
+      if (!sampleState.transportFailed && !sampleState.verified && key)
+        this.probeEvidence.unknown(lane, key);
       evidence = { requestId, lane, code: 'ACTUAL_PROBE_FAILED' };
     } finally {
       try {
-        if (
-          scope &&
-          key &&
-          !this.retired &&
-          process.env.COORDINATOR_WRITER_FENCE_VALID === 'true'
-        ) {
+        if (scope && key && this.acceptsSamples()) {
           this.store.assertFence(attempt.attemptId, row.fence);
           const current = await this.inspector.entryBinding();
           const expected = this.currentScope(attempt.attemptId, row.fence, current);
-          const api = (lane === 'candidate' ? current.candidateApi : current.oldApi) as
-            Json | undefined;
+          const api = optionalUpgradeRecord(
+            lane === 'candidate' ? current.candidateApi : current.oldApi,
+          );
           const unchanged =
-            Object.entries(expected).every(
-              ([field, value]) => scope![field as keyof UpgradeProbeScope] === value,
-            ) &&
+            matchesProbeScope(scope, expected) &&
             (lane === 'gateway' ||
-              (api?.origin === scope.origin && api?.digest === scope.artifactDigest));
+              (api?.origin === scope.origin && api.digest === scope.artifactDigest));
           this.store.assertFence(attempt.attemptId, row.fence);
           if (unchanged) {
             const sample = {
@@ -307,9 +312,9 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
               success: Number(success),
               request_id: requestId,
             };
-            const recorded = transportFailed
+            const recorded = sampleState.transportFailed
               ? this.probeEvidence.transportFailure(lane, key, sample, keepMs)
-              : verified && this.probeEvidence.record(lane, key, sample, keepMs);
+              : sampleState.verified && this.probeEvidence.record(lane, key, sample, keepMs);
             if (recorded && lane === 'gateway')
               this.store.sqlite
                 .prepare(
@@ -339,16 +344,16 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   ): Promise<{ qualified: boolean; maxMs: number }> {
     const continuity = await this.inspector.continuity(id, fence);
     if (continuity.qualified !== true) return { qualified: false, maxMs: 0 };
-    const resources = continuity.resources as Json[];
+    const resources = upgradeRecords(continuity.resources);
     let maxMs = 0;
     for (const resource of resources) {
       if (!['running', 'idle'].includes(String(resource.status)) || resource.headless === true)
         continue;
       const existing = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], Json>(
           'SELECT * FROM upgrade_attachment_observations WHERE attempt_id=? AND sandbox_id=?',
         )
-        .get(id, resource.sandboxId) as Json | undefined;
+        .get(id, resource.sandboxId);
       if (existing && existing.runtime_identity === resource.runtimeIdentity) {
         maxMs = Math.max(maxMs, Number(existing.duration_ms));
         continue;
@@ -363,13 +368,17 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       try {
         await Promise.race([
           new Promise<void>((ok, fail) => {
-            stream.onData(() => ok());
+            stream.onData(() => {
+              ok();
+            });
             stream.onConnectionState?.((state) => {
               if (state === 'unconfirmed') fail(new Error('PTY_UNCONFIRMED'));
             });
           }),
           new Promise<never>((_, fail) => {
-            timer = setTimeout(() => fail(new Error('PTY_BUDGET_EXCEEDED')), 5000);
+            timer = setTimeout(() => {
+              fail(new Error('PTY_BUDGET_EXCEEDED'));
+            }, 5000);
           }),
         ]);
         requireUpgrade(
@@ -434,26 +443,30 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       proofStartedAt = this.clock.now().getTime(),
       snapshot = this.store.snapshot(id),
       continuity = await this.inspector.continuity(id, fence);
-    const baseRow = this.store.sqlite
-      .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string };
-    const base = JSON.parse(baseRow.snapshot) as Json;
+    const baseRow = requiredUpgradeValue(
+      this.store.sqlite
+        .prepare<unknown[], { snapshot: string }>(
+          'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
+        )
+        .get(id),
+    );
+    const base = upgradeRecord(JSON.parse(baseRow.snapshot));
     let attach = { qualified: false, maxMs: 0 };
     try {
       attach = await this.attachProof(id, fence);
     } catch {
       /* Original PTY unknown fails the gate. */
     }
-    const originals = new Set((base.resources as Json[]).map((r) => r.sandboxId));
-    const owner = continuity.owner as Json | null;
+    const originals = new Set(upgradeRecords(base.resources).map((r) => r.sandboxId));
+    const owner = nullableUpgradeRecord(continuity.owner);
     const operations = Array.isArray(owner?.operations)
-      ? (owner.operations as Json[]).filter(
+      ? upgradeRecords(owner.operations).filter(
           (op) => Date.parse(String(op.dispatchedAt)) >= Date.parse(String(base.observedAt)),
         )
       : null;
     const independentTimeout = (op: Json) =>
       op.method === 'jobs.killJob' &&
-      (base.tasks as Json[]).some(
+      upgradeRecords(base.tasks).some(
         (task) =>
           task.sandbox_id === op.sandboxId &&
           Date.parse(String(op.dispatchedAt)) >=
@@ -462,7 +475,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const independentUserAction = (op: Json) => {
       const dispatched = Date.parse(String(op.dispatchedAt));
       if (op.method === 'jobs.killJob') {
-        const originalTasks = (base.tasks as Json[]).filter(
+        const originalTasks = upgradeRecords(base.tasks).filter(
           (task) => task.sandbox_id === op.sandboxId,
         );
         if (originalTasks.length !== 1) return false;
@@ -487,7 +500,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       (op) =>
         originals.has(op.sandboxId) &&
         ['stop', 'destroy', 'destroyBySandboxId', 'jobs.killJob'].includes(String(op.method)) &&
-        (op.actor as Json)?.kind !== 'user' &&
+        upgradeRecord(op.actor).kind !== 'user' &&
         !independentUserAction(op) &&
         !independentTimeout(op),
     ).length;
@@ -497,23 +510,21 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const duplicates = operations
       ? operations.length - new Set(operations.map((op) => op.id)).size
       : undefined;
-    const duplicateOccurrences = (
+    const duplicateOccurrences = requiredUpgradeValue(
       this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { n: number }>(
           'SELECT count(*) n FROM automation_cron_occurrences o LEFT JOIN automation_runs r ON r.id=o.run_id WHERE r.id IS NULL OR r.automation_id<>o.automation_id',
         )
-        .get() as { n: number }
+        .get(),
     ).n;
-    const integrity = true; // The uncached read-only worker above completed successfully.
-    const ownerAudits = Array.isArray(owner?.owners) ? (owner.owners as Json[]) : [];
+    const ownerAudits = Array.isArray(owner?.owners) ? upgradeRecords(owner.owners) : [];
     const ownerGenerationsValid =
       ownerAudits.length > 0 &&
       ownerAudits.every((audit) => {
-        const lease = audit.lease as Json | undefined;
-        return Boolean(
-          lease &&
-          lease.generation === Number(process.env.COORDINATOR_GENERATION) &&
-          Number(lease.expiresAt ?? lease.leaseExpiresAt) > this.clock.now().getTime(),
+        const lease = optionalUpgradeRecord(audit.lease);
+        return (
+          lease?.generation === Number(process.env.COORDINATOR_GENERATION) &&
+          Number(lease.expiresAt ?? lease.leaseExpiresAt) > this.clock.now().getTime()
         );
       });
     const migration = snapshot.plan.migrationPath.migrationPlanDigest
@@ -522,14 +533,14 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     let webHealth: Json;
     try {
       const web = await this.inspector.webBuild(binding),
-        actual = binding.web as Json;
+        actual = upgradeRecord(binding.web);
       const expected = [
         snapshot.sourceActivation.components.web,
         snapshot.manifest.components.web,
       ].find((w) => w.artifactDigest === actual.digest);
       webHealth = {
         known: true,
-        healthy: Boolean(expected && web.webRevision === expected.webRevision),
+        healthy: expected?.webRevision === web.webRevision,
         artifactDigest: actual.digest,
         observedAt: this.clock.now().toISOString(),
       };
@@ -558,7 +569,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       { ...expected, origin: loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) },
       freshness,
     );
-    const oldApi = binding.oldApi as Json;
+    const oldApi = upgradeRecord(binding.oldApi);
     const expectedSourceApi =
       snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api;
     const source = this.probeEvidence.read(
@@ -596,7 +607,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         binding.attemptId === id &&
         Number(binding.fence) === fence &&
         Number(binding.weight) === weight,
-      sharedStateHealthy: integrity,
+      sharedStateHealthy: true, // The uncached read-only worker above completed successfully.
       continuity,
       projectionReads: this.migrations.projectionReadEvidence(),
       invariants: {
@@ -606,7 +617,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         duplicateOccurrences,
         writerConflicts: process.env.COORDINATOR_WRITER_FENCE_VALID === 'true' ? 0 : 1,
         migrationDifferences: migration ? (migration.known ? migration.differences : undefined) : 0,
-        integrityFailures: integrity ? 0 : 1,
+        integrityFailures: 0, // The uncached read-only worker above completed successfully.,
       },
       coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
       observerEpoch: this.probeEvidence.observerEpoch,

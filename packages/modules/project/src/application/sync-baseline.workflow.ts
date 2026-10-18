@@ -56,7 +56,9 @@ export class SyncBaselineWorkflow {
   async run(project: Project): Promise<void> {
     project.assertCanSync(); // refuse BEFORE the fetch — see `Project.assertCanSync`
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, SYNC_TIMEOUT_MS);
     let auth: GitAuthContext | null = null;
     try {
       // `assertCanSync` above already established `sourceType === 'git'`, and I-PRJ-1

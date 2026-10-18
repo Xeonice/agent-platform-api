@@ -1,5 +1,5 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { ProjectId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { ProjectId } from '@platform/shared-kernel/pure';
 import { CloneStatusVO } from '../value-objects/project-status.vo';
 import type { CloneStatus } from '../value-objects/project-status.vo';
 import { RepoUrl } from '../value-objects/repo-url.vo';
@@ -99,7 +99,7 @@ export class Project extends AggregateRoot<ProjectId> {
       throw new ProjectStateError('empty project must not carry repoUrl (I-PRJ)');
     }
     // validate the URL shape up front (throws InvalidRepoUrlError → 400)
-    const repoUrl = isGit ? RepoUrl.create(input.repoUrl as string).value : null;
+    const repoUrl = isGit && input.repoUrl ? RepoUrl.create(input.repoUrl).value : null;
     const project = new Project({
       id: input.id,
       name: input.name,

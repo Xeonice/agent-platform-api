@@ -210,11 +210,9 @@ export class ImageSeeder implements OnApplicationBootstrap {
 function withBudget<T>(work: Promise<T>, ref: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(new Error(`resolving ${ref} exceeded the ${String(SEED_BUDGET_MS)}ms seed budget`)),
-      SEED_BUDGET_MS,
-    );
+    timer = setTimeout(() => {
+      reject(new Error(`resolving ${ref} exceeded the ${String(SEED_BUDGET_MS)}ms seed budget`));
+    }, SEED_BUDGET_MS);
     timer.unref();
   });
   work.catch(() => undefined);

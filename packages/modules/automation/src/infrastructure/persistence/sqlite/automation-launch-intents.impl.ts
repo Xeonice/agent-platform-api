@@ -35,17 +35,15 @@ function hydrate(row: Row): AutomationLaunchIntent {
 }
 @Injectable()
 export class SqliteAutomationLaunchIntents implements AutomationLaunchIntents {
-  constructor(
-    @Inject(DATABASE) private readonly db: BetterSQLite3Database<Record<string, never>>,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: BetterSQLite3Database) {}
   async find(runId: string, retryCount: number): Promise<AutomationLaunchIntent | null> {
-    const row = this.db.get<Row>(
+    const row = this.db.get<Row | undefined>(
       sql`SELECT * FROM automation_launch_intents WHERE run_id=${runId} AND retry_count=${retryCount}`,
     );
-    return row ? hydrate(row) : null;
+    return Promise.resolve(row ? hydrate(row) : null);
   }
   reserveSync(_tx: Tx, intent: AutomationLaunchIntent): AutomationLaunchIntent {
-    const row = this.db.get<Row>(
+    const row = this.db.get<Row | undefined>(
       sql`SELECT * FROM automation_launch_intents WHERE run_id=${intent.runId} AND retry_count=${intent.retryCount}`,
     );
     if (row) {
@@ -64,10 +62,10 @@ export class SqliteAutomationLaunchIntents implements AutomationLaunchIntents {
     return intent;
   }
   reserveOccurrenceSync(_tx: Tx, automationId: string, dueAt: Date, runId: string): boolean {
-    const rule = this.db.get<{ next_trigger_at: number | null; enabled: number }>(
+    const rule = this.db.get<{ next_trigger_at: number | null; enabled: number } | undefined>(
       sql`SELECT next_trigger_at,enabled FROM automations WHERE id=${automationId}`,
     );
-    if (!rule || rule.enabled !== 1 || rule.next_trigger_at !== Math.floor(dueAt.getTime() / 1000))
+    if (rule?.enabled !== 1 || rule.next_trigger_at !== Math.floor(dueAt.getTime() / 1000))
       return false;
     const prior = this.db.get(
       sql`SELECT 1 FROM automation_cron_occurrences WHERE automation_id=${automationId} AND due_at=${dueAt.getTime()}`,

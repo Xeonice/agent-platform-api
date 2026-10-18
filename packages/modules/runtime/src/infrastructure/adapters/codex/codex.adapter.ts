@@ -310,29 +310,31 @@ export class CodexAdapter implements RuntimeAdapter {
     return cred;
   }
 
-  async createCredentialFromSecret(
+  createCredentialFromSecret(
     method: 'api-key' | 'access-token-paste',
     secret: string,
   ): Promise<RuntimeCredential> {
-    if (method !== 'api-key') {
-      throw new AdapterAuthError(
-        'UNSUPPORTED_METHOD',
-        `codex createCredentialFromSecret: ${method}`,
-      );
-    }
-    const key = secret.trim();
-    const cred: RuntimeCredential = {
-      runtimeId: 'codex',
-      obtainedVia: 'api-key',
-      maskedIdentifier: `sk-…${key.slice(-4)}`,
-      issuedAt: '',
-      env: { OPENAI_API_KEY: key },
-      credentialFiles: [],
-      zeroize(): void {
-        cred.env = undefined;
-      },
-    };
-    return cred;
+    return new Promise<RuntimeCredential>((resolve) => {
+      if (method !== 'api-key') {
+        throw new AdapterAuthError(
+          'UNSUPPORTED_METHOD',
+          `codex createCredentialFromSecret: ${method}`,
+        );
+      }
+      const key = secret.trim();
+      const cred: RuntimeCredential = {
+        runtimeId: 'codex',
+        obtainedVia: 'api-key',
+        maskedIdentifier: `sk-…${key.slice(-4)}`,
+        issuedAt: '',
+        env: { OPENAI_API_KEY: key },
+        credentialFiles: [],
+        zeroize(): void {
+          cred.env = undefined;
+        },
+      };
+      resolve(cred);
+    });
   }
 
   /**
@@ -355,7 +357,7 @@ export class CodexAdapter implements RuntimeAdapter {
       { stdin: TRUST_BLOCK(spec.workdir), timeoutMs: SEED_WRITE_TIMEOUT_MS },
     );
     if (r.exitCode !== 0) {
-      throw new Error(`seeding codex config.toml failed (exit ${r.exitCode})`);
+      throw new Error(`seeding codex config.toml failed (exit ${String(r.exitCode)})`);
     }
   }
 
@@ -375,7 +377,10 @@ export class CodexAdapter implements RuntimeAdapter {
         timeoutMs: SEED_WRITE_TIMEOUT_MS,
       });
       if (r.exitCode !== 0) {
-        throw new AdapterAuthError('AUTH_REJECTED', `codex --with-access-token exit ${r.exitCode}`);
+        throw new AdapterAuthError(
+          'AUTH_REJECTED',
+          `codex --with-access-token exit ${String(r.exitCode)}`,
+        );
       }
       return;
     }
@@ -451,7 +456,7 @@ export class CodexAdapter implements RuntimeAdapter {
     // (The format check below refuses that value too; both layers stay.)
     if (resume || (task.prompt !== undefined && task.prompt !== '')) cmd.push('--');
     // the reference is a POSITIONAL of `resume`, so it precedes the prompt.
-    if (resume) cmd.push(assertSessionRef(task.resumeFrom as string));
+    if (task.resumeFrom !== undefined) cmd.push(assertSessionRef(task.resumeFrom));
     if (task.prompt !== undefined && task.prompt !== '') cmd.push(task.prompt);
     // `resume` also drops `-C/--cd`; `cwd` still travels because the platform sets the
     // working directory through the sandbox job, not through a codex flag.

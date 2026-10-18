@@ -9,6 +9,9 @@ const rounds = [
   { name: 'non-protocol', projects: ['pure', 'service', 'sqlite'] },
   { name: 'protocol', projects: ['protocol'] },
 ];
+// Optional Vitest file filters keep a focused report on this same execution path.
+// With no filters, CI still runs every configured acceptance project.
+const filters = process.argv.slice(2).filter((argument) => argument !== '--');
 const results = [];
 const assertionEvidence = resolve(reports, 'assertion-evaluations.jsonl');
 writeFileSync(assertionEvidence, '');
@@ -22,6 +25,7 @@ for (const round of rounds) {
       ...round.projects.flatMap((project) => ['--project', project]),
       '--reporter=json',
       `--outputFile=${output}`,
+      ...filters,
     ],
     {
       cwd: root,
@@ -43,23 +47,27 @@ const sources = files(resolve(root, 'acceptance'))
   .sort();
 const records = results.flatMap((result) => result.testResults);
 const tests = records.flatMap((result) => result.assertionResults);
+const executedTests = tests.filter((test) => ['passed', 'failed'].includes(test.status));
 const evaluations = readFileSync(assertionEvidence, 'utf8')
   .trim()
   .split('\n')
   .filter(Boolean)
   .map((line) => JSON.parse(line));
-if (evaluations.length !== tests.length)
+if (evaluations.length !== executedTests.length)
   throw new Error('Actual matcher evidence must contain one record for each executed test');
 const report = {
   node: process.version,
+  fileFilters: filters,
   files: records.length,
   tests: tests.length,
+  executedTests: executedTests.length,
   passed: tests.filter((test) => test.status === 'passed').length,
   failed: tests.filter((test) => test.status === 'failed').length,
   skipped: tests.filter((test) => !['passed', 'failed'].includes(test.status)).length,
+  matcherEvidenceRecords: evaluations.length,
   runtimeMatcherEvaluations: evaluations.reduce((count, row) => count + row.evaluations, 0),
   runtimeMatcherMeaning:
-    'Actual Vitest matcher calls in each completed test; polling retry evaluations count too. This is distinct from test count and source clauses.',
+    'Actual Vitest matcher calls in passed/failed executed tests; skipped/todo tests have no fabricated matcher record. Polling retry evaluations count too. This is distinct from test count and source clauses.',
   sourceExpectationSites: sources.reduce(
     (total, file) =>
       total + [...readFileSync(file, 'utf8').matchAll(/\bexpect\s*(?:\.\w+\s*)?\(/g)].length,

@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -36,7 +37,7 @@ import {
 } from '../../../apps/api/src/platform/upgrade/image-runtime-schema-plan';
 import { imageRuntimeSchemaCommitted } from '../../../apps/api/src/platform/upgrade/image-runtime-schema-migration';
 import * as integrity from '../../../apps/api/src/platform/upgrade/migration-database-integrity';
-import { useEnv } from '../../support/strict-ports';
+import { useEnv, stub } from '../../support/strict-ports';
 
 // Actual SQLite/journal, old-writer fencing and immutable package-plan boundary.
 // These state-layer tests do not claim native Guest or release qualification.
@@ -322,7 +323,7 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
     expect(await f.execute()).toMatchObject({ complete: true });
     expect(await f.execute('status')).toMatchObject({ complete: true });
     expect(f.schema()).toBe(29);
-    expect(f.runner.metrics(f.store.latest()!.attemptId)).toMatchObject({
+    expect(f.runner.metrics(assertDefined(f.store.latest()).attemptId)).toMatchObject({
       known: true,
       differences: 0,
       oldRepresentationRetained: true,
@@ -340,7 +341,7 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
     ]) {
       const manifest = {
         ...f.envelope.manifest,
-        upgradePaths: [{ ...f.envelope.manifest.upgradePaths[0]!, ...patch }],
+        upgradePaths: [{ ...assertDefined(f.envelope.manifest.upgradePaths[0]), ...patch }],
       };
       expect(() => freezeUpgradePlan({ ...f.envelope, manifest }, f.current)).toThrow(
         'GLOBAL_SCHEMA_MIGRATION_UNQUALIFIED',
@@ -604,12 +605,14 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
     const corrupt = join(f.directory, 'corrupt.db');
     await writeFile(corrupt, Buffer.alloc(8192, 0xff));
     await expect(
-      integrity.verifyMigrationDatabaseIntegrity({ name: corrupt } as Database.Database),
+      integrity.verifyMigrationDatabaseIntegrity(stub<Database.Database>({ name: corrupt })),
     ).rejects.toMatchObject({ code: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE' });
     await expect(
-      integrity.verifyMigrationDatabaseIntegrity({
-        name: join(f.directory, 'missing-private-path.db'),
-      } as Database.Database),
+      integrity.verifyMigrationDatabaseIntegrity(
+        stub<Database.Database>({
+          name: join(f.directory, 'missing-private-path.db'),
+        }),
+      ),
     ).rejects.toMatchObject({
       code: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE',
       message: 'GLOBAL_SCHEMA_INTEGRITY_UNAVAILABLE',

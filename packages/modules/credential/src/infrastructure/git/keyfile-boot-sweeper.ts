@@ -1,6 +1,7 @@
 import { rm } from 'node:fs/promises';
 import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { gitKeysBaseDir } from './keyfile-dir';
+import { errorMessage } from '@platform/shared-kernel';
 
 /**
  * Boot sweep of the platform-private keyfile base dir (docs/backend/03 §7.3 F).
@@ -18,7 +19,7 @@ export class KeyfileBootSweeper implements OnApplicationBootstrap {
     try {
       await rm(base, { recursive: true, force: true });
     } catch (e) {
-      this.logger.warn(`keyfile boot sweep skipped: ${(e as Error).message}`);
+      this.logger.warn(`keyfile boot sweep skipped: ${errorMessage(e)}`);
     }
   }
 }

@@ -1,3 +1,11 @@
+import { z } from 'zod';
+import { SignedUpgradeManifestSchema, UpgradePlanSchema } from '@platform/contracts';
+import {
+  optionalUpgradeRecord,
+  requiredUpgradeValue,
+  upgradeRecord,
+  upgradeRecords,
+} from './upgrade-values';
 import { resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import {
@@ -39,6 +47,9 @@ import { observeUpgradeOnce } from './upgrade-observation';
 import type { DefaultImageSnapshot } from './upgrade-operation-store';
 import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 
+function assertSourceActual(value: unknown): asserts value is UpgradeSourceActual | null {
+  UpgradeSourceActualSchema.nullable().parse(value);
+}
 type Json = Record<string, unknown>;
 export function persistedBinding(value: Json): Json {
   const {
@@ -102,18 +113,18 @@ export class UpgradeInspector {
     return this.clock.now().toISOString();
   }
   defaultImagesSnapshot(): DefaultImageSnapshot[] {
-    const hasVersions = (
-      this.store.sqlite.pragma('table_info(image_manifests)') as { name: string }[]
-    ).some((column) => column.name === 'runtime_versions');
+    const hasVersions = z
+      .array(z.object({ name: z.string() }))
+      .parse(this.store.sqlite.pragma('table_info(image_manifests)'))
+      .some((column) => column.name === 'runtime_versions');
     return this.providers.list().flatMap((provider) => {
       const ref = builtinImageRefFor(provider.name),
         parsed = parseImageRef(ref);
       const row = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { digest: string; runtime_versions: string }>(
           `SELECT m.digest,${hasVersions ? 'm.runtime_versions' : "'{}' AS runtime_versions"} FROM images i JOIN image_manifests m ON m.image_id=i.id WHERE i.name=? AND i.is_builtin=1 AND m.version=? AND m.is_active=1 AND m.validation_status IN ('valid','warning') ORDER BY m.registered_at DESC,m.rowid DESC LIMIT 1`,
         )
-        .get(parsed.name, parsed.digest ?? parsed.tag ?? 'latest') as
-        { digest: string; runtime_versions: string } | undefined;
+        .get(parsed.name, parsed.digest ?? parsed.tag ?? 'latest');
       if (!row || !/^sha256:[a-f0-9]{64}$/.test(row.digest)) return [];
       const versions: unknown = JSON.parse(row.runtime_versions);
       const runtimeVersions =
@@ -144,7 +155,7 @@ export class UpgradeInspector {
       signal: AbortSignal.timeout(2000),
     });
     requireUpgrade(r.ok, 'ENTRY_BINDING_UNAVAILABLE');
-    const binding = (await r.json()) as Json;
+    const binding = upgradeRecord(await r.json());
     requireUpgrade(binding.instanceId === this.store.instanceId, 'ENTRY_INSTANCE_MISMATCH');
     return binding;
   }
@@ -158,7 +169,7 @@ export class UpgradeInspector {
       signal: AbortSignal.timeout(2000),
     });
     requireUpgrade(r.ok, 'CANDIDATE_NOT_READY');
-    const value = (await r.json()) as Json;
+    const value = upgradeRecord(await r.json());
     requireUpgrade(
       value.instanceId === this.store.instanceId && value.role === 'control',
       'CONTROL_IDENTITY_MISMATCH',
@@ -174,7 +185,7 @@ export class UpgradeInspector {
       signal: AbortSignal.timeout(1500),
     });
     requireUpgrade(response.ok, 'ACTUAL_INSTALLER_UNKNOWN');
-    const identity = (await response.json()) as Json;
+    const identity = upgradeRecord(await response.json());
     requireUpgrade(
       identity.instanceId === this.store.instanceId &&
         identity.role === 'installer' &&
@@ -188,7 +199,7 @@ export class UpgradeInspector {
   }
   async installedProof(release: ConfirmedServiceRelease, binding?: Json): Promise<Json> {
     const actual = binding ?? (await this.entryBinding());
-    const api = (actual.weight === 100 ? actual.candidateApi : actual.oldApi) as Json;
+    const api = upgradeRecord(actual.weight === 100 ? actual.candidateApi : actual.oldApi);
     const identity = await this.controlIdentity(api.origin),
       web = await this.webBuild(actual),
       installer = await this.installerIdentity();
@@ -200,7 +211,7 @@ export class UpgradeInspector {
       identity.actualCoordinatorArtifactDigest === coor.artifactDigest &&
       identity.writerFenceValid === true;
     const webMatches =
-      (actual.web as Json).digest === release.components.web.artifactDigest &&
+      upgradeRecord(actual.web).digest === release.components.web.artifactDigest &&
       web.webRevision === release.components.web.webRevision;
     const installerMatches =
       installer.artifactDigest === release.components.installer.artifactDigest &&
@@ -222,7 +233,7 @@ export class UpgradeInspector {
         signal: AbortSignal.timeout(1500),
       });
       requireUpgrade(response.ok, 'ACTUAL_OWNER_UNKNOWN');
-      const owner = (await response.json()) as Json;
+      const owner = upgradeRecord(await response.json());
       ownerMatches =
         owner.instanceId === this.store.instanceId &&
         owner.ownerId === route.ownerId &&
@@ -256,8 +267,14 @@ export class UpgradeInspector {
    * Only installed signed artifacts and a live unique writer may seed a NEW
    * user intent. The last complete release remains the version-chain anchor. */
   async sourceActual(forRecovery = false): Promise<UpgradeSourceActual | null> {
-    return observeUpgradeOnce(this, 'sourceActual:' + forRecovery, () =>
-      this.measureSourceActual(forRecovery),
+    return observeUpgradeOnce(
+      this,
+      'sourceActual:' + String(forRecovery),
+      () => this.measureSourceActual(forRecovery),
+      (value) => {
+        assertSourceActual(value);
+        return value;
+      },
     );
   }
   private async measureSourceActual(forRecovery: boolean): Promise<UpgradeSourceActual | null> {
@@ -277,7 +294,7 @@ export class UpgradeInspector {
     // rehash an unchanged multi-gigabyte installation on every status poll.
     if ((await this.installedProof(source, binding)).qualified === true) return null;
     requireUpgrade(binding.weight === 0 || binding.weight === 100, 'PARTIAL_ROUTE_UNCONFIRMED');
-    const api = (binding.weight === 100 ? binding.candidateApi : binding.oldApi) as Json;
+    const api = upgradeRecord(binding.weight === 100 ? binding.candidateApi : binding.oldApi);
     const identity = await this.controlIdentity(api.origin),
       web = await this.webBuild(binding),
       installer = await this.installerIdentity();
@@ -310,16 +327,16 @@ export class UpgradeInspector {
       signal: AbortSignal.timeout(1500),
     });
     requireUpgrade(response.ok, 'ACTUAL_OWNER_UNKNOWN');
-    const owner = (await response.json()) as Json;
+    const owner = upgradeRecord(await response.json());
     requireUpgrade(
       owner.instanceId === this.store.instanceId && owner.ownerId === route.ownerId,
       'ACTUAL_OWNER_UNKNOWN',
     );
     const installs = this.store.sqlite
-      .prepare(
+      .prepare<unknown[], { manifest: string; plan: string }>(
         'SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC',
       )
-      .all(this.store.instanceId) as { manifest: string; plan: string }[];
+      .all(this.store.instanceId);
     const candidates: { root: string; components: ConfirmedServiceRelease['components'] }[] = [];
     if (process.env.UPGRADE_INITIAL_ARTIFACT_ROOT) {
       const initial = await initialSourceActivation(this.store);
@@ -329,10 +346,8 @@ export class UpgradeInspector {
       });
     }
     for (const install of installs) {
-      const manifest = JSON.parse(install.manifest) as {
-        manifest: { components: ConfirmedServiceRelease['components'] };
-      };
-      const plan = JSON.parse(install.plan) as { package: { digest: string } };
+      const manifest = SignedUpgradeManifestSchema.parse(JSON.parse(install.manifest));
+      const plan = UpgradePlanSchema.parse(JSON.parse(install.plan));
       candidates.push({
         root: resolve(
           process.env.UPGRADE_INSTALLER_ROOT ?? '',
@@ -349,7 +364,7 @@ export class UpgradeInspector {
         digest: identity.actualCoordinatorArtifactDigest,
         input: identity.actualCoordinatorInputFingerprint,
       },
-      web: { digest: (binding.web as Json).digest, revision: web.webRevision },
+      web: { digest: upgradeRecord(binding.web).digest, revision: web.webRevision },
       installer: { digest: installer.artifactDigest, input: installer.inputFingerprint },
       owner: { digest: owner.artifactDigest, input: owner.inputFingerprint },
     };
@@ -380,13 +395,13 @@ export class UpgradeInspector {
     if (!changed) return null;
     const continuity = await this.continuity(latest.attemptId);
     requireUpgrade(continuity.qualified === true, 'SOURCE_CONTINUITY_UNCONFIRMED');
-    const ownerProof = continuity.owner as Json;
-    const owners = ownerProof.owners as Json[];
+    const ownerProof = upgradeRecord(continuity.owner);
+    const owners = upgradeRecords(ownerProof.owners);
     const protocol = (components.coordinator ?? components.api).protocol;
     requireUpgrade(
       owners.length > 0 &&
         owners.every((o) => {
-          const p = o.protocol as Json;
+          const p = upgradeRecord(o.protocol);
           return Number(p.min) <= protocol.max && Number(p.max) >= protocol.min;
         }),
       'SOURCE_OWNER_PROTOCOL_UNCONFIRMED',
@@ -472,7 +487,7 @@ export class UpgradeInspector {
         signal: AbortSignal.timeout(1500),
       });
       requireUpgrade(response.ok, 'PROCESS_OBSERVATION_UNKNOWN');
-      const observed = (await response.json()) as Json;
+      const observed = upgradeRecord(await response.json());
       requireUpgrade(
         observed.instanceId === this.store.instanceId &&
           observed.startIdentity === input.startIdentity &&
@@ -502,27 +517,32 @@ export class UpgradeInspector {
     }
   }
   async webBuild(binding: Json): Promise<{ webRevision: string; releaseId: string | null }> {
-    const web = binding.web as Json | undefined;
+    const web = optionalUpgradeRecord(binding.web);
     requireUpgrade(web && typeof web.origin === 'string', 'WEB_BINDING_UNKNOWN');
     const r = await fetch(loopbackOrigin(web.origin) + '/web-build', {
       signal: AbortSignal.timeout(2000),
     });
     requireUpgrade(r.ok, 'WEB_BUILD_UNAVAILABLE');
-    const actual = (await r.json()) as Json;
+    const actual = upgradeRecord(await r.json());
     requireUpgrade(
       typeof actual.webRevision === 'string' &&
         /^[a-f0-9]{40}$/.test(actual.webRevision) &&
         (actual.releaseId === null || typeof actual.releaseId === 'string'),
       'WEB_BUILD_IDENTITY_UNKNOWN',
     );
-    return { webRevision: actual.webRevision, releaseId: actual.releaseId as string | null };
+    return { webRevision: actual.webRevision, releaseId: actual.releaseId };
   }
   async verifyArtifact(
     root: string,
     expected: ConfirmedServiceRelease['components'],
   ): Promise<void> {
-    await observeUpgradeOnce(this, 'artifact:' + root + ':' + upgradeDigest(expected), () =>
-      verifyUpgradeArtifact(root, expected),
+    await observeUpgradeOnce(
+      this,
+      'artifact:' + root + ':' + upgradeDigest(expected),
+      () => verifyUpgradeArtifact(root, expected),
+      (value) => {
+        requireUpgrade(value === undefined, 'INVALID_JSON', 400);
+      },
     );
   }
   async verifySourceArtifact(root: string, expected: ConfirmedServiceRelease['components']) {
@@ -536,8 +556,8 @@ export class UpgradeInspector {
   async bootstrapProof(release: ConfirmedServiceRelease, artifactRoot: string): Promise<void> {
     await this.verifyArtifact(artifactRoot, release.components);
     const binding = await this.entryBinding(),
-      web = binding.web as Json,
-      api = binding.oldApi as Json;
+      web = upgradeRecord(binding.web),
+      api = upgradeRecord(binding.oldApi);
     const identity = await this.controlIdentity(api.origin),
       build = await this.webBuild(binding);
     requireUpgrade(
@@ -556,17 +576,17 @@ export class UpgradeInspector {
   }
   private rows(): ResourceRow[] {
     return this.store.sqlite
-      .prepare(
+      .prepare<unknown[], ResourceRow>(
         "SELECT id,provider,provider_handle,provider_state,status,headless FROM sandboxes WHERE status IN ('running','idle','starting','creating','stopping')",
       )
-      .all() as ResourceRow[];
+      .all();
   }
   private handle(row: ResourceRow): SandboxHandle {
     return {
       provider: row.provider,
       providerSandboxId: row.provider_handle,
       ...(row.provider_state
-        ? { providerState: JSON.parse(row.provider_state) as Record<string, unknown> }
+        ? { providerState: upgradeRecord(JSON.parse(row.provider_state)) }
         : {}),
     };
   }
@@ -585,7 +605,7 @@ export class UpgradeInspector {
           };
         try {
           const inspected = await this.providers.get(row.provider).inspect(this.handle(row));
-          const raw = inspected.raw as Json | undefined;
+          const raw = optionalUpgradeRecord(inspected.raw);
           return {
             sandboxId: row.id,
             provider: row.provider,
@@ -611,10 +631,10 @@ export class UpgradeInspector {
   }
   async capture(): Promise<Json> {
     const tables = this.store.sqlite
-      .prepare(
+      .prepare<unknown[], { name: string }>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
       )
-      .all() as { name: string }[];
+      .all();
     const columns = Object.fromEntries(
       tables.map((t) => [
         t.name,
@@ -623,7 +643,7 @@ export class UpgradeInspector {
     );
     const release = this.store.confirmed();
     const coordinator = {
-      origin: loopbackOrigin(`http://${env.host}:${env.port}`),
+      origin: loopbackOrigin(`http://${env.host}:${String(env.port)}`),
       startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
       artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
       inputFingerprint:
@@ -652,10 +672,12 @@ export class UpgradeInspector {
           'SELECT id,enabled,schedule_kind,schedule_config,timezone,next_trigger_at FROM automations WHERE enabled=1',
         )
         .all(),
-      transitionsAfter: (
+      transitionsAfter: requiredUpgradeValue(
         this.store.sqlite
-          .prepare('SELECT coalesce(max(rowid),0) AS n FROM sandbox_state_transitions')
-          .get() as { n: number }
+          .prepare<unknown[], { n: number }>(
+            'SELECT coalesce(max(rowid),0) AS n FROM sandbox_state_transitions',
+          )
+          .get(),
       ).n,
       coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION ?? 0),
       coordinator,
@@ -666,10 +688,15 @@ export class UpgradeInspector {
           "SELECT t.terminal_identity,t.sandbox_id,t.kind,t.private_session_id,t.runtime_identity FROM terminal_bookmarks t JOIN sandboxes s ON s.id=t.sandbox_id WHERE t.runtime_identity IS NOT NULL AND t.close_requested_at IS NULL AND s.status IN ('running','idle','starting')",
         )
         .all(),
-      auditAfter: (
-        this.store.sqlite.prepare('SELECT coalesce(max(seq),0) n FROM audit_events').get() as {
-          n: number;
-        }
+      auditAfter: requiredUpgradeValue(
+        this.store.sqlite
+          .prepare<
+            unknown[],
+            {
+              n: number;
+            }
+          >('SELECT coalesce(max(seq),0) n FROM audit_events')
+          .get(),
       ).n,
       authContinuityFingerprint: this.authFingerprint(),
       observedAt: this.observedAt,
@@ -684,10 +711,12 @@ export class UpgradeInspector {
   async authenticationContinuity(id: string, fence: number, origin: unknown): Promise<boolean> {
     this.store.assertFence(id, fence);
     const row = this.store.sqlite
-      .prepare('SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string } | undefined;
+      .prepare<unknown[], { snapshot: string }>(
+        'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
+      )
+      .get(id);
     if (!row) return false;
-    const expected = (JSON.parse(row.snapshot) as Json).authContinuityFingerprint;
+    const expected = upgradeRecord(JSON.parse(row.snapshot)).authContinuityFingerprint;
     const legacy = this.security.legacyContinuityFingerprint(this.store.instanceId);
     const legacyBaseline =
       legacy !== null &&
@@ -725,7 +754,7 @@ export class UpgradeInspector {
         !(returnedScope === null && legacyBaseline && challenge.legacy)
       )
         return false;
-      const actual = (await response.json()) as Json;
+      const actual = upgradeRecord(await response.json());
       return (
         actual.instanceId === this.store.instanceId &&
         actual.attemptId === accepted.attemptId &&
@@ -748,7 +777,7 @@ export class UpgradeInspector {
     const routes = this.providers.installedRoutes(),
       activeOwnerId = this.providers.activeOwnerId;
     const owners = await Promise.all(
-      routes.map(async (route) => {
+      routes.map(async (route): Promise<Json> => {
         const r = await fetch(loopbackOrigin(route.endpoint) + '/runtime/continuity', {
           headers: {
             'x-platform-internal-key': process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
@@ -757,12 +786,12 @@ export class UpgradeInspector {
           signal: AbortSignal.timeout(2000),
         });
         requireUpgrade(r.ok, 'OWNER_AUDIT_UNKNOWN');
-        const value = (await r.json()) as Json;
+        const value = upgradeRecord(await r.json());
         requireUpgrade(
           value.instanceId === this.store.instanceId &&
             value.ownerId === route.ownerId &&
-            value.observedAt &&
-            this.clock.now().getTime() - Date.parse(String(value.observedAt)) <= 5000,
+            typeof value.observedAt === 'string' &&
+            this.clock.now().getTime() - Date.parse(value.observedAt) <= 5000,
           'OWNER_AUDIT_UNKNOWN',
         );
         const metadataResponse = await fetch(loopbackOrigin(route.endpoint) + '/runtime/metadata', {
@@ -773,7 +802,7 @@ export class UpgradeInspector {
           signal: AbortSignal.timeout(1500),
         });
         requireUpgrade(metadataResponse.ok, 'OWNER_PROTOCOL_UNKNOWN');
-        const metadata = (await metadataResponse.json()) as Json;
+        const metadata = upgradeRecord(await metadataResponse.json());
         requireUpgrade(
           metadata.ownerId === route.ownerId && metadata.instanceId === this.store.instanceId,
           'OWNER_IDENTITY_CHANGED',
@@ -786,7 +815,7 @@ export class UpgradeInspector {
               : metadata.protocol,
           artifactDigest: metadata.artifactDigest,
           inputFingerprint: metadata.inputFingerprint,
-        } as Json;
+        };
       }),
     );
     const active = owners.find((o) => o.ownerId === activeOwnerId);
@@ -795,7 +824,9 @@ export class UpgradeInspector {
       instanceId: this.store.instanceId,
       activeOwnerId,
       owners,
-      operations: owners.flatMap((o) => (Array.isArray(o.operations) ? o.operations : [])),
+      operations: owners.flatMap((o) =>
+        Array.isArray(o.operations) ? upgradeRecords(o.operations) : [],
+      ),
       lease: active.lease,
       observedAt: this.observedAt,
     };
@@ -811,14 +842,28 @@ export class UpgradeInspector {
         'REPAIR_SOURCE_NOT_TERMINAL',
       );
     const record = this.store.sqlite
-      .prepare('SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?')
-      .get(id) as { snapshot: string; digest: string } | undefined;
+      .prepare<unknown[], { snapshot: string; digest: string }>(
+        'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
+      )
+      .get(id);
     requireUpgrade(record, 'CONTINUITY_BASELINE_MISSING');
-    const baseline = JSON.parse(record.snapshot) as Json;
+    const baseline = upgradeRecord(JSON.parse(record.snapshot));
     requireUpgrade(upgradeDigest(baseline) === record.digest, 'CONTINUITY_BASELINE_CORRUPT');
     const current = await this.resources(),
       reasons: string[] = [];
-    for (const original of baseline.resources as ResourceProof[]) {
+    for (const original of z
+      .array(
+        z.object({
+          sandboxId: z.string(),
+          provider: z.string(),
+          handleDigest: z.string(),
+          runtimeIdentity: z.string().nullable(),
+          status: z.string(),
+          lifecycleState: z.string(),
+          headless: z.boolean(),
+        }),
+      )
+      .parse(baseline.resources)) {
       const row = current.find((v) => v.sandboxId === original.sandboxId);
       const intentional = this.store.sqlite
         .prepare(
@@ -835,12 +880,12 @@ export class UpgradeInspector {
       )
         reasons.push('ORIGINAL_RUNTIME_UNCONFIRMED');
     }
-    for (const original of baseline.tasks as Json[]) {
+    for (const original of upgradeRecords(baseline.tasks)) {
       const currentTask = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], Json>(
           'SELECT job_handle,cursor,exit_code,last_seq,stdout_bytes,status,cancel_requested_at FROM agent_tasks WHERE id=?',
         )
-        .get(original.id) as Json | undefined;
+        .get(original.id);
       if (
         !currentTask ||
         currentTask.job_handle !== original.job_handle ||
@@ -854,10 +899,9 @@ export class UpgradeInspector {
         const completion = await this.jobCompletions.find(String(original.id));
         let originalHandle: { provider: string; jobId: string } | null = null;
         try {
-          originalHandle = JSON.parse(String(original.job_handle)) as {
-            provider: string;
-            jobId: string;
-          };
+          originalHandle = z
+            .object({ provider: z.string(), jobId: z.string() })
+            .parse(JSON.parse(String(original.job_handle)));
         } catch {
           /* Unknown original handles cannot prove an exit. */
         }
@@ -884,17 +928,17 @@ export class UpgradeInspector {
           reasons.push('NATURAL_JOB_EXIT_NEEDS_OWNER_RECEIPT');
       }
     }
-    for (const original of baseline.automations as Json[]) {
+    for (const original of upgradeRecords(baseline.automations)) {
       const row = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], Json>(
           'SELECT enabled,schedule_kind,schedule_config,timezone FROM automations WHERE id=?',
         )
-        .get(original.id) as Json | undefined;
+        .get(original.id);
       const audits = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], Json>(
           "SELECT seq,type,at,detail FROM audit_events WHERE seq>? AND subject_type='automation' AND subject_id=? AND actor='user' AND outcome='ok' AND type IN ('automation.updated','automation.deleted','automation.enabled','automation.disabled') ORDER BY seq",
         )
-        .all(baseline.auditAfter ?? 0, original.id) as Json[];
+        .all(baseline.auditAfter ?? 0, original.id);
       const changedFields = ['schedule_kind', 'schedule_config', 'timezone'].filter(
         (key) => row?.[key] !== original[key],
       );
@@ -902,7 +946,7 @@ export class UpgradeInspector {
       for (const audit of audits)
         if (audit.type === 'automation.updated') {
           try {
-            const detail = JSON.parse(String(audit.detail)) as Json;
+            const detail = upgradeRecord(JSON.parse(String(audit.detail)));
             if (Array.isArray(detail.fieldNames))
               for (const field of detail.fieldNames) userFields.add(String(field));
           } catch {
@@ -931,15 +975,14 @@ export class UpgradeInspector {
       )
         reasons.push('AUTOMATION_CHANGED_DURING_UPGRADE');
     }
-    for (const terminal of (Array.isArray(baseline.terminals)
-      ? baseline.terminals
-      : []) as Json[]) {
+    for (const terminal of upgradeRecords(
+      Array.isArray(baseline.terminals) ? baseline.terminals : [],
+    )) {
       const bookmark = this.store.sqlite
-        .prepare(
+        .prepare<unknown[], { close_requested_at: number | null }>(
           'SELECT close_requested_at FROM terminal_bookmarks WHERE terminal_identity=? AND sandbox_id=?',
         )
-        .get(terminal.terminal_identity, terminal.sandbox_id) as
-        { close_requested_at: number | null } | undefined;
+        .get(terminal.terminal_identity, terminal.sandbox_id);
       if (bookmark?.close_requested_at != null) continue;
       const intentionalStop = this.store.sqlite
         .prepare(
@@ -1010,13 +1053,13 @@ export class UpgradeInspector {
     const actual = await this.entryBinding();
     if (input.actual)
       requireUpgrade(
-        canonicalUpgrade(persistedBinding(input.actual as Json)) ===
+        canonicalUpgrade(persistedBinding(upgradeRecord(input.actual))) ===
           canonicalUpgrade(persistedBinding(actual)),
         'ENTRY_BINDING_CHANGED',
       );
-    const candidate = input.candidate as Json | undefined;
+    const candidate = optionalUpgradeRecord(input.candidate);
     const api =
-      candidate ?? ((actual.weight === 100 ? actual.candidateApi : actual.oldApi) as Json);
+      candidate ?? upgradeRecord(actual.weight === 100 ? actual.candidateApi : actual.oldApi);
     const identity = await this.controlIdentity(api.origin),
       continuity = await this.continuity(id, fence);
     const component = snapshot.manifest.components.api;
@@ -1035,10 +1078,10 @@ export class UpgradeInspector {
       identity.writerFenceValid === true;
     const web = await this.webBuild(actual);
     const webMatches =
-      (actual.web as Json).digest === snapshot.manifest.components.web.artifactDigest &&
+      upgradeRecord(actual.web).digest === snapshot.manifest.components.web.artifactDigest &&
       web.webRevision === snapshot.manifest.components.web.webRevision;
     this.store.assertFence(id, fence);
-    const sourceApi = actual.oldApi as Json;
+    const sourceApi = upgradeRecord(actual.oldApi);
     const sourceComponent =
       snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api;
     const baseline = this.probeEvidence.read(

@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 
 /** Accepted internal create identity; public clients cannot supply these IDs. */
 export interface SandboxAdmissionIntents {

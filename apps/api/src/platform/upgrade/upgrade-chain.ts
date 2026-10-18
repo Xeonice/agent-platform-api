@@ -43,7 +43,7 @@ export function freezeUpgradeChain(
         throw error;
     }
     const nextVisiting = new Set([...visiting, envelope.manifest.releaseId]);
-    let lastError: unknown;
+    let lastError: UpgradeError | undefined;
     for (const path of envelope.manifest.upgradePaths) {
       const required = [
         ...new Set([

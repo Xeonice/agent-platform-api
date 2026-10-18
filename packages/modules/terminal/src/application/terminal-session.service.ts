@@ -35,6 +35,7 @@ import {
   TMUX_PROBE_CMD,
 } from '../domain/services/tmux-command.policy';
 import type { ShellSessionSummary } from '../domain/services/tmux-command.policy';
+import { errorMessage } from '@platform/shared-kernel';
 
 const TMUX_CMD_TIMEOUT_MS = 30_000;
 
@@ -145,7 +146,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     );
     if (r.exitCode !== 0) {
       throw new Error(
-        `failed to start the agent tmux session (exit ${r.exitCode}): ${r.stdout.trim()}`,
+        `failed to start the agent tmux session (exit ${String(r.exitCode)}): ${r.stdout.trim()}`,
       );
     }
     return { promptConsumed: carriesPrompt, reusedExisting: false };
@@ -277,7 +278,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     } catch (e) {
       // 与 agent 那条路同一条取舍：沙箱可能整个没了，让 pty 层报真正的错，
       // 而不是被一次 binding 查询的失败盖住。少一个 `-c` 只是起点目录不同。
-      this.logger.warn(`sandbox ${sandboxId}: binding unavailable (${(e as Error).message})`);
+      this.logger.warn(`sandbox ${sandboxId}: binding unavailable (${errorMessage(e)})`);
     }
     return attachOrCreateShellCmd(session, workdir);
   }
@@ -360,16 +361,14 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     try {
       exec = await this.sandboxes.execFor(sandboxId);
     } catch (e) {
-      this.logger.warn(
-        `sandbox ${sandboxId}: 列终端会话失败（exec 不可达）：${(e as Error).message}`,
-      );
+      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败（exec 不可达）：${errorMessage(e)}`);
       return null;
     }
     let r: Awaited<ReturnType<SandboxExecFn>>;
     try {
       r = await exec(listSessionsCmd(), { timeoutMs: TMUX_CMD_TIMEOUT_MS });
     } catch (e) {
-      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败：${(e as Error).message}`);
+      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败：${errorMessage(e)}`);
       return null;
     }
     if (r.exitCode !== 0) {
@@ -377,17 +376,18 @@ export class TerminalSessionService implements AgentSessionBootstrap {
       // ⚠️ 它**不是**「没有用户终端」—— 那种情况下 agent 会话也不该在，属于异常。
       this.logger.warn(
         `sandbox ${sandboxId}: 列终端会话失败（tmux 退出码 ${String(r.exitCode)}）：` +
-          `${r.stderr.trim() || r.stdout.trim()}`,
+          (r.stderr.trim() || r.stdout.trim()),
       );
       return null;
     }
     const shells = parseShellSessionList(r.stdout);
-    if (!this.bookmarks) return shells;
+    const bookmarks = this.bookmarks;
+    if (!bookmarks) return shells;
     return Promise.all(
       shells.map(async (shell) => ({
         ...shell,
         terminalIdentity: (
-          await this.bookmarks!.ensure(
+          await bookmarks.ensure(
             sandboxId,
             shell.runtimeId ? 'runtime' : 'shell',
             shell.shellId,

@@ -7,4 +7,4 @@ export interface ProjectReadProjection {
   saveNameSync?(tx: Tx, projectId: string, name: string): string;
 }
 export const PROJECT_READ_PROJECTION = Symbol('ProjectReadProjection');
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';

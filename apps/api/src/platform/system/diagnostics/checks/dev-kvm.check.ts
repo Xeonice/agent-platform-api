@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { execFile } from 'node:child_process';
 import { access, constants } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
@@ -268,7 +269,7 @@ async function errnoOf(path: string): Promise<string | null> {
     await access(path, constants.R_OK | constants.W_OK);
     return null;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code ?? 'EACCES';
+    return isRecord(e) && typeof e.code === 'string' ? e.code : 'EACCES';
   }
 }
 
@@ -293,7 +294,9 @@ function hvSupport(ctx: DiagnoseContext): Promise<boolean | null> {
       'sysctl',
       ['-n', 'kern.hv_support'],
       { timeout: Math.min(ctx.timeoutMs, 3000), signal: ctx.signal },
-      (error, stdout) => resolve(error ? null : stdout.trim() === '1'),
+      (error, stdout) => {
+        resolve(error ? null : stdout.trim() === '1');
+      },
     );
   });
 }

@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -159,7 +160,7 @@ function target(source: ConfirmedServiceRelease, releaseId = '0.2.1', migration 
   return { envelope, plan, request };
 }
 function accept(migration = false) {
-  const source = store.confirmed()!;
+  const source = assertDefined(store.confirmed());
   const fixture = target(source, '0.2.1', migration);
   const attempt = store.accept('actor-a', fixture.request, fixture.envelope, fixture.plan);
   store.claim(attempt.attemptId, 'controller-a', 30_000);
@@ -237,7 +238,7 @@ function events() {
 it('keeps known download progress and immutable stage clocks when later migration total is unknown and heartbeat repeats work', () => {
   const { id } = accept(true);
   store.commit(id, command(id, 'progress', { stepId: 'package-download', completedWork: 250 }));
-  const first = store.stageProgress(id)!;
+  const first = assertDefined(store.stageProgress(id));
   expect(store.attempt(id).percent).toBeNull();
   expect(first).toMatchObject({
     stage: 'package-download',
@@ -282,7 +283,7 @@ afterEach(() => {
 
 describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and recovery', () => {
   it('rejects an unqualified global migration version without reserving an attempt or changing the actual journal', () => {
-    const source = store.confirmed()!;
+    const source = assertDefined(store.confirmed());
     const fixture = target(source, '0.2.1', true);
     const manifest = UpgradeManifestSchema.parse({
       ...fixture.envelope.manifest,
@@ -311,7 +312,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     expect(connection.sqlite.prepare('SELECT * FROM __drizzle_migrations').all()).toEqual(before);
   });
   it('freezes a separately measured partial tuple for a new explicit repair intent, preserving the last complete release and reusing only the actual Owner/Installer', () => {
-    const original = store.confirmed()!;
+    const original = assertDefined(store.confirmed());
     const first = accept();
     for (const step of first.plan.steps) {
       apply(first.id, step);
@@ -393,7 +394,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
   it.each(['proof', 'base', 'generation', 'stale'] as const)(
     'rejects a partial source with %s mismatch before admitting another instance attempt',
     (kind) => {
-      const original = store.confirmed()!;
+      const original = assertDefined(store.confirmed());
       const first = accept();
       store.commit(first.id, command(first.id, 'deferred', { reason: 'state-fixture deferred' }));
       connection.sqlite
@@ -435,7 +436,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     },
   );
   it('commits one accepted intent across lost acknowledgement, reopen and two-actor concurrent admission', async () => {
-    const fixture = target(store.confirmed()!);
+    const fixture = target(assertDefined(store.confirmed()));
     const accepted = store.accept('actor-a', fixture.request, fixture.envelope, fixture.plan);
     connection.sqlite.close();
     connection = createConnection(filename);
@@ -616,7 +617,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     const { id, plan } = accept(true);
     const frozen = canonicalUpgrade(plan);
     const knownTotal = plan.steps.reduce((sum, step) => sum + (step.totalWork ?? 0), 0);
-    const migration = plan.steps.find((s) => s.kind === 'migration')!;
+    const migration = assertDefined(plan.steps.find((s) => s.kind === 'migration'));
     expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null, completedWork: 0 });
     for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
     store.commit(id, command(id, 'progress', { stepId: migration.stepId, completedWork: 3 }));
@@ -646,7 +647,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     'uses only the completed migration receipt to resolve its actual %i units without rewriting the fixed plan or receipts',
     (completed) => {
       const { id, plan } = accept(true);
-      const migration = plan.steps.find((step) => step.kind === 'migration')!;
+      const migration = assertDefined(plan.steps.find((step) => step.kind === 'migration'));
       const before = canonicalUpgrade(store.plan(id));
       const storedPlan = (
         connection.sqlite
@@ -693,7 +694,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
 
   it('keeps incomplete unknown work unresolved despite progress and elapsed time, and rejects invalid or regressing work', () => {
     const { id, plan } = accept(true);
-    const migration = plan.steps.find((step) => step.kind === 'migration')!;
+    const migration = assertDefined(plan.steps.find((step) => step.kind === 'migration'));
     for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
     store.commit(id, command(id, 'progress', { stepId: migration.stepId, completedWork: 3 }));
     expect(store.attempt(id)).toMatchObject({ totalWork: null, percent: null });
@@ -725,7 +726,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
     'over-budget',
   ])('does not turn %s migration metadata into a known total', (fault) => {
     const { id, plan } = accept(true);
-    const migration = plan.steps.find((step) => step.kind === 'migration')!;
+    const migration = assertDefined(plan.steps.find((step) => step.kind === 'migration'));
     for (const step of plan.steps.slice(0, plan.steps.indexOf(migration))) apply(id, step);
     apply(id, migration, 9);
     const row = connection.sqlite
@@ -810,7 +811,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
         recoveryPlan: frozenRecovery,
       }),
     );
-    const recovery = store.recovery()!;
+    const recovery = assertDefined(store.recovery());
     expect(recovery).toMatchObject({
       recoveryAttemptId,
       triggeringAttemptId: id,
@@ -853,7 +854,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
   });
 
   it('a Web-only mixed recovery preserves successful history and latest data without inventing a fully restored A release', () => {
-    const original = store.confirmed()!;
+    const original = assertDefined(store.confirmed());
     const { id } = accept();
     const installed = activate(id);
     const success = connection.sqlite
@@ -1039,7 +1040,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
         recoveryPlan: recoveryPlan(next.attemptId),
       }),
     );
-    const originalRecovery = store.recovery()!;
+    const originalRecovery = assertDefined(store.recovery());
     store.commit(
       next.attemptId,
       command(next.attemptId, 'recovery-failed', { reason: 'await independent proof' }),
@@ -1052,7 +1053,7 @@ describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and 
         recoveryPlan: recoveryPlan(next.attemptId),
       }),
     );
-    const currentRecovery = store.recovery()!;
+    const currentRecovery = assertDefined(store.recovery());
     expect(currentRecovery.generation).toBeGreaterThan(originalRecovery.generation);
     expect(currentRecovery.recoveryAttemptId).not.toBe(originalRecovery.recoveryAttemptId);
     expect(currentRecovery.state).toBe('recovering');
@@ -1113,15 +1114,15 @@ describe('UPG high-frequency probe snapshot excludes historical receipt payloads
       sourceActual: full.sourceActual,
       appliedSteps: full.appliedSteps.filter((step) => step.stepId === 'candidate'),
     });
-    expect(projected!.appliedSteps[0]!.evidence).toEqual(candidate);
-    expect(decoded!.some((value) => value.includes(marker))).toBe(false);
-    expect(queries!.every((sql) => !/SELECT\s+\*/i.test(sql))).toBe(true);
+    expect(assertDefined(assertDefined(projected).appliedSteps[0]).evidence).toEqual(candidate);
+    expect(assertDefined(decoded).some((value) => value.includes(marker))).toBe(false);
+    expect(assertDefined(queries).every((sql) => !/SELECT\s+\*/i.test(sql))).toBe(true);
     expect(
-      queries!.some((sql) =>
+      assertDefined(queries).some((sql) =>
         /upgrade_continuity_baselines|upgrade_events|upgrade_recoveries/.test(sql),
       ),
     ).toBe(false);
-    const stepQueries = queries!.filter((sql) => sql.includes('upgrade_steps'));
+    const stepQueries = assertDefined(queries).filter((sql) => sql.includes('upgrade_steps'));
     expect(stepQueries).toHaveLength(1);
     expect(stepQueries[0]).toMatch(/step_id\s*=\s*'candidate'/);
     expect(stepQueries[0]).toMatch(/applied\s*=\s*1/);
@@ -1137,12 +1138,12 @@ describe('UPG high-frequency probe snapshot excludes historical receipt payloads
     connection.sqlite
       .prepare("UPDATE upgrade_steps SET evidence=? WHERE attempt_id=? AND step_id='candidate'")
       .run('{not-yet-applied', fixture.id);
-    const initial = store.latestProbeSnapshot()!;
+    const initial = assertDefined(store.latestProbeSnapshot());
     expect(initial.appliedSteps).toEqual([]);
     time += 31_000;
-    expect(store.latestProbeSnapshot()!.leaseExpiresAt).toBeLessThan(time);
+    expect(assertDefined(store.latestProbeSnapshot()).leaseExpiresAt).toBeLessThan(time);
     const claimed = store.claim(fixture.id, 'replacement-probe-controller', 30_000);
-    const fresh = store.latestProbeSnapshot()!;
+    const fresh = assertDefined(store.latestProbeSnapshot());
     expect(fresh.fence).toBe(claimed.fence);
     expect(fresh.fence).toBeGreaterThan(initial.fence);
     expect(fresh.leaseExpiresAt).toBe(time + 30_000);
@@ -1154,8 +1155,8 @@ describe('UPG high-frequency probe snapshot excludes historical receipt payloads
     store.commit(first.id, command(first.id, 'deferred', { reason: 'state-layer fixture' }));
     const second = accept();
     expect(second.id).not.toBe(first.id);
-    const selected = store.latestProbeSnapshot()!;
-    expect(selected.attempt.attemptId).toBe(store.latest()!.attemptId);
+    const selected = assertDefined(store.latestProbeSnapshot());
+    expect(selected.attempt.attemptId).toBe(assertDefined(store.latest()).attemptId);
     expect(selected.attempt.attemptId).toBe(second.id);
     expect(selected.fence).toBe(store.snapshot(second.id).fence);
   });
@@ -1216,8 +1217,8 @@ describe('UPG high-frequency probe snapshot excludes historical receipt payloads
     } finally {
       querySpy.mockRestore();
     }
-    expect(queries!.some((sql) => /upgrade_steps|upgrade_continuity_baselines/.test(sql))).toBe(
-      false,
-    );
+    expect(
+      assertDefined(queries).some((sql) => /upgrade_steps|upgrade_continuity_baselines/.test(sql)),
+    ).toBe(false);
   });
 });

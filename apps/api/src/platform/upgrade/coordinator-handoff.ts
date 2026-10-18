@@ -1,3 +1,4 @@
+import { upgradeRecord } from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY, SANDBOX_FACADE } from '@platform/contracts';
@@ -22,7 +23,7 @@ import { UpgradeStore } from './upgrade-store';
 import { canonicalUpgrade, requireUpgrade } from './upgrade-trust';
 
 type Json = Record<string, unknown>;
-interface HandoffRow {
+export interface HandoffRow {
   attempt_id: string;
   operation_id: string;
   plan_digest: string;
@@ -55,8 +56,8 @@ export class CoordinatorHandoff {
   ) {}
   private row(id: string): HandoffRow | undefined {
     return this.store.sqlite
-      .prepare('SELECT * FROM coordinator_handoffs WHERE attempt_id=?')
-      .get(id) as HandoffRow | undefined;
+      .prepare<unknown[], HandoffRow>('SELECT * FROM coordinator_handoffs WHERE attempt_id=?')
+      .get(id);
   }
   private async binding(state: 'ready' | 'quiescing', extra: Json = {}): Promise<void> {
     const path = process.env.PLATFORM_COORDINATOR_BINDING_PATH;
@@ -64,7 +65,7 @@ export class CoordinatorHandoff {
     await writeInstalledBinding(path, {
       state,
       instanceId: this.store.instanceId,
-      origin: `http://${env.host}:${env.port}`,
+      origin: `http://${env.host}:${String(env.port)}`,
       generation: Number(process.env.COORDINATOR_GENERATION),
       artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
       ...extra,
@@ -83,7 +84,7 @@ export class CoordinatorHandoff {
       signal: AbortSignal.timeout(action === 'adopt' ? 2000 : 1500),
     });
     requireUpgrade(r.ok, 'COORDINATOR_CANDIDATE_UNCONFIRMED');
-    return (await r.json()) as Json;
+    return upgradeRecord(await r.json());
   }
   async execute(id: string, input: Json): Promise<Json> {
     const fence = Number(input.fence);
@@ -126,11 +127,10 @@ export class CoordinatorHandoff {
       };
     }
     const candidate = existing
-      ? (JSON.parse(existing.candidate) as Json)
-      : (input.candidate as Json);
+      ? upgradeRecord(JSON.parse(existing.candidate))
+      : upgradeRecord(input.candidate);
     requireUpgrade(
-      candidate &&
-        candidate.artifactDigest === snapshot.manifest.components.coordinator.artifactDigest &&
+      candidate.artifactDigest === snapshot.manifest.components.coordinator.artifactDigest &&
         typeof candidate.startIdentity === 'string',
       'COORDINATOR_CANDIDATE_IDENTITY_REQUIRED',
     );

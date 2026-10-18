@@ -1,3 +1,4 @@
+import { errorMessage, isRecord } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -85,7 +86,7 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
   onApplicationBootstrap(): void {
     if (process.env.DISABLE_SANDBOX_HEALTH_MONITOR === '1') return;
     this.timer = setInterval(() => void this.runOnce(), SAMPLE_INTERVAL_MS);
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /** `SandboxDto.health` 的取数。没观测过 ⇒ `undefined`（缺席 ≠ unhealthy）。 */
@@ -108,7 +109,7 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
       for (const id of [...this.current.keys()]) if (!liveIds.has(id)) this.forget(id);
       for (const id of [...this.failureStreak.keys()]) if (!liveIds.has(id)) this.forget(id);
     } catch (e) {
-      this.logger.warn(`health sweep failed: ${(e as Error).message}`);
+      this.logger.warn(`health sweep failed: ${errorMessage(e)}`);
     } finally {
       this.running = false;
     }
@@ -140,7 +141,7 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
     } catch (e) {
       // ⚠️ **必须 catch。** 03 §7.8 实现纪律 2：一次探测异常冒泡出去就成了别人的失败。
       zeroCostFailure = true;
-      reason = `inspect failed: ${(e as Error).message}`;
+      reason = `inspect failed: ${errorMessage(e)}`;
     }
 
     if (status !== null) {
@@ -317,6 +318,6 @@ function handleOf(sandbox: Sandbox): SandboxHandle | null {
 
 /** boxlite 把它折在 `raw` 里（见 `boxlite-sandbox.provider.ts` 的 `inspect`）。 */
 function readExecErrors(status: SandboxRuntimeStatus): number | undefined {
-  const raw = status.raw as { execErrorsTotal?: unknown } | undefined;
-  return typeof raw?.execErrorsTotal === 'number' ? raw.execErrorsTotal : undefined;
+  const raw = status.raw;
+  return isRecord(raw) && typeof raw.execErrorsTotal === 'number' ? raw.execErrorsTotal : undefined;
 }

@@ -1,3 +1,6 @@
+import { DockerContainersSchema } from '../providers/docker/docker-values';
+import { BoxliteInfosSchema } from '../providers/boxlite/boxlite-values';
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import type Docker from 'dockerode';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -12,7 +15,7 @@ import { getSharedBoxliteRuntime } from '../providers/boxlite/boxlite-runtime';
 import { sandboxes } from '../persistence/schema/sandbox.sqlite';
 import { INSTANCE_LABEL, boxliteNamePrefix, platformInstanceId } from './instance-id';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * Startup orphan reconciler (docs/backend/13 §4 privileged reconciliation path).
@@ -54,7 +57,7 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
     try {
       await this.reconcile();
     } catch (e) {
-      this.logger.warn(`startup reconcile skipped: ${(e as Error).message}`);
+      this.logger.warn(`startup reconcile skipped: ${errorMessage(e)}`);
     }
   }
 
@@ -88,12 +91,14 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
       // ⚠️ **按实例过滤,不是按"平台托管"过滤**。旧写法只筛 `platform.managed=true`,
       // 于是任何一个平台进程都会把**别的实例**的容器当孤儿删掉——开发机上
       // e2e(自带临时库)一跑就清空开发者正开着的 demo。理由与取舍见 instance-id.ts。
-      containers = await this.docker.listContainers({
-        all: true,
-        filters: { label: ['platform.managed=true', `${INSTANCE_LABEL}=${mine}`] },
-      });
+      containers = DockerContainersSchema.parse(
+        await this.docker.listContainers({
+          all: true,
+          filters: { label: ['platform.managed=true', `${INSTANCE_LABEL}=${mine}`] },
+        }),
+      );
     } catch (e) {
-      this.logger.warn(`docker reconcile skipped (daemon unreachable): ${(e as Error).message}`);
+      this.logger.warn(`docker reconcile skipped (daemon unreachable): ${errorMessage(e)}`);
       return 0;
     }
     for (const c of containers) {
@@ -105,7 +110,7 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
       if (isPlatformOwnedSandboxId(sandboxId)) {
         // 只收已经退出 / 死掉的旧 helper；running / created / restarting / paused 一律不动
         // —— 除非它属于已经不是默认的 provider（见类注释）。
-        const retired = this.retiredProvider(c.Labels?.['platform.provider']);
+        const retired = this.retiredProvider(c.Labels['platform.provider']);
         if (!retired && !['exited', 'dead'].includes(c.State)) continue;
         const name = c.Names?.[0] ?? c.Id;
         try {
@@ -127,7 +132,7 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
           `reaped ORPHAN container ${c.Names?.[0] ?? c.Id} (sandbox ${sandboxId} has no DB record)`,
         );
       } catch (e) {
-        this.logger.warn(`failed to reap container ${c.Id}: ${(e as Error).message}`);
+        this.logger.warn(`failed to reap container ${c.Id}: ${errorMessage(e)}`);
       }
     }
     return removed;
@@ -146,22 +151,25 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
     // 名字里带上实例指纹,规则与 docker 侧同构:不同实例的 micro-VM 前缀不同,
     // 彼此的 `startsWith` 都不成立 ⇒ 天然互不回收。
     const minePrefix = boxliteNamePrefix();
-    const boxes = await runtime.listInfo().catch((e: unknown) => {
-      this.logger.warn(`boxlite reconcile skipped: ${(e as Error).message}`);
-      return [];
-    });
+    const boxes = await runtime
+      .listInfo()
+      .then((values) => BoxliteInfosSchema.parse(values))
+      .catch((e: unknown) => {
+        this.logger.warn(`boxlite reconcile skipped: ${errorMessage(e)}`);
+        return [];
+      });
     for (const b of boxes) {
       // 旧格式(无实例段)的 box 不匹配这个前缀 ⇒ 同样"宁可漏收不可误删"。
-      if (!b.name || !b.name.startsWith(minePrefix)) continue;
+      if (!b.name?.startsWith(minePrefix)) continue;
       const sandboxId = b.name.slice(minePrefix.length);
       if (isPlatformOwnedSandboxId(sandboxId)) {
         // 只收已经停掉 / 失败的旧 helper（开机时上一个容器里的那个必然是 stopped：BoxLite
         // 初始化会把验不了 shim 的 box 标成 Stopped）。running / configured / stopping /
         // paused / unknown 一律不动 —— 宁可留给 helper 自己按名字清，也不误删新 helper。
         // 例外同 docker 侧：boxlite 已经不是默认 provider ⇒ 不论状态都删。
-        const status = (b.state?.status ?? '').toLowerCase();
+        const status = b.state.status.toLowerCase();
         const retired = this.retiredProvider('boxlite');
-        if (!retired && (b.state?.running === true || !['stopped', 'failed'].includes(status))) {
+        if (!retired && (b.state.running || !['stopped', 'failed'].includes(status))) {
           continue;
         }
         try {
@@ -183,7 +191,7 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
           `reaped ORPHAN boxlite micro-VM ${b.name} (sandbox ${sandboxId} has no DB record)`,
         );
       } catch (e) {
-        this.logger.warn(`failed to reap box ${b.name}: ${(e as Error).message}`);
+        this.logger.warn(`failed to reap box ${b.name}: ${errorMessage(e)}`);
       }
     }
     return removed;

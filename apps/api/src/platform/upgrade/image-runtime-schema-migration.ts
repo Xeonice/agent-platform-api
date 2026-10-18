@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { upgradeRecord } from './upgrade-values';
 import type Database from 'better-sqlite3';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -37,11 +39,13 @@ function state(sqlite: Database.Database): 'source' | 'target' | 'invalid' {
 export function imageRuntimeSchemaCommitted(sqlite: Database.Database): boolean {
   if (state(sqlite) !== 'target') return false;
   const row = sqlite
-    .prepare('SELECT request_digest,result FROM upgrade_migration_operations WHERE operation_id=?')
-    .get(RECEIPT) as { request_digest: string; result: string } | undefined;
-  if (!row || row.request_digest !== planDigest) return false;
+    .prepare<unknown[], { request_digest: string; result: string }>(
+      'SELECT request_digest,result FROM upgrade_migration_operations WHERE operation_id=?',
+    )
+    .get(RECEIPT);
+  if (row?.request_digest !== planDigest) return false;
   try {
-    const receipt = JSON.parse(row.result) as Json;
+    const receipt = upgradeRecord(JSON.parse(row.result));
     return (
       receipt.planDigest === planDigest &&
       receipt.targetJournalDigest === plan.targetJournalDigest &&
@@ -130,9 +134,9 @@ export async function executeImageRuntimeSchemaMigration(
     'GLOBAL_SCHEMA_RECIPE_CHANGED',
   );
   const migrations = join(root, 'artifacts', snapshot.plan.package.digest.slice(7), 'api/drizzle');
-  const journal = JSON.parse(await readFile(join(migrations, 'meta/_journal.json'), 'utf8')) as {
-    entries: { tag: string; when: number }[];
-  };
+  const journal = z
+    .object({ entries: z.array(z.object({ tag: z.string(), when: z.number() })) })
+    .parse(JSON.parse(await readFile(join(migrations, 'meta/_journal.json'), 'utf8')));
   requireUpgrade(
     Array.isArray(journal.entries) &&
       journal.entries.length === 29 &&
@@ -165,7 +169,7 @@ export async function executeImageRuntimeSchemaMigration(
   requireUpgrade(storage.walBytes <= policy.maxWalBytes, 'MIGRATION_WAL_BUDGET');
   const started = performance.now();
   const busy = Number(sqlite.pragma('busy_timeout', { simple: true }));
-  sqlite.pragma('busy_timeout = ' + Math.min(busy, policy.migrationBatchMs));
+  sqlite.pragma('busy_timeout = ' + String(Math.min(busy, policy.migrationBatchMs)));
   try {
     sqlite
       .transaction(() => {
@@ -183,7 +187,8 @@ export async function executeImageRuntimeSchemaMigration(
         requireUpgrade(state(sqlite) === 'target', 'GLOBAL_SCHEMA_COMMIT_IDENTITY_INVALID');
         requireUpgrade(
           sqlite.pragma('quick_check(image_manifests)', { simple: true }) === 'ok' &&
-            (sqlite.pragma('foreign_key_check(image_manifests)') as unknown[]).length === 0,
+            z.array(z.unknown()).parse(sqlite.pragma('foreign_key_check(image_manifests)'))
+              .length === 0,
           'GLOBAL_SCHEMA_INTEGRITY_FAILED',
         );
         requireUpgrade(
@@ -214,7 +219,7 @@ export async function executeImageRuntimeSchemaMigration(
       })
       .immediate();
   } finally {
-    sqlite.pragma('busy_timeout = ' + busy);
+    sqlite.pragma('busy_timeout = ' + String(busy));
   }
   requireUpgrade(imageRuntimeSchemaCommitted(sqlite), 'GLOBAL_SCHEMA_COMMIT_UNCONFIRMED');
   return result();

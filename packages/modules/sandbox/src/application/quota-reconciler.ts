@@ -1,3 +1,5 @@
+import { asNodeId } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import {
   Inject,
   Injectable,
@@ -108,12 +110,12 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
       }
     } catch (e) {
       // 对账失败绝不拦启动 —— 一个起不来的平台比一份略旧的账本坏得多。
-      this.logger.warn(`quota reconcile skipped: ${(e as Error).message}`);
+      this.logger.warn(`quota reconcile skipped: ${errorMessage(e)}`);
     }
     if (process.env.DISABLE_QUOTA_RECONCILE === '1') return;
     this.timer = setInterval(() => void this.sweep(), INCREMENTAL_INTERVAL_MS);
     // 不为了对账把事件循环吊着（与 `SandboxHealthMonitor` / `AutomationScheduler` 同款）
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /**
@@ -136,7 +138,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
     try {
       return await this.reconcileIncremental();
     } catch (e) {
-      this.logger.warn(`incremental quota reconcile failed: ${(e as Error).message}`);
+      this.logger.warn(`incremental quota reconcile failed: ${errorMessage(e)}`);
       return idle;
     } finally {
       this.sweeping = false;
@@ -216,7 +218,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
     } catch (e) {
       this.logger.warn(
         `could not inspect sandbox ${sandbox.id} while reconciling quota ` +
-          `(${(e as Error).message}); leaving its allocation untouched`,
+          `(${errorMessage(e)}); leaving its allocation untouched`,
       );
       return 'unknown';
     }
@@ -234,7 +236,7 @@ function handleOf(sandbox: Sandbox): SandboxHandle | null {
 }
 
 function nodeId(): NodeId {
-  return (process.env.SCHEDULER_NODE_ID ?? 'local') as NodeId;
+  return asNodeId(process.env.SCHEDULER_NODE_ID ?? 'local');
 }
 
 function staleMs(): number {

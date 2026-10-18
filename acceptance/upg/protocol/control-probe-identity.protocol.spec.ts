@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -88,7 +89,7 @@ async function role(installed: boolean) {
     res.statusCode = 404;
     res.end();
   });
-  await new Promise<void>((ok) => server!.listen(0, '127.0.0.1', ok));
+  await new Promise<void>((ok) => assertDefined(server).listen(0, '127.0.0.1', ok));
   const env = {
     ...process.env,
     PLATFORM_INSTANCE_ID: 'own-probe-instance',
@@ -124,18 +125,18 @@ async function role(installed: boolean) {
       () => fail(new Error('Control identity fixture startup timeout: ' + errors)),
       10000,
     );
-    child!.stderr.on('data', (bytes) => {
+    assertDefined(child).stderr.on('data', (bytes) => {
       errors += String(bytes);
     });
-    child!.stdout.on('data', (bytes) => {
+    assertDefined(child).stdout.on('data', (bytes) => {
       output += String(bytes);
       const match = /OWN_IDENTITY:(\{[^\n]+\})/.exec(output);
       if (match) {
         clearTimeout(timer);
-        ok('http://127.0.0.1:' + (JSON.parse(match[1]!) as { port: number }).port);
+        ok('http://127.0.0.1:' + (JSON.parse(assertDefined(match[1])) as { port: number }).port);
       }
     });
-    child!.once('exit', (code) => {
+    assertDefined(child).once('exit', (code) => {
       clearTimeout(timer);
       fail(new Error('Control fixture exited ' + code + ': ' + errors));
     });
@@ -152,11 +153,11 @@ async function role(installed: boolean) {
 afterEach(async () => {
   if (child && child.exitCode === null) {
     child.kill('SIGTERM');
-    await new Promise<void>((ok) => child!.once('exit', () => ok()));
+    await new Promise<void>((ok) => assertDefined(child).once('exit', () => ok()));
   }
   if (server) {
     server.closeAllConnections();
-    await new Promise<void>((ok) => server!.close(() => ok()));
+    await new Promise<void>((ok) => assertDefined(server).close(() => ok()));
   }
   if (root) rmSync(root, { recursive: true, force: true });
   child = undefined;

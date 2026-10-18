@@ -47,7 +47,6 @@ import { AUTOMATION_RUN_REPOSITORY } from '../domain/repositories/automation-run
 import type { AutomationRunRepository } from '../domain/repositories/automation-run.repository';
 import { TriggerDecisionService } from '../domain/services/trigger-decision.domain-service';
 import { DEFAULT_MISSED_THRESHOLD_MIN, RetryPolicy } from '../domain/value-objects/policies.vo';
-import type { TimeoutMinutes } from '../domain/value-objects/policies.vo';
 import { AutomationRunFinished, AutomationTriggered } from '../domain/events/automation-events';
 import { AutomationNotifier } from './automation.notifier';
 import {
@@ -139,12 +138,12 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
     if (this.retired || this.timer !== null || process.env.DISABLE_AUTOMATION_SCHEDULER === '1')
       return;
     this.timer = setInterval(() => {
-      void this.runOnce().catch((error) =>
-        this.logger.debug(`automation writer awaits ownership: ${reason(error)}`),
-      );
+      void this.runOnce().catch((error: unknown) => {
+        this.logger.debug(`automation writer awaits ownership: ${reason(error)}`);
+      });
     }, SWEEP_INTERVAL_MS);
     // 不为了调度器把事件循环吊着（与 `VolumeReaper` / `CredentialRefreshScanner` 同款）
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /**
@@ -276,7 +275,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
     const message = reason(e);
     const key = `${scope}:${id}`;
     const previous = this.skipStreaks.get(key);
-    const sweeps = previous !== undefined && previous.message === message ? previous.sweeps + 1 : 1;
+    const sweeps = previous?.message === message ? previous.sweeps + 1 : 1;
     this.skipStreaks.set(key, { message, sweeps, lastSweep: this.sweepSeq });
     const line = `automation sweep skipped ${scope} ${id}: ${message}`;
     if (sweeps === 1) {
@@ -329,7 +328,7 @@ export class AutomationScheduler implements OnApplicationBootstrap, OnModuleDest
           continue;
         }
         await this.finishTask(automation, run);
-        this.applyOutcome(automation, run, run.status as AutomationOutcome);
+        this.applyOutcome(automation, run, requireOutcome(run.status));
         this.notify(this.notifier.afterRunFinished(automation, run));
         applied += 1;
       } catch (e) {
@@ -806,7 +805,7 @@ const LOG_CEILING = 31_457_280;
 
 /**
  * 与 `hydrateAll` 同款的取文案方式：**非 Error 也要能读**。
- * `(e as Error).message` 遇到 `throw 'boom'`（JS 里合法）会把一行日志写成 `undefined`
+ * `errorMessage(e)` 遇到 `throw 'boom'`（JS 里合法）会把一行日志写成 `undefined`
  * —— 而这几处日志的全部价值就是「说清楚它为什么被跳过」。
  */
 function reason(e: unknown): string {
@@ -818,7 +817,7 @@ function launchInput(automation: Automation): AutomationTaskLaunchInput {
     projectId: automation.projectId,
     runtimeId: automation.runtimeId,
     prompt: automation.prompt,
-    timeoutMinutes: automation.timeoutMinutes as TimeoutMinutes,
+    timeoutMinutes: automation.timeoutMinutes,
     automationId: automation.id,
     automationName: automation.name,
     artifactRetentionDays: automation.retentionDays,
@@ -829,4 +828,16 @@ function launchInput(automation: Automation): AutomationTaskLaunchInput {
 function missedThresholdMin(): number {
   const raw = Number(process.env.AUTOMATION_MISSED_THRESHOLD_MIN);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MISSED_THRESHOLD_MIN;
+}
+
+function requireOutcome(value: string): AutomationOutcome {
+  if (
+    value === 'success' ||
+    value === 'failed' ||
+    value === 'timeout' ||
+    value === 'skipped' ||
+    value === 'missed'
+  )
+    return value;
+  throw new Error('Expected a terminal automation outcome');
 }

@@ -39,21 +39,19 @@ export function readUntil<T>(
     let settled = false;
     /** 收到过任何字节吗 —— 「一字未出」与「出了但没解析出想要的」是两种病，下一步不同。 */
     let sawAnyBytes = false;
-    const timer = setTimeout(
-      () =>
-        finish(
-          null,
-          unavailable(
-            `等待 ${what} 超时（${String(timeoutMs)}ms）` +
-              (sawAnyBytes
-                ? '：命令有输出，但没有出现期望的内容 —— 多半是这个 CLI 换了版本，输出格式和平台的解析对不上了。'
-                : '：命令一个字节都没输出 —— 登录 CLI 会检查有没有终端，' +
-                  '最常见的原因是没给它分配伪终端；其次是这台机器连不上对应的登录服务。'),
-            sawAnyBytes ? 'CLI_OUTPUT_UNPARSED' : 'CLI_SILENT',
-          ),
+    const timer = setTimeout(() => {
+      finish(
+        null,
+        unavailable(
+          `等待 ${what} 超时（${String(timeoutMs)}ms）` +
+            (sawAnyBytes
+              ? '：命令有输出，但没有出现期望的内容 —— 多半是这个 CLI 换了版本，输出格式和平台的解析对不上了。'
+              : '：命令一个字节都没输出 —— 登录 CLI 会检查有没有终端，' +
+                '最常见的原因是没给它分配伪终端；其次是这台机器连不上对应的登录服务。'),
+          sawAnyBytes ? 'CLI_OUTPUT_UNPARSED' : 'CLI_SILENT',
         ),
-      timeoutMs,
-    );
+      );
+    }, timeoutMs);
 
     const finish = (value: T | null, err?: Error): void => {
       if (settled) return;

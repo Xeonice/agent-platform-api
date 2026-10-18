@@ -1,3 +1,5 @@
+import { asNodeId } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CLOCK, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type {
@@ -90,7 +92,7 @@ export class ResourceAllocator {
 
   /** 单机恒 `'local'`（13 §2.1.3）；多节点时由部署填。 */
   get nodeId(): NodeId {
-    return (process.env.SCHEDULER_NODE_ID ?? 'local') as NodeId;
+    return asNodeId(process.env.SCHEDULER_NODE_ID ?? 'local');
   }
 
   /** 03 §1 的下限旋钮 —— 空项目（以及小到没意义的基线）登记多少。 */
@@ -175,7 +177,7 @@ export class ResourceAllocator {
       } catch (e) {
         this.logger.error(
           `failed to release the resource allocation of sandbox ${sandboxId}: ` +
-            `${(e as Error).message}. Startup reconciliation (13 §4) will pick it up.`,
+            `${errorMessage(e)}. Startup reconciliation (13 §4) will pick it up.`,
         );
       }
     });

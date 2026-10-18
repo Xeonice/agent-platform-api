@@ -39,7 +39,7 @@ function openConnection(): Connection {
   if (!conn) {
     if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator-prepared') {
       const prepared = preparedConnection(url, platformInstanceId());
-      adoptPrepared = prepared.activate;
+      adoptPrepared = prepared.activate.bind(prepared);
       connections.set(url, prepared.connection);
       return prepared.connection;
     }

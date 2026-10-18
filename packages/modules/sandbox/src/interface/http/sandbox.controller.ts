@@ -100,6 +100,10 @@ export class SandboxController {
   @ApiOperation({ summary: 'Destroy a sandbox (optionally keeping its workspace)' })
   @ApiNoContentResponse()
   destroy(@Param('id') id: string, @Body() body: DestroySandboxDto): Promise<void> {
-    return this.app.destroy(id, body ?? {});
+    return this.app.destroy(id, destroyOptions(body));
   }
+}
+
+function destroyOptions(body: DestroySandboxDto | undefined): DestroySandboxDto {
+  return body ?? {};
 }

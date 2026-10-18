@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 
 const hooks = new WeakMap<object, () => void>();
-const running = new WeakSet<object>();
+const running = new WeakSet();
 /** A single Coordinator registers its deterministic projection/outbox hook. */
 export function registerBusinessTransactionHook(sqlite: Database.Database, hook: () => void): void {
   hooks.set(sqlite, hook);

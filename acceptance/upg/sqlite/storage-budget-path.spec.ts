@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import Database from 'better-sqlite3';
 import {
   lstat,
@@ -43,9 +44,11 @@ describe('REQ-UPG-006/007/008 — storage budget belongs to the opened SQLite da
     return sqlite;
   }
   function mainFile(sqlite: Database.Database) {
-    return (sqlite.pragma('database_list') as { name: string; file: string }[]).find(
-      (row) => row.name === 'main',
-    )!.file;
+    return assertDefined(
+      (sqlite.pragma('database_list') as { name: string; file: string }[]).find(
+        (row) => row.name === 'main',
+      ),
+    ).file;
   }
   async function physicalObservation(sqlite: Database.Database) {
     const physicalFile = await realpath(mainFile(sqlite));

@@ -393,7 +393,7 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
     // socket: its handshake REQUIRES `sandboxId` in the query (`SANDBOX_REQUIRED`
     // otherwise) and `subscribe` compares it exactly as this does — so the two shells
     // answer identically, and neither is a way around the other.
-    if (!task || task.sandboxId !== sandboxId) {
+    if (task?.sandboxId !== sandboxId) {
       throw new NotFoundException(`task ${taskId} not found in sandbox ${sandboxId}`);
     }
     return task;

@@ -1,3 +1,4 @@
+import { upgradeRecord, upgradeRecords } from './upgrade-values';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
@@ -23,7 +24,7 @@ export async function verifyUpgradeArtifact(
   const metadataPath = join(root, 'upgrade-artifact.json');
   const metadataStat = await lstat(metadataPath);
   requireUpgrade(metadataStat.isFile() && !metadataStat.isSymbolicLink(), 'UNSAFE_ARTIFACT_PATH');
-  const bundle = JSON.parse(await readFile(metadataPath, 'utf8')) as Record<string, unknown>;
+  const bundle = upgradeRecord(JSON.parse(await readFile(metadataPath, 'utf8')));
   requireUpgrade(
     bundle.schemaVersion === 1 &&
       bundle.platform === process.platform &&
@@ -32,12 +33,11 @@ export async function verifyUpgradeArtifact(
       canonicalUpgrade(bundle.components) === canonicalUpgrade(expected),
     'INSTALLED_ARTIFACT_METADATA_MISMATCH',
   );
-  const files = bundle.files as Record<string, unknown>[];
+  const files = upgradeRecords(bundle.files);
   const names = new Set<string>();
   for (const file of files) {
     requireUpgrade(
-      file &&
-        typeof file.path === 'string' &&
+      typeof file.path === 'string' &&
         /^(?:api\/|web\/|installer\/|upgrade-migration\.json$)/.test(file.path) &&
         !file.path.includes('\\') &&
         !file.path.split('/').some((part) => !part || part === '.' || part === '..') &&
@@ -75,7 +75,13 @@ export async function verifyUpgradeArtifact(
       'INSTALLED_ARTIFACT_CHANGED',
     );
     const hash = createHash('sha256');
-    for await (const chunk of createReadStream(path)) hash.update(chunk);
+    for await (const chunk of createReadStream(path)) {
+      requireUpgrade(
+        Buffer.isBuffer(chunk) || typeof chunk === 'string',
+        'INSTALLED_ARTIFACT_CHANGED',
+      );
+      hash.update(chunk);
+    }
     requireUpgrade(
       'sha256:' + hash.digest('hex') === declaration.digest,
       'INSTALLED_ARTIFACT_CHANGED',

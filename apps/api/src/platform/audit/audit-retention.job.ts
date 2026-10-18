@@ -8,6 +8,7 @@ import {
 import { CLOCK, shiftMs } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
 import { AuditRepository } from './audit.repository';
+import { errorMessage } from '@platform/shared-kernel';
 
 /** 13 §2.8.2 双闸之一：按 `at` 保留 30 天。 */
 export const RETENTION_DAYS = 30;
@@ -73,7 +74,7 @@ export class AuditRetentionJob implements OnApplicationBootstrap, OnApplicationS
       return { byAge, byCount };
     } catch (e) {
       // 与写入口同一条处置：保留作业炸了不该拖垮进程，但必须有人看得见。
-      this.logger.error(`audit retention sweep failed: ${(e as Error).message}`);
+      this.logger.error(`audit retention sweep failed: ${errorMessage(e)}`);
       return null;
     } finally {
       this.running = false;

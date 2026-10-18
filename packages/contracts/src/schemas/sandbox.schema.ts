@@ -58,7 +58,7 @@ export const CreateSandboxSchema = z.object({
   initialPrompt: z
     .string()
     .trim()
-    .refine((value) => [...value].length <= 8000, '任务指令最多 8000 个字符')
+    .refine((value) => Array.from(value).length <= 8000, '任务指令最多 8000 个字符')
     .optional(),
   headless: z.boolean().optional(),
   timeoutMinutes: TimeoutMinutesSchema.optional(),

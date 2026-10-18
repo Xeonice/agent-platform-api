@@ -43,7 +43,7 @@ export class InitialTask {
     if (prompt !== undefined && Array.from(prompt).length > INITIAL_PROMPT_MAX_LENGTH) {
       throw new SandboxInvariantViolationError(
         'I-SBX-10',
-        `initialPrompt is ${Array.from(prompt).length} characters; the limit is ${INITIAL_PROMPT_MAX_LENGTH}`,
+        `initialPrompt is ${String(Array.from(prompt).length)} characters; the limit is ${String(INITIAL_PROMPT_MAX_LENGTH)}`,
       );
     }
     if (consumedAt !== undefined && prompt === undefined) {

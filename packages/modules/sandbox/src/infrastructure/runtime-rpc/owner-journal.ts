@@ -1,3 +1,4 @@
+import { ownerRecord } from './wire-codec';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -5,6 +6,7 @@ import Database from 'better-sqlite3';
 import { fromEpochMs, type Clock } from '@platform/shared-kernel';
 import {
   SandboxProviderError,
+  RuntimeOwnerHandleSchema,
   SandboxProviderErrorCode,
   type RuntimeOwnerCall,
   type RuntimeOwnerFence,
@@ -14,17 +16,17 @@ import {
 } from '@platform/contracts';
 import { decodeOwnerValue, encodeOwnerValue } from './wire-codec';
 
-type Operation = {
+interface Operation {
   digest: string;
   state: 'pending' | 'complete' | 'failed';
   result: string | null;
-};
-type Assignment = {
+}
+interface Assignment {
   sandbox_id: string;
   provider: string;
   handle: string;
   state: 'owned' | 'destroyed';
-};
+}
 
 /** Owner-private journal; it never opens the platform business database. */
 export class RuntimeOwnerJournal {
@@ -52,8 +54,10 @@ export class RuntimeOwnerJournal {
         state TEXT NOT NULL, dispatched_at INTEGER NOT NULL, completed_at INTEGER);
     `);
     const identity = this.db
-      .prepare('SELECT instance_id, owner_id FROM owner_identity WHERE id=1')
-      .get() as { instance_id: string; owner_id: string } | undefined;
+      .prepare<[], { instance_id: string; owner_id: string }>(
+        'SELECT instance_id, owner_id FROM owner_identity WHERE id=1',
+      )
+      .get();
     if (identity && (identity.instance_id !== instanceId || identity.owner_id !== ownerId)) {
       this.db.close();
       throw new Error('RuntimeOwner home belongs to a different instance or owner');
@@ -63,9 +67,10 @@ export class RuntimeOwnerJournal {
 
   lease(): RuntimeOwnerLease | null {
     const row = this.db
-      .prepare('SELECT session_id,generation,fence,expires_at FROM owner_lease WHERE id=1')
-      .get() as
-      { session_id: string; generation: number; fence: number; expires_at: number } | undefined;
+      .prepare<[], { session_id: string; generation: number; fence: number; expires_at: number }>(
+        'SELECT session_id,generation,fence,expires_at FROM owner_lease WHERE id=1',
+      )
+      .get();
     return row
       ? {
           instanceId: this.instanceId,
@@ -83,11 +88,7 @@ export class RuntimeOwnerJournal {
       if (input.instanceId !== this.instanceId) this.reject('Instance mismatch');
       const previous = this.lease();
       const now = this.clock.now().getTime();
-      if (
-        previous &&
-        previous.sessionId === input.sessionId &&
-        previous.generation === input.generation
-      ) {
+      if (previous?.sessionId === input.sessionId && previous.generation === input.generation) {
         if (previous.fence !== input.expectedFence) this.reject('Stale lease renewal');
         if (previous.leaseExpiresAt <= now)
           this.reject('Expired lease requires a fresh session and fence');
@@ -123,8 +124,7 @@ export class RuntimeOwnerJournal {
     const lease = this.lease();
     if (
       fence.authority !== 'business' ||
-      !lease ||
-      lease.sessionId !== fence.sessionId ||
+      lease?.sessionId !== fence.sessionId ||
       lease.generation !== fence.generation ||
       lease.fence !== fence.fence ||
       lease.leaseExpiresAt <= this.clock.now().getTime() ||
@@ -145,8 +145,7 @@ export class RuntimeOwnerJournal {
         const lease = this.lease();
         if (
           input.instanceId !== this.instanceId ||
-          !lease ||
-          lease.sessionId !== input.sessionId ||
+          lease?.sessionId !== input.sessionId ||
           lease.generation !== input.generation ||
           lease.fence !== input.fence ||
           lease.leaseExpiresAt <= this.clock.now().getTime()
@@ -175,8 +174,8 @@ export class RuntimeOwnerJournal {
         )
         .digest('hex');
       const old = this.db
-        .prepare('SELECT digest,state,result FROM owner_operations WHERE id=?')
-        .get(call.fence.operationId) as Operation | undefined;
+        .prepare<[string], Operation>('SELECT digest,state,result FROM owner_operations WHERE id=?')
+        .get(call.fence.operationId);
       if (old) {
         if (old.digest !== digest) this.reject('Operation identity reused with different input');
         if (old.state !== 'complete' || old.result === null)
@@ -231,12 +230,11 @@ export class RuntimeOwnerJournal {
       // not permission for another effect or a platform business-ledger write.
       this.validate(call.fence, false);
       const intent = this.operation(call.fence.operationId);
-      if (!intent || intent.state !== 'pending') this.reject('Runtime intent is not pending');
+      if (intent?.state !== 'pending') this.reject('Runtime intent is not pending');
       if (assign) {
         const existing = this.assignmentBySandbox(assign.sandboxId);
         if (
-          existing &&
-          existing.state === 'owned' &&
+          existing?.state === 'owned' &&
           (existing.provider !== assign.handle.provider ||
             existing.handle !== JSON.stringify(assign.handle))
         )
@@ -283,7 +281,7 @@ export class RuntimeOwnerJournal {
       .run(operationId);
   }
   continuity(): object {
-    type AuditRow = {
+    interface AuditRow {
       operation_id: string;
       method: string;
       sandbox_id: string | null;
@@ -293,15 +291,15 @@ export class RuntimeOwnerJournal {
       state: string;
       dispatched_at: number;
       completed_at: number | null;
-    };
+    }
     const rows = this.db
-      .prepare('SELECT * FROM owner_effect_audit ORDER BY dispatched_at,operation_id')
-      .all() as AuditRow[];
+      .prepare<[], AuditRow>('SELECT * FROM owner_effect_audit ORDER BY dispatched_at,operation_id')
+      .all();
     const operations = rows.map((row) => ({
       id: row.operation_id,
       method: row.method,
       sandboxId: row.sandbox_id,
-      actor: JSON.parse(row.actor) as { kind: string; id: string },
+      actor: decodeActor(row.actor),
       generation: row.generation,
       fence: row.fence,
       state: row.state,
@@ -319,13 +317,15 @@ export class RuntimeOwnerJournal {
   }
   operation(operationId: string): Operation | undefined {
     return this.db
-      .prepare('SELECT digest,state,result FROM owner_operations WHERE id=?')
-      .get(operationId) as Operation | undefined;
+      .prepare<[string], Operation>('SELECT digest,state,result FROM owner_operations WHERE id=?')
+      .get(operationId);
   }
   assignmentBySandbox(id: string): Assignment | undefined {
     return this.db
-      .prepare('SELECT sandbox_id,provider,handle,state FROM owner_assignments WHERE sandbox_id=?')
-      .get(id) as Assignment | undefined;
+      .prepare<[string], Assignment>(
+        'SELECT sandbox_id,provider,handle,state FROM owner_assignments WHERE sandbox_id=?',
+      )
+      .get(id);
   }
   confirmedDestroyed(provider: string, providerId: string, sandboxId?: string): boolean {
     // A destroy receipt and this tombstone commit atomically. Absence/unknown
@@ -342,13 +342,13 @@ export class RuntimeOwnerJournal {
   }
   assignedHandle(provider: string, id: string, sandboxId?: string): SandboxHandle {
     const row = this.db
-      .prepare(
+      .prepare<[string, string], Assignment>(
         "SELECT sandbox_id,provider,handle,state FROM owner_assignments WHERE provider=? AND provider_id=? AND state='owned'",
       )
-      .get(provider, id) as Assignment | undefined;
+      .get(provider, id);
     if (!row || (sandboxId && row.sandbox_id !== sandboxId))
       this.reject('Unconfirmed runtime assignment');
-    return JSON.parse(row.handle) as SandboxHandle;
+    return RuntimeOwnerHandleSchema.parse(JSON.parse(row.handle) as unknown);
   }
   assignments(): {
     sandboxId: string;
@@ -356,19 +356,22 @@ export class RuntimeOwnerJournal {
     providerSandboxId: string;
     state: string;
   }[] {
-    const confirmed = (
-      this.db
-        .prepare('SELECT sandbox_id,provider,provider_id,state FROM owner_assignments')
-        .all() as { sandbox_id: string; provider: string; provider_id: string; state: string }[]
-    ).map((row) => ({
-      sandboxId: row.sandbox_id,
-      provider: row.provider,
-      providerSandboxId: row.provider_id,
-      state: row.state,
-    }));
+    const confirmed = this.db
+      .prepare<[], { sandbox_id: string; provider: string; provider_id: string; state: string }>(
+        'SELECT sandbox_id,provider,provider_id,state FROM owner_assignments',
+      )
+      .all()
+      .map((row) => ({
+        sandboxId: row.sandbox_id,
+        provider: row.provider,
+        providerSandboxId: row.provider_id,
+        state: row.state,
+      }));
     const unconfirmed = this.db
-      .prepare('SELECT sandbox_id,provider FROM owner_reservations')
-      .all() as { sandbox_id: string; provider: string }[];
+      .prepare<[], { sandbox_id: string; provider: string }>(
+        'SELECT sandbox_id,provider FROM owner_reservations',
+      )
+      .all();
     return [
       ...confirmed,
       ...unconfirmed.map((row) => ({
@@ -390,4 +393,11 @@ export class RuntimeOwnerJournal {
       true,
     );
   }
+}
+
+function decodeActor(raw: string): { kind: string; id: string } {
+  const value = ownerRecord(JSON.parse(raw) as unknown);
+  if (typeof value.kind !== 'string' || typeof value.id !== 'string')
+    throw new Error('Invalid journal actor');
+  return { kind: value.kind, id: value.id };
 }

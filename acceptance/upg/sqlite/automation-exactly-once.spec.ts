@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
@@ -127,8 +128,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
     let b: AutomationScheduler | undefined;
     try {
       await entered.promise;
-      const run = (await f.runs.findLatest(f.rule.id))!;
-      const intent = (await f.intents.find(run.id, 0))!;
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
       await waitForStatus(f.h.service, intent.sandboxId, 'running');
       a.pauseOwnership();
       original.release();
@@ -148,7 +149,7 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
         ),
       );
       await b.runOnce();
-      const completed = (await f.runs.findById(run.id))!;
+      const completed = assertDefined(await f.runs.findById(run.id));
       expect(completed.status).toBe('success');
       expect(completed.outcomeApplied).toBe(true);
       const stable = {
@@ -162,7 +163,7 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
       a.resumeOwnership();
       ack.resolve();
       await oldSweep;
-      const after = (await f.runs.findById(run.id))!;
+      const after = assertDefined(await f.runs.findById(run.id));
       expect({
         status: after.status,
         at: after.completedAt,
@@ -220,8 +221,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
     try {
       oldScheduler.onApplicationBootstrap();
       await tick();
-      const run = (await f.runs.findLatest(f.rule.id))!;
-      const intent = (await f.intents.find(run.id, 0))!;
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
       expect(run.sandboxId).toBe(intent.sandboxId);
       expect(f.h.provider.calls.filter((v) => v === 'create')).toHaveLength(1);
       original.release();
@@ -280,9 +281,9 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
         throw new Error('simulated crash before intent commit');
       }
     }
-    const due = (await f.rules.findById(f.rule.id))!.nextTriggerAt;
+    const due = assertDefined(await f.rules.findById(f.rule.id)).nextTriggerAt;
     await f.scheduler(f.launcher, new CrashAfterRunWrite(f.h.db)).runOnce();
-    expect((await f.rules.findById(f.rule.id))!.nextTriggerAt).toEqual(due);
+    expect(assertDefined(await f.rules.findById(f.rule.id)).nextTriggerAt).toEqual(due);
     expect(f.h.sqlite.prepare('SELECT count(*) AS n FROM automation_runs').get()).toEqual({ n: 0 });
     expect(
       f.h.sqlite.prepare('SELECT count(*) AS n FROM automation_cron_occurrences').get(),
@@ -292,8 +293,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
     );
     expect(f.h.provider.calls).not.toContain('create');
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
-    await waitForStatus(f.h.service, run.sandboxId!, 'running');
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
+    await waitForStatus(f.h.service, assertDefined(run.sandboxId), 'running');
     expect(
       f.h.sqlite.prepare('SELECT count(*) AS n FROM automation_cron_occurrences').get(),
     ).toEqual({ n: 1 });
@@ -315,11 +316,11 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
       finishTask: (id, input) => f.launcher.finishTask(id, input),
     };
     await f.scheduler(lostAck).runOnce();
-    const original = (await f.runs.findLatest(f.rule.id))!;
+    const original = assertDefined(await f.runs.findLatest(f.rule.id));
     expect(original).toMatchObject({ status: 'pending', sandboxId: null, outcomeApplied: false });
-    const intent = (await f.intents.find(original.id, 0))!;
+    const intent = assertDefined(await f.intents.find(original.id, 0));
     await waitForStatus(f.h.service, intent.sandboxId, 'running');
-    const edited = (await f.rules.findById(f.rule.id))!;
+    const edited = assertDefined(await f.rules.findById(f.rule.id));
     edited.update(
       { prompt: 'a new prompt must not replace this accepted occurrence' },
       f.h.clock.now(),
@@ -340,8 +341,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
   it('two scheduler objects racing the same actual cron slot commit one run and one launch reservation', async () => {
     const f = fixture();
     await Promise.all([f.scheduler().runOnce(), f.scheduler().runOnce()]);
-    const run = (await f.runs.findLatest(f.rule.id))!;
-    await waitForStatus(f.h.service, run.sandboxId!, 'running');
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
+    await waitForStatus(f.h.service, assertDefined(run.sandboxId), 'running');
     expect(
       f.h.sqlite.prepare('SELECT count(*) AS n FROM automation_cron_occurrences').get(),
     ).toEqual({ n: 1 });
@@ -355,8 +356,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
   it('accepted sandbox and task acknowledgements are idempotent across duplicate calls and changed payload is rejected', async () => {
     const f = fixture();
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
-    const intent = (await f.intents.find(run.id, 0))!;
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
+    const intent = assertDefined(await f.intents.find(run.id, 0));
     const input = {
       ...(JSON.parse(intent.input) as {
         projectId: string;
@@ -401,8 +402,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
   it('an unknown start outcome remains attached to the original intent with no retry job, false failure or teardown', async () => {
     const f = fixture();
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
-    await waitForStatus(f.h.service, run.sandboxId!, 'running');
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
+    await waitForStatus(f.h.service, assertDefined(run.sandboxId), 'running');
     const start = f.h.provider.jobs.startJob.bind(f.h.provider.jobs);
     f.h.provider.jobs.startJob = async (...args) => {
       await start(...args);
@@ -417,7 +418,7 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
       sandboxId: run.sandboxId,
       outcomeApplied: false,
     });
-    expect(await f.launcher.phaseOf(run.sandboxId!)).toEqual({ kind: 'unconfirmed' });
+    expect(await f.launcher.phaseOf(assertDefined(run.sandboxId))).toEqual({ kind: 'unconfirmed' });
     await f.scheduler().runOnce();
     await f.h.taskService.resumeRunning();
     await f.launcher.reconcileFinished();
@@ -433,15 +434,15 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
     const f = fixture();
     f.h.hostCapacity.diskAvailableBytes = 0;
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
     expect(run).toMatchObject({ status: 'resource-exhausted', retryCount: 1, sandboxId: null });
-    const first = (await f.intents.find(run.id, 1))!;
-    const edited = (await f.rules.findById(f.rule.id))!;
+    const first = assertDefined(await f.intents.find(run.id, 1));
+    const edited = assertDefined(await f.rules.findById(f.rule.id));
     edited.update({ prompt: 'edited after acceptance' }, f.h.clock.now());
     f.h.uow.run((tx) => f.rules.saveSync(tx, edited));
     f.h.advanceClock(24 * 60_000);
     await f.scheduler().runOnce();
-    const second = (await f.intents.find(run.id, 2))!;
+    const second = assertDefined(await f.intents.find(run.id, 2));
     expect(second.input).toBe(first.input);
     expect(second.sandboxId).not.toBe(first.sandboxId);
     expect(second.taskId).not.toBe(first.taskId);
@@ -477,8 +478,8 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
   it('immutable launch identity conflicts cannot reallocate IDs and a purged sandbox tombstone refuses recreation', async () => {
     const f = fixture();
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
-    const intent = (await f.intents.find(run.id, 0))!;
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
+    const intent = assertDefined(await f.intents.find(run.id, 0));
     await waitForStatus(f.h.service, intent.sandboxId, 'running');
     expect(() =>
       f.h.uow.run((tx) => f.intents.reserveSync(tx, { ...intent, taskId: randomUUID() })),
@@ -515,11 +516,11 @@ describe('REQ-UPG-001/006/008 — persisted automation occurrences and accepted 
 
   it('a confirmed zero-effect create-door rejection records one failure without guest work or ambiguous-start cleanup', async () => {
     const f = fixture();
-    const rule = (await f.rules.findById(f.rule.id))!;
+    const rule = assertDefined(await f.rules.findById(f.rule.id));
     rule.update({ runtimeId: 'not-registered-runtime' }, f.h.clock.now());
     f.h.uow.run((tx) => f.rules.saveSync(tx, rule));
     await f.scheduler().runOnce();
-    const run = (await f.runs.findLatest(f.rule.id))!;
+    const run = assertDefined(await f.runs.findLatest(f.rule.id));
     expect(run).toMatchObject({ status: 'failed', outcomeApplied: true, sandboxId: null });
     expect((await f.rules.findById(f.rule.id))?.failureCount).toBe(1);
     expect(f.h.provider.calls).not.toContain('create');
