@@ -36,11 +36,15 @@ import { coordinatorWriterControl } from '../persistence/coordinator-lease';
 import { env } from '../config/env';
 import { supportedDataFormats } from '../data-format-capabilities';
 import { UpgradeStore } from './upgrade-store';
-import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
+import { loopbackOrigin, persistedBinding, UpgradeInspector } from './upgrade-inspector';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { writeInstalledBinding } from './upgrade-atomic-file';
 import { sqliteStorageObservation } from './sqlite-storage-budget';
+import {
+  recoveryIntegrity,
+  RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS,
+} from './upgrade-recovery-integrity';
 
 type Json = Record<string, unknown>;
 interface Row {
@@ -142,10 +146,30 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     return plan;
   }
   async compatibility(id: string, fence: number): Promise<Json> {
+    const observationStarted = this.clock.now().toISOString();
     this.store.assertFence(id, fence);
     const snapshot = this.store.snapshot(id),
       baseline = this.baseline(id),
       source = upgradeRecord(baseline.coordinator);
+    const binding = await this.inspector.entryBinding();
+    // A retained Coordinator can be read-only, including the releasing window
+    // before resume reacquires the writer. Require its physical process and the
+    // actual writer epoch to stay the same, without granting it writer rights.
+    const coordinatorIdentity = () => ({
+      artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+      startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
+      generation: process.env.COORDINATOR_GENERATION,
+      writer: this.store.sqlite
+        .prepare<unknown[], Json>(
+          "SELECT instance_id,holder_id,generation,fence FROM platform_role_leases WHERE role='state-coordinator'",
+        )
+        .get(),
+    });
+    const beforeIdentity = coordinatorIdentity();
+    requireUpgrade(
+      beforeIdentity.writer?.instance_id === this.store.instanceId,
+      'SOURCE_WRITER_UNCONFIRMED',
+    );
     const retainedBinary =
       source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
       source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY;
@@ -209,7 +233,15 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     const authorityPreserved = contracted
       ? newAuthorityHealthy
       : !migration || (migration.known && migration.oldRepresentationRetained);
-    const integrity = this.store.sqlite.pragma('quick_check', { simple: true }) === 'ok';
+    const integrity = await recoveryIntegrity(
+      this.store,
+      this.inspector,
+      this.clock,
+      id,
+      fence,
+      binding,
+      snapshot.plan.policy.observationFreshnessMs,
+    );
     const storage = await sqliteStorageObservation(this.store.sqlite),
       memory = process.memoryUsage();
     const capacity =
@@ -221,6 +253,22 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     await new Promise<void>((ok) => setImmediate(ok));
     const eventLoopBounded =
       this.clock.now().getTime() - started <= snapshot.plan.policy.requestDeadlineMs;
+    this.store.assertFence(id, fence);
+    requireUpgrade(
+      canonicalUpgrade(persistedBinding(binding)) ===
+        canonicalUpgrade(persistedBinding(await this.inspector.entryBinding())),
+      'ENTRY_BINDING_CHANGED',
+    );
+    this.store.assertFence(id, fence);
+    requireUpgrade(
+      canonicalUpgrade(beforeIdentity) === canonicalUpgrade(coordinatorIdentity()),
+      'SOURCE_WRITER_UNCONFIRMED',
+    );
+    const age = this.clock.now().getTime() - Date.parse(observationStarted);
+    requireUpgrade(
+      age >= 0 && age <= snapshot.plan.policy.observationFreshnessMs,
+      'OBSERVATION_STALE',
+    );
     return {
       supportedDataFormats: formats,
       qualified:
@@ -246,10 +294,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         snapshot.sourceActivation.components.api.protocol,
       schema: this.inspector.schema(),
       instanceId: this.store.instanceId,
-      observedAt: this.clock.now().toISOString(),
+      observedAt: observationStarted,
     };
   }
-  private async rpc(origin: unknown, path: string, input: Json): Promise<Json> {
+  private async rpc(origin: unknown, path: string, input: Json, timeoutMs = 2000): Promise<Json> {
     const response = await fetch(loopbackOrigin(origin) + path, {
       method: 'POST',
       headers: {
@@ -258,7 +306,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         'x-platform-instance-id': this.store.instanceId,
       },
       body: canonicalUpgrade(input),
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
     return upgradeRecord(await response.json());
@@ -315,6 +363,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       source.origin,
       '/internal/upgrades/' + id + '/coordinator-compatibility',
       { fence },
+      RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS,
     );
     requireUpgrade(live.qualified === true, 'LATEST_DATA_INCOMPATIBLE');
     const snapshot = this.store.snapshot(id),

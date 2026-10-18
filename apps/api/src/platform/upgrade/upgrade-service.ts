@@ -53,7 +53,10 @@ import {
 } from './upgrade-operation-store';
 import { UpgradeProjection } from './upgrade-projection';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
-import { recoveryIntegrity } from './upgrade-recovery-integrity';
+import {
+  recoveryIntegrity,
+  RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS,
+} from './upgrade-recovery-integrity';
 
 type Json = Record<string, unknown>;
 export const UPGRADE_OPERATION_DATA_FORMATS = ['upgrade-plan-v1'] as const;
@@ -766,7 +769,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
             'x-platform-instance-id': this.store.instanceId,
           },
           body: canonicalUpgrade({ fence }),
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.timeout(RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS),
         },
       );
       requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');

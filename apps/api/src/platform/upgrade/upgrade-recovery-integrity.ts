@@ -4,6 +4,10 @@ import { persistedBinding, type UpgradeInspector } from './upgrade-inspector';
 import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 import { requireUpgrade, UpgradeError, upgradeDigest } from './upgrade-trust';
 
+// Read-only control RPC: allow the 20s worker termination request plus bounded
+// exit/identity collection. This never extends the original 5s proof freshness.
+export const RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS = 25_000;
+
 /** Recovery uses a real uncached read-only scan without blocking HTTP or lease
  * renewal. An awaited scan cannot qualify a different route or controller. */
 export async function recoveryIntegrity(
