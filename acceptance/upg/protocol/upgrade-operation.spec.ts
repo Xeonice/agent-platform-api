@@ -104,6 +104,7 @@ async function fixture(chainLength = 2, fenced = false) {
   const capture = vi.fn(() => preparation.promise);
   const installedProof = vi.fn(async () => ({ qualified: true }));
   const inspectorBoundary: Partial<UpgradeInspector> = {
+    requiresProjectNameV2: () => false,
     sourceActual: async () => null,
     installedProof,
     capture,

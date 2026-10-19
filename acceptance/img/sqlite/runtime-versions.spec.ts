@@ -295,7 +295,7 @@ describe('AC-IMG-062.1/062.2/062.3/062.4 · image CLI declarations · actual OCI
 });
 
 describe('AC-IMG-062.1/062.3 · image CLI declarations · committed additive migration', () => {
-  it('migrates a real schema28 database to29 while preserving business rows, historical digests and the active pointer', async () => {
+  it('migrates a real schema28 database to the current committed schema while preserving business rows, historical digests and the active pointer', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'img-version-migration-'));
     cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
     mkdirSync(join(directory, 'meta'));
@@ -338,7 +338,7 @@ describe('AC-IMG-062.1/062.3 · image CLI declarations · committed additive mig
     const tasks = sqlite.prepare('SELECT * FROM sandboxes').all();
     runMigrations(db, sqlite);
     expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({
-      n: 29,
+      n: journal.entries.length,
     });
     const after = sqlite.prepare('SELECT * FROM image_manifests ORDER BY id').all() as Record<
       string,
@@ -357,7 +357,7 @@ describe('AC-IMG-062.1/062.3 · image CLI declarations · committed additive mig
     expect((await repository.findById('old'))?.runtimeVersions).toEqual({});
     runMigrations(db, sqlite);
     expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({
-      n: 29,
+      n: journal.entries.length,
     });
   });
 });
