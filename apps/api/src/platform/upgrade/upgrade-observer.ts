@@ -341,8 +341,9 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   private async attachProof(
     id: string,
     fence: number,
+    continuity: Json,
   ): Promise<{ qualified: boolean; maxMs: number }> {
-    const continuity = await this.inspector.continuity(id, fence);
+    this.store.assertFence(id, fence);
     if (continuity.qualified !== true) return { qualified: false, maxMs: 0 };
     const resources = upgradeRecords(continuity.resources);
     let maxMs = 0;
@@ -453,7 +454,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const base = upgradeRecord(JSON.parse(baseRow.snapshot));
     let attach = { qualified: false, maxMs: 0 };
     try {
-      attach = await this.attachProof(id, fence);
+      attach = await this.attachProof(id, fence, continuity);
     } catch {
       /* Original PTY unknown fails the gate. */
     }

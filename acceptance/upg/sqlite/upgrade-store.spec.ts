@@ -282,6 +282,208 @@ afterEach(() => {
 });
 
 describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and recovery', () => {
+  it('advertises reference heartbeats and preserves the full durable receipt without rewriting evidence', () => {
+    const { id } = accept();
+    expect(store.snapshot(id).controllerCapabilities).toEqual({ progressEvidenceReference: 1 });
+    const evidence = { scope: 'sqlite-state-layer-only', proof: 'x'.repeat(1024 * 1024) };
+    const material = command(id, 'step-applied', {
+      stepId: 'package-download',
+      completedWork: 1000,
+      evidence,
+      receiptDigest: upgradeDigest(evidence),
+    });
+    store.commit(id, material);
+    const durable = () =>
+      connection.sqlite
+        .prepare('SELECT * FROM upgrade_steps WHERE attempt_id=? AND step_id=?')
+        .get(id, 'package-download');
+    const before = durable();
+    const timing = store.stageProgress(id);
+    const initial = store.snapshot(id).attempt;
+    // SQLite itself rejects any evidence UPDATE, including one with identical bytes.
+    connection.sqlite.exec(
+      "CREATE TRIGGER reject_evidence_rewrite BEFORE UPDATE OF evidence ON upgrade_steps BEGIN SELECT RAISE(ABORT, 'EVIDENCE_REWRITTEN'); END",
+    );
+    for (let i = 0; i < 8; i++) {
+      time += 1000;
+      const heartbeat = command(id, 'progress', {
+        stepId: 'package-download',
+        completedWork: 1000,
+        totalWork: 1000,
+        stage: 'downloading',
+        evidenceDigest: upgradeDigest(evidence),
+      });
+      store.commit(id, heartbeat);
+      expect(store.commit(id, heartbeat).attempt.sequence).toBe(initial.sequence + i + 1);
+    }
+    expect(durable()).toEqual(before);
+    expect(store.stageProgress(id)).toEqual(timing);
+    expect(store.snapshot(id).attempt).toMatchObject({
+      state: initial.state,
+      stage: initial.stage,
+      sequence: initial.sequence + 8,
+      observedAt: clock.now().toISOString(),
+    });
+    const materialEvent = connection.sqlite
+      .prepare<unknown[], { payload: string }>(
+        'SELECT payload FROM upgrade_events WHERE event_id=?',
+      )
+      .get(material.eventId);
+    expect(JSON.parse(assertDefined(materialEvent).payload)).toEqual(material.payload);
+    const heartbeats = connection.sqlite
+      .prepare<unknown[], { payload: string }>(
+        "SELECT payload FROM upgrade_events WHERE attempt_id=? AND kind='progress'",
+      )
+      .all(id);
+    expect(heartbeats).toHaveLength(8);
+    for (const event of heartbeats) {
+      expect(Buffer.byteLength(event.payload)).toBeLessThan(512);
+      expect(JSON.parse(event.payload)).toEqual({
+        stepId: 'package-download',
+        completedWork: 1000,
+        totalWork: 1000,
+        stage: 'downloading',
+        evidenceDigest: upgradeDigest(evidence),
+      });
+    }
+  });
+  it('accepts a reference only to the current partial checkpoint while retaining full material progress', () => {
+    const { id } = accept();
+    const first = { scope: 'sqlite-state-layer-only', received: 250 };
+    const second = { scope: 'sqlite-state-layer-only', received: 500 };
+    store.commit(
+      id,
+      command(id, 'progress', { stepId: 'package-download', completedWork: 250, evidence: first }),
+    );
+    time += 1000;
+    const reference = command(id, 'progress', {
+      stepId: 'package-download',
+      completedWork: 250,
+      evidenceDigest: upgradeDigest(first),
+    });
+    store.commit(id, reference);
+    const referenceEvent = connection.sqlite
+      .prepare<unknown[], { event_digest: string; payload: string }>(
+        'SELECT event_digest,payload FROM upgrade_events WHERE event_id=?',
+      )
+      .get(reference.eventId);
+    expect(assertDefined(referenceEvent)).toEqual({
+      event_digest: upgradeDigest(reference),
+      payload: JSON.stringify(reference.payload),
+    });
+    const beforeRepeat = store.snapshot(id);
+    const beforeRepeatEvents = events();
+    expect(store.commit(id, reference)).toEqual(beforeRepeat);
+    expect(events()).toBe(beforeRepeatEvents);
+    expect(() =>
+      store.commit(id, { ...reference, payload: { ...reference.payload, totalWork: 1000 } }),
+    ).toThrow('UPGRADE_EVENT_PAYLOAD_CONFLICT');
+    expect(store.step(id, 'package-download')).toMatchObject({
+      applied: false,
+      completedWork: 250,
+      receiptDigest: null,
+      evidence: first,
+    });
+    time += 1000;
+    store.commit(
+      id,
+      command(id, 'progress', { stepId: 'package-download', completedWork: 500, evidence: second }),
+    );
+    expect(store.step(id, 'package-download')).toMatchObject({
+      applied: false,
+      completedWork: 500,
+      evidence: second,
+    });
+    expect(() =>
+      store.commit(
+        id,
+        command(id, 'progress', {
+          stepId: 'package-download',
+          completedWork: 500,
+          evidenceDigest: upgradeDigest(first),
+        }),
+      ),
+    ).toThrow('UPGRADE_PROGRESS_REFERENCE_INVALID');
+    store.commit(id, command(id, 'progress', { stepId: 'package-download', completedWork: 500 }));
+    const timing = store.stageProgress(id);
+    time += 1000;
+    store.commit(
+      id,
+      command(id, 'progress', {
+        stepId: 'package-download',
+        completedWork: 500,
+        evidenceDigest: upgradeDigest(null),
+      }),
+    );
+    expect(store.step(id, 'package-download')).toMatchObject({
+      applied: false,
+      completedWork: 500,
+      evidence: null,
+    });
+    expect(store.stageProgress(id)).toEqual(timing);
+  });
+  it.each([
+    ['digest', { evidenceDigest: 'sha256:' + '0'.repeat(64) }],
+    ['work', { completedWork: 251 }],
+    ['total', { totalWork: 999 }],
+    ['stage', { stage: 'observing' }],
+    ['inline evidence', { evidence: null }],
+    ['extra proof', { otherProof: 'x'.repeat(1024) }],
+  ])('rejects a tampered %s reference atomically', (_kind, patch) => {
+    const { id } = accept();
+    const evidence = { scope: 'sqlite-state-layer-only', received: 250 };
+    store.commit(
+      id,
+      command(id, 'progress', { stepId: 'package-download', completedWork: 250, evidence }),
+    );
+    const before = store.snapshot(id);
+    const beforeEvents = events();
+    const beforeTiming = store.stageProgress(id);
+    time += 1000;
+    expect(() =>
+      store.commit(
+        id,
+        command(id, 'progress', {
+          stepId: 'package-download',
+          completedWork: 250,
+          evidenceDigest: upgradeDigest(evidence),
+          ...patch,
+        }),
+      ),
+    ).toThrow('UPGRADE_PROGRESS_REFERENCE_INVALID');
+    expect(store.snapshot(id)).toEqual(before);
+    expect(events()).toBe(beforeEvents);
+    expect(store.stageProgress(id)).toEqual(beforeTiming);
+  });
+  it('rejects reference-only completion and references to a different durable stage', () => {
+    const { id, plan } = accept();
+    const first = assertDefined(plan.steps[0]);
+    apply(id, first);
+    const previous = store.step(id, first.stepId);
+    expect(() =>
+      store.commit(
+        id,
+        command(id, 'step-applied', {
+          stepId: first.stepId,
+          completedWork: previous.completedWork,
+          evidenceDigest: upgradeDigest(previous.evidence),
+        }),
+      ),
+    ).toThrow('UPGRADE_PROGRESS_REFERENCE_INVALID');
+    apply(id, assertDefined(plan.steps[1]));
+    const before = store.snapshot(id);
+    expect(() =>
+      store.commit(
+        id,
+        command(id, 'progress', {
+          stepId: first.stepId,
+          completedWork: previous.completedWork,
+          evidenceDigest: upgradeDigest(previous.evidence),
+        }),
+      ),
+    ).toThrow('UPGRADE_PROGRESS_REFERENCE_INVALID');
+    expect(store.snapshot(id)).toEqual(before);
+  });
   it('rejects an unqualified global migration version without reserving an attempt or changing the actual journal', () => {
     const source = assertDefined(store.confirmed());
     const fixture = target(source, '0.2.1', true);

@@ -571,6 +571,7 @@ export class UpgradeStore {
         )
       : undefined;
     return {
+      controllerCapabilities: { progressEvidenceReference: 1 as const },
       attempt: { ...this.attempt(id), actorId: row.actor_id },
       signedManifest: SignedUpgradeManifestSchema.parse(JSON.parse(row.manifest)),
       manifest: SignedUpgradeManifestSchema.parse(JSON.parse(row.manifest)).manifest,
@@ -790,6 +791,25 @@ export class UpgradeStore {
           const step = plan.steps.find((s) => s.stepId === p.stepId);
           requireUpgrade(step, 'UPGRADE_STEP_NOT_FOUND', 400);
           const existing = this.step(id, step.stepId);
+          const progressReference = Object.hasOwn(p, 'evidenceDigest');
+          if (progressReference) {
+            // A heartbeat refers only to this exact durable checkpoint. It is
+            // neither new work nor an alternative receipt supplied by a caller.
+            requireUpgrade(
+              command.kind === 'progress' &&
+                !Object.hasOwn(p, 'evidence') &&
+                Object.keys(p).every((key) =>
+                  ['stepId', 'completedWork', 'totalWork', 'evidenceDigest', 'stage'].includes(key),
+                ) &&
+                row.stage === step.stepId &&
+                p.completedWork === existing.completedWork &&
+                (p.totalWork === undefined || p.totalWork === step.totalWork) &&
+                (p.stage === undefined || p.stage === row.state) &&
+                p.evidenceDigest === upgradeDigest(existing.evidence),
+              'UPGRADE_PROGRESS_REFERENCE_INVALID',
+              400,
+            );
+          }
           requireUpgrade(
             typeof p.completedWork === 'number' &&
               Number.isFinite(p.completedWork) &&
@@ -853,7 +873,7 @@ export class UpgradeStore {
                 id,
                 step.stepId,
               );
-          } else
+          } else if (!progressReference)
             this.sqlite
               .prepare(
                 'UPDATE upgrade_steps SET completed_work=?,evidence=? WHERE attempt_id=? AND step_id=? AND applied=0',
@@ -872,16 +892,21 @@ export class UpgradeStore {
             web: 'api-activated',
             activation: 'api-activated',
           };
-          this.sqlite
-            .prepare('UPDATE upgrade_attempts SET state=?,stage=? WHERE attempt_id=?')
-            .run(states[step.kind], step.stepId, id);
+          if (!progressReference)
+            this.sqlite
+              .prepare('UPDATE upgrade_attempts SET state=?,stage=? WHERE attempt_id=?')
+              .run(states[step.kind], step.stepId, id);
           if (
-            step.kind === 'route' ||
-            step.kind === 'web' ||
-            (command.kind === 'step-applied' &&
-              ['coordinator-handoff', 'owner-candidate', 'installer-handoff', 'migration'].includes(
-                step.kind,
-              ))
+            !progressReference &&
+            (step.kind === 'route' ||
+              step.kind === 'web' ||
+              (command.kind === 'step-applied' &&
+                [
+                  'coordinator-handoff',
+                  'owner-candidate',
+                  'installer-handoff',
+                  'migration',
+                ].includes(step.kind)))
           )
             this.sqlite
               .prepare(

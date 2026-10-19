@@ -302,6 +302,15 @@ afterEach(async () => {
 });
 
 describe('UPG actual backend HTTP evidence, independent of sticky gateway success', () => {
+  it('collects continuity once per observation and reuses the same proof for attachment qualification', async () => {
+    const f = await fixture();
+    const continuity = vi.spyOn(f.inspector, 'continuity');
+    const observation = await f.observer.observation('attempt', 7, 0);
+    expect(continuity).toHaveBeenCalledTimes(1);
+    expect(continuity).toHaveBeenCalledWith('attempt', 7);
+    expect(observation.continuity).toEqual(await continuity.mock.results[0]?.value);
+    expect(observation.probes).toMatchObject({ attachMaxMs: 0 });
+  });
   it('detects candidate 500 while gateway A remains healthy, and each lane writes its own unique pair', async () => {
     const f = await fixture();
     f.candidate.mode = 'fail';
