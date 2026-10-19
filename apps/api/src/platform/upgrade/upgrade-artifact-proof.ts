@@ -126,7 +126,7 @@ export function sourceArtifactProof(
 export async function initialSourceActivation(
   store: UpgradeStore,
 ): Promise<ConfirmedServiceRelease> {
-  const rows = store.sqlite
+  const rows = store.ledgerSqlite
     .prepare<unknown[], { source_activation: string }>(
       'SELECT source_activation FROM upgrade_attempts WHERE instance_id=? ORDER BY generation ASC',
     )

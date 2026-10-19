@@ -1,3 +1,5 @@
+import { preserveUpgradeCriticalAuthority } from './upgrade-control-authority-client';
+import { assertCurrentBusinessAction, withoutBusinessAction } from './upgrade-business-action';
 import { upgradeRecord } from './upgrade-values';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -151,7 +153,9 @@ export class CoordinatorHandoff {
       const artifactRoot = resolve(join(installedRoot, 'artifacts', plan.package.digest.slice(7)));
       requireUpgrade(candidate.artifactRoot === artifactRoot, 'FIXED_ARTIFACT_ROOT_REQUIRED');
       await this.inspector.verifyArtifact(artifactRoot, snapshot.manifest.components);
+      assertCurrentBusinessAction();
       const identity = await this.candidateRpc(candidate, 'identity');
+      assertCurrentBusinessAction();
       requireUpgrade(
         identity.instanceId === this.store.instanceId &&
           identity.startIdentity === candidate.startIdentity &&
@@ -198,7 +202,7 @@ export class CoordinatorHandoff {
       const source = coordinatorWriterControl(this.store.sqlite);
       source.assert();
       const quiescedAt = this.clock.now().getTime();
-      this.store.preserveCriticalAuthority(id, fence);
+      await preserveUpgradeCriticalAuthority(this.store, this.clock, id, fence, 'quiesce');
       this.store.sqlite
         .prepare(
           "UPDATE coordinator_handoffs SET stage='quiesced',quiesced_at=? WHERE attempt_id=?",
@@ -210,7 +214,9 @@ export class CoordinatorHandoff {
           fence,
           nextOrigin: candidate.businessOrigin,
         });
+        assertCurrentBusinessAction();
         await this.applications.quiesce(Math.min(1000, plan.policy.requestDeadlineMs / 2));
+        assertCurrentBusinessAction();
         requireUpgrade(
           this.provisions.pauseOwnership() &&
             this.clones.pauseOwnership() &&
@@ -224,14 +230,16 @@ export class CoordinatorHandoff {
         this.tasks.prepareHandoff();
       } catch (error) {
         await this.binding('ready');
-        this.applications.resume();
-        this.pump.resumeOwnership();
-        this.automations.resumeOwnership();
-        this.provisions.resumeOwnership();
-        this.clones.resumeOwnership();
-        this.cleanup.resumeOwnership();
-        this.events.resumeAfterHandoff();
-        this.tasks.resumeAfterHandoff();
+        withoutBusinessAction(() => {
+          this.applications.resume();
+          this.pump.resumeOwnership();
+          this.automations.resumeOwnership();
+          this.provisions.resumeOwnership();
+          this.clones.resumeOwnership();
+          this.cleanup.resumeOwnership();
+          this.events.resumeAfterHandoff();
+          this.tasks.resumeAfterHandoff();
+        });
         this.store.sqlite
           .prepare(
             "UPDATE coordinator_handoffs SET stage='prepared',quiesced_at=NULL WHERE attempt_id=?",
@@ -243,6 +251,15 @@ export class CoordinatorHandoff {
     }
     if (input.action === 'release') {
       requireUpgrade(existing.stage === 'quiesced', 'HANDOFF_STAGE_CONFLICT');
+      await preserveUpgradeCriticalAuthority(
+        this.store,
+        this.clock,
+        id,
+        fence,
+        'release',
+        plan.policy.requestDeadlineMs - (this.clock.now().getTime() - Number(existing.quiesced_at)),
+      );
+      assertCurrentBusinessAction();
       requireUpgrade(
         this.clock.now().getTime() - Number(existing.quiesced_at) < plan.policy.requestDeadlineMs,
         'HANDOFF_CONTROL_BUDGET_EXCEEDED',
@@ -251,7 +268,9 @@ export class CoordinatorHandoff {
         .prepare("UPDATE coordinator_handoffs SET stage='releasing' WHERE attempt_id=?")
         .run(id);
       try {
+        assertCurrentBusinessAction();
         await this.owners.releaseBusinessAuthority();
+        assertCurrentBusinessAction();
         coordinatorWriterControl(this.store.sqlite).release();
       } catch (error) {
         // If the old writer still holds its valid epoch, no replacement owns it.
@@ -264,19 +283,31 @@ export class CoordinatorHandoff {
           )
           .run(id);
         await this.binding('ready');
-        this.applications.resume();
-        this.pump.resumeOwnership();
-        this.automations.resumeOwnership();
-        this.provisions.resumeOwnership();
-        this.clones.resumeOwnership();
-        this.cleanup.resumeOwnership();
-        this.events.resumeAfterHandoff();
-        this.tasks.resumeAfterHandoff();
+        withoutBusinessAction(() => {
+          this.applications.resume();
+          this.pump.resumeOwnership();
+          this.automations.resumeOwnership();
+          this.provisions.resumeOwnership();
+          this.clones.resumeOwnership();
+          this.cleanup.resumeOwnership();
+          this.events.resumeAfterHandoff();
+          this.tasks.resumeAfterHandoff();
+        });
         throw error;
       }
+      // Stable control owns adoption as a separately journaled fixed command.
+      if (this.store.ledgerReadonly) return { commitKnown: true, stage: 'releasing' };
       // This durable accepted handoff owns the critical section even if its
       // external Controller disappears after release. Do not wait for a new RPC
       // to bring up the already verified read-only candidate.
+      await preserveUpgradeCriticalAuthority(
+        this.store,
+        this.clock,
+        id,
+        fence,
+        'adopt',
+        plan.policy.requestDeadlineMs - (this.clock.now().getTime() - Number(existing.quiesced_at)),
+      );
       return this.candidateRpc(candidate, 'adopt', {
         instanceId: this.store.instanceId,
         attemptId: id,
@@ -289,6 +320,15 @@ export class CoordinatorHandoff {
     // Release/adopt outcomes are queried against their durable epoch/record; a
     // timeout does not authorize a second writer or a replayed release.
     requireUpgrade(['releasing', 'adopted'].includes(existing.stage), 'HANDOFF_STAGE_CONFLICT');
+    if (existing.stage !== 'adopted')
+      await preserveUpgradeCriticalAuthority(
+        this.store,
+        this.clock,
+        id,
+        fence,
+        'adopt',
+        plan.policy.requestDeadlineMs - (this.clock.now().getTime() - Number(existing.quiesced_at)),
+      );
     return this.candidateRpc(candidate, 'adopt', {
       instanceId: this.store.instanceId,
       attemptId: id,

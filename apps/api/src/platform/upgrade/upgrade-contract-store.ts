@@ -22,6 +22,7 @@ import {
 import { UpgradeStore } from './upgrade-store';
 import { CONTRACT_ROLE, contractFenceFloor, contractActive } from './upgrade-contract-authority';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
+import { currentContractControl } from '../persistence/upgrade-contract-context';
 
 const ACTIVE = ['accepted', 'retiring-readers', 'authority-active', 'clearing'];
 export interface ContractRecord {
@@ -61,6 +62,9 @@ export class UpgradeContractStore {
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
   ) {}
+  get ledgerSqlite(): Database.Database {
+    return this.upgrades.ledgerSqlite;
+  }
   get sqlite(): Database.Database {
     return this.upgrades.sqlite;
   }
@@ -68,7 +72,7 @@ export class UpgradeContractStore {
     return this.clock.now().getTime();
   }
   snapshot(id: string): ContractRecord {
-    const row = this.sqlite
+    const row = this.ledgerSqlite
       .prepare<unknown[], { result: string; fence: number; request_digest: string }>(
         'SELECT result,fence,request_digest FROM platform_operations WHERE operation_id=? AND instance_id=? AND role=?',
       )
@@ -91,7 +95,7 @@ export class UpgradeContractStore {
     return record;
   }
   latest(): ContractRecord | null {
-    const row = this.sqlite
+    const row = this.ledgerSqlite
       .prepare<unknown[], { operation_id: string }>(
         'SELECT operation_id FROM platform_operations WHERE instance_id=? AND role=? ORDER BY fence DESC,rowid DESC LIMIT 1',
       )
@@ -99,7 +103,7 @@ export class UpgradeContractStore {
     return row ? this.snapshot(row.operation_id) : null;
   }
   replay(actor: string, command: UpgradeContractRequest): ContractRecord | null {
-    const row = this.sqlite
+    const row = this.ledgerSqlite
       .prepare<unknown[], { operation_id: string; request_digest: string }>(
         "SELECT operation_id,request_digest FROM platform_operations WHERE instance_id=? AND role=? AND actor_id=? AND json_extract(result,'$.command.requestId')=?",
       )
@@ -112,7 +116,7 @@ export class UpgradeContractStore {
     return this.snapshot(row.operation_id);
   }
   lookup(actor: string, requestId: string): UpgradeContractAttempt {
-    const row = this.sqlite
+    const row = this.ledgerSqlite
       .prepare<unknown[], { operation_id: string }>(
         "SELECT operation_id FROM platform_operations WHERE instance_id=? AND role=? AND actor_id=? AND json_extract(result,'$.command.requestId')=?",
       )
@@ -129,12 +133,13 @@ export class UpgradeContractStore {
     >,
     entryFloor: number,
   ): ContractRecord {
-    return this.sqlite
+    return this.ledgerSqlite
       .transaction(() => {
         const replay = this.replay(actorId, command);
         if (replay) return replay;
+        this.upgrades.assertControlAdmissionAvailable();
         requireUpgrade(
-          !this.sqlite
+          !this.ledgerSqlite
             .prepare(
               "SELECT 1 FROM platform_operations WHERE instance_id=? AND role='upgrade-plan' AND state IN ('accepted','preparing','running')",
             )
@@ -147,21 +152,26 @@ export class UpgradeContractStore {
           'CONTRACT_ACTIVATION_CONFLICT',
         );
         requireUpgrade(
-          !contractActive(this.sqlite, this.upgrades.instanceId) &&
+          !contractActive(this.ledgerSqlite, this.upgrades.instanceId) &&
             this.upgrades.pending().attempts.length === 0 &&
             this.upgrades.recovery()?.state !== 'recovering',
           'INSTANCE_OPERATION_ACTIVE',
         );
         requireUpgrade(Number.isSafeInteger(entryFloor) && entryFloor >= 0, 'ENTRY_FENCE_UNKNOWN');
         const high = requiredUpgradeValue(
-          this.sqlite
+          this.ledgerSqlite
             .prepare<unknown[], { n: number }>(
               'SELECT coalesce(max(fence),0) n FROM upgrade_attempts WHERE instance_id=?',
             )
             .get(this.upgrades.instanceId),
         ).n;
         const fence =
-          Math.max(high, entryFloor, contractFenceFloor(this.sqlite, this.upgrades.instanceId)) + 1;
+          Math.max(
+            high,
+            entryFloor,
+            contractFenceFloor(this.ledgerSqlite, this.upgrades.instanceId),
+            this.upgrades.controlEpochFloor(),
+          ) + 1;
         const now = this.now(),
           id = this.ids.next();
         const attempt = UpgradeContractAttemptSchema.parse({
@@ -188,12 +198,12 @@ export class UpgradeContractStore {
           retirementReceipts: {},
           checkpoint: null,
         };
-        this.sqlite
+        this.ledgerSqlite
           .prepare(
             'UPDATE upgrade_attempts SET controller_id=NULL,lease_expires_at=0 WHERE instance_id=?',
           )
           .run(this.upgrades.instanceId);
-        this.sqlite
+        this.ledgerSqlite
           .prepare(
             'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
           )
@@ -215,8 +225,18 @@ export class UpgradeContractStore {
   }
   assertFence(id: string, fence: number): ContractRecord {
     const record = this.snapshot(id);
+    if (this.upgrades.ledgerReadonly) {
+      const authority = currentContractControl();
+      requireUpgrade(
+        authority?.instanceId === this.upgrades.instanceId &&
+          authority.contractId === id &&
+          authority.intentFence === fence,
+        'CONTRACT_CONTROL_AUTHORITY_REQUIRED',
+      );
+      authority.assertGlobal();
+    }
     const high = requiredUpgradeValue(
-      this.sqlite
+      this.ledgerSqlite
         .prepare<unknown[], { n: number }>(
           'SELECT coalesce(max(fence),0) n FROM upgrade_attempts WHERE instance_id=?',
         )
@@ -237,7 +257,7 @@ export class UpgradeContractStore {
     patch: Partial<UpgradeContractAttempt>,
     extra: Partial<ContractRecord> = {},
   ): ContractRecord {
-    return this.sqlite
+    return this.ledgerSqlite
       .transaction(() => {
         const original = this.assertFence(record.attempt.contractAttemptId, record.fence);
         requireUpgrade(
@@ -255,7 +275,7 @@ export class UpgradeContractStore {
             observedAt: this.clock.now().toISOString(),
           }),
         };
-        this.sqlite
+        this.ledgerSqlite
           .prepare(
             'UPDATE platform_operations SET state=?,result=?,updated_at=? WHERE operation_id=? AND fence=?',
           )
@@ -271,7 +291,7 @@ export class UpgradeContractStore {
       .immediate();
   }
   active(): ContractRecord[] {
-    return this.sqlite
+    return this.ledgerSqlite
       .prepare<unknown[], { operation_id: string }>(
         "SELECT operation_id FROM platform_operations WHERE instance_id=? AND role=? AND state IN ('accepted','retiring-readers','authority-active','clearing') ORDER BY fence DESC",
       )

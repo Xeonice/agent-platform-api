@@ -258,6 +258,8 @@ async function fixture(options: { verified?: boolean; minFreeBytes?: number } = 
     filename,
     sourceMigrations,
     sqlite,
+    // Integrity corruption is introduced outside the guarded application API.
+    injectCorruption: (sql: string) => connection.sqlite.exec(sql),
     store,
     runner,
     execute,
@@ -267,6 +269,7 @@ async function fixture(options: { verified?: boolean; minFreeBytes?: number } = 
     current,
     envelope,
     plan,
+    attemptId: accepted.attemptId,
     oldRead,
     oldInsert,
     clock,
@@ -279,6 +282,10 @@ async function fixture(options: { verified?: boolean; minFreeBytes?: number } = 
 describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata', () => {
   it('commits the exact DDL and journal atomically while the retained writer keeps its old statements and data', async () => {
     const f = await fixture();
+    expect(f.store.controlCapabilities()).toEqual({ progressEvidenceReference: 1 });
+    expect(() => f.store.authorityCheck(f.attemptId, 1)).toThrow(
+      'UPGRADE_CONTROL_METADATA_UNKNOWN',
+    );
     expect(upgradeDigest(recipe)).toBe(recipeDigest);
     expect(
       createHash('sha256')
@@ -480,7 +487,7 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
   });
   it('refuses unrelated foreign-key corruption before acquiring the migration write transaction', async () => {
     const f = await fixture();
-    f.sqlite.exec(
+    f.injectCorruption(
       'CREATE TABLE integrity_parent(id INTEGER PRIMARY KEY);' +
         'CREATE TABLE integrity_child(parent_id INTEGER REFERENCES integrity_parent(id));' +
         'PRAGMA foreign_keys=OFF; INSERT INTO integrity_child VALUES(7); PRAGMA foreign_keys=ON;',
@@ -492,7 +499,7 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
   });
   it('rolls back scoped integrity failure with the real DDL, journal and receipt', async () => {
     const f = await fixture();
-    f.sqlite.exec(
+    f.injectCorruption(
       'PRAGMA foreign_keys=OFF;' +
         "CREATE TRIGGER break_image_fk AFTER INSERT ON __drizzle_migrations BEGIN UPDATE image_manifests SET image_id='missing-parent'; END;",
     );
@@ -525,7 +532,7 @@ describe('REQ-UPG-006/007/008 — fixed schema-28 bridge for image CLI metadata'
   });
   it('preserves a committed expansion after failed global postcheck and rechecks idempotent status', async () => {
     const f = await fixture();
-    f.sqlite.exec(
+    f.injectCorruption(
       'CREATE TABLE integrity_parent(id INTEGER PRIMARY KEY);' +
         'CREATE TABLE integrity_child(parent_id INTEGER REFERENCES integrity_parent(id));' +
         'PRAGMA foreign_keys=OFF;' +

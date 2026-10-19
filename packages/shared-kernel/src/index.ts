@@ -20,3 +20,4 @@ export * from './fs/installed-artifact';
 export * from './net/git-remote';
 export * from './net/git-platform-registry';
 export { normalizeImageAlias, ImageAliasValidationError } from './domain/image-alias';
+export * from './fs/instance-id';

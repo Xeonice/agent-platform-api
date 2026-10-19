@@ -4,6 +4,12 @@ import type { Clock, IdGenerator } from '@platform/shared-kernel';
 import { UpgradeError } from '../upgrade/upgrade-trust';
 import { finishBusinessTransaction } from './business-transaction-hooks';
 import { currentBusinessWriterEpoch, withBusinessWriterEpoch } from './business-writer-context';
+import {
+  assertRecoveryBusinessAdmission,
+  withoutUpgradeRecovery,
+} from './upgrade-recovery-context';
+import { assertContractBusinessAdmission } from './upgrade-contract-context';
+import { assertBusinessActionMutation } from '../upgrade/upgrade-business-action';
 export const COORDINATOR_WRITER_CONTROL = Symbol('CoordinatorWriterControl');
 export interface CoordinatorWriterControl {
   readonly instanceId: string;
@@ -126,6 +132,12 @@ export function fenceCoordinatorConnection(
       throw new UpgradeError('COORDINATOR_WRITER_FENCE_EXPIRED');
     }
   };
+  const assertMutation = (): void => {
+    assertBusinessActionMutation();
+    assertRecoveryBusinessAdmission(sqlite);
+    assertContractBusinessAdmission(sqlite);
+    assertWriter();
+  };
   let renewal: ReturnType<typeof setInterval>;
   const renew = () => {
     try {
@@ -145,7 +157,7 @@ export function fenceCoordinatorConnection(
     }
   };
   const startRenewal = () => {
-    renewal = setInterval(renew, 5000);
+    renewal = withoutUpgradeRecovery(() => setInterval(renew, 5000));
     renewal.unref();
   };
   startRenewal();
@@ -156,7 +168,7 @@ export function fenceCoordinatorConnection(
         if (typeof value !== 'function') return value;
         return (...args: unknown[]): unknown => {
           if (['run', 'get', 'all', 'iterate'].includes(String(property)) && !target.readonly) {
-            assertWriter();
+            assertMutation();
             // A lazy mutating iterator could execute its first SQLite step only
             // after this writer released its epoch. Business writes use bounded
             // run/get/all transactions, never a deferred write capability.
@@ -164,6 +176,9 @@ export function fenceCoordinatorConnection(
             if (!sqlite.inTransaction && property !== 'iterate')
               return sqlite
                 .transaction(() => {
+                  // BEGIN may wait behind a lease transfer on another connection.
+                  // Check again after acquiring the transaction, before the write.
+                  assertMutation();
                   const result: unknown = Reflect.apply(value, target, args);
                   finishBusinessTransaction(proxy);
                   return result;
@@ -189,6 +204,8 @@ export function fenceCoordinatorConnection(
           reacquire: () => {
             const next = sqlite
               .transaction(() => {
+                assertRecoveryBusinessAdmission(sqlite);
+                assertContractBusinessAdmission(sqlite);
                 const previous = read.get();
                 if (
                   previous?.instance_id !== instanceId ||
@@ -214,7 +231,7 @@ export function fenceCoordinatorConnection(
             return next.generation;
           },
           release: () => {
-            assertWriter();
+            assertMutation();
             sqlite
               .prepare(
                 "UPDATE platform_role_leases SET expires_at=0 WHERE role='state-coordinator' AND holder_id=? AND generation=? AND fence=?",
@@ -228,7 +245,7 @@ export function fenceCoordinatorConnection(
       if (property === 'transaction')
         return (work: (...args: unknown[]) => unknown) => {
           const guarded = (...args: unknown[]) => {
-            assertWriter();
+            assertMutation();
             const result: unknown = work(...args);
             finishBusinessTransaction(proxy);
             return result;
@@ -237,8 +254,16 @@ export function fenceCoordinatorConnection(
         };
       if (property === 'exec')
         return (source: string) => {
-          assertWriter();
-          return target.exec(source);
+          assertMutation();
+          if (target.inTransaction) return target.exec(source);
+          return target
+            .transaction(() => {
+              assertMutation();
+              const result = target.exec(source);
+              finishBusinessTransaction(proxy);
+              return result;
+            })
+            .immediate();
         };
       if (property === 'close')
         return () => {

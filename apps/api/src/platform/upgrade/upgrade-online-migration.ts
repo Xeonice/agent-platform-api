@@ -748,7 +748,7 @@ export class UpgradeOnlineMigration implements OnApplicationBootstrap {
     readEpoch: number;
     degraded: boolean;
   } {
-    const attempt = this.store.sqlite
+    const attempt = this.store.ledgerSqlite
       .prepare<unknown[], { plan: string }>('SELECT plan FROM upgrade_attempts WHERE attempt_id=?')
       .get(id);
     if (

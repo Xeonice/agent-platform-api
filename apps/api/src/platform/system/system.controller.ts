@@ -8,6 +8,7 @@ import {
   Param,
   Post,
   Put,
+  Req,
   Res,
 } from '@nestjs/common';
 import {
@@ -48,7 +49,7 @@ import { SystemProvidersService } from './system-providers.service';
 import { ProviderLogService } from '../audit/provider-log.service';
 import { SystemVersionService } from './system-version.service';
 import { DiagnosticsService } from './diagnostics/diagnostics.service';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { PasscodeService } from '../access-passcode/passcode.service';
 import { setSessionCookie } from '../access-passcode/session-cookie';
 import { PresetImageProvisioner } from './preset-image/preset-image-provisioner';
@@ -120,8 +121,8 @@ export class SystemController {
   @Get('settings')
   @ApiOperation({ summary: '运行期配置（代理 / 公开地址 / 版本）。⛔ 永不回显口令 hash' })
   @ApiOkResponse({ type: SystemSettingsResponseDto })
-  getSettings(): SystemSettingsDto {
-    return this.settings.settings();
+  getSettings(): Promise<SystemSettingsDto> {
+    return this.settings.currentSettings();
   }
 
   /**
@@ -134,8 +135,8 @@ export class SystemController {
       '改运行期配置（proxyConfig / publicBaseUrl；null=清空，缺席=不改）。⚠️ 不写 initialized',
   })
   @ApiOkResponse({ type: SystemSettingsResponseDto })
-  updateSettings(@Body() body: UpdateSystemSettingsDto): SystemSettingsDto {
-    return this.settings.update(body);
+  updateSettings(@Body() body: UpdateSystemSettingsDto): Promise<SystemSettingsDto> {
+    return this.settings.updateCurrent(body);
   }
 
   /**
@@ -153,13 +154,14 @@ export class SystemController {
       '启用 / 重新生成 / 关闭访问口令。enable+regenerate 一次性返回 16 位明文，此后只存 hash；重新生成默认保留会话，invalidateSessions=true 使旧会话失效并为发起浏览器签发新会话',
   })
   @ApiOkResponse({ type: AccessPasscodeResponseDto })
-  setAccessPasscode(
+  async setAccessPasscode(
     @Body() body: AccessPasscodeRequestDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): AccessPasscodeResult {
-    const result = this.passcodes.apply(body);
+  ): Promise<AccessPasscodeResult> {
+    const result = await this.passcodes.apply(body, req);
     if (body.invalidateSessions && result.enabled)
-      setSessionCookie(res, this.sessions.issueCurrentSessionToken());
+      setSessionCookie(res, await this.sessions.issueCurrentSessionTokenAsync(req));
     return result;
   }
 

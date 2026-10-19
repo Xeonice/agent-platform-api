@@ -14,8 +14,9 @@ import {
   ConfirmedServiceReleaseSchema,
   UpgradeManifestSchema,
   type SignedUpgradeManifest,
+  type ProviderRegistry,
 } from '@platform/contracts';
-import { fromEpochMs } from '@platform/shared-kernel';
+import { CLOCK, fromEpochMs } from '@platform/shared-kernel';
 import { configurePlatformApp } from '../../../apps/api/src/bootstrap/configure-app';
 import { INTERNAL_UPGRADE_JSON_LIMIT } from '../../../apps/api/src/bootstrap/internal-upgrade-json';
 import { DeploymentState } from '../../../apps/api/src/platform/deployment/deployment-state';
@@ -34,7 +35,9 @@ import {
   freezeUpgradePlan,
   upgradeDigest,
 } from '../../../apps/api/src/platform/upgrade/upgrade-trust';
-import { useEnv } from '../../support/strict-ports';
+import { useEnv, stub, unused } from '../../support/strict-ports';
+import { UpgradeInspector } from '../../../apps/api/src/platform/upgrade/upgrade-inspector';
+import { UpgradeInspectionController } from '../../../apps/api/src/platform/upgrade/upgrade-inspection.controller';
 
 const instanceId = 'internal-upgrade-json-protocol';
 const key = 'synthetic-internal-upgrade-controller-key-32';
@@ -173,21 +176,29 @@ beforeEach(async () => {
   );
   attemptId = accepted.attemptId;
   fence = store.claim(attemptId, 'state-fixture-controller', 120000).fence;
-  const security = new UpgradeSecurity(clock, ids, new PasscodeService(drizzle(sqlite)));
-  const service = new UpgradeService(
+  const passcodes = new PasscodeService(drizzle(sqlite));
+  const security = new UpgradeSecurity(clock, ids, passcodes);
+  const inspector = new UpgradeInspector(
     store,
-    undefined as never,
-    security,
-    undefined as never,
     clock,
+    stub<ProviderRegistry>({ list: () => [] }),
+    new UpgradeOnlineMigration(store, clock),
+    security,
+    passcodes,
+    unused('job receipts'),
+    unused('sandbox exec'),
+    unused('probe evidence'),
   );
+  const service = new UpgradeService(store, undefined as never, security, inspector, clock);
   // Only the real commit/snapshot controller paths are exercised. There is no
   // SDK/health/activation double pretending to qualify a release or native task.
   const module = await Test.createTestingModule({
-    controllers: [UpgradeInternalController, PublicBodyFixture],
+    controllers: [UpgradeInternalController, UpgradeInspectionController, PublicBodyFixture],
     providers: [
       DeploymentState,
       { provide: UpgradeService, useValue: service },
+      { provide: UpgradeInspector, useValue: inspector },
+      { provide: CLOCK, useValue: clock },
       ...[
         CoordinatorHandoff,
         UpgradeRoleHandoffs,
@@ -252,6 +263,125 @@ function history() {
 }
 
 describe('production private upgrade HTTP JSON boundary and committed SQLite receipts', () => {
+  it('exposes only authenticated fixed inspection actions and reads metadata from the actual business DB', async () => {
+    const inspect = (body: Record<string, unknown>, auth = key) =>
+      request(app.getHttpServer())
+        .post('/internal/upgrades/inspection')
+        .set('X-Platform-Internal-Key', auth)
+        .set('X-Platform-Instance-Id', instanceId)
+        .send(body);
+    const before = history();
+    const found = await inspect({ action: 'metadata' }).expect(200);
+    expect(found.body.instanceId).toBe(instanceId);
+    expect(found.body.action).toBe('metadata');
+    expect(found.body.result).toEqual({
+      schema: (
+        sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get() as { n: number }
+      ).n,
+      requiredDataFormats: [],
+      defaultImagesSnapshot: [],
+      observedAt: found.body.startedAt,
+    });
+    expect(Date.parse(found.body.completedAt)).toBeGreaterThanOrEqual(
+      Date.parse(found.body.startedAt),
+    );
+    await inspect({ action: 'metadata' }, 'wrong-key').expect(403);
+    await inspect({ action: 'exec', command: 'forbidden' }).expect(400);
+    await inspect({ action: 'metadata', method: 'capture' }).expect(400);
+    await inspect({
+      action: 'bootstrapProof',
+      release: store.confirmed(),
+      artifactRoot: '/etc',
+    }).expect(400);
+    await inspect({ action: 'controlIdentity', origin: 'https://outside.invalid' }).expect(400);
+    expect(history()).toEqual(before);
+  });
+
+  it('negotiates the fast bridge and persists full evidence while returning bounded authenticated receipts', async () => {
+    const capabilities = await request(app.getHttpServer())
+      .get('/internal/upgrades/controller-capabilities')
+      .set('X-Platform-Internal-Key', key)
+      .set('X-Platform-Instance-Id', instanceId)
+      .expect(200);
+    expect(capabilities.body).toEqual({ controlFastPath: 1, progressEvidenceReference: 1 });
+    const proof = evidence(),
+      body = command(proof),
+      prefix = '/internal/upgrades/' + attemptId;
+    const compact = (path: string, value: Record<string, unknown>) =>
+      request(app.getHttpServer())
+        .post(prefix + path)
+        .set('X-Platform-Internal-Key', key)
+        .set('X-Platform-Instance-Id', instanceId)
+        .send(value);
+    const committed = await compact('/commit-receipt', body).expect(200);
+    expect(Buffer.byteLength(JSON.stringify(committed.body))).toBeLessThan(1024);
+    expect(committed.body).toMatchObject({
+      eventId: body.eventId,
+      eventDigest: upgradeDigest(body),
+      eventSequence: 1,
+      sequence: 1,
+      fence,
+    });
+    const check = await compact('/authority-check', { fence, generation: body.generation }).expect(
+      200,
+    );
+    expect(check.body).toMatchObject({
+      attemptId,
+      sequence: 1,
+      planDigest: store.plan(attemptId).planDigest,
+    });
+    const renewed = await compact('/lease-renew', {
+      fence,
+      generation: body.generation,
+      controllerId: 'state-fixture-controller',
+    }).expect(200);
+    expect(renewed.body.leaseExpiresAt).toBeGreaterThan(Date.now());
+    const checkpoint = await request(app.getHttpServer())
+      .get(prefix + '/progress-checkpoint')
+      .query({ fence, generation: body.generation })
+      .set('X-Platform-Internal-Key', key)
+      .set('X-Platform-Instance-Id', instanceId)
+      .expect(200);
+    expect(checkpoint.body.step).toEqual({
+      stepId: 'package-download',
+      completedWork: 0,
+      applied: false,
+      receiptDigest: null,
+      evidenceDigest: upgradeDigest(proof),
+    });
+    expect(Buffer.byteLength(JSON.stringify(checkpoint.body))).toBeLessThan(1024);
+    const reference = {
+      ...body,
+      eventId: randomUUID(),
+      expectedSequence: 1,
+      payload: {
+        stepId: 'package-download',
+        completedWork: 0,
+        totalWork: 1,
+        stage: 'downloading',
+        evidenceDigest: checkpoint.body.step.evidenceDigest,
+      },
+    };
+    await compact('/commit-receipt', reference).expect(200);
+    expect(store.step(attemptId, 'package-download').evidence).toEqual(proof);
+    expect((await compact('/commit-receipt', body).expect(200)).body).toMatchObject({
+      eventSequence: 1,
+      sequence: 2,
+    });
+    const before = history();
+    await compact('/lease-renew', {
+      fence,
+      generation: body.generation,
+      controllerId: 'wrong-holder',
+    }).expect(409);
+    await compact('/authority-check', { fence: fence + 1 }).expect(409);
+    await request(app.getHttpServer())
+      .get(prefix + '/progress-checkpoint')
+      .query({ fence, generation: body.generation })
+      .expect(403);
+    expect(history()).toEqual(before);
+  });
+
   it('preserves evidence above the public default, durable event digest, exact replay and sequence', async () => {
     const proof = evidence(),
       body = command(proof);

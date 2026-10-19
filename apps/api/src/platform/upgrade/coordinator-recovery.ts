@@ -33,6 +33,12 @@ import { AutomationScheduler } from '@platform/automation';
 import { TerminalGateway } from '@platform/terminal';
 import { ControlApplicationRegistry } from '../control-rpc/control-rpc.module';
 import { coordinatorWriterControl } from '../persistence/coordinator-lease';
+import {
+  currentUpgradeRecovery,
+  withoutUpgradeRecovery,
+} from '../persistence/upgrade-recovery-context';
+import { recoveryHeaders } from './upgrade-recovery-authority';
+import { z } from 'zod';
 import { env } from '../config/env';
 import { supportedDataFormats } from '../data-format-capabilities';
 import { UpgradeStore } from './upgrade-store';
@@ -85,7 +91,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     private readonly cleanup?: SandboxFacadeAdapter,
   ) {}
   onApplicationBootstrap(): void {
-    if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
+    if (this.store.ledgerReadonly || process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.watch = setInterval(() => {
       if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'true' || this.resuming) return;
       const row = this.store.sqlite
@@ -111,8 +117,207 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
   onModuleDestroy(): void {
     if (this.watch) clearInterval(this.watch);
   }
+  private resumeWorkers(): void {
+    this.store.assertRecoveryMutation();
+    withoutUpgradeRecovery(() => {
+      this.applications.resume();
+      this.pump.resumeOwnership();
+      this.automations.resumeOwnership();
+      this.provisions.resumeOwnership();
+      this.clones.resumeOwnership();
+      this.cleanup?.resumeOwnership();
+      this.events.resumeAfterHandoff();
+      this.tasks.resumeAfterHandoff();
+    });
+  }
+  /** Reopen only the same still-authoritative writer after an interrupted
+   * quiesce. This never reacquires a lease, changes Owner routes or selects a fallback. */
+  async stabilize(id: string, input: Json): Promise<Json> {
+    const context = currentUpgradeRecovery(),
+      fence = Number(input.fence);
+    requireUpgrade(
+      context?.mode === 'stabilize' &&
+        context.attemptId === id &&
+        input.operationId === context.recoveryId + ':stabilize-current-writer',
+      'CONTROL_STABILIZATION_SCOPE_REQUIRED',
+    );
+    this.store.assertFence(id, fence);
+    this.store.assertRecoveryMutation();
+    const intent = requiredUpgradeValue(
+      this.store.ledgerSqlite
+        .prepare<unknown[], { authorization_plan: string }>(
+          'SELECT authorization_plan FROM control_recovery_intents WHERE recovery_id=? AND instance_id=?',
+        )
+        .get(context.recoveryId, this.store.instanceId),
+    );
+    const authorization = upgradeRecord(JSON.parse(intent.authorization_plan)),
+      snapshot = this.store.snapshot(id);
+    requireUpgrade(
+      authorization.targetDigest === snapshot.attempt.targetDigest &&
+        authorization.acceptedPlanDigest === snapshot.plan.planDigest,
+      'CONTROL_STABILIZATION_TARGET_CHANGED',
+    );
+    const Writer = z
+      .object({
+        artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        startIdentity: z.string().min(1).max(180),
+        generation: z.number().int().positive(),
+        fence: z.number().int().positive(),
+        holderId: z.string().min(1).max(200),
+      })
+      .strict();
+    const stabilization = z
+      .object({ writer: Writer, inventoryDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/) })
+      .strict()
+      .parse(authorization.stabilization);
+    const witness = this.store.ledgerSqlite
+      .prepare<
+        unknown[],
+        {
+          writer_digest: string;
+          inventory_digest: string;
+          proof: string;
+          proof_digest: string;
+          observed_at: number;
+        }
+      >(
+        'SELECT writer_digest,inventory_digest,proof,proof_digest,observed_at FROM control_stabilization_witnesses WHERE recovery_id=? AND instance_id=?',
+      )
+      .get(context.recoveryId, this.store.instanceId);
+    requireUpgrade(
+      witness && Buffer.byteLength(witness.proof) <= 256 * 1024,
+      'CONTROL_STABILIZATION_WITNESS_REQUIRED',
+    );
+    const rawProof: unknown = JSON.parse(witness.proof);
+    requireUpgrade(
+      witness.writer_digest === upgradeDigest(stabilization.writer) &&
+        witness.inventory_digest === stabilization.inventoryDigest &&
+        witness.proof_digest === upgradeDigest(rawProof),
+      'CONTROL_STABILIZATION_WITNESS_CHANGED',
+    );
+    const proof = z
+      .object({
+        instanceId: z.string(),
+        writer: Writer,
+        coordinators: z
+          .array(
+            z.object({
+              containerId: z.string().min(1).max(128),
+              startIdentity: z.string().min(1).max(180),
+              artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+              generation: z.number().int().nonnegative(),
+              writerFenceValid: z.boolean(),
+              observedAt: z.string().datetime(),
+            }),
+          )
+          .min(1)
+          .max(256),
+        observedAt: z.string().datetime(),
+      })
+      .parse(rawProof);
+    const fresh = (at: number) =>
+      Number.isFinite(at) &&
+      this.clock.now().getTime() - at >= 0 &&
+      this.clock.now().getTime() - at <= 5000;
+    requireUpgrade(
+      proof.instanceId === this.store.instanceId &&
+        upgradeDigest(proof.writer) === witness.writer_digest &&
+        fresh(witness.observed_at) &&
+        fresh(Date.parse(proof.observedAt)) &&
+        proof.coordinators.every((c) => fresh(Date.parse(c.observedAt))) &&
+        new Set(proof.coordinators.map((c) => c.containerId)).size === proof.coordinators.length &&
+        new Set(proof.coordinators.map((c) => c.startIdentity)).size === proof.coordinators.length,
+      'CONTROL_STABILIZATION_WITNESS_STALE',
+    );
+    const actualWriters = proof.coordinators.filter((c) => c.writerFenceValid);
+    requireUpgrade(
+      actualWriters.length === 1 &&
+        actualWriters[0].artifactDigest === stabilization.writer.artifactDigest &&
+        actualWriters[0].startIdentity === stabilization.writer.startIdentity &&
+        actualWriters[0].generation === stabilization.writer.generation,
+      'CONTROL_STABILIZATION_WRITER_UNKNOWN',
+    );
+    const actual = this.store.sqlite
+      .prepare<
+        unknown[],
+        {
+          holder_id: string;
+          generation: number;
+          fence: number;
+          expires_at: number;
+          instance_id: string;
+        }
+      >(
+        "SELECT instance_id,holder_id,generation,fence,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
+      )
+      .get();
+    const control = coordinatorWriterControl(this.store.sqlite);
+    control.assert();
+    requireUpgrade(
+      actual?.instance_id === this.store.instanceId &&
+        actual.holder_id === stabilization.writer.holderId &&
+        actual.generation === stabilization.writer.generation &&
+        actual.fence === stabilization.writer.fence &&
+        actual.expires_at > this.clock.now().getTime() &&
+        process.env.PLATFORM_ARTIFACT_DIGEST === stabilization.writer.artifactDigest &&
+        process.env.PLATFORM_PROCESS_START_IDENTITY === stabilization.writer.startIdentity &&
+        control.generation === actual.generation &&
+        control.fence === actual.fence,
+      'CONTROL_STABILIZATION_WRITER_CHANGED',
+    );
+    const handoff = this.store.sqlite
+      .prepare<unknown[], { stage: string; source_generation: number }>(
+        'SELECT stage,source_generation FROM coordinator_handoffs WHERE attempt_id=?',
+      )
+      .get(id);
+    requireUpgrade(
+      !handoff ||
+        (['prepared', 'quiesced'].includes(handoff.stage) &&
+          handoff.source_generation === actual.generation),
+      'CONTROL_STABILIZATION_HANDOFF_UNKNOWN',
+    );
+    const bindingPath = requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+      binding = upgradeRecord(JSON.parse(await readFile(bindingPath, 'utf8')));
+    requireUpgrade(
+      binding.instanceId === this.store.instanceId &&
+        binding.generation === actual.generation &&
+        binding.artifactDigest === stabilization.writer.artifactDigest &&
+        ['ready', 'quiescing'].includes(String(binding.state)),
+      'CONTROL_STABILIZATION_BINDING_CHANGED',
+    );
+    this.store.assertRecoveryMutation();
+    control.assert();
+    this.resumeWorkers();
+    await writeInstalledBinding(bindingPath, {
+      state: 'ready',
+      instanceId: this.store.instanceId,
+      origin: loopbackOrigin(binding.origin),
+      generation: actual.generation,
+      artifactDigest: stabilization.writer.artifactDigest,
+    });
+    this.store.assertRecoveryMutation();
+    control.assert();
+    requireUpgrade(
+      upgradeRecord(this.applications.identity()).accepting === true,
+      'CONTROL_STABILIZATION_ADMISSION_UNKNOWN',
+    );
+    return {
+      commitKnown: true,
+      qualified: true,
+      instanceId: this.store.instanceId,
+      recoveryId: context.recoveryId,
+      commandId: input.operationId,
+      epoch: context.epoch,
+      targetDigest: snapshot.attempt.targetDigest,
+      writer: stabilization.writer,
+      inventoryDigest: stabilization.inventoryDigest,
+      writerUnchanged: true,
+      requiresFreshQualification: true,
+      observedAt: this.clock.now().toISOString(),
+    };
+  }
   private baseline(id: string): Json {
-    const row = this.store.sqlite
+    const row = this.store.ledgerSqlite
       .prepare<unknown[], { snapshot: string; digest: string }>(
         'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
       )
@@ -130,14 +335,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
         recovery.planDigest === digest,
       'FIXED_RECOVERY_INTENT_REQUIRED',
     );
-    const row = requiredUpgradeValue(
-      this.store.sqlite
-        .prepare<unknown[], { plan: string }>(
-          'SELECT plan FROM upgrade_recoveries WHERE recovery_attempt_id=?',
-        )
-        .get(recovery.recoveryAttemptId),
-    );
-    const plan = upgradeRecord(JSON.parse(row.plan));
+    const plan = requiredUpgradeValue(this.store.recoveryPlan());
     const { planDigest, ...input } = plan;
     requireUpgrade(
       planDigest === digest && upgradeDigest(input) === digest,
@@ -298,12 +496,14 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     };
   }
   private async rpc(origin: unknown, path: string, input: Json, timeoutMs = 2000): Promise<Json> {
+    this.store.assertRecoveryMutation();
     const response = await fetch(loopbackOrigin(origin) + path, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-platform-internal-key': process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
         'x-platform-instance-id': this.store.instanceId,
+        ...recoveryHeaders(),
       },
       body: canonicalUpgrade(input),
       signal: AbortSignal.timeout(timeoutMs),
@@ -340,6 +540,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
             owners: current,
           },
         );
+        this.store.assertRecoveryMutation();
         this.owners.activateOwner(owner.activeOwnerId);
       }
       return {
@@ -369,7 +570,8 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     const snapshot = this.store.snapshot(id),
       quiescedAt = this.clock.now().getTime(),
       operationId = 'recovery:' + recovery.recoveryAttemptId;
-    this.store.preserveCriticalAuthority(id, fence);
+    this.store.assertRecoveryMutation();
+    if (!currentUpgradeRecovery()) this.store.preserveCriticalAuthority(id, fence);
     this.store.sqlite
       .prepare(
         'INSERT OR IGNORE INTO coordinator_recoveries(recovery_attempt_id,triggering_attempt_id,operation_id,plan_digest,candidate,stage,source_generation,quiesced_at) VALUES(?,?,?,?,?,?,?,?)',
@@ -398,6 +600,7 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           nextOrigin: source.origin,
         },
       );
+      this.store.assertRecoveryMutation();
       await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
       requireUpgrade(
         this.provisions.pauseOwnership() &&
@@ -405,11 +608,13 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           this.cleanup?.pauseOwnership() === true,
         'BACKGROUND_WORK_PENDING',
       );
+      this.store.assertRecoveryMutation();
       this.pump.shutdown();
       this.automations.pauseOwnership();
       this.terminals.prepareHandoff();
       this.events.prepareHandoff();
       this.tasks.prepareHandoff();
+      this.store.assertRecoveryMutation();
       await this.owners.releaseBusinessAuthority();
       this.store.sqlite
         .prepare("UPDATE coordinator_recoveries SET stage='releasing' WHERE recovery_attempt_id=?")
@@ -417,15 +622,11 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
       coordinatorWriterControl(this.store.sqlite).release();
     } catch (error) {
       coordinatorWriterControl(this.store.sqlite).assert();
-      await this.owners.activateBusinessAuthority(Number(process.env.COORDINATOR_GENERATION));
-      this.applications.resume();
-      this.pump.resumeOwnership();
-      this.automations.resumeOwnership();
-      this.provisions.resumeOwnership();
-      this.clones.resumeOwnership();
-      this.cleanup?.resumeOwnership();
-      this.events.resumeAfterHandoff();
-      this.tasks.resumeAfterHandoff();
+      this.store.assertRecoveryMutation();
+      await withoutUpgradeRecovery(() =>
+        this.owners.activateBusinessAuthority(Number(process.env.COORDINATOR_GENERATION)),
+      );
+      this.resumeWorkers();
       this.store.sqlite
         .prepare("UPDATE coordinator_recoveries SET stage='quiesced' WHERE recovery_attempt_id=?")
         .run(recovery.recoveryAttemptId);
@@ -498,7 +699,8 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
             },
             false,
           );
-      await this.owners.activateBusinessAuthority(generation);
+      this.store.assertRecoveryMutation();
+      await withoutUpgradeRecovery(() => this.owners.activateBusinessAuthority(generation));
       if (plan.owner) {
         const owner = upgradeRecord(plan.owner);
         requireUpgrade(
@@ -520,16 +722,10 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
             owners: this.owners.installedRoutes(),
           },
         );
+        this.store.assertRecoveryMutation();
         this.owners.activateOwner(owner.activeOwnerId);
       }
-      this.applications.resume();
-      this.pump.resumeOwnership();
-      this.automations.resumeOwnership();
-      this.provisions.resumeOwnership();
-      this.clones.resumeOwnership();
-      this.cleanup?.resumeOwnership();
-      this.events.resumeAfterHandoff();
-      this.tasks.resumeAfterHandoff();
+      this.resumeWorkers();
       const continuity = await this.inspector.continuity(id, fence);
       await writeInstalledBinding(
         requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),

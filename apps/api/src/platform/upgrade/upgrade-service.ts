@@ -1,4 +1,5 @@
 import { UpgradePlanSchema } from '@platform/contracts';
+import { currentUpgradeRecovery } from '../persistence/upgrade-recovery-context';
 import {
   nullableUpgradeRecord,
   optionalUpgradeRecord,
@@ -28,7 +29,13 @@ import type { Request, Response } from 'express';
 import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import { UpgradeStore, type UpgradeCommit } from './upgrade-store';
 import { UpgradeCatalog } from './upgrade-catalog';
-import { loopbackOrigin, persistedBinding, UpgradeInspector } from './upgrade-inspector';
+import { loopbackOrigin, persistedBinding } from './upgrade-inspection-boundary';
+import {
+  UPGRADE_INSPECTOR,
+  UPGRADE_CONTRACT_SERVICE,
+  UPGRADE_PROJECTION,
+  type UpgradeInspectionPort,
+} from './upgrade-inspection.port';
 import {
   canonicalUpgrade,
   requireUpgrade,
@@ -44,14 +51,14 @@ import {
   qualifyWebRecovery,
   persistedFaultScope,
 } from './upgrade-web-recovery';
-import { UpgradeContractService } from './upgrade-contract-service';
+import type { UpgradeContractService } from './upgrade-contract-service';
 import { withUpgradeObservation } from './upgrade-observation';
 import {
   UpgradeOperationStore,
   type UpgradeOperationRecord,
   type DefaultImageSnapshot,
 } from './upgrade-operation-store';
-import { UpgradeProjection } from './upgrade-projection';
+import type { UpgradeProjection } from './upgrade-projection';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
 import {
   recoveryIntegrity,
@@ -71,13 +78,14 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     readonly store: UpgradeStore,
     private readonly catalog: UpgradeCatalog,
     readonly security: UpgradeSecurity,
-    readonly inspector: UpgradeInspector,
+    @Inject(UPGRADE_INSPECTOR) readonly inspector: UpgradeInspectionPort,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Optional() readonly contracts?: UpgradeContractService,
+    @Optional() @Inject(UPGRADE_CONTRACT_SERVICE) readonly contracts?: UpgradeContractService,
     @Optional() readonly operations?: UpgradeOperationStore,
-    @Optional() private readonly projection?: UpgradeProjection,
+    @Optional() @Inject(UPGRADE_PROJECTION) private readonly projection?: UpgradeProjection,
   ) {}
   onApplicationBootstrap(): void {
+    if (this.store.ledgerReadonly) return;
     if (process.env.PLATFORM_PROCESS_ROLE && process.env.PLATFORM_PROCESS_ROLE !== 'coordinator')
       return;
     setImmediate(() => {
@@ -103,6 +111,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
   private scheduleOperation(): void {
     if (
       this.stopped ||
+      this.store.ledgerReadonly ||
       !this.operations ||
       (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
         process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
@@ -310,9 +319,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     await this.catalog.refresh();
     const target = this.catalog.target(command.targetReleaseId, command.targetDigest);
     requireUpgrade(
-      !this.store.sqlite
-        .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
-        .get() ||
+      !this.inspector.requiresProjectNameV2() ||
         target.envelope.manifest.components.coordinator.dataFormats?.includes(
           'project-name-v2-authority',
         ),
@@ -589,7 +596,21 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.store.assertFence(id, claimed.fence, claimed.generation);
     return claimed;
   }
-  async commit(id: string, command: UpgradeCommit) {
+  commit(id: string, command: UpgradeCommit) {
+    return this.commitChecked(id, command, (confirmed, restored) =>
+      this.store.commit(id, command, confirmed, restored),
+    );
+  }
+  commitReceipt(id: string, command: UpgradeCommit) {
+    return this.commitChecked(id, command, (confirmed, restored) =>
+      this.store.commitReceipt(id, command, confirmed, restored),
+    );
+  }
+  private async commitChecked<T extends { fence: number }>(
+    id: string,
+    command: UpgradeCommit,
+    persist: (confirmed?: ConfirmedServiceRelease, restored?: UpgradeSourceActual) => T,
+  ): Promise<T> {
     this.store.assertControllerFence(id, command.fence, command.generation);
     let confirmed: ConfirmedServiceRelease | undefined;
     let restoredPartial: UpgradeSourceActual | undefined;
@@ -699,7 +720,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
         }
       }
     }
-    const result = this.store.commit(id, command, confirmed, restoredPartial);
+    const result = persist(confirmed, restoredPartial);
     if (command.kind === 'recovery-started') {
       const response = await fetch(
         loopbackOrigin(process.env.PLATFORM_ENTRY_CONTROL_ORIGIN) + '/fence',
@@ -743,7 +764,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     const rehearsal = snapshot.manifest.evidence.find(
       (e) => e.kind === 'fault-recovery' && e.result === 'passed',
     );
-    const baselineRow = this.store.sqlite
+    const baselineRow = this.store.ledgerSqlite
       .prepare<unknown[], { snapshot: string; digest: string }>(
         'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
       )
@@ -774,7 +795,7 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       );
       requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
       live = upgradeRecord(await response.json());
-      const prior = this.store.sqlite
+      const prior = this.store.ledgerSqlite
         .prepare<unknown[], { plan: string }>(
           "SELECT plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
         )
@@ -899,14 +920,19 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
     this.store.assertFence(input.attemptId, input.fence);
     return this.store.sqlite
       .transaction(() => {
+        this.store.assertFence(input.attemptId, input.fence);
+        this.store.assertRecoveryMutation();
         const prior = this.store.sqlite
           .prepare<unknown[], Json>(
-            'SELECT request_id,value,revision FROM upgrade_probe_records WHERE request_id=?',
+            'SELECT request_id,attempt_id,value,revision FROM upgrade_probe_records WHERE request_id=?',
           )
           .get(input.requestId);
         if (prior) {
-          requireUpgrade(prior.value === input.value, 'PROBE_ID_CONFLICT');
-          return prior;
+          requireUpgrade(
+            prior.value === input.value && prior.attempt_id === input.attemptId,
+            'PROBE_ID_CONFLICT',
+          );
+          return { request_id: prior.request_id, value: prior.value, revision: prior.revision };
         }
         const revision =
           requiredUpgradeValue(
@@ -926,6 +952,19 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
       .immediate();
   }
   readProbe(requestId: string) {
+    const recovery = currentUpgradeRecovery();
+    if (recovery) {
+      this.store.assertFence(recovery.attemptId, recovery.epoch);
+      this.store.assertRecoveryMutation();
+      requireUpgrade(
+        this.store.sqlite
+          .prepare<unknown[], { attempt_id: string }>(
+            'SELECT attempt_id FROM upgrade_probe_records WHERE request_id=?',
+          )
+          .get(requestId)?.attempt_id === recovery.attemptId,
+        'PROBE_RECORD_SCOPE_MISMATCH',
+      );
+    }
     const value = this.store.sqlite
       .prepare('SELECT request_id,value,revision FROM upgrade_probe_records WHERE request_id=?')
       .get(requestId);

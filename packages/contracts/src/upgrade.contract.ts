@@ -366,6 +366,12 @@ export const UpgradeRecoverySchema = z.object({
   planDigest: Digest,
   reason: z.string(),
   observedAt: Time,
+  phase: z
+    .enum(['created', 'reconciling', 'restoring', 'verifying', 'recovered', 'blocked'])
+    .optional(),
+  confirmedAt: Time.nullable().optional(),
+  triggeringOperationId: z.string().min(1).max(128).optional(),
+  diagnosticId: z.string().min(1).max(128).optional(),
 });
 /** Private measured installation tuple. It does not assert a complete release. */
 export const UpgradeSourceActualSchema = z.object({
@@ -387,6 +393,26 @@ export const UpgradeStatusSchema = z.object({
   confirmedServiceRelease: ConfirmedServiceReleaseSchema.nullable(),
   lastConfirmedServiceRelease: ConfirmedServiceReleaseSchema.nullable(),
   serviceState: z.enum(['confirmed', 'transitioning', 'unknown']),
+  // Independent controller observations never advance the business release.
+  controlSystem: z
+    .object({
+      version: z.string().min(1).max(128),
+      protocolVersion: z.number().int().positive(),
+      state: z.enum(['ready', 'passive', 'reconciling', 'unavailable']),
+      observedAt: Time,
+    })
+    .strict()
+    .optional(),
+  // Bounded identifiers only; no raw error, environment, payload or stack data.
+  diagnostics: z
+    .object({
+      correlationId: z.string().min(1).max(128),
+      phase: z.string().min(1).max(64),
+      code: z.string().min(1).max(100),
+      recordedAt: Time,
+    })
+    .strict()
+    .optional(),
   catalog: z.object({
     state: z.enum(['verified', 'unknown', 'unavailable', 'no-update']),
     observedAt: Time.nullable(),

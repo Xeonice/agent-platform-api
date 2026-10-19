@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,11 @@ import {
   planFixtureRoots,
   planFixtureSource,
 } from '../../support/upgrade-plan-fixture';
+import {
+  canonicalUpgrade,
+  upgradeDigest,
+  upgradeRunInputFingerprint,
+} from '../../../apps/api/src/platform/upgrade/upgrade-trust';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -62,6 +67,10 @@ async function fixture(capable = true) {
     sourceActual: async () => null,
     installedProof: async () => ({ qualified: true }),
     schema: () => source.schema,
+    requiresProjectNameV2: () =>
+      !!db.sqlite
+        .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+        .get(),
   };
   const inspector = inspectorBoundary as UpgradeInspector;
   const catalog = new UpgradeCatalog(store, clock, inspector);
@@ -75,12 +84,101 @@ async function fixture(capable = true) {
     bridge,
     final,
     inspector,
+    home,
+    trustRootPath: root,
+    catalogFile,
     advance: (ms: number) => {
       time += ms;
     },
   };
 }
 describe('real signed catalog final-target compatibility eligibility', () => {
+  it('uses the explicit isolated control root without a business DATA_ROOT and rejects missing/relative/outside homes', async () => {
+    const f = await fixture(),
+      keys = generateKeyPairSync('ed25519');
+    const manifest = {
+      ...f.bridge.manifest,
+      purpose: 'qualification' as const,
+      qualification: {
+        instanceId: 'catalog-chain-boundary',
+        inputFingerprint: upgradeRunInputFingerprint(f.bridge.manifest),
+      },
+    };
+    const envelope = {
+      manifest,
+      manifestDigest: upgradeDigest(manifest),
+      signature: {
+        algorithm: 'Ed25519',
+        keyId: 'qualification-fixture',
+        value: sign(null, Buffer.from(canonicalUpgrade(manifest)), keys.privateKey).toString(
+          'base64',
+        ),
+      },
+    };
+    const roots = {
+      ...planFixtureRoots(),
+      purpose: 'qualification',
+      qualificationInstanceId: 'catalog-chain-boundary',
+      keys: [
+        {
+          id: 'qualification-fixture',
+          publicKey: keys.publicKey.export({ format: 'pem', type: 'spki' }),
+        },
+      ],
+    };
+    const proofPath = join(f.home, 'qualification.json');
+    await writeFile(f.trustRootPath, JSON.stringify(roots), { mode: 0o600 });
+    await writeFile(
+      f.catalogFile,
+      JSON.stringify({
+        schemaVersion: 1,
+        releases: [
+          { envelope, releaseId: manifest.releaseId, manifestDigest: envelope.manifestDigest },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      proofPath,
+      JSON.stringify({
+        purpose: 'qualification',
+        instanceId: 'catalog-chain-boundary',
+        trustRootDigest: upgradeDigest(roots),
+        isolatedRoot: f.home,
+      }),
+      { mode: 0o600 },
+    );
+    const restore = useEnv({
+      PLATFORM_PROCESS_ROLE: 'upgrade-control',
+      DATA_ROOT: undefined,
+      UPGRADE_CONTROL_ROOT: join(f.home, 'control'),
+      UPGRADE_QUALIFICATION_INSTALLATION_PATH: proofPath,
+    });
+    try {
+      await f.catalog.refresh();
+      expect(f.catalog.status().state).toBe('verified');
+      for (const invalid of [
+        undefined,
+        '',
+        'relative-control',
+        f.home,
+        join(f.home, '..', 'outside-control'),
+      ]) {
+        const reset = useEnv({ UPGRADE_CONTROL_ROOT: invalid });
+        try {
+          await f.catalog.refresh();
+          expect(f.catalog.status()).toMatchObject({
+            state: 'unknown',
+            reason: 'QUALIFICATION_HOME_NOT_ISOLATED',
+          });
+        } finally {
+          reset();
+        }
+      }
+    } finally {
+      restore();
+    }
+  });
   it('advertises the final target and immutable two-node chain without downloading execution packages, then withdraws stale eligibility', async () => {
     const f = await fixture();
     await f.catalog.refresh();

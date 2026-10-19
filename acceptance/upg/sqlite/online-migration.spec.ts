@@ -261,6 +261,8 @@ async function fixture(
     sqlite.prepare("SELECT name FROM sqlite_master WHERE name='upg_shadow_fixture_items'").all();
   return {
     sqlite,
+    // Corruption is injected outside the guarded application connection.
+    breakOutbox: () => connection.sqlite.exec('DROP TABLE upgrade_projection_changes'),
     uow,
     store,
     runner,
@@ -492,7 +494,11 @@ describe('REQ-UPG-006/007/008 — actual online expand/bridge projection, transa
     const original = f.sqlite
       .prepare('SELECT value FROM fixture_items WHERE item_id=?')
       .get('00000');
-    f.sqlite.exec('DROP TABLE upgrade_projection_changes');
+    expect(() => f.sqlite.exec('DROP TABLE upgrade_projection_changes')).toThrow('no such table');
+    expect(
+      f.sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='upgrade_projection_changes'").get(),
+    ).toBeDefined();
+    f.breakOutbox();
     expect(() =>
       f.uow.run(() =>
         f.sqlite

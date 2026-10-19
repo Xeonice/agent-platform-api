@@ -28,6 +28,8 @@ import { UpgradeObserver } from './upgrade-observer';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { CoordinatorRecovery } from './coordinator-recovery';
 import { UpgradeContractService } from './upgrade-contract-service';
+import { rejectRecoveryHeaders } from './upgrade-recovery-authority';
+import { authorizeUpgradeProbe } from './upgrade-probe-auth';
 
 export class UpgradeContractRequestDto extends createZodDto(UpgradeContractRequestSchema) {}
 export class UpgradeContractAttemptDto extends createZodDto(UpgradeContractAttemptSchema) {}
@@ -137,14 +139,22 @@ export class UpgradeController {
   @Post('probe')
   @HttpCode(200)
   probe(@Req() req: Request, @Body() input: UpgradeProbeDto) {
-    this.upgrades.security.internal(req, this.upgrades.store.instanceId);
-    return this.upgrades.probe(input);
+    authorizeUpgradeProbe(req, this.upgrades.store.instanceId, () => {
+      this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    });
+    return this.upgrades.store.recoveryRequest(req, input.attemptId, 'observe', () =>
+      this.upgrades.probe(input),
+    );
   }
   @Get('probe')
   readProbe(@Req() req: Request, @Query('requestId') id: string) {
-    this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    authorizeUpgradeProbe(req, this.upgrades.store.instanceId, () => {
+      this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    });
     requireUpgrade(z.string().uuid().safeParse(id).success, 'INVALID_PROBE_ID', 400);
-    return this.upgrades.readProbe(id);
+    return this.upgrades.store.recoveryRequest(req, undefined, 'observe', () =>
+      this.upgrades.readProbe(id),
+    );
   }
 }
 
@@ -156,6 +166,25 @@ const RenewSchema = z
     controllerId: z.string().nullable(),
     fence: z.number().int().positive(),
     checkOnly: z.boolean().optional(),
+  })
+  .strict();
+const AuthorityCheckSchema = z
+  .object({
+    fence: z.number().int().positive(),
+    generation: z.number().int().positive().optional(),
+  })
+  .strict();
+const LeaseRenewSchema = z
+  .object({
+    fence: z.number().int().positive(),
+    generation: z.number().int().positive(),
+    controllerId: z.string().min(1).max(180),
+  })
+  .strict();
+const CheckpointQuerySchema = z
+  .object({
+    fence: z.coerce.number().int().positive(),
+    generation: z.coerce.number().int().positive(),
   })
   .strict();
 const CommitSchema = z
@@ -189,8 +218,13 @@ export class UpgradeInternalController {
     private readonly migrations: UpgradeOnlineMigration,
     private readonly recovery: CoordinatorRecovery,
   ) {}
-  private auth(req: Request): void {
+  private auth(req: Request, recovery = false): void {
     this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    if (!recovery) rejectRecoveryHeaders(req);
+  }
+  @Get('controller-capabilities') controlCapabilities(@Req() req: Request) {
+    this.auth(req);
+    return this.upgrades.store.controlCapabilities();
   }
   @Get('pending') pending(@Req() req: Request) {
     this.auth(req);
@@ -208,8 +242,10 @@ export class UpgradeInternalController {
     @Query('attemptId') id: string,
     @Query('fence') fence: string,
   ) {
-    this.auth(req);
-    return this.upgrades.inspector.continuity(id, Number(fence));
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'read', () =>
+      this.upgrades.inspector.continuity(id, Number(fence)),
+    );
   }
   @Get('observation') observation(
     @Req() req: Request,
@@ -217,8 +253,10 @@ export class UpgradeInternalController {
     @Query('fence') fence: string,
     @Query('weight') weight: string,
   ) {
-    this.auth(req);
-    return this.observer.observation(id, Number(fence), Number(weight));
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'observe', () =>
+      this.observer.observation(id, Number(fence), Number(weight)),
+    );
   }
   @Post('bootstrap') @HttpCode(200) async bootstrap(@Req() req: Request) {
     this.auth(req);
@@ -237,6 +275,41 @@ export class UpgradeInternalController {
     this.auth(req);
     const input = ClaimSchema.parse(raw);
     return this.upgrades.claim(id, input.controllerId, input.leaseMs);
+  }
+  @Post(':attemptId/authority-check') @HttpCode(200) authorityCheck(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.auth(req);
+    const input = AuthorityCheckSchema.parse(raw);
+    return this.upgrades.store.authorityCheck(id, input.fence, input.generation);
+  }
+  @Post(':attemptId/lease-renew') @HttpCode(200) leaseRenew(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.auth(req);
+    const input = LeaseRenewSchema.parse(raw);
+    return this.upgrades.store.leaseRenew(id, input.fence, input.generation, input.controllerId);
+  }
+  @Get(':attemptId/progress-checkpoint') checkpoint(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Query() raw: unknown,
+  ) {
+    this.auth(req);
+    const input = CheckpointQuerySchema.parse(raw);
+    return this.upgrades.store.progressCheckpoint(id, input.fence, input.generation);
+  }
+  @Post(':attemptId/commit-receipt') @HttpCode(200) commitReceipt(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.auth(req);
+    return this.upgrades.commitReceipt(id, CommitSchema.parse(raw));
   }
   @Post(':attemptId/renew') @HttpCode(200) renew(
     @Req() req: Request,
@@ -276,8 +349,10 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() input: Record<string, unknown>,
   ) {
-    this.auth(req);
-    return this.upgrades.fallbackEligibility(id, Number(input.fence), input);
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'read', () =>
+      this.upgrades.fallbackEligibility(id, Number(input.fence), input),
+    );
   }
   @Post(':attemptId/coordinator-handoff') @HttpCode(200) coordinatorHandoff(
     @Req() req: Request,
@@ -285,7 +360,9 @@ export class UpgradeInternalController {
     @Body() input: Record<string, unknown>,
   ) {
     this.auth(req);
-    return this.handoff.execute(id, input);
+    return this.upgrades.store.businessAction(req.headers, id, 'coordinatorHandoff', input, () =>
+      this.handoff.execute(id, input),
+    );
   }
   @Post(':attemptId/owner-candidate') @HttpCode(200) ownerCandidate(
     @Req() req: Request,
@@ -293,7 +370,9 @@ export class UpgradeInternalController {
     @Body() input: Record<string, unknown>,
   ) {
     this.auth(req);
-    return this.roles.execute(id, 'owner', input);
+    return this.upgrades.store.businessAction(req.headers, id, 'ownerCandidate', input, () =>
+      this.roles.execute(id, 'owner', input),
+    );
   }
   @Post(':attemptId/controller-handoff') @HttpCode(200) controllerHandoff(
     @Req() req: Request,
@@ -309,31 +388,80 @@ export class UpgradeInternalController {
     @Body() input: Record<string, unknown>,
   ) {
     this.auth(req);
-    return this.migrations.execute(id, input);
+    return this.upgrades.store.businessAction(req.headers, id, 'migration', input, () =>
+      this.migrations.execute(id, input),
+    );
   }
   @Post(':attemptId/coordinator-compatibility') @HttpCode(200) compatibility(
     @Req() req: Request,
     @Param('attemptId') id: string,
     @Body() input: Record<string, unknown>,
   ) {
-    this.auth(req);
-    return this.recovery.compatibility(id, Number(input.fence));
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'read', () =>
+      this.recovery.compatibility(id, Number(input.fence)),
+    );
+  }
+  @Post(':attemptId/recovery-admission') @HttpCode(200) recoveryAdmission(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.auth(req, true);
+    const input = z.object({ fence: z.number().int().positive() }).strict().parse(raw);
+    return this.upgrades.store.recoveryRequest(req, id, 'admit', () =>
+      this.upgrades.store.admitRecovery(id, input.fence),
+    );
+  }
+  @Get(':attemptId/recovery-actions') recoveryActions(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+  ) {
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'read', () =>
+      this.upgrades.store.recoveryActions(id),
+    );
+  }
+  @Post(':attemptId/stabilize-current-writer') @HttpCode(200) stabilizeCurrentWriter(
+    @Req() req: Request,
+    @Param('attemptId') id: string,
+    @Body() raw: unknown,
+  ) {
+    this.auth(req, true);
+    const parsed = z
+      .object({ fence: z.number().int().positive(), operationId: z.string().min(1).max(200) })
+      .strict()
+      .safeParse(raw);
+    requireUpgrade(parsed.success, 'INVALID_STABILIZATION_COMMAND', 400);
+    return this.upgrades.store.recoveryRequest(req, id, 'stabilize', () =>
+      this.upgrades.store.recoveryAction(id, 'stabilize-current-writer', parsed.data, () =>
+        this.recovery.stabilize(id, parsed.data),
+      ),
+    );
   }
   @Post(':attemptId/coordinator-recovery') @HttpCode(200) recoverCoordinator(
     @Req() req: Request,
     @Param('attemptId') id: string,
     @Body() input: Record<string, unknown>,
   ) {
-    this.auth(req);
-    return this.recovery.execute(id, input);
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'restore', () =>
+      this.upgrades.store.recoveryAction(id, 'coordinator-recovery', input, () =>
+        this.recovery.execute(id, input),
+      ),
+    );
   }
   @Post(':attemptId/coordinator-resume') @HttpCode(200) resumeCoordinator(
     @Req() req: Request,
     @Param('attemptId') id: string,
     @Body() input: Record<string, unknown>,
   ) {
-    this.auth(req);
-    return this.recovery.resume(id, input);
+    this.auth(req, true);
+    return this.upgrades.store.recoveryRequest(req, id, 'restore', () =>
+      this.upgrades.store.recoveryAction(id, 'coordinator-resume', input, () =>
+        this.recovery.resume(id, input),
+      ),
+    );
   }
 }
 

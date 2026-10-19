@@ -19,6 +19,58 @@ afterEach(() =>
     .forEach((fn) => fn()),
 );
 describe('REQ-UPG-006/007 — actual SQLite single writer and retained operation epoch', () => {
+  it('rechecks the writer after BEGIN when a second real connection transfers it between admission and transaction', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'upg-writer-begin-race-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const filename = join(dir, 'state.db'),
+      rawA = new Database(filename),
+      rawB = new Database(filename);
+    cleanup.push(
+      () => rawB.close(),
+      () => rawA.close(),
+    );
+    cleanup.push(
+      useEnv({ COORDINATOR_GENERATION: undefined, COORDINATOR_WRITER_FENCE_VALID: undefined }),
+    );
+    rawA.exec('CREATE TABLE app_effects(value TEXT)');
+    let armed = false;
+    const database = new Proxy(rawA, {
+      get(target, property): unknown {
+        if (property === 'transaction')
+          return (work: (...args: unknown[]) => unknown) => {
+            const transaction = target.transaction(work);
+            return Object.assign((...args: unknown[]) => transaction(...args), {
+              immediate: (...args: unknown[]) => {
+                if (armed) {
+                  armed = false;
+                  rawB
+                    .prepare(
+                      "UPDATE platform_role_leases SET holder_id='second-connection',generation=generation+1,fence=fence+1 WHERE role='state-coordinator'",
+                    )
+                    .run();
+                }
+                return transaction.immediate(...args);
+              },
+              deferred: transaction.deferred,
+              exclusive: transaction.exclusive,
+            });
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const writer = fenceCoordinatorConnection(
+      database,
+      'writer-begin-race',
+      { now: () => fromEpochMs(1791763200000) },
+      { next: randomUUID },
+    );
+    armed = true;
+    expect(() => writer.prepare("INSERT INTO app_effects VALUES('stale-writer')").run()).toThrow(
+      'COORDINATOR_WRITER_FENCE_EXPIRED',
+    );
+    expect(rawB.prepare('SELECT count(*) n FROM app_effects').get()).toEqual({ n: 0 });
+  });
   it('rejects a late original async operation after A→B→the same retained A, while fresh A operations can write', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'upg-writer-epoch-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));

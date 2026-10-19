@@ -43,6 +43,7 @@ async function role(installed: boolean) {
     );
   }
   let status = 200;
+  const forwarded: Record<string, unknown>[] = [];
   server = createServer(async (req, res) => {
     if (req.url === '/internal/application/catalog') {
       res.setHeader('content-type', 'application/json');
@@ -64,9 +65,9 @@ async function role(installed: boolean) {
       return;
     }
     if (req.url === '/internal/application/invoke') {
-      for await (const _bytes of req) {
-        /* consume actual request */
-      }
+      let body = '';
+      for await (const bytes of req) body += String(bytes);
+      forwarded.push(JSON.parse(body) as Record<string, unknown>);
       res.end(
         [
           {
@@ -145,6 +146,7 @@ async function role(installed: boolean) {
     origin,
     actualDigest,
     start: env.PLATFORM_PROCESS_START_IDENTITY,
+    forwarded,
     status: (value: number) => {
       status = value;
     },
@@ -174,6 +176,11 @@ describe('Control API actual own probe response identity', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'x-platform-internal-key': 'fixture-dedicated-probe-key-no-role-authority',
+          'x-platform-instance-id': 'own-probe-instance',
+          'x-platform-recovery-id': 'fixture-independent-recovery',
+          'x-platform-recovery-epoch': '7',
+          'x-platform-control-epoch': '7',
           [UPGRADE_PROBE_IDENTITY_HEADERS.startIdentity]: 'forged-client-start',
         },
         body: '{}',
@@ -186,6 +193,17 @@ describe('Control API actual own probe response identity', () => {
         f.actualDigest,
       );
       expect(response.headers.get(UPGRADE_PROBE_IDENTITY_HEADERS.startIdentity)).toBe(f.start);
+      expect(f.forwarded.at(-1)).toMatchObject({
+        request: {
+          headers: {
+            'x-platform-internal-key': 'fixture-dedicated-probe-key-no-role-authority',
+            'x-platform-instance-id': 'own-probe-instance',
+            'x-platform-recovery-id': 'fixture-independent-recovery',
+            'x-platform-recovery-epoch': '7',
+            'x-platform-control-epoch': '7',
+          },
+        },
+      });
     }
   });
   it('keeps missing physical installed identity unknown even when Coordinator/client offer metadata', async () => {

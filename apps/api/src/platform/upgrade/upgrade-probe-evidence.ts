@@ -20,12 +20,21 @@ export interface UpgradeProbeScope {
   origin: string;
   artifactDigest: string;
   startIdentity: string;
+  recoveryId?: string;
+  controlEpoch?: number;
+  businessAttemptId?: string;
+  /** Entry's unchanged business attempt barrier, separate from recovery authority. */
+  businessFence?: number;
 }
 export function matchesProbeScope(
   scope: UpgradeProbeScope,
   expected: Partial<UpgradeProbeScope>,
 ): boolean {
   const values: Record<string, unknown> = { ...scope };
+  // A partial ordinary-upgrade lookup must never inherit a recovery cohort,
+  // even when its numeric fence happens to equal the independent epoch.
+  for (const field of ['recoveryId', 'controlEpoch', 'businessAttemptId', 'businessFence'] as const)
+    if (scope[field] !== expected[field]) return false;
   return Object.entries(expected).every(([field, value]) => values[field] === value);
 }
 export interface UpgradeHttpSample {

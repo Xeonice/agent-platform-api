@@ -1,3 +1,5 @@
+import { platformInstanceId } from '@platform/shared-kernel';
+import { assertControlMetadataBusinessCompatibility } from './control-metadata-schema-bridge';
 import { resolve } from 'node:path';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -82,6 +84,11 @@ export function createConnection(filename: string): Connection {
  * migration that leaves dangling references must not boot the app.
  */
 export function runMigrations(db: Db, sqlite?: Database.Database): void {
+  if (process.env.UPGRADE_CONTROL_DATABASE_PATH) {
+    if (!sqlite) throw new Error('CONTROL_BRIDGE_BUSINESS_HANDLE_REQUIRED');
+    assertControlMetadataBusinessCompatibility(sqlite, migrationsDir(), platformInstanceId());
+    return; // Only the reviewed control metadata migration is externalized.
+  }
   sqlite?.pragma('foreign_keys = OFF');
   try {
     migrate(db, { migrationsFolder: migrationsDir() });

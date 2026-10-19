@@ -12,6 +12,7 @@ import { UpgradeContractService } from '../../../apps/api/src/platform/upgrade/u
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
 import { UpgradeStore } from '../../../apps/api/src/platform/upgrade/upgrade-store';
 import { UpgradeOnlineMigration } from '../../../apps/api/src/platform/upgrade/upgrade-online-migration';
+import { UpgradeContractBusiness } from '../../../apps/api/src/platform/upgrade/upgrade-contract-business';
 import { PasscodeService } from '../../../apps/api/src/platform/access-passcode/passcode.service';
 import { PasscodeGuard } from '../../../apps/api/src/platform/access-passcode/passcode.guard';
 import { PasscodeAttemptLimiter } from '../../../apps/api/src/platform/access-passcode/passcode-attempt-limiter';
@@ -63,10 +64,14 @@ beforeEach(async () => {
   // positive health/VM/retirement evidence. Native tests prove the positive chain.
   const contractService = new UpgradeContractService(
     contracts,
-    new UpgradeOnlineMigration(upgrades, clock),
+    new UpgradeContractBusiness(
+      contracts,
+      new UpgradeOnlineMigration(upgrades, clock),
+      undefined as never,
+      clock,
+    ),
     undefined as never,
     security,
-    undefined as never,
     clock,
   );
   const service = new UpgradeService(

@@ -2,7 +2,7 @@ import { requiredUpgradeValue } from './upgrade-values';
 import { isRecord } from '@platform/shared-kernel';
 import { upgradeRecord } from './upgrade-values';
 import { lstat, readFile } from 'node:fs/promises';
-import { relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import type {
@@ -12,7 +12,7 @@ import type {
   UpgradeSourceActual,
 } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
-import { UpgradeInspector } from './upgrade-inspector';
+import { UPGRADE_INSPECTOR, type UpgradeInspectionPort } from './upgrade-inspection.port';
 import { freezeUpgradeChain, type FixedUpgradeStage } from './upgrade-chain';
 import {
   readUpgradeTrustRoot,
@@ -65,7 +65,7 @@ export class UpgradeCatalog {
   constructor(
     private readonly store: UpgradeStore,
     @Inject(CLOCK) private readonly clock: Clock,
-    private readonly inspector: UpgradeInspector,
+    @Inject(UPGRADE_INSPECTOR) private readonly inspector: UpgradeInspectionPort,
   ) {}
   async refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
@@ -127,7 +127,17 @@ export class UpgradeCatalog {
             typeof proof.isolatedRoot === 'string',
           'QUALIFICATION_INSTALLATION_MISMATCH',
         );
-        const inside = relative(resolve(proof.isolatedRoot), resolve(process.env.DATA_ROOT ?? ''));
+        const independent = process.env.PLATFORM_PROCESS_ROLE === 'upgrade-control';
+        const home = independent ? process.env.UPGRADE_CONTROL_ROOT : process.env.DATA_ROOT;
+        if (independent)
+          requireUpgrade(
+            typeof home === 'string' &&
+              home.length > 0 &&
+              isAbsolute(home) &&
+              resolve(home) === home,
+            'QUALIFICATION_HOME_NOT_ISOLATED',
+          );
+        const inside = relative(resolve(proof.isolatedRoot), resolve(home ?? ''));
         requireUpgrade(
           inside !== '' && !inside.startsWith('..') && !inside.startsWith('/'),
           'QUALIFICATION_HOME_NOT_ISOLATED',
@@ -263,9 +273,7 @@ export class UpgradeCatalog {
             'UPGRADE_PLAN_RESUME_UNSUPPORTED',
           );
           requireUpgrade(
-            !this.store.sqlite
-              .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
-              .get() ||
+            !this.inspector.requiresProjectNameV2() ||
               chain.every((stage) =>
                 stage.envelope.manifest.components.coordinator.dataFormats?.includes(
                   'project-name-v2-authority',

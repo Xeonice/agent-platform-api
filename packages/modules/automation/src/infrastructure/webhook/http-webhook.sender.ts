@@ -93,7 +93,7 @@ export class HttpWebhookSender implements WebhookSender {
     const opts = {
       allowPrivateNetwork: allowPrivateNetwork(),
       // 缺席按「没启用」读 —— 保守的那一边（见 ACCESS_GATE_READER 的端口注释）。
-      accessGateEnabled: this.gate?.isEnabled() ?? false,
+      accessGateEnabled: (await this.gate?.isEnabled()) ?? false,
     };
     let addresses: { address: string }[];
     try {

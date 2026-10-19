@@ -13,8 +13,13 @@ import { CLOCK, type Clock } from '@platform/shared-kernel';
 import type { UpgradeStatus } from '@platform/contracts';
 import { UpgradeStore } from './upgrade-store';
 import { UpgradeCatalog } from './upgrade-catalog';
-import { UpgradeInspector, loopbackOrigin } from './upgrade-inspector';
-import { UpgradeContractService } from './upgrade-contract-service';
+import { loopbackOrigin } from './upgrade-inspection-boundary';
+import {
+  UPGRADE_INSPECTOR,
+  UPGRADE_CONTRACT_SERVICE,
+  type UpgradeInspectionPort,
+} from './upgrade-inspection.port';
+import type { UpgradeContractService } from './upgrade-contract-service';
 import { requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { withUpgradeObservation } from './upgrade-observation';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
@@ -66,11 +71,14 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   constructor(
     private readonly store: UpgradeStore,
     private readonly catalog: UpgradeCatalog,
-    private readonly inspector: UpgradeInspector,
+    @Inject(UPGRADE_INSPECTOR) private readonly inspector: UpgradeInspectionPort,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Optional() private readonly contracts?: UpgradeContractService,
+    @Optional()
+    @Inject(UPGRADE_CONTRACT_SERVICE)
+    private readonly contracts?: UpgradeContractService,
   ) {}
   onApplicationBootstrap(): void {
+    if (this.store.ledgerReadonly) return;
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.timer = setInterval(() => {
       this.schedule();
@@ -87,6 +95,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   schedule(): void {
     if (
       this.stopped ||
+      this.store.ledgerReadonly ||
       (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
         process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
     )
@@ -142,7 +151,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   }
   private saved(): PhysicalObservation | null {
     try {
-      const row = this.store.sqlite
+      const row = this.store.ledgerSqlite
         .prepare<unknown[], { result: string; request_digest: string }>(
           'SELECT result,request_digest FROM platform_operations WHERE operation_id=? AND instance_id=? AND role=?',
         )
@@ -299,7 +308,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
       confirmedAt: repairableCurrent?.observedAt ?? started,
     };
     const now = this.clock.now().getTime();
-    this.store.sqlite
+    this.store.ledgerSqlite
       .prepare(
         'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET request_digest=excluded.request_digest,state=excluded.state,result=excluded.result,updated_at=excluded.updated_at',
       )

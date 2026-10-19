@@ -11,6 +11,7 @@ import {
 } from './session-cookie';
 import { readPublicNetworkConfig } from '../config/public-network';
 import { requestClientIp } from './client-ip';
+import { requireAuthorityDecision } from './access-authority-client';
 
 /**
  * Access passcode Guard — the FIRST real APP_GUARD (docs/shared/11 §3.1, MVP;
@@ -31,13 +32,16 @@ export class PasscodeGuard implements CanActivate {
     private readonly limiter: PasscodeAttemptLimiter,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
-    if (context.getType() !== 'http' || !this.passcodes.enabled) {
+  canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+    if (context.getType() !== 'http') {
       return true; // non-HTTP (STDIO MCP) or passcode disabled ⇒ allow
     }
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
-    if (this.isExempt(req) || this.passcodes.allowsLoopback(req.socket.remoteAddress)) return true;
+    if (this.isExempt(req)) return true;
+    if (this.passcodes.authorityEnabled) return this.authorizeAtAuthority(req, res);
+    if (!this.passcodes.enabled || this.passcodes.allowsLoopback(req.socket.remoteAddress))
+      return true;
 
     const now = Date.now();
     const ip = requestClientIp(req, this.network);
@@ -79,6 +83,13 @@ export class PasscodeGuard implements CanActivate {
     }
     // Browsers fetch protected resources before unlocking; only unlock submissions count.
     throw passcodeRequired();
+  }
+
+  private async authorizeAtAuthority(req: Request, res: Response): Promise<boolean> {
+    const decision = await this.passcodes.authorizeRequest(req);
+    requireAuthorityDecision(decision);
+    if (decision.sessionToken) setSessionCookie(res, decision.sessionToken);
+    return true;
   }
 
   private isExempt(req: Request): boolean {

@@ -8,7 +8,7 @@ import { env } from '../config/env';
 import { readPublicNetworkConfig, parseHttpOrigin } from '../config/public-network';
 import { readCookie } from './session-cookie';
 import { PasscodeService } from './passcode.service';
-import { requireUpgrade } from '../upgrade/upgrade-trust';
+import { requireUpgrade, upgradeDigest } from '../upgrade/upgrade-trust';
 
 interface UpgradePrincipal {
   actorId: string;
@@ -29,6 +29,10 @@ export class UpgradeSecurity {
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     private readonly passcodes: PasscodeService,
   ) {
+    if (this.passcodes.authorityEnabled) {
+      this.secret = Buffer.alloc(0);
+      return;
+    }
     const pinned = process.env.UPGRADE_SESSION_SECRET;
     if (pinned) {
       requireUpgrade(pinned.length >= 32, 'UPGRADE_SESSION_SECRET_TOO_SHORT');
@@ -57,6 +61,7 @@ export class UpgradeSecurity {
   // Retained for old Web clients: there is no separate authorization step.
   readonly canAuthenticate = false;
   continuityFingerprint(instanceId: string): string {
+    requireUpgrade(!this.passcodes.authorityEnabled, 'ACCESS_AUTHORITY_ASYNC_REQUIRED', 503);
     return createHmac('sha256', this.secret)
       .update(`session-continuity:${instanceId}`)
       .digest('hex');
@@ -68,6 +73,7 @@ export class UpgradeSecurity {
     return key && key.length >= 32 ? key : undefined;
   }
   legacyContinuityFingerprint(instanceId: string): string | null {
+    requireUpgrade(!this.passcodes.authorityEnabled, 'ACCESS_AUTHORITY_ASYNC_REQUIRED', 503);
     const legacy = this.legacyContinuityKey;
     return legacy
       ? createHmac('sha256', this.secret)
@@ -81,6 +87,7 @@ export class UpgradeSecurity {
     instanceId: string,
     legacyBaseline = false,
   ): { cookie: string; userScope: string; legacy: boolean } {
+    requireUpgrade(!this.passcodes.authorityEnabled, 'ACCESS_AUTHORITY_ASYNC_REQUIRED', 503);
     const viewerId = this.ids.next(),
       expiresAt = this.clock.now().getTime() + 60_000;
     const viewer = this.sign({ instanceId, viewerId, expiresAt });
@@ -100,6 +107,38 @@ export class UpgradeSecurity {
       userScope: createHmac('sha256', this.secret)
         .update(`scope:${instanceId}:${viewerId}`)
         .digest('hex'),
+    };
+  }
+  async continuityEvidence(
+    instanceId: string,
+  ): Promise<{ fingerprint: string; legacyFingerprint: string | null; policyRevision: number }> {
+    if (this.passcodes.authorityEnabled) {
+      const value = await this.passcodes.authorityFingerprint();
+      requireUpgrade(value.instanceId === instanceId, 'UPGRADE_INSTANCE_MISMATCH', 503);
+      return value;
+    }
+    const access = this.passcodes.issueSessionToken(0),
+      legacy = this.legacyContinuityFingerprint(instanceId);
+    return {
+      fingerprint: upgradeDigest({ upgrade: this.continuityFingerprint(instanceId), access }),
+      legacyFingerprint: legacy ? upgradeDigest({ upgrade: legacy, access }) : null,
+      policyRevision: 1,
+    };
+  }
+  async continuityChallengeAsync(
+    instanceId: string,
+    legacyBaseline = false,
+  ): Promise<{ cookie: string; userScope: string; legacy: boolean; policyRevision: number }> {
+    if (this.passcodes.authorityEnabled) {
+      const value = await this.passcodes.authorityChallenge(legacyBaseline);
+      requireUpgrade(value.instanceId === instanceId, 'UPGRADE_INSTANCE_MISMATCH', 503);
+      return value;
+    }
+    const value = this.continuityChallenge(instanceId, legacyBaseline);
+    return {
+      ...value,
+      cookie: `${value.cookie}; ap_session=${encodeURIComponent(this.passcodes.issueCurrentSessionToken())}`,
+      policyRevision: 1,
     };
   }
   private sign(payload: object): string {
@@ -137,6 +176,21 @@ export class UpgradeSecurity {
     );
   }
   principal(req: Request, res: Response, instanceId: string): UpgradePrincipal {
+    if (this.passcodes.authorityEnabled) {
+      requireUpgrade(
+        instanceId === process.env.PLATFORM_INSTANCE_ID,
+        'UPGRADE_INSTANCE_MISMATCH',
+        503,
+      );
+      const decision = this.passcodes.authorityDecision(req);
+      requireUpgrade(
+        decision?.authorized && decision.principal,
+        'ACCESS_AUTHORITY_REQUEST_REQUIRED',
+        503,
+      );
+      if (decision.viewerCookie) res.append('Set-Cookie', decision.viewerCookie);
+      return decision.principal;
+    }
     let viewer = this.verify(readCookie(req, VIEWER_COOKIE));
     if (viewer?.instanceId !== instanceId || typeof viewer.viewerId !== 'string') {
       viewer = {

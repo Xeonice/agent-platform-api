@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { isRecord } from '@platform/shared-kernel';
 import { requiredUpgradeValue } from './upgrade-values';
 import { optionalUpgradeRecord, upgradeRecord, upgradeRecords } from './upgrade-values';
 import {
@@ -8,20 +7,20 @@ import {
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { statfs, lstat } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { CLOCK, fromEpochMs, type Clock } from '@platform/shared-kernel';
 import {
-  SANDBOX_PROVIDER_REGISTRY,
-  type ProviderRegistry,
   type UpgradeContractPlan,
   type UpgradeContractRequest,
   type UpgradeContractStatus,
 } from '@platform/contracts';
-import { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
 import { UpgradeContractStore, type ContractRecord } from './upgrade-contract-store';
-import { UpgradeOnlineMigration } from './upgrade-online-migration';
-import { UpgradeInspector, loopbackOrigin } from './upgrade-inspector';
+import {
+  UPGRADE_CONTRACT_BUSINESS,
+  type UpgradeContractBusinessPort,
+} from './upgrade-contract-business.port';
+import { UPGRADE_INSPECTOR, type UpgradeInspectionPort } from './upgrade-inspection.port';
+import { loopbackOrigin } from './upgrade-inspection-boundary';
 import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import {
   readUpgradeTrustRoot,
@@ -32,7 +31,6 @@ import {
   upgradeRunInputFingerprint,
   UpgradeError,
 } from './upgrade-trust';
-import { env } from '../config/env';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
 import type { Request, Response } from 'express';
 
@@ -46,13 +44,13 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
   private readonly windows = new Map<string, number>();
   constructor(
     readonly store: UpgradeContractStore,
-    private readonly migration: UpgradeOnlineMigration,
-    private readonly inspector: UpgradeInspector,
+    @Inject(UPGRADE_CONTRACT_BUSINESS) private readonly business: UpgradeContractBusinessPort,
+    @Inject(UPGRADE_INSPECTOR) private readonly inspector: UpgradeInspectionPort,
     private readonly security: UpgradeSecurity,
-    @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
   onApplicationBootstrap() {
+    if (this.store.upgrades.ledgerReadonly) return;
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.timer = setInterval(() => {
       if (process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
@@ -70,15 +68,29 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
     if (this.timer) clearInterval(this.timer);
   }
   private async supervisor(path: string, body?: Json): Promise<Json> {
-    const r = await fetch(loopbackOrigin(process.env.PLATFORM_INSTALLER_SUPERVISOR_ORIGIN) + path, {
-      method: body ? 'POST' : 'GET',
-      headers: {
-        'content-type': 'application/json',
-        'x-platform-internal-key': process.env.PLATFORM_INSTALLER_SUPERVISOR_KEY ?? '',
+    const stableRetirement = Boolean(
+      process.env.UPGRADE_CONTROL_DATABASE_PATH &&
+      process.env.UPGRADE_CONTROL_ORIGIN &&
+      path === '/retire-reader',
+    );
+    const r = await fetch(
+      stableRetirement
+        ? loopbackOrigin(process.env.UPGRADE_CONTROL_ORIGIN) +
+            '/internal/control/contracts/retire-reader'
+        : loopbackOrigin(process.env.PLATFORM_INSTALLER_SUPERVISOR_ORIGIN) + path,
+      {
+        method: body ? 'POST' : 'GET',
+        headers: {
+          'content-type': 'application/json',
+          'x-platform-internal-key': stableRetirement
+            ? (process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '')
+            : (process.env.PLATFORM_INSTALLER_SUPERVISOR_KEY ?? ''),
+          ...(stableRetirement ? { 'x-platform-instance-id': this.store.upgrades.instanceId } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(2000),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(2000),
-    });
+    );
     requireUpgrade(r.ok, 'CONTRACT_SUPERVISOR_UNCONFIRMED');
     return upgradeRecord(await r.json());
   }
@@ -158,7 +170,8 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       ids.add(r.readerId);
     }
     // Current writer is not a retireable reader. It is separately physically verified.
-    return records.filter((r) => r.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY);
+    const currentStartIdentity = await this.business.currentStartIdentity();
+    return records.filter((r) => r.startIdentity !== currentStartIdentity);
   }
   private async qualify(
     plan: UpgradeContractPlan,
@@ -179,30 +192,26 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       (await this.inspector.installedProof(current)).qualified === true,
       'CONTRACT_CURRENT_WRITER_UNCONFIRMED',
     );
-    const expand = this.store.sqlite
-      .prepare<unknown[], { attempt_id: string }>(
-        'SELECT attempt_id FROM upgrade_online_migrations WHERE plan_digest=?',
-      )
-      .get(plan.expandPlanDigest);
-    requireUpgrade(expand, 'CONTRACT_EXPAND_UNCONFIRMED');
-    const upgrade = this.store.upgrades.snapshot(expand.attempt_id);
+    const expandAttemptId = await this.business.expandAttemptId(plan.expandPlanDigest);
+    requireUpgrade(expandAttemptId, 'CONTRACT_EXPAND_UNCONFIRMED');
+    const upgrade = this.store.upgrades.snapshot(expandAttemptId);
     const windowKey = String(generation) + ':' + plan.planDigest;
     const anchor = this.windows.get(windowKey) ?? performance.now();
     this.windows.set(windowKey, anchor);
     const windowMs = Math.max(plan.rollbackWindowMs, upgrade.plan.policy.retentionMs);
     const elapsed = performance.now() - anchor;
     requireUpgrade(skipWindow || elapsed >= windowMs, 'CONTRACT_ROLLBACK_WINDOW_OPEN');
-    const facts = this.migration.contractFacts(plan);
+    const facts = await this.business.contractFacts(plan);
     requireUpgrade(facts.newReadsConfirmed, 'CONTRACT_NEW_READS_UNCONFIRMED');
-    const baseline = this.store.sqlite
+    const baseline = this.store.ledgerSqlite
       .prepare<unknown[], { snapshot: string }>(
         'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
       )
-      .get(expand.attempt_id);
+      .get(expandAttemptId);
     requireUpgrade(baseline, 'CONTRACT_READER_INVENTORY_UNCONFIRMED');
     const source = upgradeRecord(upgradeRecord(JSON.parse(baseline.snapshot)).coordinator);
     requireUpgrade(
-      source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY ||
+      source.startIdentity === (await this.business.currentStartIdentity()) ||
         readers.some(
           (r) =>
             r.startIdentity === source.startIdentity && r.artifactDigest === source.artifactDigest,
@@ -261,11 +270,8 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
         'CONTRACT_READER_STILL_DEPENDENT',
       );
     }
-    requireUpgrade(
-      this.providers instanceof RuntimeOwnerProviderRegistry,
-      'CONTRACT_OWNER_DEPENDENCY_UNKNOWN',
-    );
-    for (const owner of this.providers.installedRoutes()) {
+    const owners = await this.business.ownerRoutes();
+    for (const owner of owners) {
       const response = await fetch(loopbackOrigin(owner.endpoint) + '/runtime/metadata', {
         headers: {
           'x-platform-internal-key': process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
@@ -285,10 +291,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
       );
     }
     const isolation = await this.supervisor('/owner-isolation');
-    const ownerIds = this.providers
-      .installedRoutes()
-      .map((owner) => owner.ownerId)
-      .sort();
+    const ownerIds = owners.map((owner) => owner.ownerId).sort();
     requireUpgrade(
       isolation.instanceId === this.store.upgrades.instanceId &&
         isolation.qualified === true &&
@@ -311,7 +314,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
   async status(): Promise<UpgradeContractStatus> {
     const last = this.store.latest();
     const base: UpgradeContractStatus = {
-      authority: this.migration.projectNameAuthoritative() ? 'new' : 'legacy',
+      authority: (await this.business.projectNameAuthoritative()) ? 'new' : 'legacy',
       availablePlan: null,
       attempt: last?.attempt ?? null,
     };
@@ -437,23 +440,13 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
     );
     return { qualified: true, record };
   }
-  private async budget(plan: UpgradeContractPlan) {
-    const fs = await statfs(env.dataRoot);
-    const available = fs.bavail * fs.bsize;
-    const path = typeof this.store.sqlite.name === 'string' ? this.store.sqlite.name + '-wal' : '';
-    const wal = path
-      ? await lstat(path).catch((error: unknown) => {
-          if (isRecord(error) && error.code === 'ENOENT') return null;
-          throw error;
-        })
-      : null;
-    requireUpgrade(
-      available >= plan.minFreeBytes && (!wal || wal.size <= plan.maxWalBytes),
-      'CONTRACT_STORAGE_BUDGET_EXCEEDED',
-    );
-  }
   async tick(): Promise<void> {
-    if (this.running || process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
+    if (
+      this.running ||
+      (process.env.PLATFORM_PROCESS_ROLE !== 'upgrade-control' &&
+        process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
+    )
+      return;
     this.running = true;
     try {
       for (let record of this.store.active()) {
@@ -474,7 +467,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
               ),
             'CONTRACT_SIGNED_PLAN_CHANGED',
           );
-          await this.budget(record.plan);
+          await this.business.budget(record.plan);
           if (record.attempt.state === 'accepted' || record.attempt.state === 'retiring-readers') {
             // Accepted window proof is durable, but current representation/writer/owners/readers
             // are measured again. A crash never restarts the rollback window as authorization.
@@ -522,35 +515,25 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
                 },
               );
             }
-            this.store.sqlite
-              .transaction(() => {
-                const total = this.migration.activateProjectAuthority(record.plan, () => {
-                  this.store.assertFence(record.attempt.contractAttemptId, record.fence);
-                });
-                record = this.store.save(record, {
-                  state: 'authority-active',
-                  stage: '新数据格式已成为唯一权威',
-                  totalRows: total,
-                });
-              })
-              .immediate();
+            await this.business.activate(record, (total) => {
+              record = this.store.save(record, {
+                state: 'authority-active',
+                stage: '新数据格式已成为唯一权威',
+                totalRows: total,
+              });
+            });
           }
           if (record.attempt.state === 'authority-active' || record.attempt.state === 'clearing') {
-            this.store.sqlite
-              .transaction(() => {
-                const batch = this.migration.clearLegacyProjectNames(record.plan, () => {
-                  this.store.assertFence(record.attempt.contractAttemptId, record.fence);
-                });
-                record = this.store.save(record, {
-                  state: batch.complete ? 'completed' : 'clearing',
-                  stage: batch.complete ? '旧用户数据表示已清理' : '分批清理旧用户数据表示',
-                  completedRows: record.attempt.completedRows + batch.cleared,
-                  ...(batch.complete
-                    ? { totalRows: record.attempt.completedRows + batch.cleared }
-                    : {}),
-                });
-              })
-              .immediate();
+            await this.business.clear(record, (batch) => {
+              record = this.store.save(record, {
+                state: batch.complete ? 'completed' : 'clearing',
+                stage: batch.complete ? '旧用户数据表示已清理' : '分批清理旧用户数据表示',
+                completedRows: record.attempt.completedRows + batch.cleared,
+                ...(batch.complete
+                  ? { totalRows: record.attempt.completedRows + batch.cleared }
+                  : {}),
+              });
+            });
           }
         } catch (error) {
           const current = this.store.snapshot(record.attempt.contractAttemptId);
@@ -563,7 +546,7 @@ export class UpgradeContractService implements OnApplicationBootstrap, OnModuleD
               error instanceof UpgradeError ? error.code : 'CONTRACT_OPERATION_UNKNOWN';
             // Stop this intent; no automatic new request/retry and never restore old data.
             this.store.save(current, {
-              state: this.migration.projectNameAuthoritative() ? 'failed' : 'deferred',
+              state: (await this.business.projectNameAuthoritative()) ? 'failed' : 'deferred',
               stage: '独立清理已停止推进',
               reason,
             });

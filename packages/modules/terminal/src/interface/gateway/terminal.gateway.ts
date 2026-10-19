@@ -94,24 +94,29 @@ export class TerminalGateway
   afterInit(server: Namespace): void {
     this.namespace = server;
     server.use((socket, next) => {
-      const rejection = this.rejectHandshake(socket);
-      if (rejection) {
-        this.logger.warn(`terminal handshake rejected: ${rejection.message}`);
-        next(rejection);
-        return;
-      }
-      next();
+      void this.rejectHandshake(socket)
+        .then((rejection) => {
+          if (rejection) {
+            this.logger.warn(`terminal handshake rejected: ${rejection.message}`);
+            next(rejection);
+            return;
+          }
+          next();
+        })
+        .catch(() => {
+          next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+        });
     });
   }
 
   /** `null` ⇒ the handshake is acceptable. Order is load-bearing — see each comment. */
-  private rejectHandshake(client: Socket): Error | null {
+  private async rejectHandshake(client: Socket): Promise<Error | null> {
     // access-passcode gate FIRST (S1 audit P1-1): the REST guard self-exempts
     // non-HTTP contexts, so the WS handshake must re-check the passcode/session
     // itself. It runs BEFORE any other probe so an UNAUTHENTICATED client cannot
     // use the distinct rejection codes to fingerprint the server (e.g. probe
     // the schema-hash) — every rejection looks the same until it is authorized.
-    if (!this.auth.authorize(this.readCredentials(client))) {
+    if (!(await this.auth.authorize(this.readCredentials(client)))) {
       return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
     }
     // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. It used to read

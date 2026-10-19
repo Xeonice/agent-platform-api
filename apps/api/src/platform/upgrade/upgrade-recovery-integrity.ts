@@ -1,6 +1,7 @@
 import type { Clock } from '@platform/shared-kernel';
 import type { UpgradeStore } from './upgrade-store';
-import { persistedBinding, type UpgradeInspector } from './upgrade-inspector';
+import { persistedBinding } from './upgrade-inspection-boundary';
+import type { UpgradeInspector } from './upgrade-inspector';
 import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
 import { requireUpgrade, UpgradeError, upgradeDigest } from './upgrade-trust';
 

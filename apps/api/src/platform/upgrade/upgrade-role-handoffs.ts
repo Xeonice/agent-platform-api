@@ -8,6 +8,7 @@ import { UpgradeStore } from './upgrade-store';
 import { loopbackOrigin, UpgradeInspector } from './upgrade-inspector';
 import { canonicalUpgrade, requireUpgrade } from './upgrade-trust';
 import { writeInstalledBinding } from './upgrade-atomic-file';
+import { assertCurrentBusinessAction, withoutBusinessAction } from './upgrade-business-action';
 
 type Json = Record<string, unknown>;
 interface Handoff {
@@ -26,6 +27,10 @@ export class UpgradeRoleHandoffs {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
   async execute(id: string, kind: 'owner' | 'installer', input: Json): Promise<Json> {
+    requireUpgrade(
+      !(this.store.ledgerReadonly && kind === 'installer' && input.action !== 'status'),
+      'STABLE_CONTROL_INSTALLER_HANDOFF_FORBIDDEN',
+    );
     requireUpgrade(
       typeof input.operationId === 'string' &&
         typeof input.planDigest === 'string' &&
@@ -83,6 +88,7 @@ export class UpgradeRoleHandoffs {
       attemptId: id,
       kind,
     });
+    assertCurrentBusinessAction();
     requireUpgrade(observed.qualified === true, 'ROLE_PROCESS_UNCONFIRMED');
     const url = loopbackOrigin(candidate.managementOrigin ?? candidate.origin);
     if (kind === 'installer') {
@@ -149,6 +155,7 @@ export class UpgradeRoleHandoffs {
     });
     requireUpgrade(metadataResponse.ok, 'NEW_OWNER_METADATA_UNKNOWN');
     const metadata = upgradeRecord(await metadataResponse.json());
+    assertCurrentBusinessAction();
     requireUpgrade(
       typeof metadata.ownerId === 'string' &&
         metadata.artifactDigest === component.artifactDigest &&
@@ -156,16 +163,19 @@ export class UpgradeRoleHandoffs {
       'NEW_OWNER_IDENTITY_MISMATCH',
     );
     if (!row) {
-      await this.owners.addOwner(
-        {
-          endpoint: url,
-          instanceId: this.store.instanceId,
-          key: process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
-          generation: Number(process.env.COORDINATOR_GENERATION),
-          clock: this.clock,
-        },
-        false,
+      await withoutBusinessAction(() =>
+        this.owners.addOwner(
+          {
+            endpoint: url,
+            instanceId: this.store.instanceId,
+            key: process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
+            generation: Number(process.env.COORDINATOR_GENERATION),
+            clock: this.clock,
+          },
+          false,
+        ),
       );
+      assertCurrentBusinessAction();
       this.store.assertFence(id, fence);
       this.store.sqlite
         .prepare('INSERT INTO upgrade_role_handoffs VALUES(?,?,?,?,?,?,?)')
@@ -182,6 +192,7 @@ export class UpgradeRoleHandoffs {
     if (input.action === 'prepare')
       return { commitKnown: true, stage: 'prepared', evidence: observed };
     const proof = await this.inspector.continuity(id, fence);
+    assertCurrentBusinessAction();
     requireUpgrade(proof.qualified === true, 'ORIGINAL_OWNER_UNCONFIRMED');
     const path = process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH;
     requireUpgrade(path, 'OWNER_BINDING_PATH_REQUIRED');
@@ -213,7 +224,9 @@ export class UpgradeRoleHandoffs {
       owners: routes,
     };
     // Publish recoverable fixed routing before changing only future allocation.
+    assertCurrentBusinessAction();
     await writeInstalledBinding(path, binding);
+    assertCurrentBusinessAction();
     this.owners.activateOwner(metadata.ownerId);
     const evidence = {
       ...observed,

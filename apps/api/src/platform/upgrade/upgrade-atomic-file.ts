@@ -2,8 +2,12 @@ import { UuidIdGenerator } from '../time/uuid-id-generator';
 import { lstat, open, rename } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { canonicalUpgrade, requireUpgrade } from './upgrade-trust';
+import { assertRecoverySideEffect } from '../persistence/upgrade-recovery-context';
+import { assertCurrentBusinessAction } from './upgrade-business-action';
 
 export async function writeInstalledBinding(path: string, value: unknown): Promise<void> {
+  assertRecoverySideEffect();
+  assertCurrentBusinessAction();
   requireUpgrade(isAbsolute(path), 'INSTALLED_BINDING_PATH_REQUIRED');
   const parent = dirname(path),
     stat = await lstat(parent);
@@ -19,6 +23,8 @@ export async function writeInstalledBinding(path: string, value: unknown): Promi
   } finally {
     await handle.close();
   }
+  assertRecoverySideEffect();
+  assertCurrentBusinessAction();
   await rename(temp, path);
   const dir = await open(parent, 'r');
   try {

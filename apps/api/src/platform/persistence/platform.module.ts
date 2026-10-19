@@ -28,10 +28,11 @@ import {
 } from './coordinator-lease';
 import { platformInstanceId } from '@platform/sandbox';
 import { preparedConnection } from './prepared-connection';
+import { PLATFORM_SQLITE } from './platform-sqlite.token';
+export { PLATFORM_SQLITE } from './platform-sqlite.token';
 
 /** Memoized connection (per database url) — migrations run once on first open. */
 const connections = new Map<string, Connection>();
-export const PLATFORM_SQLITE = Symbol('PlatformSqlite');
 let adoptPrepared: (() => number) | undefined;
 function openConnection(): Connection {
   const url = env.databaseUrl;

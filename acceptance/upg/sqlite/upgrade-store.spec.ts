@@ -284,7 +284,10 @@ afterEach(() => {
 describe('REQ-UPG-001/006/007/008 — actual SQLite upgrade intent, fencing and recovery', () => {
   it('advertises reference heartbeats and preserves the full durable receipt without rewriting evidence', () => {
     const { id } = accept();
-    expect(store.snapshot(id).controllerCapabilities).toEqual({ progressEvidenceReference: 1 });
+    expect(store.snapshot(id).controllerCapabilities).toEqual({
+      progressEvidenceReference: 1,
+      controlFastPath: 1,
+    });
     const evidence = { scope: 'sqlite-state-layer-only', proof: 'x'.repeat(1024 * 1024) };
     const material = command(id, 'step-applied', {
       stepId: 'package-download',

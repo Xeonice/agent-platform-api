@@ -27,6 +27,8 @@ import {
   withCoordinatorBusinessEpoch,
 } from '../persistence/coordinator-lease';
 import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
+import { currentUpgradeRecovery } from '../persistence/upgrade-recovery-context';
+import { recoveryHeaders } from './upgrade-recovery-authority';
 import {
   UpgradeProbeEvidence,
   type UpgradeProbeLane,
@@ -52,6 +54,10 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   // pair has two independent <=2s HTTP deadlines, hence at most 80 live pairs.
   private readonly maxInFlight = 80;
   private retired = false;
+  private recoveryPlanCache?: { key: string; plan: Json };
+  private recoveryBindingCache?: { key: string; binding: Json };
+  private recoveryAttachments = new Map<string, { runtimeIdentity: unknown; durationMs: number }>();
+  private recoveryAttachmentScope: string | null = null;
   constructor(
     private readonly store: UpgradeStore,
     private readonly inspector: UpgradeInspector,
@@ -67,9 +73,10 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       if (this.retired || process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true') return;
       try {
         for (const lane of ['gateway', 'source', 'candidate'] as const)
-          void withCoordinatorBusinessEpoch(this.store.sqlite, () => this.sample(lane)).catch(
-            () => undefined,
-          );
+          void withCoordinatorBusinessEpoch(
+            this.store.sqlite,
+            () => this.store.recoveryObservation(() => this.sample(lane)) ?? this.sample(lane),
+          ).catch(() => undefined);
       } catch {
         /* A concurrent writer retirement admits no new sample. */
       }
@@ -88,6 +95,8 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     fence: number,
     binding: Json,
   ): Omit<UpgradeProbeScope, 'origin' | 'artifactDigest' | 'startIdentity'> {
+    const recovery = currentUpgradeRecovery();
+    if (recovery) this.recoveryBinding(binding);
     return {
       instanceId: this.store.instanceId,
       attemptId: id,
@@ -96,7 +105,91 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       routeWeight: Number(binding.weight),
       coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
       observerEpoch: this.probeEvidence.observerEpoch,
+      ...(recovery
+        ? {
+            recoveryId: recovery.recoveryId,
+            controlEpoch: recovery.epoch,
+            businessAttemptId: String(binding.attemptId),
+            businessFence: Number(binding.fence),
+          }
+        : {}),
     };
+  }
+  private recoveryBinding(binding: Json): Json {
+    const recovery = currentUpgradeRecovery();
+    requireUpgrade(recovery, 'RECOVERY_OBSERVATION_CONTEXT_REQUIRED');
+    const key = `${recovery.recoveryId}:${String(recovery.epoch)}`;
+    if (this.recoveryBindingCache?.key !== key) {
+      const authorization = this.store.recoveryAuthorizationPlan();
+      const receipt = upgradeRecord(authorization?.businessBinding);
+      const { receiptDigest, ...facts } = receipt;
+      const frozen = upgradeRecord(receipt.binding);
+      requireUpgrade(
+        receipt.instanceId === this.store.instanceId &&
+          typeof receipt.observedAt === 'string' &&
+          Number.isFinite(Date.parse(receipt.observedAt)) &&
+          upgradeDigest(facts) === receiptDigest &&
+          frozen.instanceId === this.store.instanceId &&
+          typeof frozen.attemptId === 'string' &&
+          frozen.attemptId.length > 0 &&
+          Number.isSafeInteger(frozen.fence) &&
+          Number(frozen.fence) > 0 &&
+          Number.isSafeInteger(frozen.routeGeneration) &&
+          Number(frozen.routeGeneration) > 0,
+        'RECOVERY_BUSINESS_BINDING_RECEIPT_INVALID',
+      );
+      this.recoveryBindingCache = { key, binding: frozen };
+    }
+    const frozen = this.recoveryBindingCache.binding;
+    requireUpgrade(
+      binding.instanceId === frozen.instanceId &&
+        binding.attemptId === frozen.attemptId &&
+        binding.fence === frozen.fence &&
+        Number.isSafeInteger(binding.routeGeneration) &&
+        Number(binding.routeGeneration) >= Number(frozen.routeGeneration),
+      'RECOVERY_BUSINESS_BINDING_CHANGED',
+    );
+    return frozen;
+  }
+  private recoveryTarget(binding: Json): { api: Json; expectedDigest: string } {
+    const recovery = currentUpgradeRecovery();
+    requireUpgrade(
+      recovery?.instanceId === this.store.instanceId,
+      'RECOVERY_OBSERVATION_CONTEXT_REQUIRED',
+    );
+    this.store.assertRecoveryMutation();
+    const key = `${recovery.recoveryId}:${String(recovery.epoch)}`;
+    if (this.recoveryPlanCache?.key !== key) {
+      const plan = this.store.recoveryPlan();
+      requireUpgrade(
+        plan?.triggeringAttemptId === recovery.attemptId,
+        'RECOVERY_OBSERVATION_PLAN_UNKNOWN',
+      );
+      this.recoveryPlanCache = { key, plan };
+    }
+    const plan = this.recoveryPlanCache.plan;
+    requireUpgrade(
+      Number(binding.weight) === 0 || Number(binding.weight) === 100,
+      'RECOVERY_TRAFFIC_NOT_CONVERGED',
+    );
+    const api = upgradeRecord(Number(binding.weight) === 0 ? binding.oldApi : binding.candidateApi);
+    const expected = optionalUpgradeRecord(plan.api);
+    const frozen = this.recoveryBinding(binding);
+    const allowed = [
+      optionalUpgradeRecord(frozen.oldApi),
+      optionalUpgradeRecord(frozen.candidateApi),
+      expected,
+    ];
+    requireUpgrade(
+      allowed.some((item) => item?.origin === api.origin && item?.digest === api.digest),
+      'RECOVERY_SELECTED_COMPONENT_CHANGED',
+    );
+    if (expected)
+      requireUpgrade(
+        api.origin === expected.origin && api.digest === expected.digest,
+        'RECOVERY_TARGET_API_MISMATCH',
+      );
+    return { api, expectedDigest: String(api.digest) };
   }
   private candidateIdentity(
     snapshot: Pick<ReturnType<UpgradeStore['snapshot']>, 'manifest' | 'appliedSteps'>,
@@ -148,17 +241,24 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   }
   private async sample(lane: UpgradeProbeLane = 'gateway'): Promise<void> {
     if (this.inFlight[lane] >= this.maxInFlight || !this.acceptsSamples()) return;
+    const recovery = currentUpgradeRecovery();
+    if (recovery && lane === 'candidate') return;
     const row = this.store.latestProbeSnapshot();
     if (!row) return;
     const attempt = row.attempt;
-    if (row.fence < 1 || row.leaseExpiresAt <= this.clock.now().getTime()) return;
+    if (recovery && attempt.attemptId !== recovery.attemptId) return;
+    const fence = recovery?.epoch ?? row.fence;
+    const lease = recovery
+      ? this.store.assertFence(attempt.attemptId, fence).lease_expires_at
+      : row.leaseExpiresAt;
+    if (fence < 1 || lease <= this.clock.now().getTime()) return;
     this.inFlight[lane]++;
     const requestId = this.ids.next();
     let key: string | undefined, scope: UpgradeProbeScope | undefined;
     let at = this.clock.now().getTime(),
       httpLatency = 0,
       success = false;
-    const sampleState = { verified: lane === 'gateway', transportFailed: false };
+    const sampleState = { verified: lane === 'gateway' && !recovery, transportFailed: false };
     let completedAt: number | undefined;
     let evidence: Json = {};
     const keepMs =
@@ -168,27 +268,43 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     try {
       const binding = await this.inspector.entryBinding();
       if (
-        binding.attemptId !== attempt.attemptId ||
-        Number(binding.fence) !== row.fence ||
+        (!recovery && binding.attemptId !== attempt.attemptId) ||
+        (!recovery && Number(binding.fence) !== fence) ||
         (lane === 'candidate' && Number(binding.weight) === 0)
       )
         return;
-      const common = this.currentScope(attempt.attemptId, row.fence, binding);
+      const common = this.currentScope(attempt.attemptId, fence, binding);
       key = this.probeEvidence.currentKey(lane, common);
       const sourceApi = row.sourceActual?.components.api ?? row.sourceActivation.components.api;
-      requireUpgrade(
-        upgradeRecord(binding.oldApi).digest === sourceApi.artifactDigest,
-        'SOURCE_PROBE_ARTIFACT_MISMATCH',
-      );
+      if (!recovery)
+        requireUpgrade(
+          upgradeRecord(binding.oldApi).digest === sourceApi.artifactDigest,
+          'SOURCE_PROBE_ARTIFACT_MISMATCH',
+        );
       let identity: (UpgradeProbeApiIdentity & { origin: string }) | undefined;
-      if (lane === 'source')
+      if (recovery) {
+        const target = this.recoveryTarget(binding);
+        if (!optionalUpgradeRecord(this.recoveryPlanCache?.plan.api))
+          requireUpgrade(
+            target.expectedDigest === row.manifest.components.api.artifactDigest,
+            'RECOVERY_RETAINED_API_MISMATCH',
+          );
+        identity = this.sourceIdentity(
+          await this.inspector.controlIdentity(target.api.origin),
+          { ...binding, oldApi: target.api },
+          common.coordinatorGeneration,
+        );
+      } else if (lane === 'source')
         identity = this.sourceIdentity(
           await this.inspector.controlIdentity(upgradeRecord(binding.oldApi).origin),
           binding,
           common.coordinatorGeneration,
         );
       if (lane === 'candidate') identity = this.candidateIdentity(row, binding);
-      const origin = identity?.origin ?? loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN);
+      const origin =
+        lane === 'gateway'
+          ? loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN)
+          : (identity?.origin ?? loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN));
       scope = {
         ...common,
         origin,
@@ -199,11 +315,18 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       at = this.clock.now().getTime();
       const headers = {
         'content-type': 'application/json',
-        'x-platform-internal-key': process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
+        'x-platform-internal-key':
+          process.env.UPGRADE_BUSINESS_PROBE_KEY ?? process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
         'x-platform-instance-id': this.store.instanceId,
         'x-operation-id': requestId,
+        ...recoveryHeaders(),
       };
-      const value = upgradeDigest({ attemptId: attempt.attemptId, requestId, lane });
+      const value = upgradeDigest({
+        attemptId: attempt.attemptId,
+        requestId,
+        lane,
+        ...(recovery ? { recoveryId: recovery.recoveryId, controlEpoch: recovery.epoch } : {}),
+      });
       const request = async (url: string, options: RequestInit) => {
         const started = this.clock.now().getTime();
         const response = await fetch(url, {
@@ -228,7 +351,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
           method: 'POST',
           body: JSON.stringify({
             attemptId: attempt.attemptId,
-            fence: row.fence,
+            fence,
             requestId,
             value,
           }),
@@ -245,13 +368,13 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         // Legacy source A has no own-response metadata. Its actual private
         // process identity must be unchanged on both sides of this pair.
         if (
-          lane === 'source' &&
+          (lane === 'source' || recovery) &&
           !hasProbeIdentity(response.headers) &&
           !hasProbeIdentity(read.headers)
         ) {
           const after = this.sourceIdentity(
-            await this.inspector.controlIdentity(origin),
-            binding,
+            await this.inspector.controlIdentity(identity.origin),
+            recovery ? { ...binding, oldApi: this.recoveryTarget(binding).api } : binding,
             common.coordinatorGeneration,
           );
           sampleState.verified =
@@ -291,17 +414,22 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     } finally {
       try {
         if (scope && key && this.acceptsSamples()) {
-          this.store.assertFence(attempt.attemptId, row.fence);
+          this.store.assertFence(attempt.attemptId, fence);
           const current = await this.inspector.entryBinding();
-          const expected = this.currentScope(attempt.attemptId, row.fence, current);
+          const expected = this.currentScope(attempt.attemptId, fence, current);
           const api = optionalUpgradeRecord(
-            lane === 'candidate' ? current.candidateApi : current.oldApi,
+            recovery
+              ? this.recoveryTarget(current).api
+              : lane === 'candidate'
+                ? current.candidateApi
+                : current.oldApi,
           );
           const unchanged =
             matchesProbeScope(scope, expected) &&
             (lane === 'gateway' ||
-              (api?.origin === scope.origin && api.digest === scope.artifactDigest));
-          this.store.assertFence(attempt.attemptId, row.fence);
+              (api?.origin === scope.origin && api.digest === scope.artifactDigest)) &&
+            (!recovery || api?.digest === scope.artifactDigest);
+          this.store.assertFence(attempt.attemptId, fence);
           if (unchanged) {
             const sample = {
               observed_at: at,
@@ -315,7 +443,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
             const recorded = sampleState.transportFailed
               ? this.probeEvidence.transportFailure(lane, key, sample, keepMs)
               : sampleState.verified && this.probeEvidence.record(lane, key, sample, keepMs);
-            if (recorded && lane === 'gateway')
+            if (recorded && lane === 'gateway' && !recovery)
               this.store.sqlite
                 .prepare(
                   'INSERT INTO upgrade_observations(attempt_id,weight,route_generation,coordinator_generation,observed_at,latency_ms,success,request_id,evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -342,19 +470,32 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     id: string,
     fence: number,
     continuity: Json,
+    recoveryScope?: string,
   ): Promise<{ qualified: boolean; maxMs: number }> {
     this.store.assertFence(id, fence);
+    const recovery = currentUpgradeRecovery();
     if (continuity.qualified !== true) return { qualified: false, maxMs: 0 };
     const resources = upgradeRecords(continuity.resources);
     let maxMs = 0;
     for (const resource of resources) {
       if (!['running', 'idle'].includes(String(resource.status)) || resource.headless === true)
         continue;
-      const existing = this.store.sqlite
-        .prepare<unknown[], Json>(
-          'SELECT * FROM upgrade_attachment_observations WHERE attempt_id=? AND sandbox_id=?',
-        )
-        .get(id, resource.sandboxId);
+      const recoveryKey = String(resource.sandboxId);
+      const existingRecovery =
+        recovery && this.recoveryAttachmentScope === recoveryScope
+          ? this.recoveryAttachments.get(recoveryKey)
+          : undefined;
+      if (existingRecovery && existingRecovery.runtimeIdentity === resource.runtimeIdentity) {
+        maxMs = Math.max(maxMs, existingRecovery.durationMs);
+        continue;
+      }
+      const existing = recovery
+        ? undefined
+        : this.store.sqlite
+            .prepare<unknown[], Json>(
+              'SELECT * FROM upgrade_attachment_observations WHERE attempt_id=? AND sandbox_id=?',
+            )
+            .get(id, resource.sandboxId);
       if (existing && existing.runtime_identity === resource.runtimeIdentity) {
         maxMs = Math.max(maxMs, Number(existing.duration_ms));
         continue;
@@ -387,15 +528,30 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
           'ORIGINAL_PTY_IDENTITY_UNCONFIRMED',
         );
         const duration = this.clock.now().getTime() - started;
-        this.store.sqlite
-          .prepare('INSERT OR REPLACE INTO upgrade_attachment_observations VALUES(?,?,?,?,?)')
-          .run(
-            id,
-            resource.sandboxId,
-            resource.runtimeIdentity,
-            duration,
-            this.clock.now().getTime(),
+        if (recovery) {
+          this.store.assertRecoveryMutation();
+          requireUpgrade(
+            this.recoveryAttachmentScope === recoveryScope,
+            'RECOVERY_ATTACHMENT_SCOPE_CHANGED',
           );
+          requireUpgrade(
+            this.recoveryAttachments.size < 10000,
+            'RECOVERY_ATTACHMENT_BUDGET_EXCEEDED',
+          );
+          this.recoveryAttachments.set(recoveryKey, {
+            runtimeIdentity: resource.runtimeIdentity,
+            durationMs: duration,
+          });
+        } else
+          this.store.sqlite
+            .prepare('INSERT OR REPLACE INTO upgrade_attachment_observations VALUES(?,?,?,?,?)')
+            .run(
+              id,
+              resource.sandboxId,
+              resource.runtimeIdentity,
+              duration,
+              this.clock.now().getTime(),
+            );
         maxMs = Math.max(maxMs, duration);
       } finally {
         if (timer) clearTimeout(timer);
@@ -405,6 +561,8 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     return { qualified: true, maxMs };
   }
   async observation(id: string, fence: number, weight: number): Promise<Json> {
+    const recovery = currentUpgradeRecovery();
+    if (recovery) this.store.assertRecoveryMutation();
     const writer = coordinatorWriterControl(this.store.sqlite);
     writer.assert();
     this.store.assertFence(id, fence);
@@ -413,6 +571,19 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       initialBinding = await this.inspector.entryBinding(),
       initialScope = this.currentScope(id, fence, initialBinding),
       initialBindingDigest = upgradeDigest(persistedBinding(initialBinding));
+    if (recovery) {
+      const attachmentScope = upgradeDigest(initialScope);
+      if (this.recoveryAttachmentScope !== attachmentScope) {
+        this.recoveryAttachments.clear();
+        this.recoveryAttachmentScope = attachmentScope;
+      }
+      // Bootstrap a real HTTP cohort, never synthetic counts or old attempt proof.
+      if (
+        !this.probeEvidence.currentKey('gateway', initialScope) ||
+        !this.probeEvidence.currentKey('source', initialScope)
+      )
+        await Promise.all([this.sample('gateway'), this.sample('source')]);
+    }
     const assertAuthority = () => {
       writer.assert();
       this.store.assertFence(id, fence);
@@ -445,7 +616,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       snapshot = this.store.snapshot(id),
       continuity = await this.inspector.continuity(id, fence);
     const baseRow = requiredUpgradeValue(
-      this.store.sqlite
+      this.store.ledgerSqlite
         .prepare<unknown[], { snapshot: string }>(
           'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
         )
@@ -454,7 +625,12 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     const base = upgradeRecord(JSON.parse(baseRow.snapshot));
     let attach = { qualified: false, maxMs: 0 };
     try {
-      attach = await this.attachProof(id, fence, continuity);
+      attach = await this.attachProof(
+        id,
+        fence,
+        continuity,
+        recovery ? upgradeDigest(initialScope) : undefined,
+      );
     } catch {
       /* Original PTY unknown fails the gate. */
     }
@@ -536,7 +712,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       const web = await this.inspector.webBuild(binding),
         actual = upgradeRecord(binding.web);
       const expected = [
-        snapshot.sourceActivation.components.web,
+        snapshot.sourceActual?.components.web ?? snapshot.sourceActivation.components.web,
         snapshot.manifest.components.web,
       ].find((w) => w.artifactDigest === actual.digest);
       webHealth = {
@@ -571,13 +747,15 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       freshness,
     );
     const oldApi = upgradeRecord(binding.oldApi);
-    const expectedSourceApi =
-      snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api;
+    const recoveredTarget = recovery ? this.recoveryTarget(binding) : null;
+    const expectedSourceApi = recoveredTarget
+      ? { artifactDigest: recoveredTarget.expectedDigest }
+      : (snapshot.sourceActual?.components.api ?? snapshot.sourceActivation.components.api);
     const source = this.probeEvidence.read(
       'source',
       {
         ...expected,
-        origin: loopbackOrigin(oldApi.origin),
+        origin: loopbackOrigin(recoveredTarget?.api.origin ?? oldApi.origin),
         artifactDigest: expectedSourceApi.artifactDigest,
       },
       freshness,
@@ -590,7 +768,8 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
     }
     const candidate = this.probeEvidence.read('candidate', candidateExpected, freshness);
     const baselineWindow = Math.min(gateway.windowMs, source.windowMs);
-    const windowMs = weight === 0 ? baselineWindow : Math.min(baselineWindow, candidate.windowMs);
+    const windowMs =
+      recovery || weight === 0 ? baselineWindow : Math.min(baselineWindow, candidate.windowMs);
     const baselineQualified =
       source.known &&
       gateway.known &&
@@ -599,14 +778,17 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       source.failures === 0 &&
       source.maxLatencyMs <= snapshot.plan.policy.requestDeadlineMs;
     return {
+      ...(recovery ? { scope: source.scope } : {}),
       webHealth,
       observedAt: this.clock.now().toISOString(),
       fenceValid: true,
       ownerGenerationsValid,
       routeGenerationValid:
         stableBinding &&
-        binding.attemptId === id &&
-        Number(binding.fence) === fence &&
+        binding.attemptId === (recovery ? initialScope.businessAttemptId : id) &&
+        (recovery
+          ? Number(binding.fence) === initialScope.businessFence
+          : Number(binding.fence) === fence) &&
         Number(binding.weight) === weight,
       sharedStateHealthy: true, // The uncached read-only worker above completed successfully.
       continuity,
@@ -623,6 +805,7 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
       coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
       observerEpoch: this.probeEvidence.observerEpoch,
       probes: {
+        ...(recovery ? { scope: gateway.scope } : {}),
         known: gateway.known,
         hz:
           gateway.windowMs > 0
@@ -637,27 +820,50 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
         windowMs: gateway.windowMs,
         attachMaxMs: attach.qualified ? attach.maxMs : snapshot.plan.policy.attachDeadlineMs + 1,
       },
-      candidateProbes: {
-        known: candidate.known,
-        hz:
-          candidate.windowMs > 0
-            ? Math.min(
-                snapshot.plan.policy.probeHz,
-                (1000 * (candidate.requests - 1)) / candidate.windowMs,
-              )
-            : 0,
-        samples: candidate.requests,
-        failures: candidate.failures,
-        maxLatencyMs: candidate.maxLatencyMs,
-        windowMs: candidate.windowMs,
-      },
-      candidate: {
-        known: candidate.known,
-        requests: candidate.requests,
-        errorRate: candidate.errorRate,
-        p95Ms: candidate.p95Ms,
-        windowMs: candidate.windowMs,
-      },
+      ...(recovery
+        ? {
+            recoveryProbes: {
+              known: gateway.known,
+              scope: gateway.scope,
+              hz:
+                gateway.windowMs > 0
+                  ? Math.min(
+                      snapshot.plan.policy.probeHz,
+                      (1000 * (gateway.requests - 1)) / gateway.windowMs,
+                    )
+                  : 0,
+              samples: gateway.requests,
+              requests: gateway.requests,
+              failures: gateway.failures,
+              errorRate: gateway.errorRate,
+              p95Ms: gateway.p95Ms,
+              maxLatencyMs: gateway.maxLatencyMs,
+              windowMs: gateway.windowMs,
+            },
+          }
+        : {
+            candidateProbes: {
+              known: candidate.known,
+              hz:
+                candidate.windowMs > 0
+                  ? Math.min(
+                      snapshot.plan.policy.probeHz,
+                      (1000 * (candidate.requests - 1)) / candidate.windowMs,
+                    )
+                  : 0,
+              samples: candidate.requests,
+              failures: candidate.failures,
+              maxLatencyMs: candidate.maxLatencyMs,
+              windowMs: candidate.windowMs,
+            },
+            candidate: {
+              known: candidate.known,
+              requests: candidate.requests,
+              errorRate: candidate.errorRate,
+              p95Ms: candidate.p95Ms,
+              windowMs: candidate.windowMs,
+            },
+          }),
       baseline: {
         known: baselineQualified,
         qualified: baselineQualified,

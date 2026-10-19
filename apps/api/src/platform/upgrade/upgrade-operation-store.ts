@@ -69,7 +69,7 @@ export class UpgradeOperationStore {
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
   ) {}
   private get sqlite() {
-    return this.upgrades.sqlite;
+    return this.upgrades.ledgerSqlite;
   }
   read(id: string): UpgradeOperationRecord {
     const row = this.sqlite

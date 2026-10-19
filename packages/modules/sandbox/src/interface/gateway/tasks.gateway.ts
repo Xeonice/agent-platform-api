@@ -119,23 +119,28 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
   afterInit(server: Namespace): void {
     this.namespace = server;
     server.use((socket, next) => {
-      const rejection = this.rejectHandshake(socket);
-      if (rejection) {
-        this.logger.warn(`tasks handshake rejected: ${rejection.message}`);
-        next(rejection);
-        return;
-      }
-      next();
+      void this.rejectHandshake(socket)
+        .then((rejection) => {
+          if (rejection) {
+            this.logger.warn(`tasks handshake rejected: ${rejection.message}`);
+            next(rejection);
+            return;
+          }
+          next();
+        })
+        .catch(() => {
+          next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+        });
     });
   }
 
   /** `null` ⇒ the handshake is acceptable. */
-  private rejectHandshake(client: Socket): Error | null {
+  private async rejectHandshake(client: Socket): Promise<Error | null> {
     // access-passcode gate FIRST, exactly like /terminal and /events: the REST guard
     // self-exempts non-HTTP contexts, so the WS handshake re-checks it itself. This
     // channel carries agent OUTPUT — the contents of a private repository, in general
     // — so an unauthenticated socket must never reach the subscribe path.
-    if (!this.auth.authorize(this.readCredentials(client))) {
+    if (!(await this.auth.authorize(this.readCredentials(client)))) {
       return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
     }
     if (this.retiring)

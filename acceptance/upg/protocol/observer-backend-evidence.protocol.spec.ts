@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fromEpochMs } from '@platform/shared-kernel';
+import type { ProcessStream } from '@platform/contracts';
 import { UpgradeObserver } from '../../../apps/api/src/platform/upgrade/upgrade-observer';
 import {
   UpgradeProbeEvidence,
@@ -21,6 +22,13 @@ import {
   type CoordinatorWriterControl,
 } from '../../../apps/api/src/platform/persistence/coordinator-lease';
 import * as integrity from '../../../apps/api/src/platform/upgrade/migration-database-integrity';
+import { upgradeDigest } from '../../../apps/api/src/platform/upgrade/upgrade-trust';
+import { upgradeRecord } from '../../../apps/api/src/platform/upgrade/upgrade-values';
+import {
+  currentUpgradeRecovery,
+  withUpgradeRecovery,
+  type UpgradeRecoveryContext,
+} from '../../../apps/api/src/platform/persistence/upgrade-recovery-context';
 
 type Json = Record<string, unknown>;
 let servers: Server[] = [],
@@ -38,7 +46,14 @@ interface Backend {
   start: string;
   headers: boolean;
   waitMs: number;
-  requests: Array<{ method: string; operationId: string; requestId: string }>;
+  requests: Array<{
+    method: string;
+    operationId: string;
+    requestId: string;
+    recoveryId?: string;
+    recoveryEpoch?: string;
+    fence?: number;
+  }>;
   identities: number;
   rotateAfterWrite: boolean;
 }
@@ -82,11 +97,12 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
       if (state.mode !== 'partial')
         res.setHeader(UPGRADE_PROBE_IDENTITY_HEADERS.startIdentity, state.start);
     }
-    let requestId: string;
+    let requestId: string, submittedFence: number | undefined;
     if (req.method === 'POST') {
       let body = '';
       for await (const bytes of req) body += String(bytes);
       const input = JSON.parse(body) as Json;
+      submittedFence = Number(input.fence);
       requestId = String(input.requestId);
       records.set(requestId, {
         request_id: requestId,
@@ -99,6 +115,15 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
       method: assertDefined(req.method),
       operationId: String(req.headers['x-operation-id']),
       requestId,
+      recoveryId:
+        typeof req.headers['x-platform-recovery-id'] === 'string'
+          ? req.headers['x-platform-recovery-id']
+          : undefined,
+      recoveryEpoch:
+        typeof req.headers['x-platform-recovery-epoch'] === 'string'
+          ? req.headers['x-platform-recovery-epoch']
+          : undefined,
+      fence: submittedFence,
     });
     res.statusCode = state.mode === 'fail' ? 500 : 200;
     res.end(JSON.stringify(records.get(requestId) ?? {}));
@@ -108,23 +133,36 @@ async function backend(digest: string, headers: boolean): Promise<Backend> {
   state.origin = 'http://127.0.0.1:' + (server.address() as { port: number }).port;
   return state;
 }
-async function fixture() {
+async function fixture(
+  options: {
+    recovery?: boolean;
+    webOnly?: boolean;
+    earlyFailure?: boolean;
+    partialSource?: boolean;
+  } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), 'upg-observer-integrity-')),
     db = new Database(join(directory, 'observation.sqlite'));
   db.exec('CREATE TABLE unrelated_history(id INTEGER PRIMARY KEY, payload BLOB)');
   files.push({ db, directory });
-  const source = await backend(sourceDigest, false),
+  const source = await backend(sourceDigest, options.recovery === true),
     candidate = await backend(candidateDigest, true);
   let binding: Json = {
     instanceId,
-    attemptId: 'attempt',
-    fence: 7,
+    attemptId: options.earlyFailure ? 'previous-serving-attempt' : 'attempt',
+    fence: options.earlyFailure ? 6 : 7,
     routeGeneration: 1,
     weight: 1,
     oldApi: { origin: source.origin, digest: sourceDigest },
     candidateApi: { origin: candidate.origin, digest: candidateDigest },
-    web: { digest: sourceDigest },
+    web: { digest: options.partialSource ? 'sha256:' + 'c'.repeat(64) : sourceDigest },
   };
+  const bindingFacts = {
+    instanceId,
+    binding: structuredClone(binding),
+    observedAt: new Date().toISOString(),
+  };
+  const bindingReceipt = { ...bindingFacts, receiptDigest: upgradeDigest(bindingFacts) };
   const durable: unknown[][] = [];
   const policy = {
     minRequests: 100,
@@ -135,6 +173,14 @@ async function fixture() {
     attachDeadlineMs: 5000,
   };
   const snapshot = {
+    sourceActual: options.partialSource
+      ? {
+          components: {
+            api: { artifactDigest: sourceDigest },
+            web: { artifactDigest: 'sha256:' + 'c'.repeat(64), webRevision: 'partial-source' },
+          },
+        }
+      : null,
     fence: 7,
     leaseExpiresAt: clock.now().getTime() + 600000,
     plan: { policy, migrationPath: {} },
@@ -177,30 +223,68 @@ async function fixture() {
       throw new Error('Observer fixture must not reacquire the writer');
     },
   } satisfies CoordinatorWriterControl;
+  const recovery: UpgradeRecoveryContext | undefined = options.recovery
+    ? {
+        instanceId,
+        recoveryId: randomUUID(),
+        attemptId: 'attempt',
+        epoch: 41,
+        mode: 'observe',
+        assertGlobal: () => {
+          if (!controllerValid) throw new Error('RECOVERY_AUTHORITY_EXPIRED_OR_SUPERSEDED');
+        },
+      }
+    : undefined;
+  const continuityResources: Json[] = [];
+  let ptyOpens = 0,
+    ptyDetaches = 0;
+  const prepare = (sql: string) => ({
+    run: (...args: unknown[]) => durable.push(args),
+    get: () =>
+      sql.includes('upgrade_continuity_baselines')
+        ? {
+            snapshot: JSON.stringify({
+              resources: continuityResources,
+              tasks: [],
+              observedAt: new Date().toISOString(),
+            }),
+          }
+        : sql.includes('upgrade_attachment_observations')
+          ? { runtime_identity: 'original-runtime', duration_ms: 1 }
+          : { n: 0 },
+  });
   const store = {
     instanceId,
     latest: () => ({ attemptId: 'attempt' }),
     snapshot: () => snapshot,
     latestProbeSnapshot: () => ({ attempt: { attemptId: 'attempt' }, ...snapshot }),
-    assertFence: () => {
-      if (!controllerValid) throw new Error('UPGRADE_FENCE_EXPIRED');
+    recoveryObservation: <T>(work: () => T): T | null =>
+      recovery ? withUpgradeRecovery(recovery, work) : null,
+    recoveryAuthorizationPlan: () => ({ businessBinding: bindingReceipt }),
+    recoveryPlan: () => ({
+      triggeringAttemptId: 'attempt',
+      api: options.webOnly ? null : { origin: source.origin, digest: sourceDigest },
+      componentScope: options.webOnly ? ['web'] : ['api'],
+    }),
+    assertRecoveryMutation: () => {
+      const actual = assertDefined(currentUpgradeRecovery());
+      expect(actual.recoveryId).toBe(recovery?.recoveryId);
+      actual.assertGlobal();
+      writer.assert();
     },
+    assertFence: (_id: string, fence: number) => {
+      if (!controllerValid) throw new Error('UPGRADE_FENCE_EXPIRED');
+      if (recovery) {
+        expect(currentUpgradeRecovery()?.recoveryId).toBe(recovery.recoveryId);
+        expect(fence).toBe(recovery.epoch);
+      }
+      return { lease_expires_at: clock.now().getTime() + 60000 };
+    },
+    ledgerSqlite: { prepare },
     sqlite: {
       name: db.name,
       [COORDINATOR_WRITER_CONTROL]: writer,
-      prepare: (sql: string) => ({
-        run: (...args: unknown[]) => durable.push(args),
-        get: () =>
-          sql.includes('upgrade_continuity_baselines')
-            ? {
-                snapshot: JSON.stringify({
-                  resources: [],
-                  tasks: [],
-                  observedAt: new Date().toISOString(),
-                }),
-              }
-            : { n: 0 },
-      }),
+      prepare,
       pragma: () => {
         throw new Error('WHOLE_DATABASE_SCAN_ON_EVENT_LOOP');
       },
@@ -213,7 +297,7 @@ async function fixture() {
     continuity: async () => ({
       qualified: true,
       observedAt: clock.now().toISOString(),
-      resources: [],
+      resources: continuityResources,
       owner: {
         operations: [],
         owners: [
@@ -226,30 +310,66 @@ async function fixture() {
         ],
       },
     }),
-    webBuild: async () => ({ webRevision: 'source' }),
+    webBuild: async () => ({ webRevision: options.partialSource ? 'partial-source' : 'source' }),
   };
   const evidence = new UpgradeProbeEvidence(clock, ids);
-  process.env.PLATFORM_ENTRY_ORIGIN = source.origin; // Real gateway traffic all lands on healthy A.
+  process.env.PLATFORM_ENTRY_ORIGIN = options.webOnly ? candidate.origin : source.origin;
   const observer = new UpgradeObserver(
     store as never,
     inspector as never,
     clock,
     ids,
-    unused<ConstructorParameters<typeof UpgradeObserver>[4]>('unused pty'),
+    options.recovery
+      ? {
+          openPty: async () => {
+            ptyOpens++;
+            const stream: ProcessStream = {
+              ref: 'recovery-attach-protocol-fixture',
+              runtimeIdentity: 'original-runtime',
+              onData: (callback) => {
+                queueMicrotask(() => callback(Buffer.from('terminal-ready')));
+              },
+              detach: () => {
+                ptyDetaches++;
+              },
+              write: () => {
+                throw new Error('Recovery attachment must not send input');
+              },
+              resize: () => {},
+              onExit: () => {},
+              kill: async () => {
+                throw new Error('Recovery attachment must not kill a task');
+              },
+            };
+            return stream;
+          },
+        }
+      : unused<ConstructorParameters<typeof UpgradeObserver>[4]>('unused pty'),
     stub<ConstructorParameters<typeof UpgradeObserver>[5]>({ projectionReadEvidence: () => [] }),
     evidence,
   );
-  const sample = (lane: UpgradeProbeLane) => observer['sample'](lane);
+  const sample = (lane: UpgradeProbeLane) =>
+    recovery
+      ? withUpgradeRecovery(recovery, () => observer['sample'](lane))
+      : observer['sample'](lane);
   const read = (lane: UpgradeProbeLane) =>
     evidence.read(
       lane,
       {
         attemptId: 'attempt',
-        fence: 7,
+        fence: recovery?.epoch ?? 7,
         routeGeneration: Number(binding.routeGeneration),
         routeWeight: Number(binding.weight),
         coordinatorGeneration: Number(process.env.COORDINATOR_GENERATION),
         observerEpoch: evidence.observerEpoch,
+        ...(recovery
+          ? {
+              recoveryId: recovery.recoveryId,
+              controlEpoch: recovery.epoch,
+              businessAttemptId: String(binding.attemptId),
+              businessFence: Number(binding.fence),
+            }
+          : {}),
       },
       5000,
     );
@@ -265,6 +385,13 @@ async function fixture() {
     db,
     inspector,
     writer,
+    recovery,
+    continuityResources,
+    attachmentCounts: () => ({ opened: ptyOpens, detached: ptyDetaches }),
+    observeRecovery: () =>
+      withUpgradeRecovery(assertDefined(recovery), () =>
+        observer.observation('attempt', assertDefined(recovery).epoch, Number(binding.weight)),
+      ),
     retireWriter: () => {
       writerValid = false;
     },
@@ -302,6 +429,17 @@ afterEach(async () => {
 });
 
 describe('UPG actual backend HTTP evidence, independent of sticky gateway success', () => {
+  it('accepts the actually proven partial source Web as the source cohort without inventing a confirmed version', async () => {
+    const f = await fixture({ partialSource: true });
+    const observation = await f.observer.observation('attempt', 7, 0);
+    expect(observation.webHealth).toMatchObject({
+      known: true,
+      healthy: true,
+      artifactDigest: 'sha256:' + 'c'.repeat(64),
+    });
+    expect(f.snapshot.sourceActivation.components.web.artifactDigest).toBe(sourceDigest);
+    expect(f.snapshot.manifest.components.web.artifactDigest).toBe(candidateDigest);
+  });
   it('collects continuity once per observation and reuses the same proof for attachment qualification', async () => {
     const f = await fixture();
     const continuity = vi.spyOn(f.inspector, 'continuity');
@@ -566,5 +704,167 @@ describe('UPG actual backend HTTP evidence, independent of sticky gateway succes
       'GLOBAL_SCHEMA_INTEGRITY_FAILED',
     );
     expect(continuity).not.toHaveBeenCalled();
+  });
+});
+
+// These tests exercise real HTTP pairs and local evidence scope. The Owner,
+// business query port and authority fixture are explicit; they are not Native
+// or release qualification and do not claim original Guest continuity.
+describe('UPG independent recovery HTTP observation namespace', () => {
+  it('keeps failed candidate out of recovery metrics and uses the new epoch with the old business barrier', async () => {
+    const f = await fixture({ recovery: true });
+    f.change({ weight: 0 });
+    f.snapshot.leaseExpiresAt = 0;
+    f.candidate.mode = 'fail';
+    await Promise.all([f.sample('gateway'), f.sample('source'), f.sample('candidate')]);
+    const observed = await f.observeRecovery();
+    expect(observed.scope).toMatchObject({
+      instanceId,
+      attemptId: 'attempt',
+      recoveryId: f.recovery?.recoveryId,
+      controlEpoch: 41,
+      fence: 41,
+      businessFence: 7,
+      routeGeneration: 1,
+      artifactDigest: sourceDigest,
+      startIdentity: f.source.start,
+    });
+    expect(observed.candidate).toBeUndefined();
+    expect(observed.candidateProbes).toBeUndefined();
+    expect(observed.recoveryProbes).toMatchObject({ known: true, failures: 0 });
+    expect(f.candidate.requests).toHaveLength(0);
+    expect(f.source.requests.some((row) => row.method === 'POST')).toBe(true);
+    expect(f.source.requests.some((row) => row.method === 'GET')).toBe(true);
+    expect(
+      f.source.requests.every(
+        (row) => row.recoveryId === f.recovery?.recoveryId && row.recoveryEpoch === '41',
+      ),
+    ).toBe(true);
+    expect(
+      f.source.requests.filter((row) => row.method === 'POST').every((row) => row.fence === 41),
+    ).toBe(true);
+    expect(f.durable).toHaveLength(0); // No legacy upgrade observation rows rewritten.
+    f.expireController();
+    await expect(f.observeRecovery()).rejects.toThrow('RECOVERY_AUTHORITY_EXPIRED_OR_SUPERSEDED');
+  });
+
+  it('can verify a Web-only recovery retaining API B at 100% without probing the retired source A', async () => {
+    const f = await fixture({ recovery: true, webOnly: true });
+    f.change({ weight: 100 });
+    f.source.mode = 'fail';
+    const observed = await f.observeRecovery();
+    expect(observed.scope).toMatchObject({
+      artifactDigest: candidateDigest,
+      startIdentity: f.candidate.start,
+      routeWeight: 100,
+      businessFence: 7,
+      controlEpoch: 41,
+    });
+    expect(observed.recoveryProbes).toMatchObject({ known: true, failures: 0 });
+    expect(observed.candidateProbes).toBeUndefined();
+    expect(f.source.requests).toHaveLength(0);
+    expect(f.candidate.requests.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('cannot mature a recovery window using ordinary success or a changed process identity', async () => {
+    const f = await fixture({ recovery: true });
+    f.change({ weight: 0 });
+    await Promise.all([f.sample('gateway'), f.sample('source')]);
+    expect(f.read('source')).toMatchObject({ known: true, requests: 1 });
+    assertDefined(f.recovery).epoch = 42;
+    expect(f.read('source')).toMatchObject({ known: false, requests: 0 });
+    await Promise.all([f.sample('gateway'), f.sample('source')]);
+    expect(f.read('source')).toMatchObject({
+      known: true,
+      requests: 1,
+      scope: { controlEpoch: 42 },
+    });
+    f.source.start = randomUUID();
+    await f.sample('source');
+    expect(f.read('source')).toMatchObject({
+      known: true,
+      requests: 1,
+      windowMs: 0,
+      scope: { startIdentity: f.source.start },
+    });
+  });
+
+  it('rejects an Entry attempt or business fence change within the frozen recovery authorization', async () => {
+    const f = await fixture({ recovery: true, earlyFailure: true });
+    f.change({ weight: 0 });
+    const initial = await f.observeRecovery();
+    expect(initial.scope).toMatchObject({
+      attemptId: 'attempt',
+      businessAttemptId: 'previous-serving-attempt',
+      businessFence: 6,
+    });
+    f.change({ attemptId: 'attempt' });
+    await expect(f.observeRecovery()).rejects.toThrow('RECOVERY_BUSINESS_BINDING_CHANGED');
+    f.change({ attemptId: 'previous-serving-attempt', fence: 7 });
+    await expect(f.observeRecovery()).rejects.toThrow('RECOVERY_BUSINESS_BINDING_CHANGED');
+  });
+
+  it('requires a full real 60-second early-failure recovery read/write window at 10Hz on the prior serving attempt before reporting measured coverage', async () => {
+    const f = await fixture({ recovery: true, earlyFailure: true });
+    f.change({ weight: 0 });
+    f.snapshot.leaseExpiresAt = 0;
+    f.candidate.mode = 'fail';
+    const initial = await f.observeRecovery();
+    expect(initial.recoveryProbes).toMatchObject({ known: true, samples: 1 });
+    expect(f.read('source').windowMs).toBeLessThan(60000);
+    f.observer.onApplicationBootstrap();
+    try {
+      await vi.waitFor(
+        () => {
+          expect(f.read('source').windowMs).toBe(60000);
+          expect(f.read('gateway').windowMs).toBe(60000);
+        },
+        { timeout: 68000, interval: 250 },
+      );
+      const observed = await f.observeRecovery();
+      expect(observed.scope).toMatchObject({
+        attemptId: 'attempt',
+        businessAttemptId: 'previous-serving-attempt',
+        businessFence: 6,
+        controlEpoch: 41,
+      });
+      const recovery = upgradeRecord(observed.recoveryProbes);
+      expect(recovery.samples).toBeGreaterThanOrEqual(600);
+      expect(recovery.hz).toBeGreaterThanOrEqual(10);
+      expect(recovery.failures).toBe(0);
+      expect(recovery.windowMs).toBe(60000);
+      expect(f.candidate.requests).toHaveLength(0);
+      expect(f.source.requests.length).toBeGreaterThanOrEqual(2400);
+      expect(
+        f.source.requests
+          .filter((row) => row.method === 'POST')
+          .every((row) =>
+            f.source.requests.some(
+              (read) => read.method === 'GET' && read.requestId === row.requestId,
+            ),
+          ),
+      ).toBe(true);
+    } finally {
+      f.observer.onModuleDestroy();
+    }
+  }, 75000);
+});
+
+describe('UPG recovery attachment evidence lifetime', () => {
+  it('opens a new attachment per recovery scope instead of using the original attempt SQL cache', async () => {
+    const f = await fixture({ recovery: true });
+    f.change({ weight: 0 });
+    f.continuityResources.push({
+      sandboxId: 'original-sandbox',
+      runtimeIdentity: 'original-runtime',
+      status: 'running',
+    });
+    await f.observeRecovery();
+    expect(f.attachmentCounts()).toEqual({ opened: 1, detached: 1 });
+    await f.observeRecovery();
+    expect(f.attachmentCounts()).toEqual({ opened: 1, detached: 1 });
+    assertDefined(f.recovery).epoch = 42;
+    await f.observeRecovery();
+    expect(f.attachmentCounts()).toEqual({ opened: 2, detached: 2 });
   });
 });

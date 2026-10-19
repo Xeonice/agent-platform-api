@@ -201,7 +201,13 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       if (value !== undefined) headers[name] = value;
     }
     if (req.path === '/api/system/upgrade/probe') {
-      for (const name of ['x-platform-internal-key', 'x-platform-instance-id']) {
+      for (const name of [
+        'x-platform-internal-key',
+        'x-platform-instance-id',
+        'x-platform-recovery-id',
+        'x-platform-recovery-epoch',
+        'x-platform-control-epoch',
+      ]) {
         const value = req.headers[name];
         if (value !== undefined) headers[name] = value;
       }

@@ -1,3 +1,9 @@
+import { resolve } from 'node:path';
+import { platformInstanceId } from '@platform/shared-kernel';
+import {
+  assertControlMetadataBusinessCompatibility,
+  CONTROL_METADATA_MIGRATION,
+} from './control-metadata-schema-bridge';
 import type Database from 'better-sqlite3';
 import { imageRuntimeSchemaCommitted } from '../upgrade/image-runtime-schema-migration';
 import { requireUpgrade } from '../upgrade/upgrade-trust';
@@ -10,6 +16,18 @@ export function assertCoordinatorMigrationCompatibility(
   localMigrationCount: number,
   allowEmpty = false,
 ): void {
+  if (process.env.UPGRADE_CONTROL_DATABASE_PATH) {
+    requireUpgrade(
+      localMigrationCount === CONTROL_METADATA_MIGRATION.compiledSchema,
+      'CONTROL_METADATA_MIGRATION_UNREVIEWED',
+    );
+    assertControlMetadataBusinessCompatibility(
+      sqlite,
+      process.env.MIGRATIONS_DIR ?? resolve(process.cwd(), 'drizzle'),
+      platformInstanceId(),
+    );
+    return;
+  }
   const journal = sqlite
     .prepare<unknown[], { found: number }>(
       "SELECT 1 AS found FROM sqlite_master WHERE name='__drizzle_migrations'",

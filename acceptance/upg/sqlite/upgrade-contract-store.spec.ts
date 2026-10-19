@@ -30,6 +30,18 @@ import {
   upgradeDigest,
 } from '../../../apps/api/src/platform/upgrade/upgrade-trust';
 import { useEnv } from '../../support/strict-ports';
+import Database from 'better-sqlite3';
+import { UpgradeContractBusiness } from '../../../apps/api/src/platform/upgrade/upgrade-contract-business';
+import {
+  UpgradeOnlineMigration,
+  OnlineMigrationPlanSchema,
+} from '../../../apps/api/src/platform/upgrade/upgrade-online-migration';
+import { createUpgradeControlStores } from '../../../apps/api/src/platform/upgrade/control-store-factory';
+import { withContractRequest } from '../../../apps/api/src/platform/upgrade/upgrade-contract-control';
+import {
+  fenceCoordinatorConnection,
+  coordinatorWriterControl,
+} from '../../../apps/api/src/platform/persistence/coordinator-lease';
 
 // Real committed SQLite and production ledgers. The signed manifest/receipts
 // here are explicit STATE-layer input, never trusted/native qualification proof.
@@ -235,6 +247,58 @@ function count() {
       .get() as { n: number }
   ).n;
 }
+function contractBusinessFixture() {
+  const migrationPlan = OnlineMigrationPlanSchema.parse({
+    schemaVersion: 1,
+    kind: 'expand-shadow',
+    fromSchema: current().schema,
+    targetSchema: current().schema,
+    maxBatchRows: 2,
+    oldRepresentationRetained: true,
+    newSemanticsEnabled: false,
+    projections: [
+      {
+        sourceTable: 'projects',
+        primaryKey: 'id',
+        targetTable: 'upg_shadow_projects',
+        fields: [{ name: 'display_name', source: 'name', type: 'text' }],
+      },
+    ],
+  });
+  const digest = upgradeDigest(migrationPlan);
+  connection.sqlite
+    .prepare("INSERT INTO upgrade_online_migrations VALUES(?,?,?,'complete',?,3,1,0,NULL,?)")
+    .run(
+      digest,
+      'state-fixture-expand',
+      canonicalUpgrade(migrationPlan),
+      canonicalUpgrade({ phase: 'complete' }),
+      now,
+    );
+  connection.sqlite.exec(
+    'CREATE TABLE upg_shadow_projects(row_key TEXT PRIMARY KEY,row_revision INTEGER,tombstone INTEGER,display_name TEXT)',
+  );
+  for (let n = 0; n < 3; n++) {
+    connection.sqlite
+      .prepare(
+        "INSERT INTO projects(id,name,source_type,clone_status,baseline_path,created_at,updated_at) VALUES(?,?,'empty','ready',?,?,?)",
+      )
+      .run(
+        'p' + String(n),
+        'Name ' + String(n),
+        '/isolated/contract-project-' + String(n),
+        now,
+        now,
+      );
+    connection.sqlite
+      .prepare('INSERT INTO upg_shadow_projects VALUES(?,1,0,?)')
+      .run('p' + String(n), 'Name ' + String(n));
+  }
+  const { planDigest: _oldDigest, ...facts } = fixed().plan,
+    spec = { ...facts, expandPlanDigest: digest, batchBudgetMs: 1000 };
+  const plan = UpgradeContractPlanSchema.parse({ ...spec, planDigest: upgradeDigest(spec) });
+  return { ...fixed(), plan };
+}
 beforeEach(() => {
   now = Date.parse('2026-10-12T05:00:00Z');
   root = mkdtempSync(join(tmpdir(), 'upg-contract-ledger-'));
@@ -251,6 +315,196 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 describe('UPG actual SQLite independent semantic contract intent and authority', () => {
+  it('commits actual semantic effects, durable command receipt and legacy control progress atomically; replay cannot clear twice', () => {
+    const fixedInput = contractBusinessFixture();
+    let record = contracts.accept(
+      'state-actor',
+      command(fixedInput.plan.planDigest),
+      fixedInput,
+      0,
+    );
+    record = contracts.save(record, {
+      state: 'retiring-readers',
+      stage: 'state fixture reader gate',
+    });
+    const business = new UpgradeContractBusiness(
+      contracts,
+      new UpgradeOnlineMigration(upgrades, clock),
+      undefined as never,
+      clock,
+    );
+    expect(() =>
+      business.activate(record, () => {
+        throw new Error('fixture progress transaction failed');
+      }),
+    ).toThrow('fixture progress transaction failed');
+    expect(
+      connection.sqlite.prepare('SELECT read_epoch FROM upgrade_online_migrations').get(),
+    ).toEqual({ read_epoch: 1 });
+    expect(
+      business.lookup(
+        record.attempt.contractAttemptId,
+        record.attempt.contractAttemptId + ':activate',
+      ),
+    ).toBeNull();
+    business.activate(record, (total) => {
+      record = contracts.save(record, {
+        state: 'authority-active',
+        stage: 'activated',
+        totalRows: total,
+      });
+    });
+    const clearRecord = record,
+      clearCommand = {
+        action: 'clear' as const,
+        contractAttemptId: record.attempt.contractAttemptId,
+        fence: record.fence,
+        expectedSequence: record.attempt.sequence,
+        commandId: record.attempt.contractAttemptId + ':clear:' + String(record.attempt.sequence),
+      };
+    business.clear(record, (batch) => {
+      record = contracts.save(record, {
+        state: batch.complete ? 'completed' : 'clearing',
+        stage: 'clear actual batch',
+        completedRows: record.attempt.completedRows + batch.cleared,
+      });
+    });
+    const once = connection.sqlite.prepare('SELECT id,name FROM projects ORDER BY id').all(),
+      receipt = business.lookup(clearRecord.attempt.contractAttemptId, clearCommand.commandId);
+    expect(business.execute(clearCommand)).toEqual(receipt);
+    expect(connection.sqlite.prepare('SELECT id,name FROM projects ORDER BY id').all()).toEqual(
+      once,
+    );
+    expect(record.attempt.completedRows).toBe(2);
+    business.clear(record, (batch) => {
+      record = contracts.save(record, {
+        state: batch.complete ? 'completed' : 'clearing',
+        stage: 'clear final actual batch',
+        completedRows: record.attempt.completedRows + batch.cleared,
+      });
+    });
+    expect(record.attempt).toMatchObject({ state: 'completed', completedRows: 3 });
+    expect(
+      connection.sqlite
+        .prepare('SELECT display_name FROM upg_shadow_projects ORDER BY row_key')
+        .all(),
+    ).toEqual([{ display_name: 'Name 0' }, { display_name: 'Name 1' }, { display_name: 'Name 2' }]);
+  });
+  it('keeps fixed contract fence separate from a reclaimed global epoch in an actual independent ledger', () => {
+    const fixedInput = contractBusinessFixture(),
+      control = new Database(join(root, 'independent-control.db'));
+    const controlStores = createUpgradeControlStores({
+      sqlite: control,
+      instanceId: upgrades.instanceId,
+      clock,
+      ids,
+      claimGuard: () => null,
+      dataFormatGuard: () => {},
+    });
+    controlStores.store.bootstrap(current());
+    let record = controlStores.contracts.accept(
+      'state-actor',
+      command(fixedInput.plan.planDigest),
+      fixedInput,
+      0,
+    );
+    record = controlStores.contracts.save(record, {
+      state: 'retiring-readers',
+      stage: 'qualified state fixture',
+    });
+    const epoch = record.fence + 100,
+      id = record.attempt.contractAttemptId;
+    control.exec(
+      'CREATE TABLE control_authority(instance_id TEXT PRIMARY KEY,epoch INTEGER,operation_id TEXT,kind TEXT,mode TEXT,holder_id TEXT,lease_expires_at INTEGER); CREATE TABLE control_contract_authority(contract_attempt_id TEXT PRIMARY KEY,instance_id TEXT,intent_fence INTEGER,epoch INTEGER,executor_id TEXT,sequence INTEGER,claimed_at INTEGER,updated_at INTEGER)',
+    );
+    control
+      .prepare("INSERT INTO control_authority VALUES(?,?,?,'contract','active','executor-a',?)")
+      .run(upgrades.instanceId, epoch, id, now + 30000);
+    control
+      .prepare('INSERT INTO control_contract_authority VALUES(?,?,?,?,?,1,?,?)')
+      .run(id, upgrades.instanceId, record.fence, epoch, 'executor-a', now, now);
+    const reader = new Database(join(root, 'independent-control.db'), { readonly: true });
+    const restoreWriter = useEnv({
+      COORDINATOR_GENERATION: undefined,
+      COORDINATOR_WRITER_FENCE_VALID: undefined,
+    });
+    const fenced = fenceCoordinatorConnection(connection.sqlite, upgrades.instanceId, clock, ids),
+      participant = new UpgradeStore(fenced, clock, ids, {
+        instanceId: upgrades.instanceId,
+        readonly: true,
+        ledgerSqlite: reader,
+      });
+    const participantContracts = new UpgradeContractStore(participant, clock, ids),
+      business = new UpgradeContractBusiness(
+        participantContracts,
+        new UpgradeOnlineMigration(participant, clock),
+        undefined as never,
+        clock,
+      );
+    const privateRequest = (value: number) => ({
+      headers: { 'x-platform-contract-id': id, 'x-platform-control-epoch': String(value) },
+    });
+    const apply = {
+      action: 'activate' as const,
+      contractAttemptId: id,
+      fence: record.fence,
+      expectedSequence: record.attempt.sequence,
+      commandId: id + ':activate',
+    };
+    try {
+      expect(() => business.execute(apply)).toThrow('CONTRACT_CONTROL_AUTHORITY_REQUIRED');
+      const receipt = withContractRequest(
+        privateRequest(epoch),
+        participantContracts,
+        clock,
+        id,
+        () => business.execute(apply),
+      );
+      expect(receipt.fence).toBe(record.fence);
+      expect(
+        connection.sqlite
+          .prepare(
+            "SELECT fence,request_digest FROM platform_operations WHERE role='schema-contract-admission'",
+          )
+          .get(),
+      ).toEqual({ fence: epoch, request_digest: String(record.fence) });
+      control.prepare("UPDATE control_authority SET epoch=epoch+1,holder_id='executor-b'").run();
+      control
+        .prepare(
+          "UPDATE control_contract_authority SET epoch=epoch+1,executor_id='executor-b',sequence=sequence+1",
+        )
+        .run();
+      expect(
+        withContractRequest(privateRequest(epoch + 1), participantContracts, clock, id, () =>
+          business.execute(apply),
+        ),
+      ).toEqual(receipt);
+      expect(() =>
+        withContractRequest(privateRequest(epoch), participantContracts, clock, id, () =>
+          business.execute(apply),
+        ),
+      ).toThrow('CONTRACT_CONTROL_AUTHORITY_EXPIRED_OR_SUPERSEDED');
+      expect(() =>
+        withContractRequest(privateRequest(epoch + 1), participantContracts, clock, id, () =>
+          business.execute({ ...apply, expectedSequence: apply.expectedSequence + 1 }),
+        ),
+      ).toThrow('CONTRACT_BUSINESS_COMMAND_CONFLICT');
+      control.prepare("UPDATE control_authority SET kind='recovery'").run();
+      expect(() =>
+        withContractRequest(privateRequest(epoch + 1), participantContracts, clock, id, () =>
+          business.execute(apply),
+        ),
+      ).toThrow('CONTRACT_CONTROL_AUTHORITY_EXPIRED_OR_SUPERSEDED');
+      expect(
+        control.prepare("SELECT name FROM sqlite_master WHERE name='projects'").get(),
+      ).toBeUndefined();
+    } finally {
+      coordinatorWriterControl(fenced).release();
+      restoreWriter();
+      reader.close();
+      control.close();
+    }
+  });
   it('same actor/request/payload is one intent, actor lookups are isolated and changed payload is rejected', () => {
     const input = command(),
       first = accept('actor-a', input);

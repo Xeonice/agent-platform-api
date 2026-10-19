@@ -57,8 +57,8 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
    * can see.
    */
   afterInit(server: Namespace): void {
-    server.use((socket, next) => {
-      if (!this.auth.authorize(this.readCredentials(socket))) {
+    const authorize = async (socket: Socket, next: (error?: Error) => void) => {
+      if (!(await this.auth.authorize(this.readCredentials(socket)))) {
         this.logger.warn('events handshake rejected: missing/invalid access passcode');
         next(wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode'));
         return;
@@ -73,6 +73,11 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
         return;
       }
       next();
+    };
+    server.use((socket, next) => {
+      void authorize(socket, next).catch(() => {
+        next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+      });
     });
   }
 

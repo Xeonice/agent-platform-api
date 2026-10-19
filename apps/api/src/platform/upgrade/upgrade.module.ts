@@ -1,3 +1,11 @@
+import { UpgradeInspectionController } from './upgrade-inspection.controller';
+import { UpgradeLedgerConnection } from './upgrade-ledger-connection';
+import { UPGRADE_STORE_OPTIONS } from './upgrade-control-bridge';
+import {
+  UPGRADE_INSPECTOR,
+  UPGRADE_CONTRACT_SERVICE,
+  UPGRADE_PROJECTION,
+} from './upgrade-inspection.port';
 import { Global, Module } from '@nestjs/common';
 import { JOB_COMPLETION_RECEIPTS, SqliteJobCompletionReceipts } from '@platform/sandbox';
 import { PROJECT_READ_PROJECTION } from '@platform/project';
@@ -20,15 +28,33 @@ import { UpgradeContractService } from './upgrade-contract-service';
 import { UpgradeContractInternalController } from './upgrade.controller';
 import { UpgradeOperationStore } from './upgrade-operation-store';
 import { UpgradeProjection } from './upgrade-projection';
+import { UpgradeContractBusiness } from './upgrade-contract-business';
+import { UPGRADE_CONTRACT_BUSINESS } from './upgrade-contract-business.port';
+import { UpgradeContractBusinessController } from './upgrade-contract-business.controller';
 
 @Global()
 @Module({
   imports: [ControlRpcModule],
-  controllers: [UpgradeController, UpgradeInternalController, UpgradeContractInternalController],
+  controllers: [
+    UpgradeController,
+    UpgradeInternalController,
+    UpgradeContractInternalController,
+    UpgradeInspectionController,
+    UpgradeContractBusinessController,
+  ],
   providers: [
     UpgradeStore,
+    UpgradeLedgerConnection,
+    {
+      provide: UPGRADE_STORE_OPTIONS,
+      inject: [UpgradeLedgerConnection],
+      useFactory: (connection: UpgradeLedgerConnection) => connection.options(),
+    },
     UpgradeCatalog,
     UpgradeInspector,
+    { provide: UPGRADE_INSPECTOR, useExisting: UpgradeInspector },
+    { provide: UPGRADE_CONTRACT_SERVICE, useExisting: UpgradeContractService },
+    { provide: UPGRADE_PROJECTION, useExisting: UpgradeProjection },
     UpgradeSecurity,
     UpgradeService,
     UpgradeOperationStore,
@@ -40,6 +66,8 @@ import { UpgradeProjection } from './upgrade-projection';
     UpgradeOnlineMigration,
     CoordinatorRecovery,
     UpgradeContractStore,
+    UpgradeContractBusiness,
+    { provide: UPGRADE_CONTRACT_BUSINESS, useExisting: UpgradeContractBusiness },
     UpgradeContractService,
     { provide: JOB_COMPLETION_RECEIPTS, useClass: SqliteJobCompletionReceipts },
     {

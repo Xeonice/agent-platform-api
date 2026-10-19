@@ -115,3 +115,58 @@ describe('UPG process-local rolling proof boundaries', () => {
     });
   });
 });
+
+describe('UPG recovery proof is a separate observation namespace', () => {
+  it('does not let a matching ordinary numeric fence inherit recovery HTTP counts', () => {
+    const f = fixture();
+    const scope = {
+      ...f.scope,
+      recoveryId: randomUUID(),
+      controlEpoch: 41,
+      businessFence: 7,
+      fence: 41,
+    };
+    const key = f.evidence.begin('source', scope);
+    f.time(20);
+    f.evidence.record('source', key, f.sample(0), 71000);
+    expect(f.evidence.read('source', scope, 5000)).toMatchObject({ known: true, requests: 1 });
+    const {
+      recoveryId: _recovery,
+      controlEpoch: _epoch,
+      businessFence: _barrier,
+      ...ordinary
+    } = scope;
+    expect(f.evidence.read('source', ordinary, 5000)).toMatchObject({
+      known: false,
+      requests: 0,
+      scope: null,
+    });
+  });
+  it('requires a new real cohort after recovery epoch, business binding or target process changes', () => {
+    const f = fixture();
+    const scope = {
+      ...f.scope,
+      recoveryId: randomUUID(),
+      controlEpoch: 41,
+      businessFence: 7,
+      fence: 41,
+    };
+    const old = f.evidence.begin('source', scope);
+    f.time(20);
+    f.evidence.record('source', old, f.sample(0), 71000);
+    for (const changed of [
+      { ...scope, recoveryId: randomUUID() },
+      { ...scope, controlEpoch: 42, fence: 42 },
+      { ...scope, businessFence: 8 },
+      { ...scope, startIdentity: 'replacement-process' },
+    ]) {
+      f.evidence.begin('source', changed);
+      expect(f.evidence.record('source', old, f.sample(0), 71000)).toBe(false);
+      expect(f.evidence.read('source', changed, 5000)).toMatchObject({
+        known: false,
+        requests: 0,
+        windowMs: 0,
+      });
+    }
+  });
+});

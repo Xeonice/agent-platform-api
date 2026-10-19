@@ -1,3 +1,5 @@
+import { loopbackOrigin, persistedBinding } from './upgrade-inspection-boundary';
+export { loopbackOrigin, persistedBinding } from './upgrade-inspection-boundary';
 import { z } from 'zod';
 import { SignedUpgradeManifestSchema, UpgradePlanSchema } from '@platform/contracts';
 import {
@@ -39,28 +41,18 @@ import { env } from '../config/env';
 import { UpgradeOnlineMigration } from './upgrade-online-migration';
 import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import { PasscodeService } from '../access-passcode/passcode.service';
-import { SESSION_COOKIE } from '../access-passcode/session-cookie';
 import { UpgradeProbeEvidence } from './upgrade-probe-evidence';
 import { imageRuntimeSchemaCommitted } from './image-runtime-schema-migration';
 import { initialSourceActivation, sourceArtifactProof } from './upgrade-artifact-proof';
 import { observeUpgradeOnce } from './upgrade-observation';
 import type { DefaultImageSnapshot } from './upgrade-operation-store';
 import { verifyMigrationDatabaseIntegrity } from './migration-database-integrity';
+import { migratedSourceArtifact } from './upgrade-migrated-artifact';
 
 function assertSourceActual(value: unknown): asserts value is UpgradeSourceActual | null {
   UpgradeSourceActualSchema.nullable().parse(value);
 }
 type Json = Record<string, unknown>;
-export function persistedBinding(value: Json): Json {
-  const {
-    inFlight: _requests,
-    activeWS: _sockets,
-    httpByDigest: _http,
-    wsByDigest: _ws,
-    ...persistent
-  } = value;
-  return persistent;
-}
 interface ResourceRow {
   id: string;
   provider: string;
@@ -79,22 +71,6 @@ interface ResourceProof {
   headless: boolean;
 }
 
-export function loopbackOrigin(value: unknown): string {
-  requireUpgrade(typeof value === 'string', 'PRIVATE_ORIGIN_REQUIRED');
-  const url = new URL(value);
-  requireUpgrade(
-    url.protocol === 'http:' &&
-      ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname) &&
-      !url.username &&
-      !url.password &&
-      url.pathname === '/' &&
-      !url.search &&
-      !url.hash,
-    'PRIVATE_ORIGIN_REQUIRED',
-  );
-  return url.origin;
-}
-
 /** Live probes are capabilities of the Coordinator, never caller-supplied booleans. */
 @Injectable()
 export class UpgradeInspector {
@@ -104,13 +80,20 @@ export class UpgradeInspector {
     @Inject(SANDBOX_PROVIDER_REGISTRY) private readonly providers: ProviderRegistry,
     private readonly migrations: UpgradeOnlineMigration,
     private readonly security: UpgradeSecurity,
-    private readonly passcodes: PasscodeService,
+    _passcodes: PasscodeService,
     @Inject(JOB_COMPLETION_RECEIPTS) private readonly jobCompletions: JobCompletionReceipts,
     @Inject(SANDBOX_EXEC_PORT) private readonly exec: SandboxExecPort,
     private readonly probeEvidence: UpgradeProbeEvidence,
   ) {}
   get observedAt(): string {
     return this.clock.now().toISOString();
+  }
+  requiresProjectNameV2(): boolean {
+    return Boolean(
+      this.store.sqlite
+        .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+        .get(),
+    );
   }
   defaultImagesSnapshot(): DefaultImageSnapshot[] {
     const hasVersions = z
@@ -181,7 +164,10 @@ export class UpgradeInspector {
     const key = process.env.PLATFORM_INSTALLER_SUPERVISOR_KEY;
     requireUpgrade(key && key.length >= 32, 'INSTALLER_OBSERVER_REQUIRED');
     const response = await fetch(origin + '/metadata', {
-      headers: { 'x-platform-internal-key': key },
+      headers: {
+        'x-platform-internal-key': key,
+        'x-platform-instance-id': this.store.instanceId,
+      },
       signal: AbortSignal.timeout(1500),
     });
     requireUpgrade(response.ok, 'ACTUAL_INSTALLER_UNKNOWN');
@@ -332,12 +318,22 @@ export class UpgradeInspector {
       owner.instanceId === this.store.instanceId && owner.ownerId === route.ownerId,
       'ACTUAL_OWNER_UNKNOWN',
     );
-    const installs = this.store.sqlite
+    const installs = this.store.ledgerSqlite
       .prepare<unknown[], { manifest: string; plan: string }>(
         'SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC',
       )
       .all(this.store.instanceId);
-    const candidates: { root: string; components: ConfirmedServiceRelease['components'] }[] = [];
+    const candidates: {
+      root: string;
+      components: ConfirmedServiceRelease['components'];
+      provenanceVerified?: true;
+    }[] = [];
+    const migrated = await migratedSourceArtifact({
+      instanceId: this.store.instanceId,
+      clock: this.clock,
+      installerProgramRoot: installer.programRoot,
+    });
+    if (migrated) candidates.push(migrated);
     if (process.env.UPGRADE_INITIAL_ARTIFACT_ROOT) {
       const initial = await initialSourceActivation(this.store);
       candidates.push({
@@ -381,7 +377,7 @@ export class UpgradeInspector {
         );
       });
       requireUpgrade(match, 'SOURCE_COMPONENT_UNCONFIRMED');
-      if (!verified.has(match.root)) {
+      if (!verified.has(match.root) && !match.provenanceVerified) {
         await this.verifySourceArtifact(match.root, match.components);
         verified.add(match.root);
       }
@@ -698,37 +694,30 @@ export class UpgradeInspector {
           >('SELECT coalesce(max(seq),0) n FROM audit_events')
           .get(),
       ).n,
-      authContinuityFingerprint: this.authFingerprint(),
+      authContinuityFingerprint: (await this.security.continuityEvidence(this.store.instanceId))
+        .fingerprint,
       observedAt: this.observedAt,
     };
   }
-  private authFingerprint(): string {
-    return upgradeDigest({
-      upgrade: this.security.continuityFingerprint(this.store.instanceId),
-      access: this.passcodes.issueSessionToken(0),
-    });
-  }
   async authenticationContinuity(id: string, fence: number, origin: unknown): Promise<boolean> {
     this.store.assertFence(id, fence);
-    const row = this.store.sqlite
+    const row = this.store.ledgerSqlite
       .prepare<unknown[], { snapshot: string }>(
         'SELECT snapshot FROM upgrade_continuity_baselines WHERE attempt_id=?',
       )
       .get(id);
     if (!row) return false;
     const expected = upgradeRecord(JSON.parse(row.snapshot)).authContinuityFingerprint;
-    const legacy = this.security.legacyContinuityFingerprint(this.store.instanceId);
+    const evidence = await this.security.continuityEvidence(this.store.instanceId);
     const legacyBaseline =
-      legacy !== null &&
-      expected === upgradeDigest({ upgrade: legacy, access: this.passcodes.issueSessionToken(0) });
-    if (expected !== this.authFingerprint() && !legacyBaseline) return false;
-    const challenge = this.security.continuityChallenge(this.store.instanceId, legacyBaseline);
-    const cookie =
-      challenge.cookie +
-      '; ' +
-      SESSION_COOKIE +
-      '=' +
-      encodeURIComponent(this.passcodes.issueSessionToken(this.clock.now().getTime()));
+      evidence.legacyFingerprint !== null && expected === evidence.legacyFingerprint;
+    if (expected !== evidence.fingerprint && !legacyBaseline) return false;
+    const challenge = await this.security.continuityChallengeAsync(
+      this.store.instanceId,
+      legacyBaseline,
+    );
+    if (challenge.policyRevision !== evidence.policyRevision) return false;
+    const cookie = challenge.cookie;
     try {
       // A Web outage must not make the independent cookie/capability proof
       // depend on Catalog, installed-Web or Runtime health. The current
@@ -765,7 +754,7 @@ export class UpgradeInspector {
     }
   }
   recordBaseline(id: string, snapshot: Json): void {
-    this.store.sqlite
+    this.store.ledgerSqlite
       .prepare('INSERT OR IGNORE INTO upgrade_continuity_baselines VALUES(?,?,?,?)')
       .run(id, canonicalUpgrade(snapshot), upgradeDigest(snapshot), this.clock.now().getTime());
   }
@@ -841,7 +830,7 @@ export class UpgradeInspector {
           ),
         'REPAIR_SOURCE_NOT_TERMINAL',
       );
-    const record = this.store.sqlite
+    const record = this.store.ledgerSqlite
       .prepare<unknown[], { snapshot: string; digest: string }>(
         'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
       )

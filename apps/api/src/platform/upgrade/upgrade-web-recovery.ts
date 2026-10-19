@@ -7,8 +7,8 @@ import { getHeapStatistics } from 'node:v8';
 import type { Clock } from '@platform/shared-kernel';
 import { ConfirmedServiceReleaseSchema, SignedUpgradeManifestSchema } from '@platform/contracts';
 import type { UpgradeStore } from './upgrade-store';
-import type { UpgradeInspector } from './upgrade-inspector';
-import { loopbackOrigin } from './upgrade-inspector';
+import type { UpgradeInspectionPort } from './upgrade-inspection.port';
+import { loopbackOrigin } from './upgrade-inspection-boundary';
 import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
 import { env } from '../config/env';
 import { initialSourceActivation } from './upgrade-artifact-proof';
@@ -25,7 +25,7 @@ export function assertRecoveryTargets(plan: Json, eligibility: Json): void {
 }
 /** A measured failure domain cannot expand a fixed user's recovery authority. */
 export function persistedFaultScope(store: UpgradeStore, id: string): string[] {
-  const row = store.sqlite
+  const row = store.ledgerSqlite
     .prepare<unknown[], { payload: string }>(
       "SELECT payload FROM upgrade_events WHERE attempt_id=? AND kind IN ('failed','ready-revoked') ORDER BY sequence DESC LIMIT 1",
     )
@@ -38,7 +38,7 @@ export function persistedFaultScope(store: UpgradeStore, id: string): string[] {
 }
 export async function qualifyWebRecovery(
   store: UpgradeStore,
-  inspector: UpgradeInspector,
+  inspector: UpgradeInspectionPort,
   clock: Clock,
   id: string,
   fence: number,
@@ -144,7 +144,7 @@ export async function qualifyWebRecovery(
       (!migration || (migrationRow?.stage === 'complete' && !migrationRow.degraded && !pending)),
     'WEB_RECOVERY_DATA_OR_OWNER_UNCONFIRMED',
   );
-  const baseline = store.sqlite
+  const baseline = store.ledgerSqlite
     .prepare<unknown[], { snapshot: string; digest: string }>(
       'SELECT snapshot,digest FROM upgrade_continuity_baselines WHERE attempt_id=?',
     )
@@ -154,7 +154,7 @@ export async function qualifyWebRecovery(
     baseline.digest === upgradeDigest(JSON.parse(baseline.snapshot)),
     'CONTINUITY_BASELINE_CORRUPT',
   );
-  const previous = store.sqlite
+  const previous = store.ledgerSqlite
     .prepare<unknown[], { manifest: string; plan: string }>(
       "SELECT manifest,plan FROM upgrade_attempts WHERE instance_id=? AND target_release_id=? AND state='activation-confirmed' ORDER BY generation DESC LIMIT 1",
     )

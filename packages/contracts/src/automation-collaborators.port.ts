@@ -187,5 +187,5 @@ export const ACCESS_GATE_READER = Symbol('AccessGateReader');
  * 变成「能让平台向内网任意地址发 POST 的人」。
  */
 export interface AccessGateReader {
-  isEnabled(): boolean;
+  isEnabled(): boolean | Promise<boolean>;
 }
