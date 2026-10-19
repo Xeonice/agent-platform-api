@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import { SANDBOX_EVENT_BROADCASTER, type SandboxEventBroadcaster } from '@platform/contracts';
@@ -18,6 +19,8 @@ interface SessionObservation {
 /** One timer for all attached TTYs. Display-only state is never persisted or published to Outbox. */
 @Injectable()
 export class WaitingInputDetector implements WaitingInputObserver, OnModuleInit, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('terminal.waiting-input');
+
   private readonly sessions = new Map<string, SessionObservation>();
   private readonly waitingSandboxes = new Set<string>();
   private readonly heuristic: PromptHeuristic;
@@ -109,13 +112,15 @@ export class WaitingInputDetector implements WaitingInputObserver, OnModuleInit,
   }
 
   onModuleInit(): void {
-    this.timer = setInterval(() => {
-      this.tick();
-    }, 1000);
+    this.timer = this.worker.ownInterval(
+      setInterval(() => {
+        this.tick();
+      }, 1000),
+    );
     this.timer.unref();
   }
   onModuleDestroy(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.worker.cancel(this.timer);
     this.timer = undefined;
     for (const id of this.sessions.keys()) this.detach(id);
   }

@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { errorMessage } from '@platform/shared-kernel';
 import {
   Inject,
@@ -158,6 +159,8 @@ const FALLBACK_QUOTA = { cores: 1, ramMb: 512, diskMb: 1024 };
  */
 @Injectable()
 export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('sandbox.provision');
+
   private readonly logger = new Logger('ProvisionSandboxWorkflow');
   private readonly cancelled = new Set<string>();
   private readonly active = new Map<string, Promise<void>>();
@@ -218,89 +221,91 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
       void this.resumeUnconfirmed().catch(() => undefined);
     };
     recover();
-    this.recoveryTimer = setInterval(recover, 15_000);
+    this.recoveryTimer = this.worker.ownInterval(setInterval(recover, 15_000));
     this.recoveryTimer.unref();
   }
   onModuleDestroy(): void {
-    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    if (this.recoveryTimer) this.worker.cancel(this.recoveryTimer);
   }
   async resumeUnconfirmed(): Promise<void> {
-    if (!this.createIntents || !this.providers || this.recovering || this.ownershipPaused) return;
-    const epoch = this.writer?.epoch?.() ?? 0;
-    this.assertEpoch(epoch);
-    this.recovering = true;
-    try {
-      for (const intent of await this.createIntents.pending()) {
-        this.assertEpoch(epoch);
-        if (this.active.has(intent.sandboxId)) continue;
-        const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
-        this.assertEpoch(epoch);
-        if (!sandbox || !['creating', 'starting', 'running', 'idle'].includes(sandbox.status))
-          continue;
-        if (sandbox.status === 'running' || sandbox.status === 'idle') {
-          this.uow.run((tx) => this.createIntents?.finishSync(tx, sandbox.id));
-          this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
-          continue;
+    return this.worker.run(async () => {
+      if (!this.createIntents || !this.providers || this.recovering || this.ownershipPaused) return;
+      const epoch = this.writer?.epoch?.() ?? 0;
+      this.assertEpoch(epoch);
+      this.recovering = true;
+      try {
+        for (const intent of await this.createIntents.pending()) {
+          this.assertEpoch(epoch);
+          if (this.active.has(intent.sandboxId)) continue;
+          const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
+          this.assertEpoch(epoch);
+          if (!sandbox || !['creating', 'starting', 'running', 'idle'].includes(sandbox.status))
+            continue;
+          if (sandbox.status === 'running' || sandbox.status === 'idle') {
+            this.uow.run((tx) => this.createIntents?.finishSync(tx, sandbox.id));
+            this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
+            continue;
+          }
+          const provider = this.providers.get(sandbox.provider);
+          if (sandbox.status === 'creating') {
+            const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
+            this.assertEpoch(epoch);
+            if (receipt?.state !== 'complete') continue;
+            const handle = RuntimeOwnerHandleSchema.parse(receipt.result);
+            if (handle.provider !== sandbox.provider)
+              throw new Error('ORIGINAL_PROVIDER_CREATE_RECEIPT_MISMATCH');
+            sandbox.bindRuntime({
+              providerSandboxId: handle.providerSandboxId,
+              providerState: handle.providerState ?? null,
+              workspacePath: intent.workspacePath,
+            });
+            this.persist(sandbox, sandbox.id);
+          }
+          await this.restartSafely(sandbox, provider, true);
+          this.assertEpoch(epoch);
         }
-        const provider = this.providers.get(sandbox.provider);
-        if (sandbox.status === 'creating') {
+        // Reuse this existing periodic owner reconciliation. This branch never
+        // calls stop: only the exact accepted native receipt may finish it.
+        for (const intent of (await this.stopIntents?.pending()) ?? []) {
+          this.assertEpoch(epoch);
+          const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
+          this.assertEpoch(epoch);
+          if (!sandbox || sandbox.status === 'destroyed' || sandbox.status === 'stopped') {
+            this.uow.run((tx) =>
+              this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now()),
+            );
+            continue;
+          }
+          if (sandbox.status !== 'stopping') continue;
+          const provider = this.providers.get(sandbox.provider);
           const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
           this.assertEpoch(epoch);
           if (receipt?.state !== 'complete') continue;
-          const handle = RuntimeOwnerHandleSchema.parse(receipt.result);
-          if (handle.provider !== sandbox.provider)
-            throw new Error('ORIGINAL_PROVIDER_CREATE_RECEIPT_MISMATCH');
-          sandbox.bindRuntime({
-            providerSandboxId: handle.providerSandboxId,
-            providerState: handle.providerState ?? null,
-            workspacePath: intent.workspacePath,
+          const handle = this.handleOf(sandbox);
+          const actual = await provider.inspect(handle);
+          this.assertEpoch(epoch);
+          if (actual.lifecycleState !== 'instance_exited') continue;
+          const current = await this.repo.findById(sandbox.id);
+          this.assertEpoch(epoch);
+          if (current?.status !== 'stopping' || current.version !== sandbox.version) continue;
+          current.transitionTo('stopped', 'user', this.clock.now());
+          this.uow.run((tx) => {
+            this.repo.saveSync(tx, current);
+            this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now());
+            this.events.publishInTx(tx, current.pullEvents());
           });
-          this.persist(sandbox, sandbox.id);
         }
-        await this.restartSafely(sandbox, provider, true);
-        this.assertEpoch(epoch);
+      } finally {
+        this.recovering = false;
       }
-      // Reuse this existing periodic owner reconciliation. This branch never
-      // calls stop: only the exact accepted native receipt may finish it.
-      for (const intent of (await this.stopIntents?.pending()) ?? []) {
-        this.assertEpoch(epoch);
-        const sandbox = await this.repo.findById(asSandboxId(intent.sandboxId));
-        this.assertEpoch(epoch);
-        if (!sandbox || sandbox.status === 'destroyed' || sandbox.status === 'stopped') {
-          this.uow.run((tx) =>
-            this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now()),
-          );
-          continue;
-        }
-        if (sandbox.status !== 'stopping') continue;
-        const provider = this.providers.get(sandbox.provider);
-        const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
-        this.assertEpoch(epoch);
-        if (receipt?.state !== 'complete') continue;
-        const handle = this.handleOf(sandbox);
-        const actual = await provider.inspect(handle);
-        this.assertEpoch(epoch);
-        if (actual.lifecycleState !== 'instance_exited') continue;
-        const current = await this.repo.findById(sandbox.id);
-        this.assertEpoch(epoch);
-        if (current?.status !== 'stopping' || current.version !== sandbox.version) continue;
-        current.transitionTo('stopped', 'user', this.clock.now());
-        this.uow.run((tx) => {
-          this.repo.saveSync(tx, current);
-          this.stopIntents?.finishSync(tx, intent.operationId, this.clock.now());
-          this.events.publishInTx(tx, current.pullEvents());
-        });
-      }
-    } finally {
-      this.recovering = false;
-    }
+    });
   }
   /** Never cancel an accepted background create to make a binary handoff fit.
    * A live slow operation keeps this writer in place until it naturally drains. */
   pauseOwnership(): boolean {
     if (this.active.size || this.recovering) return false;
     this.ownershipPaused = true;
-    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    if (this.recoveryTimer) this.worker.cancel(this.recoveryTimer);
     this.recoveryTimer = undefined;
     return true;
   }
@@ -324,40 +329,48 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     source: WorkspaceSource,
   ): Promise<void> {
-    try {
-      await this.run(sandbox, provider, source);
-    } catch (e) {
-      // run() already marked `failed`, recorded the reason and tore down any orphan.
-      this.logger.error(`provision failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
-    }
+    return this.worker.run(async () => {
+      try {
+        await this.run(sandbox, provider, source);
+      } catch (e) {
+        // run() already marked `failed`, recorded the reason and tore down any orphan.
+        this.logger.error(`provision failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
+      }
+    });
   }
 
   async run(sandbox: Sandbox, provider: SandboxProvider, source: WorkspaceSource): Promise<void> {
-    return this.track(sandbox.id, () => this.provision(sandbox, provider, source));
+    return this.worker.run(async () => {
+      return this.track(sandbox.id, () => this.provision(sandbox, provider, source));
+    });
   }
 
   /** Stop at the next IO boundary and wait for any late provider handle to be recorded. */
   cancel(sandboxId: string): Promise<void> {
-    this.cancelled.add(sandboxId);
-    return this.active.get(sandboxId) ?? Promise.resolve();
+    return this.worker.run(async () => {
+      this.cancelled.add(sandboxId);
+      return this.active.get(sandboxId) ?? Promise.resolve();
+    });
   }
 
   private track(sandboxId: string, work: () => Promise<void>): Promise<void> {
-    if (this.ownershipPaused) throw new ProvisionOwnershipSuperseded();
-    const existing = this.active.get(sandboxId);
-    if (existing) return existing;
-    const epoch = this.writer?.epoch?.() ?? 0;
-    this.assertEpoch(epoch);
-    this.activeEpochs.set(sandboxId, epoch);
-    let settle!: () => void;
-    const idle = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
-    this.active.set(sandboxId, idle);
-    return work().finally(() => {
-      this.active.delete(sandboxId);
-      this.activeEpochs.delete(sandboxId);
-      settle();
+    return this.worker.run(async () => {
+      if (this.ownershipPaused) throw new ProvisionOwnershipSuperseded();
+      const existing = this.active.get(sandboxId);
+      if (existing) return existing;
+      const epoch = this.writer?.epoch?.() ?? 0;
+      this.assertEpoch(epoch);
+      this.activeEpochs.set(sandboxId, epoch);
+      let settle!: () => void;
+      const idle = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      this.active.set(sandboxId, idle);
+      return work().finally(() => {
+        this.active.delete(sandboxId);
+        this.activeEpochs.delete(sandboxId);
+        settle();
+      });
     });
   }
 
@@ -449,198 +462,200 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     source: WorkspaceSource,
   ): Promise<void> {
-    // hoisted so the failure path can tear down a container that WAS created (e.g. a
-    // later `start`/install failure) — otherwise it orphans (S1 audit P1-2).
-    let handle: SandboxHandle | undefined;
-    let workspacePath: string | undefined;
-    let bound = false;
-    let submittedCreate = false;
-    // ── 阶段计时（03 §7.8 `sandbox.provision.stage`）────────────────────────────
-    // 「启动 237s→4s 无历史可比」是这几行存在的全部理由：状态流转本身已经在
-    // `sandbox_state_transitions` 里，缺的是**每一段花了多久**。
-    const provisionStartedAt = this.clock.now().getTime();
-    // 当前跑到哪一段 —— 失败时用它给那条 outcome:'failed' 的审计定位。
-    let stage = 'scheduling';
-    let stageStartedAt = provisionStartedAt;
-    // 当前阶段除耗时之外**还能说清什么**。⚠️ 它必须在 `enter` 时清空：上一段的
-    // 解释挂到下一段上,比不解释更糟 —— 读的人会拿它当这一段的成因。
-    let stageDetail: Record<string, unknown> = {};
-    const enter = (name: string): void => {
-      stage = name;
-      stageStartedAt = this.clock.now().getTime();
-      stageDetail = {};
-    };
-    const done = (): void => {
-      this.recordStage(sandbox, stage, stageStartedAt, 'ok', undefined, stageDetail);
-    };
-    try {
-      this.beginStartup(sandbox, 'workspace-preparation');
-      this.advance(sandbox, 'scheduling', 'scheduler');
-      this.advance(sandbox, 'preparing-workspace', 'scheduler');
-      enter('preparing-workspace');
-      // `source.branch` (if any) was already checked against the baseline's refs at the
-      // create door, so the checkout inside `prepare` is a local operation expected to
-      // succeed; a failure here is a real fault and lands as WORKSPACE_PREPARE_FAILED.
-      const ws = await this.workspace.prepare(sandbox.id, source);
-      workspacePath = ws.hostPath;
-      this.assertActive(sandbox.id);
-      done();
-      this.recordWorkspacePrepared(sandbox, ws);
-
-      this.advance(sandbox, 'creating', 'scheduler');
-      enter('creating');
-      this.observeStartup(sandbox.id, { stage: 'instance-create', state: 'inflight' });
-      const image = await this.imageSpecOf(sandbox);
-      // env-form credentials (claude's `CLAUDE_CODE_OAUTH_TOKEN`, an api-key) can ONLY
-      // be delivered at instance creation: a per-call `env` would be visible in `ps`
-      // inside the sandbox (04 §2.3★ 第 2 条), and an already-started process cannot
-      // have env added. So the credential is resolved once here and REUSED for the
-      // post-start `injectCredential` — resolving it twice would decrypt twice for no
-      // gain. Credentials are written LAST into the env map so a same-named user
-      // variable can never win (05 §4.1 "凭证永远赢，靠顺序而非黑名单").
-      const credentials = await this.prepareCredentials(sandbox);
-      // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
-      // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
-      // 超分配」防的是一个与真实占用无关的数。
-      const quota = (await this.resources.reservedQuotaOf(sandbox.id)) ?? FALLBACK_QUOTA;
+    return this.worker.run(async () => {
+      // hoisted so the failure path can tear down a container that WAS created (e.g. a
+      // later `start`/install failure) — otherwise it orphans (S1 audit P1-2).
+      let handle: SandboxHandle | undefined;
+      let workspacePath: string | undefined;
+      let bound = false;
+      let submittedCreate = false;
+      // ── 阶段计时（03 §7.8 `sandbox.provision.stage`）────────────────────────────
+      // 「启动 237s→4s 无历史可比」是这几行存在的全部理由：状态流转本身已经在
+      // `sandbox_state_transitions` 里，缺的是**每一段花了多久**。
+      const provisionStartedAt = this.clock.now().getTime();
+      // 当前跑到哪一段 —— 失败时用它给那条 outcome:'failed' 的审计定位。
+      let stage = 'scheduling';
+      let stageStartedAt = provisionStartedAt;
+      // 当前阶段除耗时之外**还能说清什么**。⚠️ 它必须在 `enter` 时清空：上一段的
+      // 解释挂到下一段上,比不解释更糟 —— 读的人会拿它当这一段的成因。
+      let stageDetail: Record<string, unknown> = {};
+      const enter = (name: string): void => {
+        stage = name;
+        stageStartedAt = this.clock.now().getTime();
+        stageDetail = {};
+      };
+      const done = (): void => {
+        this.recordStage(sandbox, stage, stageStartedAt, 'ok', undefined, stageDetail);
+      };
       try {
-        const usable = await this.reserveInjection(sandbox, credentials);
+        this.beginStartup(sandbox, 'workspace-preparation');
+        this.advance(sandbox, 'scheduling', 'scheduler');
+        this.advance(sandbox, 'preparing-workspace', 'scheduler');
+        enter('preparing-workspace');
+        // `source.branch` (if any) was already checked against the baseline's refs at the
+        // create door, so the checkout inside `prepare` is a local operation expected to
+        // succeed; a failure here is a real fault and lands as WORKSPACE_PREPARE_FAILED.
+        const ws = await this.workspace.prepare(sandbox.id, source);
+        workspacePath = ws.hostPath;
         this.assertActive(sandbox.id);
-        const createInput: SandboxProviderContext = {
-          sandboxId: sandbox.id,
-          quota,
-          image: image.spec,
-          // ⚠️ ORDER IS THE GUARANTEE, NOT A BLACKLIST (05 §4.1「凭证永远赢，靠顺序而非
-          // 校验」). The image's own run parameters go in FIRST and the runtime
-          // credential LAST, so a user-defined variable can never shadow a credential
-          // — and `EnvVarSet` already refuses the credential NAMES at save time, which
-          // makes this belt and braces rather than either alone.
-          env: { ...image.env, ...mergeCredentialEnv(usable) },
-          volumes: [
-            {
-              source: ws.hostPath,
-              target: SANDBOX_WORKSPACE_MOUNT,
-              mode: 'rw',
-              kind: 'host-path',
+        done();
+        this.recordWorkspacePrepared(sandbox, ws);
+
+        this.advance(sandbox, 'creating', 'scheduler');
+        enter('creating');
+        this.observeStartup(sandbox.id, { stage: 'instance-create', state: 'inflight' });
+        const image = await this.imageSpecOf(sandbox);
+        // env-form credentials (claude's `CLAUDE_CODE_OAUTH_TOKEN`, an api-key) can ONLY
+        // be delivered at instance creation: a per-call `env` would be visible in `ps`
+        // inside the sandbox (04 §2.3★ 第 2 条), and an already-started process cannot
+        // have env added. So the credential is resolved once here and REUSED for the
+        // post-start `injectCredential` — resolving it twice would decrypt twice for no
+        // gain. Credentials are written LAST into the env map so a same-named user
+        // variable can never win (05 §4.1 "凭证永远赢，靠顺序而非黑名单").
+        const credentials = await this.prepareCredentials(sandbox);
+        // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
+        // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
+        // 超分配」防的是一个与真实占用无关的数。
+        const quota = (await this.resources.reservedQuotaOf(sandbox.id)) ?? FALLBACK_QUOTA;
+        try {
+          const usable = await this.reserveInjection(sandbox, credentials);
+          this.assertActive(sandbox.id);
+          const createInput: SandboxProviderContext = {
+            sandboxId: sandbox.id,
+            quota,
+            image: image.spec,
+            // ⚠️ ORDER IS THE GUARANTEE, NOT A BLACKLIST (05 §4.1「凭证永远赢，靠顺序而非
+            // 校验」). The image's own run parameters go in FIRST and the runtime
+            // credential LAST, so a user-defined variable can never shadow a credential
+            // — and `EnvVarSet` already refuses the credential NAMES at save time, which
+            // makes this belt and braces rather than either alone.
+            env: { ...image.env, ...mergeCredentialEnv(usable) },
+            volumes: [
+              {
+                source: ws.hostPath,
+                target: SANDBOX_WORKSPACE_MOUNT,
+                mode: 'rw',
+                kind: 'host-path',
+              },
+            ],
+            labels: { 'platform.sandboxId': sandbox.id },
+          };
+          const operation = {
+            operationId: `sandbox-create-${sandbox.id}`,
+            actor: this.authority?.current?.()?.actor ?? {
+              kind: 'system' as const,
+              id: `accepted-sandbox-${sandbox.id}`,
             },
-          ],
-          labels: { 'platform.sandboxId': sandbox.id },
-        };
-        const operation = {
-          operationId: `sandbox-create-${sandbox.id}`,
-          actor: this.authority?.current?.()?.actor ?? {
-            kind: 'system' as const,
-            id: `accepted-sandbox-${sandbox.id}`,
-          },
-        };
-        if (this.createIntents)
-          this.uow.run((tx) =>
-            this.createIntents?.reserveSync(
-              tx,
-              sandbox.id,
-              operation.operationId,
-              createInput,
-              ws.hostPath,
-              this.clock.now(),
-            ),
+          };
+          if (this.createIntents)
+            this.uow.run((tx) =>
+              this.createIntents?.reserveSync(
+                tx,
+                sandbox.id,
+                operation.operationId,
+                createInput,
+                ws.hostPath,
+                this.clock.now(),
+              ),
+            );
+          submittedCreate = true;
+          handle = this.authority
+            ? await this.authority.run(operation, () => provider.create(createInput))
+            : await provider.create(createInput);
+          this.assertActive(sandbox.id);
+          sandbox.bindRuntime({
+            providerSandboxId: handle.providerSandboxId,
+            workspacePath: ws.hostPath,
+            // persist any provider runtime binding (boxlite's forwarded agent port,
+            // and the agent bearer token both providers mint) so a backend restart can
+            // rebuild the handle and still reach the instance.
+            providerState: handle.providerState ?? null,
+          });
+          this.persist(sandbox, sandbox.id); // handle and bound create receipt commit together
+          bound = true;
+          done();
+
+          this.advance(sandbox, 'starting', 'scheduler');
+          enter('starting');
+          // ⚠️ **在这里问、而不是在 `runStartingSteps` 里面问**,有两个理由:
+          // ① 阶段结束时再问永远得到 `true`（镜像那时已经铺好了）—— 那等于什么都没说,
+          //    而这条信息的全部价值就是解释**这一段为什么慢**;
+          // ② 失败路径同样拿得到它。`provider.start()` 炸在铺 13GB 镜像的中途,与炸在
+          //    一个早就 staged 的镜像上,是两个不同的故障,下一步动作也不同。
+          stageDetail = await this.imageStagedOf(provider, image.spec);
+          await this.runStartingSteps(sandbox, provider, handle, image.spec, usable, stageDetail);
+          done();
+        } finally {
+          for (const c of credentials) c.credential.zeroize();
+        }
+
+        this.advance(sandbox, 'running', 'scheduler');
+        this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
+        this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
+      } catch (e) {
+        if (this.superseded(sandbox.id)) throw e;
+        if (this.authority && submittedCreate && (!bound || this.isUnconfirmed(e))) {
+          this.observeStartup(sandbox.id, { state: 'unknown' });
+          // Owner create may have completed before a response/lease/DB ack vanished.
+          // Keep its original reservation, workspace and quota; lookup alone recovers.
+          this.logger.warn(
+            `sandbox ${sandbox.id}: original provision result is unconfirmed; resource reservation retained`,
           );
-        submittedCreate = true;
-        handle = this.authority
-          ? await this.authority.run(operation, () => provider.create(createInput))
-          : await provider.create(createInput);
-        this.assertActive(sandbox.id);
-        sandbox.bindRuntime({
-          providerSandboxId: handle.providerSandboxId,
-          workspacePath: ws.hostPath,
-          // persist any provider runtime binding (boxlite's forwarded agent port,
-          // and the agent bearer token both providers mint) so a backend restart can
-          // rebuild the handle and still reach the instance.
-          providerState: handle.providerState ?? null,
-        });
-        this.persist(sandbox, sandbox.id); // handle and bound create receipt commit together
-        bound = true;
-        done();
-
-        this.advance(sandbox, 'starting', 'scheduler');
-        enter('starting');
-        // ⚠️ **在这里问、而不是在 `runStartingSteps` 里面问**,有两个理由:
-        // ① 阶段结束时再问永远得到 `true`（镜像那时已经铺好了）—— 那等于什么都没说,
-        //    而这条信息的全部价值就是解释**这一段为什么慢**;
-        // ② 失败路径同样拿得到它。`provider.start()` 炸在铺 13GB 镜像的中途,与炸在
-        //    一个早就 staged 的镜像上,是两个不同的故障,下一步动作也不同。
-        stageDetail = await this.imageStagedOf(provider, image.spec);
-        await this.runStartingSteps(sandbox, provider, handle, image.spec, usable, stageDetail);
-        done();
-      } finally {
-        for (const c of credentials) c.credential.zeroize();
-      }
-
-      this.advance(sandbox, 'running', 'scheduler');
-      this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
-      this.recordStage(sandbox, 'provision', provisionStartedAt, 'ok');
-    } catch (e) {
-      if (this.superseded(sandbox.id)) throw e;
-      if (this.authority && submittedCreate && (!bound || this.isUnconfirmed(e))) {
-        this.observeStartup(sandbox.id, { state: 'unknown' });
-        // Owner create may have completed before a response/lease/DB ack vanished.
-        // Keep its original reservation, workspace and quota; lookup alone recovers.
-        this.logger.warn(
-          `sandbox ${sandbox.id}: original provision result is unconfirmed; resource reservation retained`,
-        );
+          throw e;
+        }
+        if (this.cancelled.has(sandbox.id)) {
+          // A create can finish after cancellation. Teardown owns the late handle;
+          // never resume starting or overwrite the deleting row with the old aggregate.
+          const current = await this.repo.findById(sandbox.id);
+          if (handle && !bound && workspacePath) {
+            if (current?.status === 'destroying') {
+              current.bindRuntime({
+                providerSandboxId: handle.providerSandboxId,
+                providerState: handle.providerState,
+                workspacePath,
+              });
+              this.uow.run((tx) => {
+                this.repo.saveSync(tx, current);
+              });
+            } else {
+              await withTeardownDeadline(provider.destroy(handle), sandbox.id).catch(
+                (error: unknown) => {
+                  this.logger.error(
+                    `late cancelled instance cleanup pending for ${sandbox.id}: ${String(error)}`,
+                  );
+                },
+              );
+            }
+          }
+          // A bounded deletion may already have failed or the project transaction
+          // may have removed its row while a copy/create was suspended. Initial
+          // preparation has no user成果 to preserve; its late directory must go.
+          if (!bound && workspacePath && current?.status !== 'destroying')
+            await this.workspace.cleanup(sandbox.id, { keep: false }).catch((error: unknown) => {
+              this.logger.error(
+                `late cancelled workspace cleanup failed for ${sandbox.id}: ${String(error)}`,
+              );
+            });
+          return;
+        }
+        // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
+        // 多久才看见失败）回答的是两个不同的问题，而失败路径上聚合**不 publish 任何
+        // 领域事件** —— projector 一条都收不到，这里不记就永远没有记录（13 §2.8.2）。
+        this.recordStage(sandbox, stage, stageStartedAt, 'failed', e, stageDetail);
+        // ⚠️ 整段 `provision` **刻意不带** stageDetail:它横跨多个阶段,把某一段的解释
+        // 挂在总计上会让读者以为那是整段的成因。
+        this.recordStage(sandbox, 'provision', provisionStartedAt, 'failed', e);
+        this.compensate(sandbox, e);
+        this.observeStartup(sandbox.id, { state: 'failed' });
+        if (handle) await provider.destroy(handle).catch(() => undefined);
+        await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
+        // 03 §640：失败即**回滚配额登记**。沙箱已落 `failed`（终态），它不会再占任何东西
+        // —— 不还回去，一台机器上每一次 provision 失败都会永久吃掉一格容量，最终把整个
+        // 平台饿死在一堆早已消失的沙箱上。
+        await this.resources.release(sandbox.id);
         throw e;
       }
-      if (this.cancelled.has(sandbox.id)) {
-        // A create can finish after cancellation. Teardown owns the late handle;
-        // never resume starting or overwrite the deleting row with the old aggregate.
-        const current = await this.repo.findById(sandbox.id);
-        if (handle && !bound && workspacePath) {
-          if (current?.status === 'destroying') {
-            current.bindRuntime({
-              providerSandboxId: handle.providerSandboxId,
-              providerState: handle.providerState,
-              workspacePath,
-            });
-            this.uow.run((tx) => {
-              this.repo.saveSync(tx, current);
-            });
-          } else {
-            await withTeardownDeadline(provider.destroy(handle), sandbox.id).catch(
-              (error: unknown) => {
-                this.logger.error(
-                  `late cancelled instance cleanup pending for ${sandbox.id}: ${String(error)}`,
-                );
-              },
-            );
-          }
-        }
-        // A bounded deletion may already have failed or the project transaction
-        // may have removed its row while a copy/create was suspended. Initial
-        // preparation has no user成果 to preserve; its late directory must go.
-        if (!bound && workspacePath && current?.status !== 'destroying')
-          await this.workspace.cleanup(sandbox.id, { keep: false }).catch((error: unknown) => {
-            this.logger.error(
-              `late cancelled workspace cleanup failed for ${sandbox.id}: ${String(error)}`,
-            );
-          });
-        return;
-      }
-      // ⚠️ **两条，不是一条。** 失败那一段（哪一步炸的）与整段 provision（用户等了
-      // 多久才看见失败）回答的是两个不同的问题，而失败路径上聚合**不 publish 任何
-      // 领域事件** —— projector 一条都收不到，这里不记就永远没有记录（13 §2.8.2）。
-      this.recordStage(sandbox, stage, stageStartedAt, 'failed', e, stageDetail);
-      // ⚠️ 整段 `provision` **刻意不带** stageDetail:它横跨多个阶段,把某一段的解释
-      // 挂在总计上会让读者以为那是整段的成因。
-      this.recordStage(sandbox, 'provision', provisionStartedAt, 'failed', e);
-      this.compensate(sandbox, e);
-      this.observeStartup(sandbox.id, { state: 'failed' });
-      if (handle) await provider.destroy(handle).catch(() => undefined);
-      await this.workspace.cleanup(sandbox.id, { keep: false }).catch(() => undefined);
-      // 03 §640：失败即**回滚配额登记**。沙箱已落 `failed`（终态），它不会再占任何东西
-      // —— 不还回去，一台机器上每一次 provision 失败都会永久吃掉一格容量，最终把整个
-      // 平台饿死在一堆早已消失的沙箱上。
-      await this.resources.release(sandbox.id);
-      throw e;
-    }
+    });
   }
 
   /**
@@ -671,11 +686,13 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     resumeOriginal = false,
   ): Promise<void> {
-    try {
-      await this.restart(sandbox, provider, resumeOriginal);
-    } catch (e) {
-      this.logger.error(`restart failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
-    }
+    return this.worker.run(async () => {
+      try {
+        await this.restart(sandbox, provider, resumeOriginal);
+      } catch (e) {
+        this.logger.error(`restart failed for sandbox ${sandbox.id}: ${errorMessage(e)}`);
+      }
+    });
   }
 
   async restart(
@@ -683,7 +700,9 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     resumeOriginal = false,
   ): Promise<void> {
-    return this.track(sandbox.id, () => this.restartInstance(sandbox, provider, resumeOriginal));
+    return this.worker.run(async () => {
+      return this.track(sandbox.id, () => this.restartInstance(sandbox, provider, resumeOriginal));
+    });
   }
 
   private async restartInstance(
@@ -691,49 +710,51 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     resumeOriginal: boolean,
   ): Promise<void> {
-    const handle = this.handleOf(sandbox);
-    const startedAt = this.clock.now().getTime();
-    let stageDetail: Record<string, unknown> = {};
-    try {
-      this.beginStartup(sandbox, 'instance-start', resumeOriginal);
-      if (sandbox.status !== 'starting') this.advance(sandbox, 'starting', 'scheduler');
-      const spec = (await this.imageSpecOf(sandbox)).spec;
-      // 重启重新验证任务所选 Agent 的凭证：用户可能已在停止后删除或替换凭证，重启之后
-      //    盒子里的事实就变了，`injectedRuntimes` 必须跟着覆盖（见实体上的注释）。
-      const credentials = await this.prepareCredentials(sandbox);
+    return this.worker.run(async () => {
+      const handle = this.handleOf(sandbox);
+      const startedAt = this.clock.now().getTime();
+      let stageDetail: Record<string, unknown> = {};
       try {
-        // Recovery must make the same eligibility decision as first provision:
-        // an already expired credential is omitted before delivery, while the
-        // injection checks still reject a later revocation of a reserved one.
-        const usable = await this.reserveInjection(sandbox, credentials);
-        this.assertActive(sandbox.id);
-        // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
-        // 而用户对「重启」的时间预期比「新建」短得多。
-        stageDetail = await this.imageStagedOf(provider, spec);
-        await this.runStartingSteps(sandbox, provider, handle, spec, usable, stageDetail);
-      } finally {
-        for (const c of credentials) c.credential.zeroize();
-      }
-      this.advance(sandbox, 'running', 'scheduler');
-      this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
-      this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
-    } catch (e) {
-      if (this.superseded(sandbox.id)) throw e;
-      if (this.cancelled.has(sandbox.id)) return;
-      if (this.authority && this.isUnconfirmed(e)) {
-        this.observeStartup(sandbox.id, { state: 'unknown' });
-        this.logger.warn(
-          `sandbox ${sandbox.id}: original start remains unconfirmed; reservation retained`,
-        );
+        this.beginStartup(sandbox, 'instance-start', resumeOriginal);
+        if (sandbox.status !== 'starting') this.advance(sandbox, 'starting', 'scheduler');
+        const spec = (await this.imageSpecOf(sandbox)).spec;
+        // 重启重新验证任务所选 Agent 的凭证：用户可能已在停止后删除或替换凭证，重启之后
+        //    盒子里的事实就变了，`injectedRuntimes` 必须跟着覆盖（见实体上的注释）。
+        const credentials = await this.prepareCredentials(sandbox);
+        try {
+          // Recovery must make the same eligibility decision as first provision:
+          // an already expired credential is omitted before delivery, while the
+          // injection checks still reject a later revocation of a reserved one.
+          const usable = await this.reserveInjection(sandbox, credentials);
+          this.assertActive(sandbox.id);
+          // 重启同样要问 —— 停机期间镜像可能已被回收，那时这一次重启会和首次一样慢，
+          // 而用户对「重启」的时间预期比「新建」短得多。
+          stageDetail = await this.imageStagedOf(provider, spec);
+          await this.runStartingSteps(sandbox, provider, handle, spec, usable, stageDetail);
+        } finally {
+          for (const c of credentials) c.credential.zeroize();
+        }
+        this.advance(sandbox, 'running', 'scheduler');
+        this.observeStartup(sandbox.id, { stage: 'completed', state: 'succeeded' });
+        this.recordStage(sandbox, 'restart', startedAt, 'ok', undefined, stageDetail);
+      } catch (e) {
+        if (this.superseded(sandbox.id)) throw e;
+        if (this.cancelled.has(sandbox.id)) return;
+        if (this.authority && this.isUnconfirmed(e)) {
+          this.observeStartup(sandbox.id, { state: 'unknown' });
+          this.logger.warn(
+            `sandbox ${sandbox.id}: original start remains unconfirmed; reservation retained`,
+          );
+          throw e;
+        }
+        this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
+        this.compensate(sandbox, e, 'start');
+        this.observeStartup(sandbox.id, { state: 'failed' });
+        // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
+        await this.resources.release(sandbox.id);
         throw e;
       }
-      this.recordStage(sandbox, 'restart', startedAt, 'failed', e, stageDetail);
-      this.compensate(sandbox, e, 'start');
-      this.observeStartup(sandbox.id, { state: 'failed' });
-      // 重启失败同样落 `failed`（终态）⇒ 同样回滚配额，理由与首次 provision 那条一致。
-      await this.resources.release(sandbox.id);
-      throw e;
-    }
+    });
   }
 
   /**
@@ -749,69 +770,71 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     /** 调用方已经问过了 —— 这里再问一次会拿到不同的答案，见调用点的注释。 */
     imageStaged: { imageStaged?: boolean },
   ): Promise<void> {
-    // ① + ② — start, and gate on in-sandbox agent readiness (inside `start`).
-    //
-    // ⚠️ 这一个 `await` 是整段 provision 里**最长、且唯一没有任何事件覆盖**的一段：
-    // 实测冷 store 190529ms（13GB 的 `platform/sandbox:v2` 现拉 + 铺 rootfs），期间
-    // `sandbox.status` 恒为 `starting`、CPU 是 0%、到 registry 一条连接都没有 ——
-    // 用户判它卡死，排查的人第一眼也判它卡死。下面两帧就是为了把这一段的**边界**
-    // 说出来；进度百分比没有（provider 只给得出「开始」和「结束」，编一个就是幽灵字段）。
-    this.assertActive(sandbox.id);
-    this.broadcaster.broadcast({
-      event: 'sandbox.instance_progress',
-      sandboxId: sandbox.id,
-      phase: 'starting',
-      ...imageStaged,
-    });
-    this.assertActive(sandbox.id);
-    this.observeStartup(sandbox.id, { stage: 'instance-start', state: 'inflight' });
-    const alreadyRunning = this.authority
-      ? (await provider.inspect(handle)).lifecycleState === 'instance_running'
-      : false;
-    this.assertActive(sandbox.id);
-    if (this.authority) this.observeStartup(sandbox.id, { heartbeat: true });
-    if (!alreadyRunning) await provider.start(handle);
-    this.assertActive(sandbox.id);
-    this.broadcaster.broadcast({
-      event: 'sandbox.instance_progress',
-      sandboxId: sandbox.id,
-      phase: 'ready',
-    });
-    const underlyingExec = toExecFn(provider, handle);
-    const exec: SandboxExecFn = async (cmd, options) => {
+    return this.worker.run(async () => {
+      // ① + ② — start, and gate on in-sandbox agent readiness (inside `start`).
+      //
+      // ⚠️ 这一个 `await` 是整段 provision 里**最长、且唯一没有任何事件覆盖**的一段：
+      // 实测冷 store 190529ms（13GB 的 `platform/sandbox:v2` 现拉 + 铺 rootfs），期间
+      // `sandbox.status` 恒为 `starting`、CPU 是 0%、到 registry 一条连接都没有 ——
+      // 用户判它卡死，排查的人第一眼也判它卡死。下面两帧就是为了把这一段的**边界**
+      // 说出来；进度百分比没有（provider 只给得出「开始」和「结束」，编一个就是幽灵字段）。
       this.assertActive(sandbox.id);
-      const result = await underlyingExec(cmd, options);
+      this.broadcaster.broadcast({
+        event: 'sandbox.instance_progress',
+        sandboxId: sandbox.id,
+        phase: 'starting',
+        ...imageStaged,
+      });
       this.assertActive(sandbox.id);
-      return result;
-    };
+      this.observeStartup(sandbox.id, { stage: 'instance-start', state: 'inflight' });
+      const alreadyRunning = this.authority
+        ? (await provider.inspect(handle)).lifecycleState === 'instance_running'
+        : false;
+      this.assertActive(sandbox.id);
+      if (this.authority) this.observeStartup(sandbox.id, { heartbeat: true });
+      if (!alreadyRunning) await provider.start(handle);
+      this.assertActive(sandbox.id);
+      this.broadcaster.broadcast({
+        event: 'sandbox.instance_progress',
+        sandboxId: sandbox.id,
+        phase: 'ready',
+      });
+      const underlyingExec = toExecFn(provider, handle);
+      const exec: SandboxExecFn = async (cmd, options) => {
+        this.assertActive(sandbox.id);
+        const result = await underlyingExec(cmd, options);
+        this.assertActive(sandbox.id);
+        return result;
+      };
 
-    // ③ install the runtime CLI. Deliberately BEFORE ④: there is no point injecting
-    // a credential for a CLI that is not there yet, and both steps need `exec`.
-    this.observeStartup(sandbox.id, { stage: 'runtime-tools', state: 'inflight' });
-    await this.installs.ensureInstalled({
-      sandboxId: sandbox.id,
-      runtimeId: sandbox.runtime,
-      image,
-      exec,
+      // ③ install the runtime CLI. Deliberately BEFORE ④: there is no point injecting
+      // a credential for a CLI that is not there yet, and both steps need `exec`.
+      this.observeStartup(sandbox.id, { stage: 'runtime-tools', state: 'inflight' });
+      await this.installs.ensureInstalled({
+        sandboxId: sandbox.id,
+        runtimeId: sandbox.runtime,
+        image,
+        exec,
+      });
+      this.assertActive(sandbox.id);
+
+      // ③.5 落 runtime 启动前需要的文件。**刻意排在 ④ 之前、且与 ④ 无关**:
+      // ④ 只在有凭证时才跑,而这一步要处理的闸门(codex 的目录信任提示)在**没有凭证时
+      // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
+      this.observeStartup(sandbox.id, { stage: 'environment-initialization' });
+      await this.seedStartupFiles(sandbox, exec);
+      this.assertActive(sandbox.id);
+
+      // ④ materialise the credentials inside the sandbox（复数，2026-09）。
+      await this.injectCredentials(sandbox, credentials, exec);
+      this.assertActive(sandbox.id);
+
+      // ⑤ start the agent session — this is what makes "the agent starts working the
+      // moment the task starts" true for a user who closed the browser, and for MCP
+      // `create_sandbox`, which has no terminal at all (裁决 D-15).
+      this.observeStartup(sandbox.id, { stage: 'agent-bootstrap' });
+      await this.bootstrapAgentSession(sandbox, exec);
     });
-    this.assertActive(sandbox.id);
-
-    // ③.5 落 runtime 启动前需要的文件。**刻意排在 ④ 之前、且与 ④ 无关**:
-    // ④ 只在有凭证时才跑,而这一步要处理的闸门(codex 的目录信任提示)在**没有凭证时
-    // 照样拦**——那时 agent 会停在提示上,连"我没登录"都报不出来。
-    this.observeStartup(sandbox.id, { stage: 'environment-initialization' });
-    await this.seedStartupFiles(sandbox, exec);
-    this.assertActive(sandbox.id);
-
-    // ④ materialise the credentials inside the sandbox（复数，2026-09）。
-    await this.injectCredentials(sandbox, credentials, exec);
-    this.assertActive(sandbox.id);
-
-    // ⑤ start the agent session — this is what makes "the agent starts working the
-    // moment the task starts" true for a user who closed the browser, and for MCP
-    // `create_sandbox`, which has no terminal at all (裁决 D-15).
-    this.observeStartup(sandbox.id, { stage: 'agent-bootstrap' });
-    await this.bootstrapAgentSession(sandbox, exec);
   }
 
   /**
@@ -829,16 +852,18 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     provider: SandboxProvider,
     image: ResolvedImageSpec,
   ): Promise<{ imageStaged?: boolean }> {
-    if (!provider.imageStaged) return {};
-    try {
-      return { imageStaged: await provider.imageStaged(image) };
-    } catch (e) {
-      this.logger.warn(
-        `provider '${provider.name}' could not report image staging for '${image.ref}' ` +
-          `(${errorMessage(e)}); the startup card falls back to generic copy`,
-      );
-      return {};
-    }
+    return this.worker.run(async () => {
+      if (!provider.imageStaged) return {};
+      try {
+        return { imageStaged: await provider.imageStaged(image) };
+      } catch (e) {
+        this.logger.warn(
+          `provider '${provider.name}' could not report image staging for '${image.ref}' ` +
+            `(${errorMessage(e)}); the startup card falls back to generic copy`,
+        );
+        return {};
+      }
+    });
   }
 
   private handleOf(sandbox: Sandbox): SandboxHandle {
@@ -879,34 +904,36 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
   private async imageSpecOf(
     sandbox: Sandbox,
   ): Promise<{ spec: ResolvedImageSpec; env: Record<string, string> }> {
-    const selected =
-      sandbox.imageRef === '' ? null : await this.images.findTaskImage(sandbox.imageRef);
-    if (selected) {
+    return this.worker.run(async () => {
+      const selected =
+        sandbox.imageRef === '' ? null : await this.images.findTaskImage(sandbox.imageRef);
+      if (selected) {
+        return {
+          spec: {
+            ref: selected.ref,
+            digest: selected.digest,
+            entrypoint: selected.entrypoint,
+            // ⚠️ THE INSTALL PLAN'S ONLY HONEST INPUT (04 §7 ★ 第 3 条, now closed).
+            // `getInstallPlan()` used to decide 「预装了没有」 by regex-matching this
+            // sandbox's REF STRING — a guess about a name that is wrong for a mirror
+            // (`localhost:5001/platform/sandbox:v1`) and blind to any user image. What
+            // the image itself declared is stored on the manifest row; carrying it here
+            // is what lets the plan answer 「0 秒」 vs 「约 12.5 分钟」 about the bits
+            // that will actually be pulled.
+            supportedRuntimes: selected.manifest.supportedRuntimes,
+          },
+          env: selected.env ?? {},
+        };
+      }
+      this.logger.warn(
+        `sandbox ${sandbox.id} has no image manifest ('${sandbox.imageRef}'): it predates the ` +
+          'image slice, so its digest is not recoverable — falling back to the tag (04 §7 时刻④)',
+      );
       return {
-        spec: {
-          ref: selected.ref,
-          digest: selected.digest,
-          entrypoint: selected.entrypoint,
-          // ⚠️ THE INSTALL PLAN'S ONLY HONEST INPUT (04 §7 ★ 第 3 条, now closed).
-          // `getInstallPlan()` used to decide 「预装了没有」 by regex-matching this
-          // sandbox's REF STRING — a guess about a name that is wrong for a mirror
-          // (`localhost:5001/platform/sandbox:v1`) and blind to any user image. What
-          // the image itself declared is stored on the manifest row; carrying it here
-          // is what lets the plan answer 「0 秒」 vs 「约 12.5 分钟」 about the bits
-          // that will actually be pulled.
-          supportedRuntimes: selected.manifest.supportedRuntimes,
-        },
-        env: selected.env ?? {},
+        spec: { ref: builtinImageRef(), digest: '' },
+        env: {},
       };
-    }
-    this.logger.warn(
-      `sandbox ${sandbox.id} has no image manifest ('${sandbox.imageRef}'): it predates the ` +
-        'image slice, so its digest is not recoverable — falling back to the tag (04 §7 时刻④)',
-    );
-    return {
-      spec: { ref: builtinImageRef(), digest: '' },
-      env: {},
-    };
+    });
   }
 
   /**
@@ -918,16 +945,18 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
    */
   /** Select only the Task's Agent credential (AC-CRD-003.1). */
   private async prepareCredentials(sandbox: Sandbox): Promise<PreparedRuntimeCredential[]> {
-    // A Task owns its selected Agent's credential, regardless of what other CLIs
-    // the image happens to include (CRD-003.1).
-    const candidates = [sandbox.runtime];
+    return this.worker.run(async () => {
+      // A Task owns its selected Agent's credential, regardless of what other CLIs
+      // the image happens to include (CRD-003.1).
+      const candidates = [sandbox.runtime];
 
-    const prepared: PreparedRuntimeCredential[] = [];
-    for (const runtimeId of candidates) {
-      const credential = await this.prepareOneCredential(sandbox, runtimeId);
-      if (credential) prepared.push({ runtimeId, credential });
-    }
-    return prepared;
+      const prepared: PreparedRuntimeCredential[] = [];
+      for (const runtimeId of candidates) {
+        const credential = await this.prepareOneCredential(sandbox, runtimeId);
+        if (credential) prepared.push({ runtimeId, credential });
+      }
+      return prepared;
+    });
   }
 
   /** 单个 runtime 的凭证；没有可用凭证 ⇒ `null`（不是失败）。 */
@@ -935,43 +964,45 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     sandbox: Sandbox,
     runtimeId: string,
   ): Promise<(InjectableRuntimeCredential & { credentialId: string }) | null> {
-    try {
-      return await this.credentials.prepareRuntimeCredential(runtimeId);
-    } catch (e) {
-      if (e instanceof CredentialPreparationError) {
-        // ⚠️ 只有**默认 runtime** 没凭证才值得报警：那意味着这个任务的 agent 会裸跑。
-        //    别的 runtime 没配凭证是**常态**（用户可能只配了一个），为它记一条 warn
-        //    审计会把正常状态刷成一片黄。
-        if (runtimeId !== sandbox.runtime) {
-          this.logger.log(
-            `sandbox ${sandbox.id}: no '${runtimeId}' credential (${e.code}); ` +
-              'that runtime will not be offered as a terminal tab',
+    return this.worker.run(async () => {
+      try {
+        return await this.credentials.prepareRuntimeCredential(runtimeId);
+      } catch (e) {
+        if (e instanceof CredentialPreparationError) {
+          // ⚠️ 只有**默认 runtime** 没凭证才值得报警：那意味着这个任务的 agent 会裸跑。
+          //    别的 runtime 没配凭证是**常态**（用户可能只配了一个），为它记一条 warn
+          //    审计会把正常状态刷成一片黄。
+          if (runtimeId !== sandbox.runtime) {
+            this.logger.log(
+              `sandbox ${sandbox.id}: no '${runtimeId}' credential (${e.code}); ` +
+                'that runtime will not be offered as a terminal tab',
+            );
+            return null;
+          }
+          this.logger.warn(
+            `sandbox ${sandbox.id}: no usable '${runtimeId}' credential (${e.code}); ` +
+              'the agent will start UNAUTHENTICATED',
           );
+          // ⚠️ 一条 WARN 日志不够。「agent 起来了但没登录」在用户眼里是「它什么都没干」，
+          // 而**没有任何领域事件**会记下这件事（缺席不是状态流转）。这正是 13 §2.8.2
+          // 说的「写入口 ② 覆盖失败路径」那一类。
+          this.audit.record({
+            category: 'sandbox',
+            type: 'sandbox.credential.absent',
+            severity: 'warn',
+            subjectType: 'sandbox',
+            subjectId: sandbox.id,
+            actor: 'scheduler',
+            summary: `没有可用的 ${runtimeId} 凭证，agent 将以未登录状态启动`,
+            detail: { runtimeId },
+            outcome: 'skipped',
+            errorCode: e.code,
+          });
           return null;
         }
-        this.logger.warn(
-          `sandbox ${sandbox.id}: no usable '${runtimeId}' credential (${e.code}); ` +
-            'the agent will start UNAUTHENTICATED',
-        );
-        // ⚠️ 一条 WARN 日志不够。「agent 起来了但没登录」在用户眼里是「它什么都没干」，
-        // 而**没有任何领域事件**会记下这件事（缺席不是状态流转）。这正是 13 §2.8.2
-        // 说的「写入口 ② 覆盖失败路径」那一类。
-        this.audit.record({
-          category: 'sandbox',
-          type: 'sandbox.credential.absent',
-          severity: 'warn',
-          subjectType: 'sandbox',
-          subjectId: sandbox.id,
-          actor: 'scheduler',
-          summary: `没有可用的 ${runtimeId} 凭证，agent 将以未登录状态启动`,
-          detail: { runtimeId },
-          outcome: 'skipped',
-          errorCode: e.code,
-        });
-        return null;
+        throw e;
       }
-      throw e;
-    }
+    });
   }
 
   /** Register the actual credential before any env is delivered to provider.create. */
@@ -979,22 +1010,24 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     sandbox: Sandbox,
     credentials: PreparedRuntimeCredential[],
   ): Promise<PreparedRuntimeCredential[]> {
-    const usable: PreparedRuntimeCredential[] = [];
-    for (const prepared of credentials) {
-      this.assertActive(sandbox.id);
-      const { runtimeId, credential } = prepared;
-      if (!(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)))
-        continue;
-      if (
-        await this.credentials.recordRuntimeInjection(
-          runtimeId,
-          sandbox.id,
-          credential.credentialId,
+    return this.worker.run(async () => {
+      const usable: PreparedRuntimeCredential[] = [];
+      for (const prepared of credentials) {
+        this.assertActive(sandbox.id);
+        const { runtimeId, credential } = prepared;
+        if (!(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)))
+          continue;
+        if (
+          await this.credentials.recordRuntimeInjection(
+            runtimeId,
+            sandbox.id,
+            credential.credentialId,
+          )
         )
-      )
-        usable.push(prepared);
-    }
-    return usable;
+          usable.push(prepared);
+      }
+      return usable;
+    });
   }
 
   /**
@@ -1011,16 +1044,18 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
    * 而把整个 Task 判死显然更糟——记一条 WARN,与凭证缺席那条同一处置。
    */
   private async seedStartupFiles(sandbox: Sandbox, exec: SandboxExecFn): Promise<void> {
-    const adapter = this.runtimes.get(sandbox.runtime);
-    if (!adapter.seedStartupFiles) return;
-    try {
-      await adapter.seedStartupFiles({ workdir: SANDBOX_WORKSPACE_MOUNT }, exec);
-    } catch (e) {
-      this.logger.warn(
-        `sandbox ${sandbox.id}: seeding '${sandbox.runtime}' startup files failed ` +
-          `(${errorMessage(e)}); the agent may stop at an interactive prompt`,
-      );
-    }
+    return this.worker.run(async () => {
+      const adapter = this.runtimes.get(sandbox.runtime);
+      if (!adapter.seedStartupFiles) return;
+      try {
+        await adapter.seedStartupFiles({ workdir: SANDBOX_WORKSPACE_MOUNT }, exec);
+      } catch (e) {
+        this.logger.warn(
+          `sandbox ${sandbox.id}: seeding '${sandbox.runtime}' startup files failed ` +
+            `(${errorMessage(e)}); the agent may stop at an interactive prompt`,
+        );
+      }
+    });
   }
 
   /**
@@ -1041,58 +1076,62 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
     credentials: PreparedRuntimeCredential[],
     exec: SandboxExecFn,
   ): Promise<void> {
-    const injected: string[] = [];
-    for (const { runtimeId, credential } of credentials) {
-      this.assertActive(sandbox.id);
-      if (
-        !(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)) ||
-        !(await this.credentials.recordRuntimeInjection(
-          runtimeId,
-          sandbox.id,
-          credential.credentialId,
-        ))
-      ) {
-        throw new RuntimeCredentialRevokedError();
-      }
-      try {
-        await this.runtimes.get(runtimeId).injectCredential(credential, exec);
+    return this.worker.run(async () => {
+      const injected: string[] = [];
+      for (const { runtimeId, credential } of credentials) {
         this.assertActive(sandbox.id);
-        if (!(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)))
+        if (
+          !(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId)) ||
+          !(await this.credentials.recordRuntimeInjection(
+            runtimeId,
+            sandbox.id,
+            credential.credentialId,
+          ))
+        ) {
           throw new RuntimeCredentialRevokedError();
-        injected.push(runtimeId);
-      } catch (e) {
-        if (e instanceof RuntimeCredentialRevokedError || e instanceof SandboxProvisionCancelled)
-          throw e;
-        this.logger.warn(
-          `sandbox ${sandbox.id}: injecting '${runtimeId}' credential failed ` +
-            `(${errorMessage(e)}); it will not be offered as a terminal tab`,
-        );
+        }
+        try {
+          await this.runtimes.get(runtimeId).injectCredential(credential, exec);
+          this.assertActive(sandbox.id);
+          if (
+            !(await this.credentials.isRuntimeCredentialUsable(runtimeId, credential.credentialId))
+          )
+            throw new RuntimeCredentialRevokedError();
+          injected.push(runtimeId);
+        } catch (e) {
+          if (e instanceof RuntimeCredentialRevokedError || e instanceof SandboxProvisionCancelled)
+            throw e;
+          this.logger.warn(
+            `sandbox ${sandbox.id}: injecting '${runtimeId}' credential failed ` +
+              `(${errorMessage(e)}); it will not be offered as a terminal tab`,
+          );
+        }
       }
-    }
-    sandbox.recordInjectedRuntimes(injected);
-    this.persist(sandbox);
+      sandbox.recordInjectedRuntimes(injected);
+      this.persist(sandbox);
 
-    /**
-     * ★ 用户裁决要求的那条审计：**注入了哪几份凭证进哪个沙箱，事后要能查**。
-     *
-     * 它记的是这次注入的**范围**（凭证面扩大到了哪几家），与既有的
-     * `sandbox.credential.absent`（某个 runtime 没凭证）和 credential 上下文自己的
-     * 注入台账（`recordRuntimeInjection`，按 credentialId 记）是三件不同的事：
-     * 这一条回答的是「这个盒子里现在躺着哪几家的令牌」。
-     * ⛔ 不记任何凭证内容，只记 runtime id —— 审计要的是身份不是材料。
-     */
-    this.audit.record({
-      category: 'sandbox',
-      type: 'sandbox.credentials.injected',
-      subjectType: 'sandbox',
-      subjectId: sandbox.id,
-      actor: 'scheduler',
-      summary:
-        injected.length === 0
-          ? '未注入任何 runtime 凭证（沙箱内的 agent CLI 都将以未登录状态运行）'
-          : `已注入 ${String(injected.length)} 份 runtime 凭证：${injected.join('、')}`,
-      detail: { runtimeIds: injected, defaultRuntime: sandbox.runtime },
-      outcome: injected.length === 0 ? 'skipped' : 'ok',
+      /**
+       * ★ 用户裁决要求的那条审计：**注入了哪几份凭证进哪个沙箱，事后要能查**。
+       *
+       * 它记的是这次注入的**范围**（凭证面扩大到了哪几家），与既有的
+       * `sandbox.credential.absent`（某个 runtime 没凭证）和 credential 上下文自己的
+       * 注入台账（`recordRuntimeInjection`，按 credentialId 记）是三件不同的事：
+       * 这一条回答的是「这个盒子里现在躺着哪几家的令牌」。
+       * ⛔ 不记任何凭证内容，只记 runtime id —— 审计要的是身份不是材料。
+       */
+      this.audit.record({
+        category: 'sandbox',
+        type: 'sandbox.credentials.injected',
+        subjectType: 'sandbox',
+        subjectId: sandbox.id,
+        actor: 'scheduler',
+        summary:
+          injected.length === 0
+            ? '未注入任何 runtime 凭证（沙箱内的 agent CLI 都将以未登录状态运行）'
+            : `已注入 ${String(injected.length)} 份 runtime 凭证：${injected.join('、')}`,
+        detail: { runtimeIds: injected, defaultRuntime: sandbox.runtime },
+        outcome: injected.length === 0 ? 'skipped' : 'ok',
+      });
     });
   }
 
@@ -1107,41 +1146,43 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
    * I-SBX-9) does not REPLAY it onto files the previous run already changed.
    */
   private async bootstrapAgentSession(sandbox: Sandbox, exec: SandboxExecFn): Promise<void> {
-    if (sandbox.headless) return;
-    const pending = sandbox.initialTask.isPending;
-    const startedAt = this.clock.now().getTime();
-    const result = await this.agentSessions.bootstrapAgentSession({
-      sandboxId: sandbox.id,
-      runtimeId: sandbox.runtime,
-      initialPrompt: pending ? sandbox.initialTask.prompt : undefined,
-      workdir: SANDBOX_WORKSPACE_MOUNT,
-      exec,
-    });
-    // 03 §7.8 `sandbox.agent_session`:「起没起 / 跑的是什么」——「要进 tmux 才知道
-    // CLI 没起」是这条记录补的那个查不出来。⚠️ **不记 prompt 正文**：最长 8000 字符
-    // 的用户内容，审计要的是身份不是正文（同 `AgentTaskStarted` 的纪律）。
-    this.audit.record({
-      category: 'sandbox',
-      type: 'sandbox.agent_session',
-      subjectType: 'sandbox',
-      subjectId: sandbox.id,
-      actor: 'scheduler',
-      summary: result.reusedExisting
-        ? `agent 会话已存在，沿用（${sandbox.runtime}）`
-        : `已启动 ${sandbox.runtime} agent 会话`,
-      detail: {
+    return this.worker.run(async () => {
+      if (sandbox.headless) return;
+      const pending = sandbox.initialTask.isPending;
+      const startedAt = this.clock.now().getTime();
+      const result = await this.agentSessions.bootstrapAgentSession({
+        sandboxId: sandbox.id,
         runtimeId: sandbox.runtime,
-        started: !result.reusedExisting,
-        reusedExisting: result.reusedExisting,
-        promptCarried: result.promptConsumed,
-      },
-      durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
-      outcome: 'ok',
+        initialPrompt: pending ? sandbox.initialTask.prompt : undefined,
+        workdir: SANDBOX_WORKSPACE_MOUNT,
+        exec,
+      });
+      // 03 §7.8 `sandbox.agent_session`:「起没起 / 跑的是什么」——「要进 tmux 才知道
+      // CLI 没起」是这条记录补的那个查不出来。⚠️ **不记 prompt 正文**：最长 8000 字符
+      // 的用户内容，审计要的是身份不是正文（同 `AgentTaskStarted` 的纪律）。
+      this.audit.record({
+        category: 'sandbox',
+        type: 'sandbox.agent_session',
+        subjectType: 'sandbox',
+        subjectId: sandbox.id,
+        actor: 'scheduler',
+        summary: result.reusedExisting
+          ? `agent 会话已存在，沿用（${sandbox.runtime}）`
+          : `已启动 ${sandbox.runtime} agent 会话`,
+        detail: {
+          runtimeId: sandbox.runtime,
+          started: !result.reusedExisting,
+          reusedExisting: result.reusedExisting,
+          promptCarried: result.promptConsumed,
+        },
+        durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
+        outcome: 'ok',
+      });
+      if (result.promptConsumed) {
+        sandbox.consumeInitialTask(this.clock.now());
+        this.persist(sandbox);
+      }
     });
-    if (result.promptConsumed) {
-      sandbox.consumeInitialTask(this.clock.now());
-      this.persist(sandbox);
-    }
   }
 
   /**

@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { errorMessage, isRecord } from '@platform/shared-kernel';
 import {
   HttpException,
@@ -57,6 +58,8 @@ import {
 export class AutomationTaskLauncherAdapter
   implements AutomationTaskLauncher, OnApplicationBootstrap, OnModuleDestroy
 {
+  private readonly worker = coordinatorWorker('sandbox.automation-cleanup');
+
   private timer: NodeJS.Timeout | undefined;
   private readonly finishing = new Set<string>();
   private readonly retentionConfirmed = new Set<string>();
@@ -92,73 +95,79 @@ export class AutomationTaskLauncherAdapter
    * 跳过，而 `next_trigger_at` 早已推进 —— 一次静默的漏跑。
    */
   async capacityFor(input: AutomationTaskLaunchInput): Promise<'ok' | 'resource-exhausted'> {
-    try {
-      const ok = await this.sandboxes.hasCapacityFor({
-        projectId: input.projectId,
-        runtime: input.runtimeId,
-        headless: true,
-        timeoutMinutes: input.timeoutMinutes,
-      });
-      return ok ? 'ok' : 'resource-exhausted';
-    } catch (e) {
-      this.logger.debug(
-        `capacity probe for automation ${input.automationId} could not be answered ` +
-          `(${errorMessage(e)}); letting the create path decide`,
-      );
-      return 'ok';
-    }
+    return this.worker.run(async () => {
+      try {
+        const ok = await this.sandboxes.hasCapacityFor({
+          projectId: input.projectId,
+          runtime: input.runtimeId,
+          headless: true,
+          timeoutMinutes: input.timeoutMinutes,
+        });
+        return ok ? 'ok' : 'resource-exhausted';
+      } catch (e) {
+        this.logger.debug(
+          `capacity probe for automation ${input.automationId} could not be answered ` +
+            `(${errorMessage(e)}); letting the create path decide`,
+        );
+        return 'ok';
+      }
+    });
   }
 
   async createSandbox(input: AcceptedAutomationTaskLaunchInput): Promise<{ sandboxId: string }> {
-    try {
-      const create = () =>
-        this.sandboxes.createAccepted(
-          {
-            projectId: input.projectId,
-            runtime: input.runtimeId,
-            headless: true,
-            timeoutMinutes: input.timeoutMinutes,
-            // ⚠️ **prompt 同时落 `initial_prompt`**：headless 路径不消费它（见上），但它是
-            // 这一发到底要跑什么的**唯一落库副本**，排障时没有它就只能去猜。
-            initialPrompt: input.prompt,
-            sourceAutomationId: input.automationId,
-            sourceAutomationName: input.automationName,
-            artifactRetentionDays: input.artifactRetentionDays ?? 30,
-          },
-          input.acceptedSandboxId,
-        );
-      const dto = this.authority
-        ? await this.authority.run(
+    return this.worker.run(async () => {
+      try {
+        const create = () =>
+          this.sandboxes.createAccepted(
             {
-              operationId: `automation-create-${input.runId}-${String(input.retryCount)}`,
-              actor: { kind: 'automation', id: input.actorId },
+              projectId: input.projectId,
+              runtime: input.runtimeId,
+              headless: true,
+              timeoutMinutes: input.timeoutMinutes,
+              // ⚠️ **prompt 同时落 `initial_prompt`**：headless 路径不消费它（见上），但它是
+              // 这一发到底要跑什么的**唯一落库副本**，排障时没有它就只能去猜。
+              initialPrompt: input.prompt,
+              sourceAutomationId: input.automationId,
+              sourceAutomationName: input.automationName,
+              artifactRetentionDays: input.artifactRetentionDays ?? 30,
             },
-            create,
-          )
-        : await create();
-      return { sandboxId: dto.id };
-    } catch (e) {
-      throw this.asResourceSignal(e);
-    }
+            input.acceptedSandboxId,
+          );
+        const dto = this.authority
+          ? await this.authority.run(
+              {
+                operationId: `automation-create-${input.runId}-${String(input.retryCount)}`,
+                actor: { kind: 'automation', id: input.actorId },
+              },
+              create,
+            )
+          : await create();
+        return { sandboxId: dto.id };
+      } catch (e) {
+        throw this.asResourceSignal(e);
+      }
+    });
   }
 
   async startTask(sandboxId: string, input: AcceptedAutomationTaskLaunchInput): Promise<void> {
-    try {
-      if (sandboxId !== input.acceptedSandboxId)
-        throw new Error('AUTOMATION_LAUNCH_INTENT_CONFLICT');
-      await this.tasks.runAccepted(
-        sandboxId,
-        input.runtimeId,
-        {
-          prompt: input.prompt,
-          timeoutMinutes: input.timeoutMinutes,
-        },
-        input.acceptedTaskId,
-        input.actorId,
-      );
-    } catch (e) {
-      throw this.asResourceSignal(e);
-    }
+    return this.worker.run(async () => {
+      try {
+        if (sandboxId !== input.acceptedSandboxId)
+          throw new Error('AUTOMATION_LAUNCH_INTENT_CONFLICT');
+        await this.tasks.runAccepted(
+          sandboxId,
+          input.runtimeId,
+          {
+            prompt: input.prompt,
+            timeoutMinutes: input.timeoutMinutes,
+          },
+          input.acceptedTaskId,
+          input.actorId,
+        );
+      } catch (e) {
+        throw this.asResourceSignal(e);
+      }
+    });
   }
 
   async finishTask(
@@ -170,48 +179,50 @@ export class AutomationTaskLauncherAdapter
       finishedAt: Date;
     },
   ): Promise<void> {
-    const sandbox = await this.repo.findById(asSandboxId(sandboxId));
-    if (!sandbox || this.retentionConfirmed.has(sandboxId)) return;
-    const task = await this.latestTask(sandboxId);
-    // A lost start acknowledgement is not a terminal task verdict. Never stop a
-    // live guest merely because the scheduler cannot currently confirm its start.
-    if (task?.isRunning) return;
-    if (!task && (await this.hasUnconfirmedStart(sandboxId))) return;
-    if (sandbox.status === 'destroyed') {
-      // A crash or an older best-effort registration may leave the retained
-      // directory without its ledger row. The persisted completion snapshot, not
-      // the rule/run (which can be deleted), supplies its original expiration.
-      if (!sandbox.automationFinishedAt || !task || task.isRunning || !sandbox.workspacePath)
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(sandboxId));
+      if (!sandbox || this.retentionConfirmed.has(sandboxId)) return;
+      const task = await this.latestTask(sandboxId);
+      // A lost start acknowledgement is not a terminal task verdict. Never stop a
+      // live guest merely because the scheduler cannot currently confirm its start.
+      if (task?.isRunning) return;
+      if (!task && (await this.hasUnconfirmedStart(sandboxId))) return;
+      if (sandbox.status === 'destroyed') {
+        // A crash or an older best-effort registration may leave the retained
+        // directory without its ledger row. The persisted completion snapshot, not
+        // the rule/run (which can be deleted), supplies its original expiration.
+        if (!sandbox.automationFinishedAt || !task || task.isRunning || !sandbox.workspacePath)
+          return;
+        await this.projects.registerRetainedVolume({
+          projectId: sandbox.projectId,
+          sandboxId,
+          sandboxName: sandbox.name,
+          workspacePath: sandbox.workspacePath,
+          source: 'automation-artifact',
+          sourceAutomationId: sandbox.sourceAutomationId ?? input.automationId,
+          sourceAutomationName: sandbox.sourceAutomationName ?? input.automationName,
+          retentionDays: sandbox.artifactRetentionDays ?? input.retentionDays,
+          retainedAt: sandbox.automationFinishedAt,
+        });
+        this.retentionConfirmed.add(sandboxId);
         return;
-      await this.projects.registerRetainedVolume({
-        projectId: sandbox.projectId,
-        sandboxId,
-        sandboxName: sandbox.name,
-        workspacePath: sandbox.workspacePath,
-        source: 'automation-artifact',
-        sourceAutomationId: sandbox.sourceAutomationId ?? input.automationId,
-        sourceAutomationName: sandbox.sourceAutomationName ?? input.automationName,
-        retentionDays: sandbox.artifactRetentionDays ?? input.retentionDays,
-        retainedAt: sandbox.automationFinishedAt,
+      }
+      sandbox.recordAutomationFinished(input.finishedAt);
+      this.uow.run((tx) => {
+        this.repo.saveSync(tx, sandbox);
+      });
+      await this.sandboxes.destroy(sandboxId, {
+        keepVolume: task !== null,
+        retained: {
+          source: 'automation-artifact',
+          sourceAutomationId: input.automationId,
+          sourceAutomationName: input.automationName,
+          retentionDays: input.retentionDays,
+          retainedAt: sandbox.automationFinishedAt ?? input.finishedAt,
+        },
       });
       this.retentionConfirmed.add(sandboxId);
-      return;
-    }
-    sandbox.recordAutomationFinished(input.finishedAt);
-    this.uow.run((tx) => {
-      this.repo.saveSync(tx, sandbox);
     });
-    await this.sandboxes.destroy(sandboxId, {
-      keepVolume: task !== null,
-      retained: {
-        source: 'automation-artifact',
-        sourceAutomationId: input.automationId,
-        sourceAutomationName: input.automationName,
-        retentionDays: input.retentionDays,
-        retainedAt: sandbox.automationFinishedAt ?? input.finishedAt,
-      },
-    });
-    this.retentionConfirmed.add(sandboxId);
   }
 
   onApplicationBootstrap(): void {
@@ -221,11 +232,13 @@ export class AutomationTaskLauncherAdapter
           this.logger.error(`automation cleanup scan failed: ${String(error)}`);
         });
     });
-    this.timer = setInterval(() => {
-      void this.reconcileFinished().catch((error: unknown) => {
-        this.logger.error(`automation cleanup scan failed: ${String(error)}`);
-      });
-    }, 10_000);
+    this.timer = this.worker.ownInterval(
+      setInterval(() => {
+        void this.reconcileFinished().catch((error: unknown) => {
+          this.logger.error(`automation cleanup scan failed: ${String(error)}`);
+        });
+      }, 10_000),
+    );
     this.timer.unref();
     void this.reconcileFinished().catch((error: unknown) => {
       this.logger.error(`automation cleanup scan failed: ${String(error)}`);
@@ -234,37 +247,39 @@ export class AutomationTaskLauncherAdapter
 
   /** Rule/run rows may have been deleted; the sandbox's snapshot owns cleanup. */
   async reconcileFinished(): Promise<void> {
-    for (const sandbox of await this.repo.findAll()) {
-      if (
-        !sandbox.sourceAutomationId ||
-        this.retentionConfirmed.has(sandbox.id) ||
-        this.finishing.has(sandbox.id)
-      )
-        continue;
-      const task = await this.latestTask(sandbox.id);
-      if (!task && (await this.hasUnconfirmedStart(sandbox.id))) continue;
-      if (sandbox.status === 'destroyed' && !sandbox.automationFinishedAt) continue;
-      if (task?.isRunning || (!task && sandbox.status !== 'failed')) continue;
-      this.finishing.add(sandbox.id);
-      try {
-        await this.finishTask(sandbox.id, {
-          automationId: sandbox.sourceAutomationId,
-          automationName: sandbox.sourceAutomationName ?? sandbox.sourceAutomationId,
-          retentionDays: sandbox.artifactRetentionDays ?? 30,
-          finishedAt: sandbox.automationFinishedAt ?? task?.finishedAt ?? this.clock.now(),
-        });
-      } catch (error) {
-        this.logger.error(
-          `automation task cleanup pending for ${sandbox.id}: ${errorMessage(error)}`,
-        );
-      } finally {
-        this.finishing.delete(sandbox.id);
+    return this.worker.run(async () => {
+      for (const sandbox of await this.repo.findAll()) {
+        if (
+          !sandbox.sourceAutomationId ||
+          this.retentionConfirmed.has(sandbox.id) ||
+          this.finishing.has(sandbox.id)
+        )
+          continue;
+        const task = await this.latestTask(sandbox.id);
+        if (!task && (await this.hasUnconfirmedStart(sandbox.id))) continue;
+        if (sandbox.status === 'destroyed' && !sandbox.automationFinishedAt) continue;
+        if (task?.isRunning || (!task && sandbox.status !== 'failed')) continue;
+        this.finishing.add(sandbox.id);
+        try {
+          await this.finishTask(sandbox.id, {
+            automationId: sandbox.sourceAutomationId,
+            automationName: sandbox.sourceAutomationName ?? sandbox.sourceAutomationId,
+            retentionDays: sandbox.artifactRetentionDays ?? 30,
+            finishedAt: sandbox.automationFinishedAt ?? task?.finishedAt ?? this.clock.now(),
+          });
+        } catch (error) {
+          this.logger.error(
+            `automation task cleanup pending for ${sandbox.id}: ${errorMessage(error)}`,
+          );
+        } finally {
+          this.finishing.delete(sandbox.id);
+        }
       }
-    }
+    });
   }
 
   onModuleDestroy(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.worker.cancel(this.timer);
   }
 
   /**
@@ -272,54 +287,56 @@ export class AutomationTaskLauncherAdapter
    * 打断的异常。
    */
   async phaseOf(sandboxId: string): Promise<AutomationTaskPhase> {
-    const sandbox = await this.repo.findById(asSandboxId(sandboxId));
-    if (!sandbox) return { kind: 'gone' };
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(sandboxId));
+      if (!sandbox) return { kind: 'gone' };
 
-    const latest = await this.latestTask(sandboxId);
-    if (!latest && (await this.hasUnconfirmedStart(sandboxId))) return { kind: 'unconfirmed' };
-    if (latest !== null && !latest.isRunning) return this.finished(latest);
+      const latest = await this.latestTask(sandboxId);
+      if (!latest && (await this.hasUnconfirmedStart(sandboxId))) return { kind: 'unconfirmed' };
+      if (latest !== null && !latest.isRunning) return this.finished(latest);
 
-    if (
-      sandbox.sourceAutomationId &&
-      sandbox.automationFinishedAt &&
-      sandbox.failureCode &&
-      !latest
-    ) {
-      return {
-        kind: 'finished',
-        status: 'failed',
-        errorCode: sandbox.failureCode,
-        errorMessage: sandbox.failureReason ?? 'sandbox failed before the task could run',
-      };
-    }
-    switch (sandbox.status) {
-      case 'pending':
-      case 'scheduling':
-      case 'preparing-workspace':
-      case 'creating':
-      case 'starting':
-        return { kind: 'provisioning' };
-      case 'running':
-      case 'idle':
-        // 沙箱起来了：还没起 Task ⇒ 该 POST 了；起了且在飞 ⇒ 等。
-        return latest === null ? { kind: 'ready' } : { kind: 'running' };
-      case 'failed':
+      if (
+        sandbox.sourceAutomationId &&
+        sandbox.automationFinishedAt &&
+        sandbox.failureCode &&
+        !latest
+      ) {
         return {
           kind: 'finished',
           status: 'failed',
-          // ⚠️ **码必须带出去**（决策表行 3 的另一半）。后台 provision 撞上磁盘写满时
-          // 落的是 `DISK_INSUFFICIENT`；只回 `errorMessage`，调度器就只能把它当成一次
-          // 普通失败 +1，而它其实是「排队等资源」。
-          ...(sandbox.failureCode !== null ? { errorCode: sandbox.failureCode } : {}),
+          errorCode: sandbox.failureCode,
           errorMessage: sandbox.failureReason ?? 'sandbox failed before the task could run',
         };
-      case 'stopping':
-      case 'stopped':
-      case 'destroying':
-      case 'destroyed':
-        // 没有任何 Task 记录、沙箱又已经在下线 —— 这一发再也不会有结果了。
-        return { kind: 'gone' };
-    }
+      }
+      switch (sandbox.status) {
+        case 'pending':
+        case 'scheduling':
+        case 'preparing-workspace':
+        case 'creating':
+        case 'starting':
+          return { kind: 'provisioning' };
+        case 'running':
+        case 'idle':
+          // 沙箱起来了：还没起 Task ⇒ 该 POST 了；起了且在飞 ⇒ 等。
+          return latest === null ? { kind: 'ready' } : { kind: 'running' };
+        case 'failed':
+          return {
+            kind: 'finished',
+            status: 'failed',
+            // ⚠️ **码必须带出去**（决策表行 3 的另一半）。后台 provision 撞上磁盘写满时
+            // 落的是 `DISK_INSUFFICIENT`；只回 `errorMessage`，调度器就只能把它当成一次
+            // 普通失败 +1，而它其实是「排队等资源」。
+            ...(sandbox.failureCode !== null ? { errorCode: sandbox.failureCode } : {}),
+            errorMessage: sandbox.failureReason ?? 'sandbox failed before the task could run',
+          };
+        case 'stopping':
+        case 'stopped':
+        case 'destroying':
+        case 'destroyed':
+          // 没有任何 Task 记录、沙箱又已经在下线 —— 这一发再也不会有结果了。
+          return { kind: 'gone' };
+      }
+    });
   }
 
   private finished(task: AgentTask): AutomationTaskPhase {
@@ -338,15 +355,19 @@ export class AutomationTaskLauncherAdapter
   }
 
   private async latestTask(sandboxId: string): Promise<AgentTask | null> {
-    const rows = await this.taskRepo.findBySandbox(asSandboxId(sandboxId));
-    if (rows.length === 0) return null;
-    return rows.reduce((a, b) => (b.startedAt.getTime() >= a.startedAt.getTime() ? b : a));
+    return this.worker.run(async () => {
+      const rows = await this.taskRepo.findBySandbox(asSandboxId(sandboxId));
+      if (rows.length === 0) return null;
+      return rows.reduce((a, b) => (b.startedAt.getTime() >= a.startedAt.getTime() ? b : a));
+    });
   }
   private async hasUnconfirmedStart(sandboxId: string): Promise<boolean> {
-    return (
-      (await this.startIntents?.pending())?.some((intent) => intent.sandboxId === sandboxId) ??
-      false
-    );
+    return this.worker.run(async () => {
+      return (
+        (await this.startIntents?.pending())?.some((intent) => intent.sandboxId === sandboxId) ??
+        false
+      );
+    });
   }
 
   /**

@@ -18,6 +18,9 @@ import { guardProviders } from './bootstrap/guards.setup';
 import { DeploymentModule } from './platform/deployment/deployment.module';
 import { UpgradeModule } from './platform/upgrade/upgrade.module';
 import { ControlRpcModule } from './platform/control-rpc/control-rpc.module';
+const coordinatorRole = ['coordinator', 'coordinator-prepared'].includes(
+  process.env.PLATFORM_PROCESS_ROLE ?? '',
+);
 
 /**
  * Root module (01 §2): assembles the @Global platform, the MCP transport, the
@@ -31,11 +34,14 @@ import { ControlRpcModule } from './platform/control-rpc/control-rpc.module';
     AuditModule,
     AccessPasscodeModule,
     RealtimeModule,
-    McpModule.forRoot(mcpModuleOptions),
+    // The public Control API owns MCP sessions. A Coordinator executes the
+    // discovered tool providers through its authenticated application RPC; it
+    // does not construct a second SSE ping loop or transport session registry.
+    ...(coordinatorRole ? [] : [McpModule.forRoot(mcpModuleOptions)]),
     ProjectModule,
-    McpModule.forFeature([ProjectMcpTools], mcpModuleOptions.name),
+    ...(coordinatorRole ? [] : [McpModule.forFeature([ProjectMcpTools], mcpModuleOptions.name)]),
     SandboxModule,
-    McpModule.forFeature([SandboxMcpTools], mcpModuleOptions.name),
+    ...(coordinatorRole ? [] : [McpModule.forFeature([SandboxMcpTools], mcpModuleOptions.name)]),
     TerminalModule,
     CredentialModule,
     RuntimeModule,
@@ -50,9 +56,7 @@ import { ControlRpcModule } from './platform/control-rpc/control-rpc.module';
     SystemModule,
     DeploymentModule,
     UpgradeModule,
-    ...(['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '')
-      ? [ControlRpcModule]
-      : []),
+    ...(coordinatorRole ? [ControlRpcModule] : []),
   ],
   providers: [...guardProviders],
 })

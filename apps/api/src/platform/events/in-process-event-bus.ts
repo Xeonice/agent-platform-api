@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Injectable, Logger } from '@nestjs/common';
 import type { EventBus, Tx, DomainEvent } from '@platform/shared-kernel';
 import { errorMessage } from '@platform/shared-kernel';
@@ -15,6 +16,8 @@ import { errorMessage } from '@platform/shared-kernel';
  */
 @Injectable()
 export class InProcessEventBus implements EventBus {
+  private readonly worker = coordinatorWorker('platform.events');
+
   private readonly logger = new Logger(InProcessEventBus.name);
   private readonly handlers: ((events: DomainEvent[]) => void)[] = [];
   private buffer: DomainEvent[] = [];
@@ -25,7 +28,7 @@ export class InProcessEventBus implements EventBus {
     this.buffer.push(...events);
     if (!this.flushScheduled) {
       this.flushScheduled = true;
-      queueMicrotask(() => {
+      this.worker.queue(() => {
         this.flush();
       });
     }

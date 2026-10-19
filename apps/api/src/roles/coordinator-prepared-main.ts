@@ -1,7 +1,4 @@
-import {
-  RetirementWorkTracker,
-  preparedRetirementRows,
-} from '../platform/upgrade/retirement-census';
+import { RetirementWorkTracker } from '../platform/upgrade/retirement-census';
 import { HttpException } from '@nestjs/common';
 import { upgradeRecord, requiredUpgradeValue } from '../platform/upgrade/upgrade-values';
 import type { HandoffRow } from '../platform/upgrade/coordinator-handoff';
@@ -26,8 +23,10 @@ import { setupWebsockets } from '../bootstrap/websocket.setup';
 import { readPublicNetworkConfig } from '../platform/config/public-network';
 import { UpgradeStore } from '../platform/upgrade/upgrade-store';
 import { writeInstalledBinding } from '../platform/upgrade/upgrade-atomic-file';
-import { requireUpgrade } from '../platform/upgrade/upgrade-trust';
+import { requireUpgrade, UpgradeError } from '../platform/upgrade/upgrade-trust';
 import { coordinatorArtifactIdentity } from '../platform/upgrade/coordinator-artifact-identity';
+import { CoordinatorWorkRegistry, installCoordinatorWorkRegistry } from '@platform/shared-kernel';
+import { coordinatorWriterControl } from '../platform/persistence/coordinator-lease';
 import {
   assertCurrentBusinessAction,
   withoutBusinessAction,
@@ -37,6 +36,9 @@ import {
 export async function startPreparedCoordinator(): Promise<void> {
   const clock = new SystemClock();
   process.env.PLATFORM_PROCESS_ROLE = 'coordinator-prepared';
+  const workers = new CoordinatorWorkRegistry();
+  installCoordinatorWorkRegistry(workers);
+  const managementWorker = workers.register('platform.prepared-management');
   process.env.COORDINATOR_WRITER_FENCE_VALID = 'false';
   const instanceId = process.env.PLATFORM_INSTANCE_ID,
     key = process.env.PLATFORM_CONTROLLER_RPC_KEY;
@@ -49,7 +51,12 @@ export async function startPreparedCoordinator(): Promise<void> {
     'PREPARED_COORDINATOR_CONFIG_REQUIRED',
   );
   const physical = await coordinatorArtifactIdentity();
-  const { AppModule } = await import('../app.module');
+  const [{ AppModule }, { installNormalCoordinatorRetirement }, { sealCoordinatorWorkerManifest }] =
+    await Promise.all([
+      import('../app.module'),
+      import('../platform/upgrade/normal-coordinator-retirement'),
+      import('../platform/upgrade/coordinator-worker-manifest'),
+    ]);
   platformConnection();
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
   // Resolve and validate future builtin metadata before exposing prepared identity;
@@ -69,6 +76,21 @@ export async function startPreparedCoordinator(): Promise<void> {
   let moduleInitializationStarted = false;
   let recoveryWatch: NodeJS.Timeout | undefined = undefined;
   const retirement = new RetirementWorkTracker();
+  const normalRetirement = installNormalCoordinatorRetirement(app, workers, {
+    managementWork: () => retirement.snapshot().work,
+    managementHttp: () => retirement.snapshot().http,
+    writer: () => {
+      if (!moduleInitializationStarted && !adopting && store.sqlite.readonly) return false;
+      try {
+        coordinatorWriterControl(store.sqlite).assert();
+        return true;
+      } catch (error) {
+        return error instanceof UpgradeError && error.code === 'COORDINATOR_WRITER_FENCE_EXPIRED'
+          ? false
+          : null;
+      }
+    },
+  });
   const identity = () => ({
     role: state === 'ready' ? 'coordinator' : 'coordinator-prepared',
     instanceId,
@@ -94,6 +116,10 @@ export async function startPreparedCoordinator(): Promise<void> {
     );
   };
   async function adopt(input: Record<string, unknown>) {
+    requireUpgrade(
+      !['draining', 'drained', 'unknown'].includes(workers.snapshot().state),
+      'PREPARED_COORDINATOR_RETIRING',
+    );
     requireUpgrade(
       input.instanceId === instanceId &&
         input.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY,
@@ -128,6 +154,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     adopting = (async () => {
       adoptedIntent = String(input.operationId);
       state = 'adopting';
+      workers.beginLifecycleTransition();
       assertCurrentBusinessAction();
       const generation = activatePreparedPlatform();
       process.env.PLATFORM_PROCESS_ROLE = 'coordinator';
@@ -145,6 +172,7 @@ export async function startPreparedCoordinator(): Promise<void> {
       app.enableShutdownHooks();
       moduleInitializationStarted = true;
       await withoutBusinessAction(() => app.listen(env.port, env.host));
+      sealCoordinatorWorkerManifest(app, workers, { prepared: true });
       assertCurrentBusinessAction();
       const continuity = await app
         .get((await import('../platform/upgrade/upgrade-inspector')).UpgradeInspector)
@@ -185,67 +213,33 @@ export async function startPreparedCoordinator(): Promise<void> {
       return { commitKnown: true, stage: 'adopted', evidence };
     })().catch((error: unknown) => {
       state = 'unknown';
+      workers.invalidateCoverage();
       throw error;
     });
     return adopting;
   }
   const management = createServer((req, res) => {
-    if (req.url !== '/internal/coordinator/retirement') retirement.request(req, res);
+    const maintenance =
+      (req.method === 'GET' && req.url === '/internal/coordinator/retirement') ||
+      (req.method === 'POST' && req.url === '/internal/coordinator/retirement-drain');
+    if (!maintenance) retirement.request(req, res);
     const work = () => managementRequest(req, res);
-    void (req.url === '/internal/coordinator/retirement' ? work() : retirement.run(work)).catch(
-      () => res.destroy(),
-    );
+    void (maintenance ? work() : retirement.run(work)).catch(() => res.destroy());
   });
   async function managementRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       requireUpgrade(authorized(req), 'PREPARED_INTERNAL_AUTH', 403);
       let value: unknown;
       if (req.method === 'GET' && req.url === '/internal/coordinator/retirement') {
-        const actual = identity(),
-          transports = owners.transportReferences(),
-          counts = retirement.snapshot();
-        // Readonly connection + never called listen/init is actual local state,
-        // not an inference from workersStarted or desired configuration.
-        const dormant =
-          state === 'prepared' &&
-          !moduleInitializationStarted &&
-          !adopting &&
-          store.sqlite.readonly;
-        const rows = preparedRetirementRows(store.sqlite, {
-          startIdentity: String(actual.startIdentity),
-          artifactDigest: String(actual.artifactDigest),
-          generation: actual.generation,
-        });
-        const transportCount = transports.complete
-          ? transports.http + transports.observers + transports.renewals
-          : null;
-        value = {
-          schemaVersion: 1,
-          ...actual,
-          role: 'coordinator',
-          observedAt: clock.now().toISOString(),
-          complete:
-            dormant && transports.complete && rows.handoff !== null && rows.recovery !== null,
-          writer: dormant ? false : null,
-          counts: {
-            http: counts.http,
-            ws: dormant ? 0 : null,
-            streams: dormant ? 0 : null,
-            workers: dormant ? counts.work + (recoveryWatch ? 1 : 0) : null,
-            owners: transportCount,
-            guests: transportCount,
-            handoff: rows.handoff,
-            recovery: rows.recovery,
-            userOperations: dormant ? counts.work : null,
-          },
-          proof: {
-            moduleInitializationStarted,
-            adopting: !!adopting,
-            ledgerReadonly: store.sqlite.readonly,
-            recoveryWatch: !!recoveryWatch,
-            ownerPoolCount: transports.owners,
-          },
-        };
+        value = normalRetirement.census();
+      } else if (req.method === 'POST' && req.url === '/internal/coordinator/retirement-drain') {
+        let body = '';
+        for await (const chunk of req) {
+          body += String(chunk);
+          requireUpgrade(Buffer.byteLength(body) <= 4096, 'RETIREMENT_BODY_TOO_LARGE', 413);
+        }
+        value = await normalRetirement.close(JSON.parse(body));
+        res.statusCode = 202;
       } else if (req.method === 'GET' && req.url === '/internal/coordinator/identity')
         value = identity();
       else if (req.method === 'POST' && req.url === '/internal/coordinator/adopt') {
@@ -306,46 +300,53 @@ export async function startPreparedCoordinator(): Promise<void> {
   });
   recoveryWatch = store.ledgerReadonly
     ? undefined
-    : setInterval(() => {
-        if (state !== 'prepared' || adopting) return;
-        const row = store.sqlite
-          .prepare<unknown[], HandoffRow>(
-            "SELECT * FROM coordinator_handoffs WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
+    : managementWorker.ownInterval(
+        setInterval(() => {
+          if (state !== 'prepared' || adopting) return;
+          const row = store.sqlite
+            .prepare<unknown[], HandoffRow>(
+              "SELECT * FROM coordinator_handoffs WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
+            )
+            .get();
+          if (!row) return;
+          const candidate = upgradeRecord(JSON.parse(row.candidate));
+          if (
+            candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
+            candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
           )
-          .get();
-        if (!row) return;
-        const candidate = upgradeRecord(JSON.parse(row.candidate));
-        if (
-          candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
-          candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
-        )
-          return;
-        const writer = store.sqlite
-          .prepare<unknown[], { generation: number; expires_at: number }>(
-            "SELECT generation,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
+            return;
+          const writer = store.sqlite
+            .prepare<unknown[], { generation: number; expires_at: number }>(
+              "SELECT generation,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
+            )
+            .get();
+          if (
+            writer?.generation !== row.source_generation ||
+            writer.expires_at > clock.now().getTime()
           )
-          .get();
-        if (
-          writer?.generation !== row.source_generation ||
-          writer.expires_at > clock.now().getTime()
-        )
-          return;
-        const attempt = store.snapshot(row.attempt_id);
-        void adopt({
-          instanceId,
-          attemptId: row.attempt_id,
-          fence: attempt.fence,
-          operationId: row.operation_id,
-          planDigest: row.plan_digest,
-          startIdentity: candidate.startIdentity,
-        }).catch(() => {
-          /* Preserve unknown intent, never restart resources or a new upgrade. */
-        });
-      }, 10);
+            return;
+          const attempt = store.snapshot(row.attempt_id);
+          void managementWorker
+            .run(() =>
+              adopt({
+                instanceId,
+                attemptId: row.attempt_id,
+                fence: attempt.fence,
+                operationId: row.operation_id,
+                planDigest: row.plan_digest,
+                startIdentity: candidate.startIdentity,
+              }),
+            )
+            .catch(() => {
+              /* Preserve unknown intent, never restart resources or a new upgrade. */
+            });
+        }, 10),
+      );
   recoveryWatch?.unref();
+  sealCoordinatorWorkerManifest(app, workers, { prepared: true, dormant: true });
   for (const signal of ['SIGINT', 'SIGTERM'] as const)
     process.once(signal, () => {
-      clearInterval(recoveryWatch);
+      managementWorker.cancel(recoveryWatch);
       management.close();
       void app.close();
     });

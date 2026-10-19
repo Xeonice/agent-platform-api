@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import {
   nullableUpgradeRecord,
   requiredUpgradeValue,
@@ -67,6 +68,8 @@ interface Row {
 /** Recover the retained application process; never rewind the database or revive a guest. */
 @Injectable()
 export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('upgrade.coordinator-recovery');
+
   private watch?: ReturnType<typeof setInterval>;
   private resuming: Promise<Json> | null = null;
   constructor(
@@ -92,30 +95,32 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
   ) {}
   onApplicationBootstrap(): void {
     if (this.store.ledgerReadonly || process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
-    this.watch = setInterval(() => {
-      if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'true' || this.resuming) return;
-      const row = this.store.sqlite
-        .prepare<unknown[], Row>(
-          "SELECT * FROM coordinator_recoveries WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
+    this.watch = this.worker.ownInterval(
+      setInterval(() => {
+        if (process.env.COORDINATOR_WRITER_FENCE_VALID === 'true' || this.resuming) return;
+        const row = this.store.sqlite
+          .prepare<unknown[], Row>(
+            "SELECT * FROM coordinator_recoveries WHERE stage='releasing' ORDER BY rowid DESC LIMIT 1",
+          )
+          .get();
+        if (!row) return;
+        const candidate = upgradeRecord(JSON.parse(row.candidate));
+        if (
+          candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
+          candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
         )
-        .get();
-      if (!row) return;
-      const candidate = upgradeRecord(JSON.parse(row.candidate));
-      if (
-        candidate.startIdentity !== process.env.PLATFORM_PROCESS_START_IDENTITY ||
-        candidate.artifactDigest !== process.env.PLATFORM_ARTIFACT_DIGEST
-      )
-        return;
-      const snapshot = this.store.snapshot(row.triggering_attempt_id);
-      void this.resume(row.triggering_attempt_id, {
-        fence: snapshot.fence,
-        recoveryPlanDigest: row.plan_digest,
-      }).catch(() => undefined);
-    }, 10);
+          return;
+        const snapshot = this.store.snapshot(row.triggering_attempt_id);
+        void this.resume(row.triggering_attempt_id, {
+          fence: snapshot.fence,
+          recoveryPlanDigest: row.plan_digest,
+        }).catch(() => undefined);
+      }, 10),
+    );
     this.watch.unref();
   }
   onModuleDestroy(): void {
-    if (this.watch) clearInterval(this.watch);
+    if (this.watch) this.worker.cancel(this.watch);
   }
   private resumeWorkers(): void {
     this.store.assertRecoveryMutation();
@@ -133,188 +138,192 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
   /** Reopen only the same still-authoritative writer after an interrupted
    * quiesce. This never reacquires a lease, changes Owner routes or selects a fallback. */
   async stabilize(id: string, input: Json): Promise<Json> {
-    const context = currentUpgradeRecovery(),
-      fence = Number(input.fence);
-    requireUpgrade(
-      context?.mode === 'stabilize' &&
-        context.attemptId === id &&
-        input.operationId === context.recoveryId + ':stabilize-current-writer',
-      'CONTROL_STABILIZATION_SCOPE_REQUIRED',
-    );
-    this.store.assertFence(id, fence);
-    this.store.assertRecoveryMutation();
-    const intent = requiredUpgradeValue(
-      this.store.ledgerSqlite
-        .prepare<unknown[], { authorization_plan: string }>(
-          'SELECT authorization_plan FROM control_recovery_intents WHERE recovery_id=? AND instance_id=?',
-        )
-        .get(context.recoveryId, this.store.instanceId),
-    );
-    const authorization = upgradeRecord(JSON.parse(intent.authorization_plan)),
-      snapshot = this.store.snapshot(id);
-    requireUpgrade(
-      authorization.targetDigest === snapshot.attempt.targetDigest &&
-        authorization.acceptedPlanDigest === snapshot.plan.planDigest,
-      'CONTROL_STABILIZATION_TARGET_CHANGED',
-    );
-    const Writer = z
-      .object({
-        artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-        startIdentity: z.string().min(1).max(180),
-        generation: z.number().int().positive(),
-        fence: z.number().int().positive(),
-        holderId: z.string().min(1).max(200),
-      })
-      .strict();
-    const stabilization = z
-      .object({ writer: Writer, inventoryDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/) })
-      .strict()
-      .parse(authorization.stabilization);
-    const witness = this.store.ledgerSqlite
-      .prepare<
-        unknown[],
-        {
-          writer_digest: string;
-          inventory_digest: string;
-          proof: string;
-          proof_digest: string;
-          observed_at: number;
-        }
-      >(
-        'SELECT writer_digest,inventory_digest,proof,proof_digest,observed_at FROM control_stabilization_witnesses WHERE recovery_id=? AND instance_id=?',
-      )
-      .get(context.recoveryId, this.store.instanceId);
-    requireUpgrade(
-      witness && Buffer.byteLength(witness.proof) <= 256 * 1024,
-      'CONTROL_STABILIZATION_WITNESS_REQUIRED',
-    );
-    const rawProof: unknown = JSON.parse(witness.proof);
-    requireUpgrade(
-      witness.writer_digest === upgradeDigest(stabilization.writer) &&
-        witness.inventory_digest === stabilization.inventoryDigest &&
-        witness.proof_digest === upgradeDigest(rawProof),
-      'CONTROL_STABILIZATION_WITNESS_CHANGED',
-    );
-    const proof = z
-      .object({
-        instanceId: z.string(),
-        writer: Writer,
-        coordinators: z
-          .array(
-            z.object({
-              containerId: z.string().min(1).max(128),
-              startIdentity: z.string().min(1).max(180),
-              artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-              generation: z.number().int().nonnegative(),
-              writerFenceValid: z.boolean(),
-              observedAt: z.string().datetime(),
-            }),
+    return this.worker.run(async () => {
+      const context = currentUpgradeRecovery(),
+        fence = Number(input.fence);
+      requireUpgrade(
+        context?.mode === 'stabilize' &&
+          context.attemptId === id &&
+          input.operationId === context.recoveryId + ':stabilize-current-writer',
+        'CONTROL_STABILIZATION_SCOPE_REQUIRED',
+      );
+      this.store.assertFence(id, fence);
+      this.store.assertRecoveryMutation();
+      const intent = requiredUpgradeValue(
+        this.store.ledgerSqlite
+          .prepare<unknown[], { authorization_plan: string }>(
+            'SELECT authorization_plan FROM control_recovery_intents WHERE recovery_id=? AND instance_id=?',
           )
-          .min(1)
-          .max(256),
-        observedAt: z.string().datetime(),
-      })
-      .parse(rawProof);
-    const fresh = (at: number) =>
-      Number.isFinite(at) &&
-      this.clock.now().getTime() - at >= 0 &&
-      this.clock.now().getTime() - at <= 5000;
-    requireUpgrade(
-      proof.instanceId === this.store.instanceId &&
-        upgradeDigest(proof.writer) === witness.writer_digest &&
-        fresh(witness.observed_at) &&
-        fresh(Date.parse(proof.observedAt)) &&
-        proof.coordinators.every((c) => fresh(Date.parse(c.observedAt))) &&
-        new Set(proof.coordinators.map((c) => c.containerId)).size === proof.coordinators.length &&
-        new Set(proof.coordinators.map((c) => c.startIdentity)).size === proof.coordinators.length,
-      'CONTROL_STABILIZATION_WITNESS_STALE',
-    );
-    const actualWriters = proof.coordinators.filter((c) => c.writerFenceValid);
-    requireUpgrade(
-      actualWriters.length === 1 &&
-        actualWriters[0].artifactDigest === stabilization.writer.artifactDigest &&
-        actualWriters[0].startIdentity === stabilization.writer.startIdentity &&
-        actualWriters[0].generation === stabilization.writer.generation,
-      'CONTROL_STABILIZATION_WRITER_UNKNOWN',
-    );
-    const actual = this.store.sqlite
-      .prepare<
-        unknown[],
-        {
-          holder_id: string;
-          generation: number;
-          fence: number;
-          expires_at: number;
-          instance_id: string;
-        }
-      >(
-        "SELECT instance_id,holder_id,generation,fence,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
-      )
-      .get();
-    const control = coordinatorWriterControl(this.store.sqlite);
-    control.assert();
-    requireUpgrade(
-      actual?.instance_id === this.store.instanceId &&
-        actual.holder_id === stabilization.writer.holderId &&
-        actual.generation === stabilization.writer.generation &&
-        actual.fence === stabilization.writer.fence &&
-        actual.expires_at > this.clock.now().getTime() &&
-        process.env.PLATFORM_ARTIFACT_DIGEST === stabilization.writer.artifactDigest &&
-        process.env.PLATFORM_PROCESS_START_IDENTITY === stabilization.writer.startIdentity &&
-        control.generation === actual.generation &&
-        control.fence === actual.fence,
-      'CONTROL_STABILIZATION_WRITER_CHANGED',
-    );
-    const handoff = this.store.sqlite
-      .prepare<unknown[], { stage: string; source_generation: number }>(
-        'SELECT stage,source_generation FROM coordinator_handoffs WHERE attempt_id=?',
-      )
-      .get(id);
-    requireUpgrade(
-      !handoff ||
-        (['prepared', 'quiesced'].includes(handoff.stage) &&
-          handoff.source_generation === actual.generation),
-      'CONTROL_STABILIZATION_HANDOFF_UNKNOWN',
-    );
-    const bindingPath = requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
-      binding = upgradeRecord(JSON.parse(await readFile(bindingPath, 'utf8')));
-    requireUpgrade(
-      binding.instanceId === this.store.instanceId &&
-        binding.generation === actual.generation &&
-        binding.artifactDigest === stabilization.writer.artifactDigest &&
-        ['ready', 'quiescing'].includes(String(binding.state)),
-      'CONTROL_STABILIZATION_BINDING_CHANGED',
-    );
-    this.store.assertRecoveryMutation();
-    control.assert();
-    this.resumeWorkers();
-    await writeInstalledBinding(bindingPath, {
-      state: 'ready',
-      instanceId: this.store.instanceId,
-      origin: loopbackOrigin(binding.origin),
-      generation: actual.generation,
-      artifactDigest: stabilization.writer.artifactDigest,
+          .get(context.recoveryId, this.store.instanceId),
+      );
+      const authorization = upgradeRecord(JSON.parse(intent.authorization_plan)),
+        snapshot = this.store.snapshot(id);
+      requireUpgrade(
+        authorization.targetDigest === snapshot.attempt.targetDigest &&
+          authorization.acceptedPlanDigest === snapshot.plan.planDigest,
+        'CONTROL_STABILIZATION_TARGET_CHANGED',
+      );
+      const Writer = z
+        .object({
+          artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+          startIdentity: z.string().min(1).max(180),
+          generation: z.number().int().positive(),
+          fence: z.number().int().positive(),
+          holderId: z.string().min(1).max(200),
+        })
+        .strict();
+      const stabilization = z
+        .object({ writer: Writer, inventoryDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/) })
+        .strict()
+        .parse(authorization.stabilization);
+      const witness = this.store.ledgerSqlite
+        .prepare<
+          unknown[],
+          {
+            writer_digest: string;
+            inventory_digest: string;
+            proof: string;
+            proof_digest: string;
+            observed_at: number;
+          }
+        >(
+          'SELECT writer_digest,inventory_digest,proof,proof_digest,observed_at FROM control_stabilization_witnesses WHERE recovery_id=? AND instance_id=?',
+        )
+        .get(context.recoveryId, this.store.instanceId);
+      requireUpgrade(
+        witness && Buffer.byteLength(witness.proof) <= 256 * 1024,
+        'CONTROL_STABILIZATION_WITNESS_REQUIRED',
+      );
+      const rawProof: unknown = JSON.parse(witness.proof);
+      requireUpgrade(
+        witness.writer_digest === upgradeDigest(stabilization.writer) &&
+          witness.inventory_digest === stabilization.inventoryDigest &&
+          witness.proof_digest === upgradeDigest(rawProof),
+        'CONTROL_STABILIZATION_WITNESS_CHANGED',
+      );
+      const proof = z
+        .object({
+          instanceId: z.string(),
+          writer: Writer,
+          coordinators: z
+            .array(
+              z.object({
+                containerId: z.string().min(1).max(128),
+                startIdentity: z.string().min(1).max(180),
+                artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+                generation: z.number().int().nonnegative(),
+                writerFenceValid: z.boolean(),
+                observedAt: z.string().datetime(),
+              }),
+            )
+            .min(1)
+            .max(256),
+          observedAt: z.string().datetime(),
+        })
+        .parse(rawProof);
+      const fresh = (at: number) =>
+        Number.isFinite(at) &&
+        this.clock.now().getTime() - at >= 0 &&
+        this.clock.now().getTime() - at <= 5000;
+      requireUpgrade(
+        proof.instanceId === this.store.instanceId &&
+          upgradeDigest(proof.writer) === witness.writer_digest &&
+          fresh(witness.observed_at) &&
+          fresh(Date.parse(proof.observedAt)) &&
+          proof.coordinators.every((c) => fresh(Date.parse(c.observedAt))) &&
+          new Set(proof.coordinators.map((c) => c.containerId)).size ===
+            proof.coordinators.length &&
+          new Set(proof.coordinators.map((c) => c.startIdentity)).size ===
+            proof.coordinators.length,
+        'CONTROL_STABILIZATION_WITNESS_STALE',
+      );
+      const actualWriters = proof.coordinators.filter((c) => c.writerFenceValid);
+      requireUpgrade(
+        actualWriters.length === 1 &&
+          actualWriters[0].artifactDigest === stabilization.writer.artifactDigest &&
+          actualWriters[0].startIdentity === stabilization.writer.startIdentity &&
+          actualWriters[0].generation === stabilization.writer.generation,
+        'CONTROL_STABILIZATION_WRITER_UNKNOWN',
+      );
+      const actual = this.store.sqlite
+        .prepare<
+          unknown[],
+          {
+            holder_id: string;
+            generation: number;
+            fence: number;
+            expires_at: number;
+            instance_id: string;
+          }
+        >(
+          "SELECT instance_id,holder_id,generation,fence,expires_at FROM platform_role_leases WHERE role='state-coordinator'",
+        )
+        .get();
+      const control = coordinatorWriterControl(this.store.sqlite);
+      control.assert();
+      requireUpgrade(
+        actual?.instance_id === this.store.instanceId &&
+          actual.holder_id === stabilization.writer.holderId &&
+          actual.generation === stabilization.writer.generation &&
+          actual.fence === stabilization.writer.fence &&
+          actual.expires_at > this.clock.now().getTime() &&
+          process.env.PLATFORM_ARTIFACT_DIGEST === stabilization.writer.artifactDigest &&
+          process.env.PLATFORM_PROCESS_START_IDENTITY === stabilization.writer.startIdentity &&
+          control.generation === actual.generation &&
+          control.fence === actual.fence,
+        'CONTROL_STABILIZATION_WRITER_CHANGED',
+      );
+      const handoff = this.store.sqlite
+        .prepare<unknown[], { stage: string; source_generation: number }>(
+          'SELECT stage,source_generation FROM coordinator_handoffs WHERE attempt_id=?',
+        )
+        .get(id);
+      requireUpgrade(
+        !handoff ||
+          (['prepared', 'quiesced'].includes(handoff.stage) &&
+            handoff.source_generation === actual.generation),
+        'CONTROL_STABILIZATION_HANDOFF_UNKNOWN',
+      );
+      const bindingPath = requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+        binding = upgradeRecord(JSON.parse(await readFile(bindingPath, 'utf8')));
+      requireUpgrade(
+        binding.instanceId === this.store.instanceId &&
+          binding.generation === actual.generation &&
+          binding.artifactDigest === stabilization.writer.artifactDigest &&
+          ['ready', 'quiescing'].includes(String(binding.state)),
+        'CONTROL_STABILIZATION_BINDING_CHANGED',
+      );
+      this.store.assertRecoveryMutation();
+      control.assert();
+      this.resumeWorkers();
+      await writeInstalledBinding(bindingPath, {
+        state: 'ready',
+        instanceId: this.store.instanceId,
+        origin: loopbackOrigin(binding.origin),
+        generation: actual.generation,
+        artifactDigest: stabilization.writer.artifactDigest,
+      });
+      this.store.assertRecoveryMutation();
+      control.assert();
+      requireUpgrade(
+        upgradeRecord(this.applications.identity()).accepting === true,
+        'CONTROL_STABILIZATION_ADMISSION_UNKNOWN',
+      );
+      return {
+        commitKnown: true,
+        qualified: true,
+        instanceId: this.store.instanceId,
+        recoveryId: context.recoveryId,
+        commandId: input.operationId,
+        epoch: context.epoch,
+        targetDigest: snapshot.attempt.targetDigest,
+        writer: stabilization.writer,
+        inventoryDigest: stabilization.inventoryDigest,
+        writerUnchanged: true,
+        requiresFreshQualification: true,
+        observedAt: this.clock.now().toISOString(),
+      };
     });
-    this.store.assertRecoveryMutation();
-    control.assert();
-    requireUpgrade(
-      upgradeRecord(this.applications.identity()).accepting === true,
-      'CONTROL_STABILIZATION_ADMISSION_UNKNOWN',
-    );
-    return {
-      commitKnown: true,
-      qualified: true,
-      instanceId: this.store.instanceId,
-      recoveryId: context.recoveryId,
-      commandId: input.operationId,
-      epoch: context.epoch,
-      targetDigest: snapshot.attempt.targetDigest,
-      writer: stabilization.writer,
-      inventoryDigest: stabilization.inventoryDigest,
-      writerUnchanged: true,
-      requiresFreshQualification: true,
-      observedAt: this.clock.now().toISOString(),
-    };
   }
   private baseline(id: string): Json {
     const row = this.store.ledgerSqlite
@@ -344,421 +353,435 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
     return plan;
   }
   async compatibility(id: string, fence: number): Promise<Json> {
-    const observationStarted = this.clock.now().toISOString();
-    this.store.assertFence(id, fence);
-    const snapshot = this.store.snapshot(id),
-      baseline = this.baseline(id),
-      source = upgradeRecord(baseline.coordinator);
-    const binding = await this.inspector.entryBinding();
-    // A retained Coordinator can be read-only, including the releasing window
-    // before resume reacquires the writer. Require its physical process and the
-    // actual writer epoch to stay the same, without granting it writer rights.
-    const coordinatorIdentity = () => ({
-      artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-      startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
-      generation: process.env.COORDINATOR_GENERATION,
-      writer: this.store.sqlite
-        .prepare<unknown[], Json>(
-          "SELECT instance_id,holder_id,generation,fence FROM platform_role_leases WHERE role='state-coordinator'",
-        )
-        .get(),
-    });
-    const beforeIdentity = coordinatorIdentity();
-    requireUpgrade(
-      beforeIdentity.writer?.instance_id === this.store.instanceId,
-      'SOURCE_WRITER_UNCONFIRMED',
-    );
-    const retainedBinary =
-      source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
-      source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY;
-    let columnsCompatible = true;
-    for (const [table, columns] of Object.entries(upgradeRecord(baseline.columns))) {
-      requireUpgrade(/^[a-zA-Z0-9_]+$/.test(table), 'SCHEMA_BASELINE_INVALID');
-      const names = upgradeRecords(columns).map((c) => String(c.name));
-      try {
-        this.store.sqlite
-          .prepare(
-            'SELECT ' +
-              names.map((n) => '"' + n.replaceAll('"', '""') + '"').join(',') +
-              ' FROM "' +
-              table +
-              '" LIMIT 1',
+    return this.worker.run(async () => {
+      const observationStarted = this.clock.now().toISOString();
+      this.store.assertFence(id, fence);
+      const snapshot = this.store.snapshot(id),
+        baseline = this.baseline(id),
+        source = upgradeRecord(baseline.coordinator);
+      const binding = await this.inspector.entryBinding();
+      // A retained Coordinator can be read-only, including the releasing window
+      // before resume reacquires the writer. Require its physical process and the
+      // actual writer epoch to stay the same, without granting it writer rights.
+      const coordinatorIdentity = () => ({
+        artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+        startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY,
+        generation: process.env.COORDINATOR_GENERATION,
+        writer: this.store.sqlite
+          .prepare<unknown[], Json>(
+            "SELECT instance_id,holder_id,generation,fence FROM platform_role_leases WHERE role='state-coordinator'",
           )
-          .get();
-        const current = this.store.sqlite
-          .prepare<unknown[], Json>('PRAGMA table_info("' + table + '")')
-          .all();
-        if (
-          upgradeRecords(columns).some(
-            (c) => !current.some((n) => n.name === c.name && n.type === c.type && n.pk === c.pk),
+          .get(),
+      });
+      const beforeIdentity = coordinatorIdentity();
+      requireUpgrade(
+        beforeIdentity.writer?.instance_id === this.store.instanceId,
+        'SOURCE_WRITER_UNCONFIRMED',
+      );
+      const retainedBinary =
+        source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
+        source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY;
+      let columnsCompatible = true;
+      for (const [table, columns] of Object.entries(upgradeRecord(baseline.columns))) {
+        requireUpgrade(/^[a-zA-Z0-9_]+$/.test(table), 'SCHEMA_BASELINE_INVALID');
+        const names = upgradeRecords(columns).map((c) => String(c.name));
+        try {
+          this.store.sqlite
+            .prepare(
+              'SELECT ' +
+                names.map((n) => '"' + n.replaceAll('"', '""') + '"').join(',') +
+                ' FROM "' +
+                table +
+                '" LIMIT 1',
+            )
+            .get();
+          const current = this.store.sqlite
+            .prepare<unknown[], Json>('PRAGMA table_info("' + table + '")')
+            .all();
+          if (
+            upgradeRecords(columns).some(
+              (c) => !current.some((n) => n.name === c.name && n.type === c.type && n.pk === c.pk),
+            )
           )
-        )
+            columnsCompatible = false;
+        } catch {
           columnsCompatible = false;
-      } catch {
-        columnsCompatible = false;
+        }
       }
-    }
-    const migration = snapshot.plan.migrationPath.migrationPlanDigest
-      ? this.migrations.metrics(id)
-      : null;
-    const contracted = Boolean(
-      this.store.sqlite
-        .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
-        .get(),
-    );
-    const formats = supportedDataFormats(this.projection);
-    let newAuthorityHealthy = false;
-    if (contracted && formats.includes('project-name-v2-authority')) {
-      try {
-        const rows = this.store.sqlite
-          .prepare<unknown[], { id: string; name: string }>(
-            'SELECT id,name FROM projects LIMIT 10001',
-          )
-          .all();
-        newAuthorityHealthy =
-          rows.length <= 10000 &&
-          rows.every((row) => {
-            const name = requiredUpgradeValue(this.projection).name(row.id, row.name);
-            return (
-              typeof name === 'string' &&
-              requiredUpgradeValue(this.projection).findIdByName?.(name) === row.id
-            );
-          });
-      } catch {
-        /* Missing new authority is never a safe old-data fallback. */
+      const migration = snapshot.plan.migrationPath.migrationPlanDigest
+        ? this.migrations.metrics(id)
+        : null;
+      const contracted = Boolean(
+        this.store.sqlite
+          .prepare('SELECT 1 FROM upgrade_online_migrations WHERE read_epoch=2 LIMIT 1')
+          .get(),
+      );
+      const formats = supportedDataFormats(this.projection);
+      let newAuthorityHealthy = false;
+      if (contracted && formats.includes('project-name-v2-authority')) {
+        try {
+          const rows = this.store.sqlite
+            .prepare<unknown[], { id: string; name: string }>(
+              'SELECT id,name FROM projects LIMIT 10001',
+            )
+            .all();
+          newAuthorityHealthy =
+            rows.length <= 10000 &&
+            rows.every((row) => {
+              const name = requiredUpgradeValue(this.projection).name(row.id, row.name);
+              return (
+                typeof name === 'string' &&
+                requiredUpgradeValue(this.projection).findIdByName?.(name) === row.id
+              );
+            });
+        } catch {
+          /* Missing new authority is never a safe old-data fallback. */
+        }
       }
-    }
-    const authorityPreserved = contracted
-      ? newAuthorityHealthy
-      : !migration || (migration.known && migration.oldRepresentationRetained);
-    const integrity = await recoveryIntegrity(
-      this.store,
-      this.inspector,
-      this.clock,
-      id,
-      fence,
-      binding,
-      snapshot.plan.policy.observationFreshnessMs,
-    );
-    const storage = await sqliteStorageObservation(this.store.sqlite),
-      memory = process.memoryUsage();
-    const capacity =
-      storage.availableBytes >= snapshot.plan.policy.minFreeBytes &&
-      storage.walBytes <= snapshot.plan.policy.maxWalBytes &&
-      freemem() > memory.rss &&
-      getHeapStatistics().heap_size_limit > memory.heapUsed;
-    const started = this.clock.now().getTime();
-    await new Promise<void>((ok) => setImmediate(ok));
-    const eventLoopBounded =
-      this.clock.now().getTime() - started <= snapshot.plan.policy.requestDeadlineMs;
-    this.store.assertFence(id, fence);
-    requireUpgrade(
-      canonicalUpgrade(persistedBinding(binding)) ===
-        canonicalUpgrade(persistedBinding(await this.inspector.entryBinding())),
-      'ENTRY_BINDING_CHANGED',
-    );
-    this.store.assertFence(id, fence);
-    requireUpgrade(
-      canonicalUpgrade(beforeIdentity) === canonicalUpgrade(coordinatorIdentity()),
-      'SOURCE_WRITER_UNCONFIRMED',
-    );
-    const age = this.clock.now().getTime() - Date.parse(observationStarted);
-    requireUpgrade(
-      age >= 0 && age <= snapshot.plan.policy.observationFreshnessMs,
-      'OBSERVATION_STALE',
-    );
-    return {
-      supportedDataFormats: formats,
-      qualified:
-        retainedBinary &&
-        columnsCompatible &&
-        authorityPreserved &&
-        integrity &&
-        capacity &&
-        eventLoopBounded,
-      retainedBinary,
-      columnsCompatible,
-      oldRepresentationRetained: !contracted && authorityPreserved,
-      dataRepresentationCompatible: authorityPreserved,
-      migrationCommitKnown:
-        !migration || (migration.known && migration.differences === 0 && !migration.degraded),
-      latestDatabaseCompatible: columnsCompatible && authorityPreserved,
-      newWritesCompatible: columnsCompatible && authorityPreserved,
-      sharedStateHealthy: integrity,
-      capacitySufficient: capacity && eventLoopBounded,
-      coordinator: source,
-      protocol:
-        snapshot.sourceActivation.components.coordinator?.protocol ??
-        snapshot.sourceActivation.components.api.protocol,
-      schema: this.inspector.schema(),
-      instanceId: this.store.instanceId,
-      observedAt: observationStarted,
-    };
+      const authorityPreserved = contracted
+        ? newAuthorityHealthy
+        : !migration || (migration.known && migration.oldRepresentationRetained);
+      const integrity = await recoveryIntegrity(
+        this.store,
+        this.inspector,
+        this.clock,
+        id,
+        fence,
+        binding,
+        snapshot.plan.policy.observationFreshnessMs,
+      );
+      const storage = await sqliteStorageObservation(this.store.sqlite),
+        memory = process.memoryUsage();
+      const capacity =
+        storage.availableBytes >= snapshot.plan.policy.minFreeBytes &&
+        storage.walBytes <= snapshot.plan.policy.maxWalBytes &&
+        freemem() > memory.rss &&
+        getHeapStatistics().heap_size_limit > memory.heapUsed;
+      const started = this.clock.now().getTime();
+      await new Promise<void>((ok) => this.worker.immediate(ok));
+      const eventLoopBounded =
+        this.clock.now().getTime() - started <= snapshot.plan.policy.requestDeadlineMs;
+      this.store.assertFence(id, fence);
+      requireUpgrade(
+        canonicalUpgrade(persistedBinding(binding)) ===
+          canonicalUpgrade(persistedBinding(await this.inspector.entryBinding())),
+        'ENTRY_BINDING_CHANGED',
+      );
+      this.store.assertFence(id, fence);
+      requireUpgrade(
+        canonicalUpgrade(beforeIdentity) === canonicalUpgrade(coordinatorIdentity()),
+        'SOURCE_WRITER_UNCONFIRMED',
+      );
+      const age = this.clock.now().getTime() - Date.parse(observationStarted);
+      requireUpgrade(
+        age >= 0 && age <= snapshot.plan.policy.observationFreshnessMs,
+        'OBSERVATION_STALE',
+      );
+      return {
+        supportedDataFormats: formats,
+        qualified:
+          retainedBinary &&
+          columnsCompatible &&
+          authorityPreserved &&
+          integrity &&
+          capacity &&
+          eventLoopBounded,
+        retainedBinary,
+        columnsCompatible,
+        oldRepresentationRetained: !contracted && authorityPreserved,
+        dataRepresentationCompatible: authorityPreserved,
+        migrationCommitKnown:
+          !migration || (migration.known && migration.differences === 0 && !migration.degraded),
+        latestDatabaseCompatible: columnsCompatible && authorityPreserved,
+        newWritesCompatible: columnsCompatible && authorityPreserved,
+        sharedStateHealthy: integrity,
+        capacitySufficient: capacity && eventLoopBounded,
+        coordinator: source,
+        protocol:
+          snapshot.sourceActivation.components.coordinator?.protocol ??
+          snapshot.sourceActivation.components.api.protocol,
+        schema: this.inspector.schema(),
+        instanceId: this.store.instanceId,
+        observedAt: observationStarted,
+      };
+    });
   }
   private async rpc(origin: unknown, path: string, input: Json, timeoutMs = 2000): Promise<Json> {
-    this.store.assertRecoveryMutation();
-    const response = await fetch(loopbackOrigin(origin) + path, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-platform-internal-key': process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
-        'x-platform-instance-id': this.store.instanceId,
-        ...recoveryHeaders(),
-      },
-      body: canonicalUpgrade(input),
-      signal: AbortSignal.timeout(timeoutMs),
+    return this.worker.run(async () => {
+      this.store.assertRecoveryMutation();
+      const response = await fetch(loopbackOrigin(origin) + path, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-platform-internal-key': process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
+          'x-platform-instance-id': this.store.instanceId,
+          ...recoveryHeaders(),
+        },
+        body: canonicalUpgrade(input),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
+      return upgradeRecord(await response.json());
     });
-    requireUpgrade(response.ok, 'RETAINED_COORDINATOR_UNCONFIRMED');
-    return upgradeRecord(await response.json());
   }
   async execute(id: string, input: Json): Promise<Json> {
-    const fence = Number(input.fence);
-    this.store.assertControllerFence(id, fence);
-    requireUpgrade(typeof input.recoveryPlanDigest === 'string', 'RECOVERY_PLAN_REQUIRED');
-    const plan = this.recoveryPlan(id, input.recoveryPlanDigest),
-      recovery = requiredUpgradeValue(this.store.recovery()),
-      source = nullableUpgradeRecord(plan.coordinator);
-    if (!source) {
-      if (plan.owner) {
-        const owner = upgradeRecord(plan.owner);
-        requireUpgrade(
-          typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
-          'FIXED_OWNER_ROUTE_REQUIRED',
+    return this.worker.run(async () => {
+      const fence = Number(input.fence);
+      this.store.assertControllerFence(id, fence);
+      requireUpgrade(typeof input.recoveryPlanDigest === 'string', 'RECOVERY_PLAN_REQUIRED');
+      const plan = this.recoveryPlan(id, input.recoveryPlanDigest),
+        recovery = requiredUpgradeValue(this.store.recovery()),
+        source = nullableUpgradeRecord(plan.coordinator);
+      if (!source) {
+        if (plan.owner) {
+          const owner = upgradeRecord(plan.owner);
+          requireUpgrade(
+            typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
+            'FIXED_OWNER_ROUTE_REQUIRED',
+          );
+          const current = this.owners.installedRoutes();
+          requireUpgrade(
+            upgradeRecords(owner.owners).every((r) =>
+              current.some((c) => c.ownerId === r.ownerId && c.endpoint === r.endpoint),
+            ),
+            'ORIGINAL_OWNER_ROUTE_UNKNOWN',
+          );
+          await writeInstalledBinding(
+            requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+            {
+              instanceId: this.store.instanceId,
+              activeOwnerId: owner.activeOwnerId,
+              owners: current,
+            },
+          );
+          this.store.assertRecoveryMutation();
+          this.owners.activateOwner(owner.activeOwnerId);
+        }
+        return {
+          commitKnown: true,
+          qualified: true,
+          originalResourcesPreserved: (await this.inspector.continuity(id, fence)).qualified,
+        };
+      }
+      requireUpgrade(typeof source.startIdentity === 'string', 'RETAINED_COORDINATOR_REQUIRED');
+      const existing = this.store.sqlite
+        .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
+        .get(recovery.recoveryAttemptId);
+      if (existing?.stage === 'adopted' && existing.evidence)
+        return { commitKnown: true, ...upgradeRecord(JSON.parse(existing.evidence)) };
+      if (existing && ['releasing', 'adopting'].includes(existing.stage))
+        return this.rpc(source.origin, '/internal/upgrades/' + id + '/coordinator-resume', {
+          fence,
+          recoveryPlanDigest: input.recoveryPlanDigest,
+        });
+      const live = await this.rpc(
+        source.origin,
+        '/internal/upgrades/' + id + '/coordinator-compatibility',
+        { fence },
+        RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS,
+      );
+      requireUpgrade(live.qualified === true, 'LATEST_DATA_INCOMPATIBLE');
+      const snapshot = this.store.snapshot(id),
+        quiescedAt = this.clock.now().getTime(),
+        operationId = 'recovery:' + recovery.recoveryAttemptId;
+      this.store.assertRecoveryMutation();
+      if (!currentUpgradeRecovery()) this.store.preserveCriticalAuthority(id, fence);
+      this.store.sqlite
+        .prepare(
+          'INSERT OR IGNORE INTO coordinator_recoveries(recovery_attempt_id,triggering_attempt_id,operation_id,plan_digest,candidate,stage,source_generation,quiesced_at) VALUES(?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          recovery.recoveryAttemptId,
+          id,
+          operationId,
+          input.recoveryPlanDigest,
+          canonicalUpgrade(source),
+          'quiesced',
+          Number(process.env.COORDINATOR_GENERATION),
+          quiescedAt,
         );
-        const current = this.owners.installedRoutes();
-        requireUpgrade(
-          upgradeRecords(owner.owners).every((r) =>
-            current.some((c) => c.ownerId === r.ownerId && c.endpoint === r.endpoint),
-          ),
-          'ORIGINAL_OWNER_ROUTE_UNKNOWN',
-        );
+      try {
         await writeInstalledBinding(
-          requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+          requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
           {
+            state: 'quiescing',
             instanceId: this.store.instanceId,
-            activeOwnerId: owner.activeOwnerId,
-            owners: current,
+            origin: `http://${env.host}:${String(env.port)}`,
+            generation: Number(process.env.COORDINATOR_GENERATION),
+            artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+            attemptId: id,
+            fence,
+            nextOrigin: source.origin,
           },
         );
         this.store.assertRecoveryMutation();
-        this.owners.activateOwner(owner.activeOwnerId);
+        await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
+        requireUpgrade(
+          this.provisions.pauseOwnership() &&
+            this.clones.pauseOwnership() &&
+            this.cleanup?.pauseOwnership() === true,
+          'BACKGROUND_WORK_PENDING',
+        );
+        this.store.assertRecoveryMutation();
+        this.pump.shutdown();
+        this.automations.pauseOwnership();
+        this.terminals.prepareHandoff();
+        this.events.prepareHandoff();
+        this.tasks.prepareHandoff();
+        this.store.assertRecoveryMutation();
+        await this.owners.releaseBusinessAuthority();
+        this.store.sqlite
+          .prepare(
+            "UPDATE coordinator_recoveries SET stage='releasing' WHERE recovery_attempt_id=?",
+          )
+          .run(recovery.recoveryAttemptId);
+        coordinatorWriterControl(this.store.sqlite).release();
+      } catch (error) {
+        coordinatorWriterControl(this.store.sqlite).assert();
+        this.store.assertRecoveryMutation();
+        await withoutUpgradeRecovery(() =>
+          this.owners.activateBusinessAuthority(Number(process.env.COORDINATOR_GENERATION)),
+        );
+        this.resumeWorkers();
+        this.store.sqlite
+          .prepare("UPDATE coordinator_recoveries SET stage='quiesced' WHERE recovery_attempt_id=?")
+          .run(recovery.recoveryAttemptId);
+        await writeInstalledBinding(
+          requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
+          {
+            state: 'ready',
+            instanceId: this.store.instanceId,
+            origin: `http://${env.host}:${String(env.port)}`,
+            generation: Number(process.env.COORDINATOR_GENERATION),
+            artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
+          },
+        );
+        throw error;
       }
-      return {
-        commitKnown: true,
-        qualified: true,
-        originalResourcesPreserved: (await this.inspector.continuity(id, fence)).qualified,
-      };
-    }
-    requireUpgrade(typeof source.startIdentity === 'string', 'RETAINED_COORDINATOR_REQUIRED');
-    const existing = this.store.sqlite
-      .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
-      .get(recovery.recoveryAttemptId);
-    if (existing?.stage === 'adopted' && existing.evidence)
-      return { commitKnown: true, ...upgradeRecord(JSON.parse(existing.evidence)) };
-    if (existing && ['releasing', 'adopting'].includes(existing.stage))
       return this.rpc(source.origin, '/internal/upgrades/' + id + '/coordinator-resume', {
         fence,
         recoveryPlanDigest: input.recoveryPlanDigest,
       });
-    const live = await this.rpc(
-      source.origin,
-      '/internal/upgrades/' + id + '/coordinator-compatibility',
-      { fence },
-      RECOVERY_COMPATIBILITY_READ_TIMEOUT_MS,
-    );
-    requireUpgrade(live.qualified === true, 'LATEST_DATA_INCOMPATIBLE');
-    const snapshot = this.store.snapshot(id),
-      quiescedAt = this.clock.now().getTime(),
-      operationId = 'recovery:' + recovery.recoveryAttemptId;
-    this.store.assertRecoveryMutation();
-    if (!currentUpgradeRecovery()) this.store.preserveCriticalAuthority(id, fence);
-    this.store.sqlite
-      .prepare(
-        'INSERT OR IGNORE INTO coordinator_recoveries(recovery_attempt_id,triggering_attempt_id,operation_id,plan_digest,candidate,stage,source_generation,quiesced_at) VALUES(?,?,?,?,?,?,?,?)',
-      )
-      .run(
-        recovery.recoveryAttemptId,
-        id,
-        operationId,
-        input.recoveryPlanDigest,
-        canonicalUpgrade(source),
-        'quiesced',
-        Number(process.env.COORDINATOR_GENERATION),
-        quiescedAt,
-      );
-    try {
-      await writeInstalledBinding(
-        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
-        {
-          state: 'quiescing',
-          instanceId: this.store.instanceId,
-          origin: `http://${env.host}:${String(env.port)}`,
-          generation: Number(process.env.COORDINATOR_GENERATION),
-          artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-          attemptId: id,
-          fence,
-          nextOrigin: source.origin,
-        },
-      );
-      this.store.assertRecoveryMutation();
-      await this.applications.quiesce(Math.min(1000, snapshot.plan.policy.requestDeadlineMs / 2));
-      requireUpgrade(
-        this.provisions.pauseOwnership() &&
-          this.clones.pauseOwnership() &&
-          this.cleanup?.pauseOwnership() === true,
-        'BACKGROUND_WORK_PENDING',
-      );
-      this.store.assertRecoveryMutation();
-      this.pump.shutdown();
-      this.automations.pauseOwnership();
-      this.terminals.prepareHandoff();
-      this.events.prepareHandoff();
-      this.tasks.prepareHandoff();
-      this.store.assertRecoveryMutation();
-      await this.owners.releaseBusinessAuthority();
-      this.store.sqlite
-        .prepare("UPDATE coordinator_recoveries SET stage='releasing' WHERE recovery_attempt_id=?")
-        .run(recovery.recoveryAttemptId);
-      coordinatorWriterControl(this.store.sqlite).release();
-    } catch (error) {
-      coordinatorWriterControl(this.store.sqlite).assert();
-      this.store.assertRecoveryMutation();
-      await withoutUpgradeRecovery(() =>
-        this.owners.activateBusinessAuthority(Number(process.env.COORDINATOR_GENERATION)),
-      );
-      this.resumeWorkers();
-      this.store.sqlite
-        .prepare("UPDATE coordinator_recoveries SET stage='quiesced' WHERE recovery_attempt_id=?")
-        .run(recovery.recoveryAttemptId);
-      await writeInstalledBinding(
-        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
-        {
-          state: 'ready',
-          instanceId: this.store.instanceId,
-          origin: `http://${env.host}:${String(env.port)}`,
-          generation: Number(process.env.COORDINATOR_GENERATION),
-          artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-        },
-      );
-      throw error;
-    }
-    return this.rpc(source.origin, '/internal/upgrades/' + id + '/coordinator-resume', {
-      fence,
-      recoveryPlanDigest: input.recoveryPlanDigest,
     });
   }
   async resume(id: string, input: Json): Promise<Json> {
-    const fence = Number(input.fence);
-    this.store.assertFence(id, fence);
-    const plan = this.recoveryPlan(id, String(input.recoveryPlanDigest)),
-      recovery = requiredUpgradeValue(this.store.recovery()),
-      source = upgradeRecord(plan.coordinator);
-    requireUpgrade(
-      source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
-        source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY,
-      'RECOVERY_BINARY_CHANGED',
-    );
-    const row = this.store.sqlite
-      .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
-      .get(recovery.recoveryAttemptId);
-    requireUpgrade(row && row.plan_digest === input.recoveryPlanDigest, 'RECOVERY_INTENT_UNKNOWN');
-    if (row.stage === 'adopted' && row.evidence)
-      return { commitKnown: true, ...upgradeRecord(JSON.parse(row.evidence)) };
-    if (this.resuming) return this.resuming;
-    requireUpgrade(row.stage === 'releasing', 'RECOVERY_WRITER_NOT_RELEASED');
-    const compatibility = await this.compatibility(id, fence);
-    requireUpgrade(compatibility.qualified === true, 'RECOVERY_INCOMPATIBLE');
-    this.resuming = (async () => {
-      const generation = coordinatorWriterControl(this.store.sqlite).reacquire();
-      this.store.sqlite
-        .prepare(
-          "UPDATE coordinator_recoveries SET stage='adopting',target_generation=? WHERE recovery_attempt_id=?",
-        )
-        .run(generation, recovery.recoveryAttemptId);
-      const currentBinding = upgradeRecord(
-        JSON.parse(
-          await readFile(
-            requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
-            'utf8',
-          ),
-        ),
-      );
+    return this.worker.run(async () => {
+      const fence = Number(input.fence);
+      this.store.assertFence(id, fence);
+      const plan = this.recoveryPlan(id, String(input.recoveryPlanDigest)),
+        recovery = requiredUpgradeValue(this.store.recovery()),
+        source = upgradeRecord(plan.coordinator);
       requireUpgrade(
-        currentBinding.instanceId === this.store.instanceId && Array.isArray(currentBinding.owners),
-        'OWNER_BINDING_SCOPE_MISMATCH',
+        source.artifactDigest === process.env.PLATFORM_ARTIFACT_DIGEST &&
+          source.startIdentity === process.env.PLATFORM_PROCESS_START_IDENTITY,
+        'RECOVERY_BINARY_CHANGED',
       );
-      for (const route of upgradeRecords(currentBinding.owners))
-        if (!this.owners.installedRoutes().some((r) => r.ownerId === route.ownerId))
-          await this.owners.addOwner(
-            {
-              endpoint: loopbackOrigin(route.endpoint),
-              instanceId: this.store.instanceId,
-              key: process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
-              generation,
-              clock: this.clock,
-            },
-            false,
-          );
-      this.store.assertRecoveryMutation();
-      await withoutUpgradeRecovery(() => this.owners.activateBusinessAuthority(generation));
-      if (plan.owner) {
-        const owner = upgradeRecord(plan.owner);
-        requireUpgrade(
-          typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
-          'FIXED_OWNER_ROUTE_REQUIRED',
+      const row = this.store.sqlite
+        .prepare<unknown[], Row>('SELECT * FROM coordinator_recoveries WHERE recovery_attempt_id=?')
+        .get(recovery.recoveryAttemptId);
+      requireUpgrade(
+        row && row.plan_digest === input.recoveryPlanDigest,
+        'RECOVERY_INTENT_UNKNOWN',
+      );
+      if (row.stage === 'adopted' && row.evidence)
+        return { commitKnown: true, ...upgradeRecord(JSON.parse(row.evidence)) };
+      if (this.resuming) return this.resuming;
+      requireUpgrade(row.stage === 'releasing', 'RECOVERY_WRITER_NOT_RELEASED');
+      const compatibility = await this.compatibility(id, fence);
+      requireUpgrade(compatibility.qualified === true, 'RECOVERY_INCOMPATIBLE');
+      this.resuming = (async () => {
+        const generation = coordinatorWriterControl(this.store.sqlite).reacquire();
+        this.store.sqlite
+          .prepare(
+            "UPDATE coordinator_recoveries SET stage='adopting',target_generation=? WHERE recovery_attempt_id=?",
+          )
+          .run(generation, recovery.recoveryAttemptId);
+        const currentBinding = upgradeRecord(
+          JSON.parse(
+            await readFile(
+              requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+              'utf8',
+            ),
+          ),
         );
-        for (const route of upgradeRecords(owner.owners))
+        requireUpgrade(
+          currentBinding.instanceId === this.store.instanceId &&
+            Array.isArray(currentBinding.owners),
+          'OWNER_BINDING_SCOPE_MISMATCH',
+        );
+        for (const route of upgradeRecords(currentBinding.owners))
+          if (!this.owners.installedRoutes().some((r) => r.ownerId === route.ownerId))
+            await this.owners.addOwner(
+              {
+                endpoint: loopbackOrigin(route.endpoint),
+                instanceId: this.store.instanceId,
+                key: process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
+                generation,
+                clock: this.clock,
+              },
+              false,
+            );
+        this.store.assertRecoveryMutation();
+        await withoutUpgradeRecovery(() => this.owners.activateBusinessAuthority(generation));
+        if (plan.owner) {
+          const owner = upgradeRecord(plan.owner);
           requireUpgrade(
-            this.owners
-              .installedRoutes()
-              .some((r) => r.ownerId === route.ownerId && r.endpoint === route.endpoint),
-            'ORIGINAL_OWNER_ROUTE_UNKNOWN',
+            typeof owner.activeOwnerId === 'string' && Array.isArray(owner.owners),
+            'FIXED_OWNER_ROUTE_REQUIRED',
           );
+          for (const route of upgradeRecords(owner.owners))
+            requireUpgrade(
+              this.owners
+                .installedRoutes()
+                .some((r) => r.ownerId === route.ownerId && r.endpoint === route.endpoint),
+              'ORIGINAL_OWNER_ROUTE_UNKNOWN',
+            );
+          await writeInstalledBinding(
+            requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+            {
+              instanceId: this.store.instanceId,
+              activeOwnerId: owner.activeOwnerId,
+              owners: this.owners.installedRoutes(),
+            },
+          );
+          this.store.assertRecoveryMutation();
+          this.owners.activateOwner(owner.activeOwnerId);
+        }
+        this.resumeWorkers();
+        const continuity = await this.inspector.continuity(id, fence);
         await writeInstalledBinding(
-          requiredUpgradeValue(process.env.PLATFORM_RUNTIME_OWNER_BINDING_PATH),
+          requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
           {
+            state: 'ready',
             instanceId: this.store.instanceId,
-            activeOwnerId: owner.activeOwnerId,
-            owners: this.owners.installedRoutes(),
+            origin: source.origin,
+            generation,
+            artifactDigest: source.artifactDigest,
           },
         );
-        this.store.assertRecoveryMutation();
-        this.owners.activateOwner(owner.activeOwnerId);
-      }
-      this.resumeWorkers();
-      const continuity = await this.inspector.continuity(id, fence);
-      await writeInstalledBinding(
-        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
-        {
-          state: 'ready',
-          instanceId: this.store.instanceId,
-          origin: source.origin,
-          generation,
-          artifactDigest: source.artifactDigest,
-        },
-      );
-      const maxControlPauseMs = this.clock.now().getTime() - Number(row.quiesced_at),
-        evidence = {
-          commitKnown: true,
-          qualified:
-            continuity.qualified === true &&
-            maxControlPauseMs <= this.store.snapshot(id).plan.policy.requestDeadlineMs,
-          singleWriter: true,
-          originalResourcesPreserved: continuity.qualified === true,
-          maxControlPauseMs,
-          generation,
-          artifactDigest: source.artifactDigest,
-          observedAt: this.clock.now().toISOString(),
-        };
-      this.store.sqlite
-        .prepare(
-          "UPDATE coordinator_recoveries SET stage='adopted',activated_at=?,evidence=? WHERE recovery_attempt_id=?",
-        )
-        .run(this.clock.now().getTime(), canonicalUpgrade(evidence), recovery.recoveryAttemptId);
-      return evidence;
-    })().finally(() => {
-      this.resuming = null;
+        const maxControlPauseMs = this.clock.now().getTime() - Number(row.quiesced_at),
+          evidence = {
+            commitKnown: true,
+            qualified:
+              continuity.qualified === true &&
+              maxControlPauseMs <= this.store.snapshot(id).plan.policy.requestDeadlineMs,
+            singleWriter: true,
+            originalResourcesPreserved: continuity.qualified === true,
+            maxControlPauseMs,
+            generation,
+            artifactDigest: source.artifactDigest,
+            observedAt: this.clock.now().toISOString(),
+          };
+        this.store.sqlite
+          .prepare(
+            "UPDATE coordinator_recoveries SET stage='adopted',activated_at=?,evidence=? WHERE recovery_attempt_id=?",
+          )
+          .run(this.clock.now().getTime(), canonicalUpgrade(evidence), recovery.recoveryAttemptId);
+        return evidence;
+      })().finally(() => {
+        this.resuming = null;
+      });
+      return this.resuming;
     });
-    return this.resuming;
   }
 }

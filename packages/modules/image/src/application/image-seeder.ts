@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { IMAGE_REPOSITORY } from '../domain/repositories/image.repository';
 import type { ImageRepository } from '../domain/repositories/image.repository';
@@ -72,6 +73,8 @@ const SEED_BUDGET_MS = 10_000;
 
 @Injectable()
 export class ImageSeeder implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('platform.image-seed');
+
   private readonly logger = new Logger('ImageSeeder');
   private prepared: Map<string, PreparedBuiltinImage> | null = null;
   private preparationComplete = false;
@@ -90,16 +93,24 @@ export class ImageSeeder implements OnApplicationBootstrap {
 
   /** Read-only preparation, explicitly called before a candidate advertises prepared identity. */
   async prepare(): Promise<void> {
-    this.preparationComplete = false;
-    const prepared = new Map<string, PreparedBuiltinImage>();
-    this.prepared = prepared;
-    await Promise.all(
-      this.refs().map(async (ref) => {
-        if (await this.alreadySeeded(ref)) return;
-        prepared.set(ref, await withBudget(this.service.prepareBuiltinImage(ref), ref));
-      }),
-    );
-    this.preparationComplete = true;
+    return this.worker.run(async () => {
+      this.preparationComplete = false;
+      const prepared = new Map<string, PreparedBuiltinImage>();
+      this.prepared = prepared;
+      await Promise.all(
+        this.refs().map(async (ref) => {
+          if (await this.alreadySeeded(ref)) return;
+          prepared.set(
+            ref,
+            await withBudget(
+              this.worker.run(() => this.service.prepareBuiltinImage(ref)),
+              ref,
+            ),
+          );
+        }),
+      );
+      this.preparationComplete = true;
+    });
   }
 
   private refs(): string[] {
@@ -107,75 +118,81 @@ export class ImageSeeder implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    if (this.prepared !== null) {
-      if (!this.preparationComplete) throw new Error('BUILTIN_IMAGE_PREPARATION_INCOMPLETE');
-      // No network fallback is permitted after the writer has been released.
-      for (const ref of this.refs()) {
-        if (await this.alreadySeeded(ref)) continue;
-        const prepared = this.prepared.get(ref);
-        if (prepared === undefined) throw new Error('BUILTIN_IMAGE_PREPARATION_MISSING');
-        const result = await this.service.registerPreparedBuiltinImage(prepared);
-        this.logger.log(`seeded prepared built-in image ${ref} → ${result.manifest.digest}`);
+    return this.worker.run(async () => {
+      if (this.prepared !== null) {
+        if (!this.preparationComplete) throw new Error('BUILTIN_IMAGE_PREPARATION_INCOMPLETE');
+        // No network fallback is permitted after the writer has been released.
+        for (const ref of this.refs()) {
+          if (await this.alreadySeeded(ref)) continue;
+          const prepared = this.prepared.get(ref);
+          if (prepared === undefined) throw new Error('BUILTIN_IMAGE_PREPARATION_MISSING');
+          const result = await this.service.registerPreparedBuiltinImage(prepared);
+          this.logger.log(`seeded prepared built-in image ${ref} → ${result.manifest.digest}`);
+        }
+        return;
       }
-      return;
-    }
-    // ⚠️ **去重后并行种**：单档部署（显式配了 `SANDBOX_DEFAULT_IMAGE`，两档指向同一张）
-    // 恒为 1 张；什么都不配时是 2 张 —— 两档各自回落到平台发布的那一张（2026-09-07）。
-    //
-    // ⛔ **此前是串行 `for … await`，那让启动延迟随档数线性增长**：两张各 10s 预算
-    //    ⇒ 最坏 20s，**越过本文件用例自己划下的 15s 耐心线**（「预算必须明显小于调用方
-    //    的耐心」）。那条用例没红，只因为它的假注册表里只有一档 —— 一条按 1 张镜像写死
-    //    的断言，量不到「2 张时会怎样」。
-    //
-    // ⚠️ 并行不牺牲任何东西：两档本来就**互相独立**（一张种不上不该让另一张也不种 ——
-    //    一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉），而播种只抓
-    //    manifest + config blob、不拉层，几 KB 的 HTTP 并发毫无压力。
-    //    ⇒ 启动延迟从 O(档数 × 预算) 变回 O(预算)。
-    await Promise.all(this.refs().map((ref) => this.seedOne(ref)));
+      // ⚠️ **去重后并行种**：单档部署（显式配了 `SANDBOX_DEFAULT_IMAGE`，两档指向同一张）
+      // 恒为 1 张；什么都不配时是 2 张 —— 两档各自回落到平台发布的那一张（2026-09-07）。
+      //
+      // ⛔ **此前是串行 `for … await`，那让启动延迟随档数线性增长**：两张各 10s 预算
+      //    ⇒ 最坏 20s，**越过本文件用例自己划下的 15s 耐心线**（「预算必须明显小于调用方
+      //    的耐心」）。那条用例没红，只因为它的假注册表里只有一档 —— 一条按 1 张镜像写死
+      //    的断言，量不到「2 张时会怎样」。
+      //
+      // ⚠️ 并行不牺牲任何东西：两档本来就**互相独立**（一张种不上不该让另一张也不种 ——
+      //    一台 Linux 机器上 boxlite 那张拉不下来，不该连带把 aio 也废掉），而播种只抓
+      //    manifest + config blob、不拉层，几 KB 的 HTTP 并发毫无压力。
+      //    ⇒ 启动延迟从 O(档数 × 预算) 变回 O(预算)。
+      await Promise.all(this.refs().map((ref) => this.seedOne(ref)));
+    });
   }
 
   private async seedOne(ref: string): Promise<void> {
-    // ⚠️ **结局由 work 自己报**：成功日志在 `seed()` 里，失败日志在下面这个 catch 里。
-    //    这样即使启动预算先到期、我们不再等它，它的**真实**结局仍然会被打出来。
-    //
-    // ⛔ 此前不是这样：预算一到期就打一条 warn 说「平台现在一张预制镜像都没有」——
-    //    而 2026-09-07 实测，那条 warn 之后**紧接着就是播种成功**（出厂默认换成
-    //    ghcr.io 上的发布镜像后，冷启动要 4 次跨洋往返、实测 10.87s，刚好越过 10s 预算）。
-    //    **一条断言了还没发生的失败的警告**，比不打日志更贵：它让人去改一个没坏的配置。
-    const work = this.seed(ref).catch((e: unknown) => {
-      // 刻意不 rethrow —— 见类注释纪律②。
+    return this.worker.run(async () => {
+      // ⚠️ **结局由 work 自己报**：成功日志在 `seed()` 里，失败日志在下面这个 catch 里。
+      //    这样即使启动预算先到期、我们不再等它，它的**真实**结局仍然会被打出来。
       //
-      // ⚠️ 这条日志的下一步在 2026-08「血统验证制」之后**变了**（04 §7 ★血统 ③）。
-      // 以前它说「去镜像管理注册一张」就行；现在**不行**——自定义镜像必须基于平台预制
-      // 镜像，而这里失败意味着库里一张预制镜像都没有，于是任何自定义注册都会撞上
-      // `INVALID_STATE`「平台还没有可用的预制镜像作为基准」。真正的下一步是**把这一张
-      // 修好**。日志说错下一步，比不打日志更贵。
-      this.logger.warn(
-        `built-in image ${ref} could not be seeded (${describeSeedFailure(e)}). ` +
-          '目标预制镜像尚未登记；已有镜像与任务保持原状。' +
-          `下一步是修好这一张：${seedFailureNextStep(ref, configuredSandboxNetwork())}`,
-      );
-    });
+      // ⛔ 此前不是这样：预算一到期就打一条 warn 说「平台现在一张预制镜像都没有」——
+      //    而 2026-09-07 实测，那条 warn 之后**紧接着就是播种成功**（出厂默认换成
+      //    ghcr.io 上的发布镜像后，冷启动要 4 次跨洋往返、实测 10.87s，刚好越过 10s 预算）。
+      //    **一条断言了还没发生的失败的警告**，比不打日志更贵：它让人去改一个没坏的配置。
+      const work = this.seed(ref).catch((e: unknown) => {
+        // 刻意不 rethrow —— 见类注释纪律②。
+        //
+        // ⚠️ 这条日志的下一步在 2026-08「血统验证制」之后**变了**（04 §7 ★血统 ③）。
+        // 以前它说「去镜像管理注册一张」就行；现在**不行**——自定义镜像必须基于平台预制
+        // 镜像，而这里失败意味着库里一张预制镜像都没有，于是任何自定义注册都会撞上
+        // `INVALID_STATE`「平台还没有可用的预制镜像作为基准」。真正的下一步是**把这一张
+        // 修好**。日志说错下一步，比不打日志更贵。
+        this.logger.warn(
+          `built-in image ${ref} could not be seeded (${describeSeedFailure(e)}). ` +
+            '目标预制镜像尚未登记；已有镜像与任务保持原状。' +
+            `下一步是修好这一张：${seedFailureNextStep(ref, configuredSandboxNetwork())}`,
+        );
+      });
 
-    try {
-      await withBudget(work, ref);
-    } catch {
-      // ⚠️ **只说「还没等到」，不说「失败了」** —— 这是超时与失败的全部区别。
-      //    `work` 上面已经接了 catch，所以能走到这里的只有预算那一支。
-      this.logger.log(
-        `built-in image ${ref} 解析还没回来（已超过 ${String(SEED_BUDGET_MS)}ms 启动预算）。` +
-          '**先不阻塞启动**，它仍在后台跑 —— 成功或失败都会打在这条日志之后。' +
-          '⚠️ 在那之前建 Task 会报「平台还没有可用的预制镜像」，等一下再试。',
-      );
-    }
+      try {
+        await withBudget(work, ref);
+      } catch {
+        // ⚠️ **只说「还没等到」，不说「失败了」** —— 这是超时与失败的全部区别。
+        //    `work` 上面已经接了 catch，所以能走到这里的只有预算那一支。
+        this.logger.log(
+          `built-in image ${ref} 解析还没回来（已超过 ${String(SEED_BUDGET_MS)}ms 启动预算）。` +
+            '**先不阻塞启动**，它仍在后台跑 —— 成功或失败都会打在这条日志之后。' +
+            '⚠️ 在那之前建 Task 会报「平台还没有可用的预制镜像」，等一下再试。',
+        );
+      }
+    });
   }
 
   private async seed(ref: string): Promise<void> {
-    if (await this.alreadySeeded(ref)) return;
-    const result = await this.service.registerImage(ref, { builtin: true });
-    this.logger.log(
-      `seeded built-in image ${ref} → ${result.manifest.digest} (${result.manifest.validationStatus})`,
-    );
+    return this.worker.run(async () => {
+      if (await this.alreadySeeded(ref)) return;
+      const result = await this.service.registerImage(ref, { builtin: true });
+      this.logger.log(
+        `seeded built-in image ${ref} → ${result.manifest.digest} (${result.manifest.validationStatus})`,
+      );
+    });
   }
 
   /**
@@ -184,14 +201,16 @@ export class ImageSeeder implements OnApplicationBootstrap {
    * or touching any earlier manifest, alias, configuration or digest selection.
    */
   private async alreadySeeded(ref: string): Promise<boolean> {
-    const parsed = parseImageRef(ref);
-    const image = await this.images.findByName(parsed.name);
-    if (image === null) return false;
-    if (!image.isBuiltin) return true;
-    const version = parsed.digest ?? parsed.tag ?? 'latest';
-    return (await this.manifests.listByImage(image.id)).some(
-      (manifest) => manifest.version === version,
-    );
+    return this.worker.run(async () => {
+      const parsed = parseImageRef(ref);
+      const image = await this.images.findByName(parsed.name);
+      if (image === null) return false;
+      if (!image.isBuiltin) return true;
+      const version = parsed.digest ?? parsed.tag ?? 'latest';
+      return (await this.manifests.listByImage(image.id)).some(
+        (manifest) => manifest.version === version,
+      );
+    });
   }
 }
 

@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { z } from 'zod';
 import { UpgradeStatusSchema } from '@platform/contracts';
 import { requiredUpgradeValue } from './upgrade-values';
@@ -54,6 +55,8 @@ const FRESHNESS_MS = 5000;
  * Inspector remains mandatory at every actual side-effect/confirmation gate. */
 @Injectable()
 export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('upgrade.projection');
+
   private physical: Promise<void> | null = null;
   private metadata: Promise<void> | null = null;
   private contractRead: Promise<void> | null = null;
@@ -80,14 +83,16 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   onApplicationBootstrap(): void {
     if (this.store.ledgerReadonly) return;
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
-    this.timer = setInterval(() => {
-      this.schedule();
-    }, 1000);
+    this.timer = this.worker.ownInterval(
+      setInterval(() => {
+        this.schedule();
+      }, 1000),
+    );
     this.timer.unref();
   }
   onModuleDestroy(): void {
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.worker.cancel(this.timer);
   }
   private writer<T>(work: () => T): T {
     return withCoordinatorBusinessEpoch(this.store.sqlite, work);
@@ -101,7 +106,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
     )
       return;
     // Defer all synchronous setup/JSON/tree work until after the read response.
-    setImmediate(() => {
+    this.worker.immediate(() => {
       if (this.stopped) return;
       try {
         void this.writer(() =>
@@ -216,114 +221,116 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
     };
   }
   async refreshPhysical(): Promise<void> {
-    const row = this.store.instance(),
-      last = this.store.confirmed();
-    const started = this.clock.now().toISOString();
-    this.checkedAt = started;
-    let serviceState = row.service_state;
-    let availableWeb: UpgradeStatus['availableWeb'] = null;
-    let repairableCurrent: UpgradeStatus['repairableCurrent'] = null;
-    let availability: PhysicalObservation['serviceAvailability'] = {
-      state: 'unknown',
-      observedAt: null,
-      reason: 'ENTRY_OBSERVATION_UNKNOWN',
-    };
-    if (row.service_state === 'confirmed' && last) {
-      try {
-        const binding = await this.inspector.entryBinding(),
-          proof = await this.inspector.installedProof(last, binding),
-          actual = await this.inspector.webBuild(binding);
-        requireUpgrade(
-          proof.qualified === true &&
-            actual.webRevision === last.components.web.webRevision &&
-            upgradeRecord(binding.web).digest === last.components.web.artifactDigest,
-          'CURRENT_SERVICE_UNCONFIRMED',
-        );
-        if (row.ready === 1)
-          availableWeb = {
-            releaseId: last.releaseId,
-            webReleaseId: actual.releaseId,
-            webRevision: actual.webRevision,
-            artifactDigest: last.components.web.artifactDigest,
-            instanceId: this.store.instanceId,
-            activationGeneration: last.activationGeneration,
-            productionBinding: last.productionWebBinding,
-            ready: true,
-            compatible: true,
-            observedAt: started,
-          };
-      } catch {
-        serviceState = 'unknown';
-      }
-    }
-    if (serviceState !== 'confirmed') {
-      try {
-        const actual = await this.inspector.sourceActual();
-        if (actual)
-          repairableCurrent = {
-            baseConfirmedReleaseId: actual.baseConfirmedReleaseId,
-            activationGeneration: actual.activationGeneration,
-            observedAt: actual.observedAt,
-          };
-      } catch {
-        /* Unknown repair proof grants no mutation capability. */
-      }
-    }
-    try {
-      const response = await fetch(
-        loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) + '/api/health',
-        { signal: AbortSignal.timeout(2000) },
-      );
-      const health: unknown = await response.json();
-      availability = {
-        state:
-          response.ok &&
-          health !== null &&
-          typeof health === 'object' &&
-          'status' in health &&
-          health.status === 'ok'
-            ? 'available'
-            : 'unavailable',
-        observedAt: this.clock.now().toISOString(),
-        reason: response.ok ? null : 'ENTRY_HEALTH_FAILED',
+    return this.worker.run(async () => {
+      const row = this.store.instance(),
+        last = this.store.confirmed();
+      const started = this.clock.now().toISOString();
+      this.checkedAt = started;
+      let serviceState = row.service_state;
+      let availableWeb: UpgradeStatus['availableWeb'] = null;
+      let repairableCurrent: UpgradeStatus['repairableCurrent'] = null;
+      let availability: PhysicalObservation['serviceAvailability'] = {
+        state: 'unknown',
+        observedAt: null,
+        reason: 'ENTRY_OBSERVATION_UNKNOWN',
       };
-    } catch {
-      /* Unreachable observation is unknown, not proof the platform stopped. */
-    }
-    const current = this.store.instance();
-    if (
-      current.activation_generation !== row.activation_generation ||
-      current.service_state !== row.service_state ||
-      current.ready !== row.ready
-    )
-      return;
-    const snapshot: PhysicalObservation = {
-      activationGeneration: row.activation_generation,
-      durableState: row.service_state,
-      durableReady: row.ready,
-      serviceState,
-      availableWeb,
-      repairableCurrent,
-      serviceAvailability: availability,
-      confirmedAt: repairableCurrent?.observedAt ?? started,
-    };
-    const now = this.clock.now().getTime();
-    this.store.ledgerSqlite
-      .prepare(
-        'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET request_digest=excluded.request_digest,state=excluded.state,result=excluded.result,updated_at=excluded.updated_at',
+      if (row.service_state === 'confirmed' && last) {
+        try {
+          const binding = await this.inspector.entryBinding(),
+            proof = await this.inspector.installedProof(last, binding),
+            actual = await this.inspector.webBuild(binding);
+          requireUpgrade(
+            proof.qualified === true &&
+              actual.webRevision === last.components.web.webRevision &&
+              upgradeRecord(binding.web).digest === last.components.web.artifactDigest,
+            'CURRENT_SERVICE_UNCONFIRMED',
+          );
+          if (row.ready === 1)
+            availableWeb = {
+              releaseId: last.releaseId,
+              webReleaseId: actual.releaseId,
+              webRevision: actual.webRevision,
+              artifactDigest: last.components.web.artifactDigest,
+              instanceId: this.store.instanceId,
+              activationGeneration: last.activationGeneration,
+              productionBinding: last.productionWebBinding,
+              ready: true,
+              compatible: true,
+              observedAt: started,
+            };
+        } catch {
+          serviceState = 'unknown';
+        }
+      }
+      if (serviceState !== 'confirmed') {
+        try {
+          const actual = await this.inspector.sourceActual();
+          if (actual)
+            repairableCurrent = {
+              baseConfirmedReleaseId: actual.baseConfirmedReleaseId,
+              activationGeneration: actual.activationGeneration,
+              observedAt: actual.observedAt,
+            };
+        } catch {
+          /* Unknown repair proof grants no mutation capability. */
+        }
+      }
+      try {
+        const response = await fetch(
+          loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) + '/api/health',
+          { signal: AbortSignal.timeout(2000) },
+        );
+        const health: unknown = await response.json();
+        availability = {
+          state:
+            response.ok &&
+            health !== null &&
+            typeof health === 'object' &&
+            'status' in health &&
+            health.status === 'ok'
+              ? 'available'
+              : 'unavailable',
+          observedAt: this.clock.now().toISOString(),
+          reason: response.ok ? null : 'ENTRY_HEALTH_FAILED',
+        };
+      } catch {
+        /* Unreachable observation is unknown, not proof the platform stopped. */
+      }
+      const current = this.store.instance();
+      if (
+        current.activation_generation !== row.activation_generation ||
+        current.service_state !== row.service_state ||
+        current.ready !== row.ready
       )
-      .run(
-        `${ROLE}:${this.store.instanceId}`,
-        this.store.instanceId,
-        'system',
-        ROLE,
-        0,
-        upgradeDigest(snapshot),
-        'observed',
-        JSON.stringify(snapshot),
-        now,
-        now,
-      );
-    this.reason = null;
+        return;
+      const snapshot: PhysicalObservation = {
+        activationGeneration: row.activation_generation,
+        durableState: row.service_state,
+        durableReady: row.ready,
+        serviceState,
+        availableWeb,
+        repairableCurrent,
+        serviceAvailability: availability,
+        confirmedAt: repairableCurrent?.observedAt ?? started,
+      };
+      const now = this.clock.now().getTime();
+      this.store.ledgerSqlite
+        .prepare(
+          'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET request_digest=excluded.request_digest,state=excluded.state,result=excluded.result,updated_at=excluded.updated_at',
+        )
+        .run(
+          `${ROLE}:${this.store.instanceId}`,
+          this.store.instanceId,
+          'system',
+          ROLE,
+          0,
+          upgradeDigest(snapshot),
+          'observed',
+          JSON.stringify(snapshot),
+          now,
+          now,
+        );
+      this.reason = null;
+    });
   }
 }

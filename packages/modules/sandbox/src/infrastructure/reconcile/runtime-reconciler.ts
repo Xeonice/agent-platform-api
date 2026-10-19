@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { DockerContainersSchema } from '../providers/docker/docker-values';
 import { BoxliteInfosSchema } from '../providers/boxlite/boxlite-values';
 import { errorMessage } from '@platform/shared-kernel';
@@ -41,6 +42,8 @@ type Db = BetterSQLite3Database;
  */
 @Injectable()
 export class RuntimeReconciler implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('sandbox.boot-reconcile');
+
   private readonly logger = new Logger('RuntimeReconciler');
 
   constructor(
@@ -53,20 +56,24 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    if (process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true') return;
-    try {
-      await this.reconcile();
-    } catch (e) {
-      this.logger.warn(`startup reconcile skipped: ${errorMessage(e)}`);
-    }
+    return this.worker.run(async () => {
+      if (process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true') return;
+      try {
+        await this.reconcile();
+      } catch (e) {
+        this.logger.warn(`startup reconcile skipped: ${errorMessage(e)}`);
+      }
+    });
   }
 
   /** Public so an operator/test can trigger a reconcile explicitly. */
   async reconcile(): Promise<{ removedContainers: number; removedBoxes: number }> {
-    const known = this.knownSandboxIds();
-    const removedContainers = await this.reconcileDocker(known);
-    const removedBoxes = await this.reconcileBoxlite(known);
-    return { removedContainers, removedBoxes };
+    return this.worker.run(async () => {
+      const known = this.knownSandboxIds();
+      const removedContainers = await this.reconcileDocker(known);
+      const removedBoxes = await this.reconcileBoxlite(known);
+      return { removedContainers, removedBoxes };
+    });
   }
 
   private knownSandboxIds(): Set<string> {
@@ -84,117 +91,121 @@ export class RuntimeReconciler implements OnApplicationBootstrap {
   }
 
   private async reconcileDocker(known: Set<string>): Promise<number> {
-    let removed = 0;
-    let containers;
-    const mine = platformInstanceId();
-    try {
-      // ⚠️ **按实例过滤,不是按"平台托管"过滤**。旧写法只筛 `platform.managed=true`,
-      // 于是任何一个平台进程都会把**别的实例**的容器当孤儿删掉——开发机上
-      // e2e(自带临时库)一跑就清空开发者正开着的 demo。理由与取舍见 instance-id.ts。
-      containers = DockerContainersSchema.parse(
-        await this.docker.listContainers({
-          all: true,
-          filters: { label: ['platform.managed=true', `${INSTANCE_LABEL}=${mine}`] },
-        }),
-      );
-    } catch (e) {
-      this.logger.warn(`docker reconcile skipped (daemon unreachable): ${errorMessage(e)}`);
-      return 0;
-    }
-    for (const c of containers) {
-      const sandboxId = c.Labels?.['platform.sandboxId'];
-      if (!sandboxId) continue;
-      // 双保险:即使 daemon 侧过滤失效(旧 docker/自定义 daemon),这里也不碰别人的。
-      // **没有这一位的容器一律不动**——它们是本改动之前建的,宁可漏收不可误删。
-      if (c.Labels?.[INSTANCE_LABEL] !== mine) continue;
-      if (isPlatformOwnedSandboxId(sandboxId)) {
-        // 只收已经退出 / 死掉的旧 helper；running / created / restarting / paused 一律不动
-        // —— 除非它属于已经不是默认的 provider（见类注释）。
-        const retired = this.retiredProvider(c.Labels['platform.provider']);
-        if (!retired && !['exited', 'dead'].includes(c.State)) continue;
-        const name = c.Names?.[0] ?? c.Id;
+    return this.worker.run(async () => {
+      let removed = 0;
+      let containers;
+      const mine = platformInstanceId();
+      try {
+        // ⚠️ **按实例过滤,不是按"平台托管"过滤**。旧写法只筛 `platform.managed=true`,
+        // 于是任何一个平台进程都会把**别的实例**的容器当孤儿删掉——开发机上
+        // e2e(自带临时库)一跑就清空开发者正开着的 demo。理由与取舍见 instance-id.ts。
+        containers = DockerContainersSchema.parse(
+          await this.docker.listContainers({
+            all: true,
+            filters: { label: ['platform.managed=true', `${INSTANCE_LABEL}=${mine}`] },
+          }),
+        );
+      } catch (e) {
+        this.logger.warn(`docker reconcile skipped (daemon unreachable): ${errorMessage(e)}`);
+        return 0;
+      }
+      for (const c of containers) {
+        const sandboxId = c.Labels?.['platform.sandboxId'];
+        if (!sandboxId) continue;
+        // 双保险:即使 daemon 侧过滤失效(旧 docker/自定义 daemon),这里也不碰别人的。
+        // **没有这一位的容器一律不动**——它们是本改动之前建的,宁可漏收不可误删。
+        if (c.Labels?.[INSTANCE_LABEL] !== mine) continue;
+        if (isPlatformOwnedSandboxId(sandboxId)) {
+          // 只收已经退出 / 死掉的旧 helper；running / created / restarting / paused 一律不动
+          // —— 除非它属于已经不是默认的 provider（见类注释）。
+          const retired = this.retiredProvider(c.Labels['platform.provider']);
+          if (!retired && !['exited', 'dead'].includes(c.State)) continue;
+          const name = c.Names?.[0] ?? c.Id;
+          try {
+            await this.docker.getContainer(c.Id).remove({ force: true });
+            removed++;
+            this.logger.log(
+              `removed stale platform auth helper container ${name} (${c.State}${retired ? ', provider is no longer the default' : ''}) left by a previous API process; HelperContainerSession recreates it`,
+            );
+          } catch (e) {
+            this.noteHelperRemovalFailure(name, e);
+          }
+          continue;
+        }
+        if (known.has(sandboxId)) continue;
         try {
           await this.docker.getContainer(c.Id).remove({ force: true });
           removed++;
-          this.logger.log(
-            `removed stale platform auth helper container ${name} (${c.State}${retired ? ', provider is no longer the default' : ''}) left by a previous API process; HelperContainerSession recreates it`,
+          this.logger.warn(
+            `reaped ORPHAN container ${c.Names?.[0] ?? c.Id} (sandbox ${sandboxId} has no DB record)`,
           );
         } catch (e) {
-          this.noteHelperRemovalFailure(name, e);
+          this.logger.warn(`failed to reap container ${c.Id}: ${errorMessage(e)}`);
         }
-        continue;
       }
-      if (known.has(sandboxId)) continue;
-      try {
-        await this.docker.getContainer(c.Id).remove({ force: true });
-        removed++;
-        this.logger.warn(
-          `reaped ORPHAN container ${c.Names?.[0] ?? c.Id} (sandbox ${sandboxId} has no DB record)`,
-        );
-      } catch (e) {
-        this.logger.warn(`failed to reap container ${c.Id}: ${errorMessage(e)}`);
-      }
-    }
-    return removed;
+      return removed;
+    });
   }
 
   private async reconcileBoxlite(known: Set<string>): Promise<number> {
-    let removed = 0;
-    let runtime;
-    try {
-      runtime = await getSharedBoxliteRuntime();
-    } catch {
-      // BoxLite SDK/binary unavailable on this host — nothing to reconcile.
-      return 0;
-    }
-    // ⚠️ boxlite 侧没有标签机制,身份只能编进**名字**(下面的 prefix)。
-    // 名字里带上实例指纹,规则与 docker 侧同构:不同实例的 micro-VM 前缀不同,
-    // 彼此的 `startsWith` 都不成立 ⇒ 天然互不回收。
-    const minePrefix = boxliteNamePrefix();
-    const boxes = await runtime
-      .listInfo()
-      .then((values) => BoxliteInfosSchema.parse(values))
-      .catch((e: unknown) => {
-        this.logger.warn(`boxlite reconcile skipped: ${errorMessage(e)}`);
-        return [];
-      });
-    for (const b of boxes) {
-      // 旧格式(无实例段)的 box 不匹配这个前缀 ⇒ 同样"宁可漏收不可误删"。
-      if (!b.name?.startsWith(minePrefix)) continue;
-      const sandboxId = b.name.slice(minePrefix.length);
-      if (isPlatformOwnedSandboxId(sandboxId)) {
-        // 只收已经停掉 / 失败的旧 helper（开机时上一个容器里的那个必然是 stopped：BoxLite
-        // 初始化会把验不了 shim 的 box 标成 Stopped）。running / configured / stopping /
-        // paused / unknown 一律不动 —— 宁可留给 helper 自己按名字清，也不误删新 helper。
-        // 例外同 docker 侧：boxlite 已经不是默认 provider ⇒ 不论状态都删。
-        const status = b.state.status.toLowerCase();
-        const retired = this.retiredProvider('boxlite');
-        if (!retired && (b.state.running || !['stopped', 'failed'].includes(status))) {
+    return this.worker.run(async () => {
+      let removed = 0;
+      let runtime;
+      try {
+        runtime = await getSharedBoxliteRuntime();
+      } catch {
+        // BoxLite SDK/binary unavailable on this host — nothing to reconcile.
+        return 0;
+      }
+      // ⚠️ boxlite 侧没有标签机制,身份只能编进**名字**(下面的 prefix)。
+      // 名字里带上实例指纹,规则与 docker 侧同构:不同实例的 micro-VM 前缀不同,
+      // 彼此的 `startsWith` 都不成立 ⇒ 天然互不回收。
+      const minePrefix = boxliteNamePrefix();
+      const boxes = await runtime
+        .listInfo()
+        .then((values) => BoxliteInfosSchema.parse(values))
+        .catch((e: unknown) => {
+          this.logger.warn(`boxlite reconcile skipped: ${errorMessage(e)}`);
+          return [];
+        });
+      for (const b of boxes) {
+        // 旧格式(无实例段)的 box 不匹配这个前缀 ⇒ 同样"宁可漏收不可误删"。
+        if (!b.name?.startsWith(minePrefix)) continue;
+        const sandboxId = b.name.slice(minePrefix.length);
+        if (isPlatformOwnedSandboxId(sandboxId)) {
+          // 只收已经停掉 / 失败的旧 helper（开机时上一个容器里的那个必然是 stopped：BoxLite
+          // 初始化会把验不了 shim 的 box 标成 Stopped）。running / configured / stopping /
+          // paused / unknown 一律不动 —— 宁可留给 helper 自己按名字清，也不误删新 helper。
+          // 例外同 docker 侧：boxlite 已经不是默认 provider ⇒ 不论状态都删。
+          const status = b.state.status.toLowerCase();
+          const retired = this.retiredProvider('boxlite');
+          if (!retired && (b.state.running || !['stopped', 'failed'].includes(status))) {
+            continue;
+          }
+          try {
+            await runtime.remove(b.id, true);
+            removed++;
+            this.logger.log(
+              `removed stale platform auth helper ${b.name} (${status}${retired ? ', provider is no longer the default' : ''}) left by a previous API process; HelperContainerSession recreates it`,
+            );
+          } catch (e) {
+            this.noteHelperRemovalFailure(b.name, e);
+          }
           continue;
         }
+        if (known.has(sandboxId)) continue;
         try {
           await runtime.remove(b.id, true);
           removed++;
-          this.logger.log(
-            `removed stale platform auth helper ${b.name} (${status}${retired ? ', provider is no longer the default' : ''}) left by a previous API process; HelperContainerSession recreates it`,
+          this.logger.warn(
+            `reaped ORPHAN boxlite micro-VM ${b.name} (sandbox ${sandboxId} has no DB record)`,
           );
         } catch (e) {
-          this.noteHelperRemovalFailure(b.name, e);
+          this.logger.warn(`failed to reap box ${b.name}: ${errorMessage(e)}`);
         }
-        continue;
       }
-      if (known.has(sandboxId)) continue;
-      try {
-        await runtime.remove(b.id, true);
-        removed++;
-        this.logger.warn(
-          `reaped ORPHAN boxlite micro-VM ${b.name} (sandbox ${sandboxId} has no DB record)`,
-        );
-      } catch (e) {
-        this.logger.warn(`failed to reap box ${b.name}: ${errorMessage(e)}`);
-      }
-    }
-    return removed;
+      return removed;
+    });
   }
 
   /** helper 所属的 provider 已经不是默认 provider 了吗？认不出来 ⇒ 当作不是（照常只收死掉的）。 */

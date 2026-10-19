@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Logger } from '@nestjs/common';
 import { type OnGatewayInit, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
@@ -21,6 +22,10 @@ import type {
  */
 @WebSocketGateway({ namespace: '/events' })
 export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
+  private readonly worker = coordinatorWorker('platform.events-gateway', () => {
+    this.prepareHandoff();
+  });
+
   private readonly logger = new Logger('EventsGateway');
   private retiring = false;
 
@@ -75,9 +80,11 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
       next();
     };
     server.use((socket, next) => {
-      void authorize(socket, next).catch(() => {
-        next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
-      });
+      void this.worker
+        .run(() => authorize(socket, next))
+        .catch(() => {
+          next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+        });
     });
   }
 

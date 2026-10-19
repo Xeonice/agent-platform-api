@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { Inject, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Logger, Optional, type OnModuleDestroy } from '@nestjs/common';
+import {
+  COORDINATOR_GATEWAY_WORK_FACTORY,
+  type CoordinatorGatewayWork,
+  type CoordinatorGatewayWorkFactory,
+} from '@platform/contracts';
 import {
   ConnectedSocket,
   MessageBody,
@@ -63,6 +68,9 @@ interface Attachment {
 export class TerminalGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
+  private readonly worker: CoordinatorGatewayWork;
+  private retirementClosed = false;
+
   private readonly logger = new Logger('TerminalGateway');
   private readonly attachments = new Map<string, Attachment>();
   private namespace?: Namespace;
@@ -71,7 +79,15 @@ export class TerminalGateway
     private readonly sessions: TerminalSessionService,
     @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
     private readonly waiting: WaitingInputService,
-  ) {}
+    @Optional()
+    @Inject(COORDINATOR_GATEWAY_WORK_FACTORY)
+    workFactory?: CoordinatorGatewayWorkFactory,
+  ) {
+    this.worker = workFactory?.register('terminal.gateway', () => {
+      this.retirementClosed = true;
+      this.prepareHandoff();
+    }) ?? { run: (work) => work() };
+  }
 
   /**
    * Refuse a bad handshake in socket.io MIDDLEWARE, exactly like `/tasks`.
@@ -111,46 +127,53 @@ export class TerminalGateway
 
   /** `null` ⇒ the handshake is acceptable. Order is load-bearing — see each comment. */
   private async rejectHandshake(client: Socket): Promise<Error | null> {
-    // access-passcode gate FIRST (S1 audit P1-1): the REST guard self-exempts
-    // non-HTTP contexts, so the WS handshake must re-check the passcode/session
-    // itself. It runs BEFORE any other probe so an UNAUTHENTICATED client cannot
-    // use the distinct rejection codes to fingerprint the server (e.g. probe
-    // the schema-hash) — every rejection looks the same until it is authorized.
-    if (!(await this.auth.authorize(this.readCredentials(client)))) {
-      return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
-    }
-    // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. It used to read
-    // `presented && presented !== …`, i.e. it could only ever catch a client that was
-    // already being careful enough to send one — the client that does not need
-    // catching. A `/terminal` frame drift shows up on the other side as frames that
-    // simply do not render; the handshake is the only place it can be reported as
-    // itself.
-    const presented = this.readSchemaHash(client);
-    const revision = this.protocolRevision(client);
-    if (revision === null)
-      return wsHandshakeError('PROTOCOL_INCOMPATIBLE', 'terminal protocol ranges do not overlap');
-    if (
-      revision === 1 &&
-      this.readQuery(client, 'protocolMin') === undefined &&
-      presented !== WS_SCHEMA_HASH
-    ) {
-      return wsHandshakeError(
-        'SCHEMA_MISMATCH',
-        `expected ${WS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
-      );
-    }
-    // Addressing, checked LAST — a client that cannot agree on the frame shapes is
-    // better told THAT, and it is the older client, so the more useful diagnosis wins.
-    const sandboxId = this.readQuery(client, 'sandboxId');
-    if (sandboxId === undefined || sandboxId === '') {
-      return wsHandshakeError(
-        'SANDBOX_REQUIRED',
-        'the handshake query must name the sandbox this terminal attaches to (?sandboxId=…)',
-      );
-    }
-    // 寻址的第二半：连**哪一个**会话（06 §5）。放在 sandboxId 之后，理由相同 ——
-    // 它同样是寻址，同样不该被叫成未授权。
-    return this.rejectTarget(client);
+    return this.worker.run(async () => {
+      // access-passcode gate FIRST (S1 audit P1-1): the REST guard self-exempts
+      // non-HTTP contexts, so the WS handshake must re-check the passcode/session
+      // itself. It runs BEFORE any other probe so an UNAUTHENTICATED client cannot
+      // use the distinct rejection codes to fingerprint the server (e.g. probe
+      // the schema-hash) — every rejection looks the same until it is authorized.
+      if (!(await this.auth.authorize(this.readCredentials(client)))) {
+        return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
+      }
+      if (this.retirementClosed)
+        return wsHandshakeError(
+          'APPLICATION_WRITER_QUIESCED',
+          'terminal transport is moving to the active coordinator',
+        );
+      // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. It used to read
+      // `presented && presented !== …`, i.e. it could only ever catch a client that was
+      // already being careful enough to send one — the client that does not need
+      // catching. A `/terminal` frame drift shows up on the other side as frames that
+      // simply do not render; the handshake is the only place it can be reported as
+      // itself.
+      const presented = this.readSchemaHash(client);
+      const revision = this.protocolRevision(client);
+      if (revision === null)
+        return wsHandshakeError('PROTOCOL_INCOMPATIBLE', 'terminal protocol ranges do not overlap');
+      if (
+        revision === 1 &&
+        this.readQuery(client, 'protocolMin') === undefined &&
+        presented !== WS_SCHEMA_HASH
+      ) {
+        return wsHandshakeError(
+          'SCHEMA_MISMATCH',
+          `expected ${WS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
+        );
+      }
+      // Addressing, checked LAST — a client that cannot agree on the frame shapes is
+      // better told THAT, and it is the older client, so the more useful diagnosis wins.
+      const sandboxId = this.readQuery(client, 'sandboxId');
+      if (sandboxId === undefined || sandboxId === '') {
+        return wsHandshakeError(
+          'SANDBOX_REQUIRED',
+          'the handshake query must name the sandbox this terminal attaches to (?sandboxId=…)',
+        );
+      }
+      // 寻址的第二半：连**哪一个**会话（06 §5）。放在 sandboxId 之后，理由相同 ——
+      // 它同样是寻址，同样不该被叫成未授权。
+      return this.rejectTarget(client);
+    });
   }
 
   /**
@@ -231,186 +254,189 @@ export class TerminalGateway
   }
 
   async handleConnection(client: Socket): Promise<void> {
-    // Past the middleware, so the handshake is authorized, version-agreed and addressed.
-    // `sandboxId` cannot be absent here; the fallback keeps this method total rather
-    // than asserting, and `openSession` would reject an empty id anyway.
-    const sandboxId = this.readQuery(client, 'sandboxId') ?? '';
-    const cols = Number(this.readQuery(client, 'cols') ?? 80);
-    const rows = Number(this.readQuery(client, 'rows') ?? 24);
-    const reuse = this.readQuery(client, 'socketSessionKey');
-    const revision = this.protocolRevision(client) ?? 1;
-    const requestedBookmark = this.readQuery(client, 'terminalIdentity');
-    let target: TerminalTarget;
-    // Covers lookup, attach and guest identity confirmation together. Expiry
-    // only detaches a late host attachment; it never kills the guest session.
-    const attachDeadline =
-      revision === 2
-        ? setTimeout(() => {
-            this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
-            this.removeAttachment(client.id, true);
-            client.disconnect(true);
-          }, 5000)
-        : undefined;
+    return this.worker.run(async () => {
+      // Past the middleware, so the handshake is authorized, version-agreed and addressed.
+      // `sandboxId` cannot be absent here; the fallback keeps this method total rather
+      // than asserting, and `openSession` would reject an empty id anyway.
+      const sandboxId = this.readQuery(client, 'sandboxId') ?? '';
+      const cols = Number(this.readQuery(client, 'cols') ?? 80);
+      const rows = Number(this.readQuery(client, 'rows') ?? 24);
+      const reuse = this.readQuery(client, 'socketSessionKey');
+      const revision = this.protocolRevision(client) ?? 1;
+      const requestedBookmark = this.readQuery(client, 'terminalIdentity');
+      let target: TerminalTarget;
+      // Covers lookup, attach and guest identity confirmation together. Expiry
+      // only detaches a late host attachment; it never kills the guest session.
+      const attachDeadline =
+        revision === 2
+          ? setTimeout(() => {
+              this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+              this.removeAttachment(client.id, true);
+              client.disconnect(true);
+            }, 5000)
+          : undefined;
 
-    try {
-      target = requestedBookmark
-        ? await this.sessions.resolveBookmark(sandboxId, requestedBookmark)
-        : this.resolveTarget(client);
-      const requestedKind = this.readQuery(client, 'kind');
-      if (requestedBookmark && requestedKind && target.kind !== requestedKind)
-        throw new TerminalAttachError('TERMINAL_GONE');
-      // agent 那一支：ALWAYS attach the session provision already started
-      // (26 §8 / 裁决 D-15) —— 网关不判断「是不是第一个连接」、不调 buildStartCommand。
-      // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
-      const detectWaiting = await this.sessions.waitingInputEligible(sandboxId);
-      const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse, target });
-      if (client.disconnected) {
-        stream.detach();
-        return;
-      }
-      const socketSessionKey = randomBytes(16).toString('hex'); // 128-bit, server-generated
-      const batcher = new TerminalOutputBatcher((data) => {
-        if (this.attachments.get(client.id)?.stream !== stream) return;
-        this.waiting.output(socketSessionKey, data);
-        this.send(client, { type: 'data', data });
-      });
-      this.attachments.set(client.id, {
-        stream,
-        socketSessionKey,
-        sandboxId,
-        target,
-        batcher,
-        confirmed: revision === 1,
-      });
-      if (detectWaiting) this.waiting.attach(socketSessionKey, sandboxId);
-
-      // ⚠️ `shellId` **只在 shell 那一支带上**。agent 连接上给一个空串会让前端多出一条
-      //    「有 shellId 但它是空的」的分支 —— 缺席才是「这条连的是 agent」。
-      const attachmentId = randomBytes(16).toString('hex');
-      const bookmark = revision === 2 ? await this.sessions.bookmark(sandboxId, target) : null;
-      if (requestedBookmark && bookmark?.terminalIdentity !== requestedBookmark)
-        throw new TerminalAttachError('TERMINAL_GONE');
-      this.send(client, {
-        type: 'session',
-        socketSessionKey,
-        sandboxId,
-        attachmentId,
-        protocolRevision: revision,
-        ...(bookmark ? { terminalIdentity: bookmark.terminalIdentity } : {}),
-        ...(target.kind !== 'agent' ? { shellId: target.shellId } : {}),
-      });
-      // 清单**不挡在 `session` 之前**：它要问一次沙箱（一次 exec 往返），而 `session`
-      // 帧里装着重连凭据、也是前端判定"连上了"的那一帧。搭在它前面等于把开终端的
-      // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
-      if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
-
-      const pending: Buffer[] = [];
-      let confirmGuest!: () => void;
-      const guestOutput = new Promise<void>((resolve) => {
-        confirmGuest = resolve;
-      });
-      let pendingBytes = 0;
-      stream.onData((chunk) => {
-        if (this.attachments.get(client.id)?.stream !== stream) return;
-        confirmGuest();
-        if (this.attachments.get(client.id)?.confirmed) batcher.write(chunk);
-        else {
-          pendingBytes += chunk.length;
-          if (pendingBytes <= 1024 * 1024) pending.push(chunk);
-          else {
-            this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
-            this.removeAttachment(client.id, true);
-            client.disconnect(true);
-          }
-        }
-      });
-      stream.onConnectionState?.((state) => {
-        if (state !== 'unconfirmed' || this.attachments.get(client.id)?.stream !== stream) return;
-        this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
-        this.removeAttachment(client.id, true);
-        client.disconnect(true);
-      });
-      stream.onExit((code) => {
-        if (this.attachments.get(client.id)?.stream !== stream) return;
-        if (revision === 2) {
-          this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
-          this.removeAttachment(client.id, true);
+      try {
+        target = requestedBookmark
+          ? await this.sessions.resolveBookmark(sandboxId, requestedBookmark)
+          : this.resolveTarget(client);
+        const requestedKind = this.readQuery(client, 'kind');
+        if (requestedBookmark && requestedKind && target.kind !== requestedKind)
+          throw new TerminalAttachError('TERMINAL_GONE');
+        // agent 那一支：ALWAYS attach the session provision already started
+        // (26 §8 / 裁决 D-15) —— 网关不判断「是不是第一个连接」、不调 buildStartCommand。
+        // shell 那一支：attach-or-create 用户自己那个 `platform-shell-<id>`（06 §5）。
+        const detectWaiting = await this.sessions.waitingInputEligible(sandboxId);
+        const stream = await this.sessions.openSession(sandboxId, { cols, rows, reuse, target });
+        if (client.disconnected || this.retirementClosed) {
+          stream.detach();
           client.disconnect(true);
           return;
         }
-        batcher.flush();
-        this.removeAttachment(client.id);
-        this.send(client, { type: 'exit', code: code ?? -1 });
-        client.disconnect(true);
-      });
-      if (revision === 2 && bookmark) {
-        let deadline: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            guestOutput,
-            new Promise<never>((_, reject) => {
-              deadline = setTimeout(() => {
-                reject(new TerminalAttachError('RUNTIME_UNKNOWN'));
-              }, 5000);
-            }),
-          ]);
-          const runtimeIdentity = await this.sessions.confirmedIdentity(
-            sandboxId,
-            target,
-            bookmark.terminalIdentity,
-            stream.runtimeIdentity,
-          );
-          const attachment = this.attachments.get(client.id);
-          if (attachment?.stream !== stream || disconnected(client)) return;
-          if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
-          attachment.confirmed = true;
-          this.send(client, {
-            type: 'ready',
-            sandboxId,
-            terminalIdentity: bookmark.terminalIdentity,
-            runtimeIdentity,
-            attachmentId,
-            protocolRevision: revision,
-            existingSession: target.kind === 'agent' || !target.create,
-          });
-          for (const chunk of pending) batcher.write(chunk);
-        } finally {
-          if (deadline) clearTimeout(deadline);
+        const socketSessionKey = randomBytes(16).toString('hex'); // 128-bit, server-generated
+        const batcher = new TerminalOutputBatcher((data) => {
+          if (this.attachments.get(client.id)?.stream !== stream) return;
+          this.waiting.output(socketSessionKey, data);
+          this.send(client, { type: 'data', data });
+        });
+        this.attachments.set(client.id, {
+          stream,
+          socketSessionKey,
+          sandboxId,
+          target,
+          batcher,
+          confirmed: revision === 1,
+        });
+        if (detectWaiting) this.waiting.attach(socketSessionKey, sandboxId);
+
+        // ⚠️ `shellId` **只在 shell 那一支带上**。agent 连接上给一个空串会让前端多出一条
+        //    「有 shellId 但它是空的」的分支 —— 缺席才是「这条连的是 agent」。
+        const attachmentId = randomBytes(16).toString('hex');
+        const bookmark = revision === 2 ? await this.sessions.bookmark(sandboxId, target) : null;
+        if (requestedBookmark && bookmark?.terminalIdentity !== requestedBookmark)
+          throw new TerminalAttachError('TERMINAL_GONE');
+        this.send(client, {
+          type: 'session',
+          socketSessionKey,
+          sandboxId,
+          attachmentId,
+          protocolRevision: revision,
+          ...(bookmark ? { terminalIdentity: bookmark.terminalIdentity } : {}),
+          ...(target.kind !== 'agent' ? { shellId: target.shellId } : {}),
+        });
+        // 清单**不挡在 `session` 之前**：它要问一次沙箱（一次 exec 往返），而 `session`
+        // 帧里装着重连凭据、也是前端判定"连上了"的那一帧。搭在它前面等于把开终端的
+        // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
+        if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
+
+        const pending: Buffer[] = [];
+        let confirmGuest!: () => void;
+        const guestOutput = new Promise<void>((resolve) => {
+          confirmGuest = resolve;
+        });
+        let pendingBytes = 0;
+        stream.onData((chunk) => {
+          if (this.attachments.get(client.id)?.stream !== stream) return;
+          confirmGuest();
+          if (this.attachments.get(client.id)?.confirmed) batcher.write(chunk);
+          else {
+            pendingBytes += chunk.length;
+            if (pendingBytes <= 1024 * 1024) pending.push(chunk);
+            else {
+              this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+              this.removeAttachment(client.id, true);
+              client.disconnect(true);
+            }
+          }
+        });
+        stream.onConnectionState?.((state) => {
+          if (state !== 'unconfirmed' || this.attachments.get(client.id)?.stream !== stream) return;
+          this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+          this.removeAttachment(client.id, true);
+          client.disconnect(true);
+        });
+        stream.onExit((code) => {
+          if (this.attachments.get(client.id)?.stream !== stream) return;
+          if (revision === 2) {
+            this.send(client, { type: 'connection_state', state: 'unconfirmed', sandboxId });
+            this.removeAttachment(client.id, true);
+            client.disconnect(true);
+            return;
+          }
+          batcher.flush();
+          this.removeAttachment(client.id);
+          this.send(client, { type: 'exit', code: code ?? -1 });
+          client.disconnect(true);
+        });
+        if (revision === 2 && bookmark) {
+          let deadline: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              guestOutput,
+              new Promise<never>((_, reject) => {
+                deadline = setTimeout(() => {
+                  reject(new TerminalAttachError('RUNTIME_UNKNOWN'));
+                }, 5000);
+              }),
+            ]);
+            const runtimeIdentity = await this.sessions.confirmedIdentity(
+              sandboxId,
+              target,
+              bookmark.terminalIdentity,
+              stream.runtimeIdentity,
+            );
+            const attachment = this.attachments.get(client.id);
+            if (attachment?.stream !== stream || disconnected(client)) return;
+            if (!runtimeIdentity) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+            attachment.confirmed = true;
+            this.send(client, {
+              type: 'ready',
+              sandboxId,
+              terminalIdentity: bookmark.terminalIdentity,
+              runtimeIdentity,
+              attachmentId,
+              protocolRevision: revision,
+              existingSession: target.kind === 'agent' || !target.create,
+            });
+            for (const chunk of pending) batcher.write(chunk);
+          } finally {
+            if (deadline) clearTimeout(deadline);
+          }
         }
+      } catch (e) {
+        this.logger.error(
+          `openSession failed for sandbox ${sandboxId}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        // ⚠️ **先说一声再挂断,但只对不可重试的失败说。**
+        //
+        // 此前这里是一句不说的 `disconnect(true)`,而"连上又断"与网络抖动在客户端看来
+        // 完全一样 —— 于是它只能按抖动处理:退避重连,而每一次都走进同一个 catch。实测:
+        // 连上 → 1ms 后挂断、零帧,前端烧完 9 次退避(约 2 分钟)才停,而那个「手动重连」
+        // 每按一次又清零预算重来一轮。
+        //
+        // 但**不能一律判死**:能从这里抛出来的不只有"容器已被回收"这种永久故障,还有
+        // `PROVIDER_UNAVAILABLE` 这类瞬时故障(名字本身就在说该重试)。一律发终止信号
+        // 等于把本来能自愈的抖动也判成永久故障。判据用 `SandboxProviderError.retryable`
+        // —— 它本来就在契约里,不需要另造一套。
+        //
+        // 码用 `TERMINAL_EXIT_ATTACH_FAILED`(-2)而不是 -1:后者已经表示"进程退出但退出码
+        // 未知"(被信号杀死),复用会让"agent 被 OOM kill"和"沙箱整个不在了"变成字节级
+        // 相同的一帧,而这两件事对用户的下一步完全不同。
+        this.removeAttachment(client.id, true);
+        const code =
+          e instanceof TerminalAttachError
+            ? e.code
+            : e instanceof SandboxProviderError &&
+                !e.retryable &&
+                e.code === SandboxProviderErrorCode.NOT_FOUND
+              ? 'TERMINAL_GONE'
+              : 'RUNTIME_UNKNOWN';
+        this.send(client, { type: 'error', code, sandboxId });
+        client.disconnect(true);
+      } finally {
+        if (attachDeadline) clearTimeout(attachDeadline);
       }
-    } catch (e) {
-      this.logger.error(
-        `openSession failed for sandbox ${sandboxId}: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      // ⚠️ **先说一声再挂断,但只对不可重试的失败说。**
-      //
-      // 此前这里是一句不说的 `disconnect(true)`,而"连上又断"与网络抖动在客户端看来
-      // 完全一样 —— 于是它只能按抖动处理:退避重连,而每一次都走进同一个 catch。实测:
-      // 连上 → 1ms 后挂断、零帧,前端烧完 9 次退避(约 2 分钟)才停,而那个「手动重连」
-      // 每按一次又清零预算重来一轮。
-      //
-      // 但**不能一律判死**:能从这里抛出来的不只有"容器已被回收"这种永久故障,还有
-      // `PROVIDER_UNAVAILABLE` 这类瞬时故障(名字本身就在说该重试)。一律发终止信号
-      // 等于把本来能自愈的抖动也判成永久故障。判据用 `SandboxProviderError.retryable`
-      // —— 它本来就在契约里,不需要另造一套。
-      //
-      // 码用 `TERMINAL_EXIT_ATTACH_FAILED`(-2)而不是 -1:后者已经表示"进程退出但退出码
-      // 未知"(被信号杀死),复用会让"agent 被 OOM kill"和"沙箱整个不在了"变成字节级
-      // 相同的一帧,而这两件事对用户的下一步完全不同。
-      this.removeAttachment(client.id, true);
-      const code =
-        e instanceof TerminalAttachError
-          ? e.code
-          : e instanceof SandboxProviderError &&
-              !e.retryable &&
-              e.code === SandboxProviderErrorCode.NOT_FOUND
-            ? 'TERMINAL_GONE'
-            : 'RUNTIME_UNKNOWN';
-      this.send(client, { type: 'error', code, sandboxId });
-      client.disconnect(true);
-    } finally {
-      if (attachDeadline) clearTimeout(attachDeadline);
-    }
+    });
   }
 
   /**
@@ -470,6 +496,7 @@ export class TerminalGateway
 
   @SubscribeMessage('frame')
   onFrame(@ConnectedSocket() client: Socket, @MessageBody() frame: TerminalClientFrame): void {
+    if (this.retirementClosed) return;
     const att = this.attachments.get(client.id);
     if (!att) return;
     if (!att.confirmed && frame.type !== 'ping' && frame.type !== 'resize') return;
@@ -511,16 +538,18 @@ export class TerminalGateway
    * 那与"还没答"在前端无从区分。
    */
   private async pushShellInventory(client: Socket, sandboxId: string): Promise<void> {
-    try {
-      const shells = await this.sessions.listShellSessions(sandboxId);
-      this.send(client, { type: 'shells', shells });
-    } catch (e) {
-      // 走到这里说明是 `listShellSessions` 之外的意外（它自己已经把已知失败折成 null）。
-      this.logger.error(
-        `sandbox ${sandboxId}: push shell inventory failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      this.send(client, { type: 'shells', shells: null });
-    }
+    return this.worker.run(async () => {
+      try {
+        const shells = await this.sessions.listShellSessions(sandboxId);
+        this.send(client, { type: 'shells', shells });
+      } catch (e) {
+        // 走到这里说明是 `listShellSessions` 之外的意外（它自己已经把已知失败折成 null）。
+        this.logger.error(
+          `sandbox ${sandboxId}: push shell inventory failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        this.send(client, { type: 'shells', shells: null });
+      }
+    });
   }
 
   /**
@@ -533,21 +562,23 @@ export class TerminalGateway
    * 不是握手 query 里那个 —— 两者不是同一个值，所以这一层的校验不是多余的。
    */
   private async closeShell(sandboxId: string, shellId: string): Promise<void> {
-    try {
-      await this.sessions.closeShellSession(sandboxId, shellId);
-      for (const [clientId, att] of this.attachments) {
-        if (
-          att.sandboxId === sandboxId &&
-          att.target.kind !== 'agent' &&
-          att.target.shellId === shellId
-        )
-          this.removeAttachment(clientId, true);
+    return this.worker.run(async () => {
+      try {
+        await this.sessions.closeShellSession(sandboxId, shellId);
+        for (const [clientId, att] of this.attachments) {
+          if (
+            att.sandboxId === sandboxId &&
+            att.target.kind !== 'agent' &&
+            att.target.shellId === shellId
+          )
+            this.removeAttachment(clientId, true);
+        }
+      } catch (e) {
+        this.logger.error(
+          `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
-    } catch (e) {
-      this.logger.error(
-        `sandbox ${sandboxId}: close_shell failed for ${JSON.stringify(shellId)}: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    });
   }
 
   private send(client: Socket, frame: TerminalServerFrame): void {

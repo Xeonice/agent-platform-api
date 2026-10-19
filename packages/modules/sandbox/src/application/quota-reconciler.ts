@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { asNodeId } from '@platform/shared-kernel';
 import { errorMessage } from '@platform/shared-kernel';
 import {
@@ -81,6 +82,8 @@ export interface QuotaReconcileReport {
  */
 @Injectable()
 export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('sandbox.quota');
+
   private readonly logger = new Logger('QuotaReconciler');
   /** allocationId → 上一次拿到确定判据（`alive`/`gone`）的时刻。见类注释。 */
   private readonly lastCheckedAt = new Map<string, number>();
@@ -100,22 +103,26 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    try {
-      const report = await this.reconcile();
-      if (report.orphaned > 0) {
-        this.logger.warn(
-          `quota reconcile: released ${String(report.orphaned)} orphaned allocation(s) of ` +
-            `${String(report.scanned)} active`,
-        );
+    return this.worker.run(async () => {
+      try {
+        const report = await this.reconcile();
+        if (report.orphaned > 0) {
+          this.logger.warn(
+            `quota reconcile: released ${String(report.orphaned)} orphaned allocation(s) of ` +
+              `${String(report.scanned)} active`,
+          );
+        }
+      } catch (e) {
+        // 对账失败绝不拦启动 —— 一个起不来的平台比一份略旧的账本坏得多。
+        this.logger.warn(`quota reconcile skipped: ${errorMessage(e)}`);
       }
-    } catch (e) {
-      // 对账失败绝不拦启动 —— 一个起不来的平台比一份略旧的账本坏得多。
-      this.logger.warn(`quota reconcile skipped: ${errorMessage(e)}`);
-    }
-    if (process.env.DISABLE_QUOTA_RECONCILE === '1') return;
-    this.timer = setInterval(() => void this.sweep(), INCREMENTAL_INTERVAL_MS);
-    // 不为了对账把事件循环吊着（与 `SandboxHealthMonitor` / `AutomationScheduler` 同款）
-    this.timer.unref();
+      if (process.env.DISABLE_QUOTA_RECONCILE === '1') return;
+      this.timer = this.worker.ownInterval(
+        setInterval(() => void this.sweep(), INCREMENTAL_INTERVAL_MS),
+      );
+      // 不为了对账把事件循环吊着（与 `SandboxHealthMonitor` / `AutomationScheduler` 同款）
+      this.timer.unref();
+    });
   }
 
   /**
@@ -125,29 +132,33 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
    */
   onModuleDestroy(): void {
     if (this.timer !== null) {
-      clearInterval(this.timer);
+      this.worker.cancel(this.timer);
       this.timer = null;
     }
   }
 
   /** 定时器的入口：永不抛、不重入。**幂等，可以直接被测试调用**。 */
   async sweep(): Promise<QuotaReconcileReport> {
-    const idle: QuotaReconcileReport = { scanned: 0, confirmed: 0, orphaned: 0 };
-    if (this.sweeping) return idle;
-    this.sweeping = true;
-    try {
-      return await this.reconcileIncremental();
-    } catch (e) {
-      this.logger.warn(`incremental quota reconcile failed: ${errorMessage(e)}`);
-      return idle;
-    } finally {
-      this.sweeping = false;
-    }
+    return this.worker.run(async () => {
+      const idle: QuotaReconcileReport = { scanned: 0, confirmed: 0, orphaned: 0 };
+      if (this.sweeping) return idle;
+      this.sweeping = true;
+      try {
+        return await this.reconcileIncremental();
+      } catch (e) {
+        this.logger.warn(`incremental quota reconcile failed: ${errorMessage(e)}`);
+        return idle;
+      } finally {
+        this.sweeping = false;
+      }
+    });
   }
 
   /** 开机那次：全部活跃登记，一条不落。Public so an operator/test can trigger it. */
   async reconcile(): Promise<QuotaReconcileReport> {
-    return this.check(await this.allocations.listActive(nodeId()));
+    return this.worker.run(async () => {
+      return this.check(await this.allocations.listActive(nodeId()));
+    });
   }
 
   /**
@@ -157,71 +168,81 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
    * 「最旧的先来」不是装饰 —— 按库序取会让排在后面的登记在一台繁忙的机器上永远轮不到。
    */
   async reconcileIncremental(): Promise<QuotaReconcileReport> {
-    const now = this.clock.now().getTime();
-    const stale = staleMs();
-    const due = (await this.allocations.listActive(nodeId()))
-      .map((a) => ({ a, since: this.lastCheckedAt.get(a.id) ?? a.allocatedAt.getTime() }))
-      .filter(({ since }) => now - since >= stale)
-      .sort((x, y) => x.since - y.since)
-      .slice(0, batchSize())
-      .map(({ a }) => a);
-    return this.check(due);
+    return this.worker.run(async () => {
+      const now = this.clock.now().getTime();
+      const stale = staleMs();
+      const due = (await this.allocations.listActive(nodeId()))
+        .map((a) => ({ a, since: this.lastCheckedAt.get(a.id) ?? a.allocatedAt.getTime() }))
+        .filter(({ since }) => now - since >= stale)
+        .sort((x, y) => x.since - y.since)
+        .slice(0, batchSize())
+        .map(({ a }) => a);
+      return this.check(due);
+    });
   }
 
   private async check(allocations: readonly ResourceAllocation[]): Promise<QuotaReconcileReport> {
-    const report: QuotaReconcileReport = { scanned: allocations.length, confirmed: 0, orphaned: 0 };
-    for (const allocation of allocations) {
-      const sandbox = await this.sandboxes.findById(allocation.sandboxId);
-      const verdict = await this.verdictFor(sandbox);
-      // ⚠️ **`unknown` 不记时刻。** 记了的话，一个 provider 一直不可达的沙箱会被这条
-      // 「已核对」推到 30 分钟之后，于是 daemon 恢复后还要再等半小时才有人去看它。
-      if (verdict === 'unknown') continue;
-      this.lastCheckedAt.set(allocation.id, this.clock.now().getTime());
-      if (verdict === 'alive') {
-        if (await this.resources.confirmActive(allocation.sandboxId)) report.confirmed += 1;
-        continue;
+    return this.worker.run(async () => {
+      const report: QuotaReconcileReport = {
+        scanned: allocations.length,
+        confirmed: 0,
+        orphaned: 0,
+      };
+      for (const allocation of allocations) {
+        const sandbox = await this.sandboxes.findById(allocation.sandboxId);
+        const verdict = await this.verdictFor(sandbox);
+        // ⚠️ **`unknown` 不记时刻。** 记了的话，一个 provider 一直不可达的沙箱会被这条
+        // 「已核对」推到 30 分钟之后，于是 daemon 恢复后还要再等半小时才有人去看它。
+        if (verdict === 'unknown') continue;
+        this.lastCheckedAt.set(allocation.id, this.clock.now().getTime());
+        if (verdict === 'alive') {
+          if (await this.resources.confirmActive(allocation.sandboxId)) report.confirmed += 1;
+          continue;
+        }
+        const released = await this.resources.releaseAsOrphan(allocation.sandboxId, (tx) => {
+          if (sandbox === null) return;
+          // 17 §76 的消费方是审计（`AuditProjector`）。与释放**同一个事务**，所以
+          // 「账本改了但没人知道」这个中间态不存在。
+          this.events.publishInTx(tx, [
+            new SandboxReconciledAsOrphan(
+              sandbox.id,
+              sandbox.projectId,
+              sandbox.name,
+              sandbox.status,
+              'container missing on reconcile',
+              this.clock.now(),
+            ),
+          ]);
+        });
+        if (released) report.orphaned += 1;
       }
-      const released = await this.resources.releaseAsOrphan(allocation.sandboxId, (tx) => {
-        if (sandbox === null) return;
-        // 17 §76 的消费方是审计（`AuditProjector`）。与释放**同一个事务**，所以
-        // 「账本改了但没人知道」这个中间态不存在。
-        this.events.publishInTx(tx, [
-          new SandboxReconciledAsOrphan(
-            sandbox.id,
-            sandbox.projectId,
-            sandbox.name,
-            sandbox.status,
-            'container missing on reconcile',
-            this.clock.now(),
-          ),
-        ]);
-      });
-      if (released) report.orphaned += 1;
-    }
-    return report;
+      return report;
+    });
   }
 
   private async verdictFor(sandbox: Sandbox | null): Promise<'alive' | 'gone' | 'unknown'> {
-    // 沙箱行本身没了（FK CASCADE 之外的路径，或库被手动清过）⇒ 这条登记再也没有主人。
-    if (sandbox === null) return 'gone';
-    // 已终态：`destroy`/`compensate` 那一步的释放没跑成（崩在中间）。账本补上。
-    if (TERMINAL.has(sandbox.status)) return 'gone';
-    const handle = handleOf(sandbox);
-    // 还没建出实例（`pending`/`scheduling`/`preparing-workspace`）——**不判孤儿**：
-    // 进程重启会把它留在那儿，由生命周期链路收，而不是由账本替它决定生死。
-    if (handle === null) return 'unknown';
-    if (!this.registry.has(sandbox.provider)) return 'unknown';
-    try {
-      const status = await this.registry.get(sandbox.provider).inspect(handle);
-      // 13 §4 的判据是「容器查无」——**只有 `instance_missing` 是查无**（见类注释纪律 ①）。
-      return status.lifecycleState === 'instance_missing' ? 'gone' : 'alive';
-    } catch (e) {
-      this.logger.warn(
-        `could not inspect sandbox ${sandbox.id} while reconciling quota ` +
-          `(${errorMessage(e)}); leaving its allocation untouched`,
-      );
-      return 'unknown';
-    }
+    return this.worker.run(async () => {
+      // 沙箱行本身没了（FK CASCADE 之外的路径，或库被手动清过）⇒ 这条登记再也没有主人。
+      if (sandbox === null) return 'gone';
+      // 已终态：`destroy`/`compensate` 那一步的释放没跑成（崩在中间）。账本补上。
+      if (TERMINAL.has(sandbox.status)) return 'gone';
+      const handle = handleOf(sandbox);
+      // 还没建出实例（`pending`/`scheduling`/`preparing-workspace`）——**不判孤儿**：
+      // 进程重启会把它留在那儿，由生命周期链路收，而不是由账本替它决定生死。
+      if (handle === null) return 'unknown';
+      if (!this.registry.has(sandbox.provider)) return 'unknown';
+      try {
+        const status = await this.registry.get(sandbox.provider).inspect(handle);
+        // 13 §4 的判据是「容器查无」——**只有 `instance_missing` 是查无**（见类注释纪律 ①）。
+        return status.lifecycleState === 'instance_missing' ? 'gone' : 'alive';
+      } catch (e) {
+        this.logger.warn(
+          `could not inspect sandbox ${sandbox.id} while reconciling quota ` +
+            `(${errorMessage(e)}); leaving its allocation untouched`,
+        );
+        return 'unknown';
+      }
+    });
   }
 }
 

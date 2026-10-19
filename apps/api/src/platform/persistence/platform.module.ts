@@ -6,7 +6,12 @@ import {
   DATABASE,
   UNIT_OF_WORK,
   BUSINESS_WRITER_AUTHORITY,
+  coordinatorWorker,
 } from '@platform/shared-kernel';
+import {
+  COORDINATOR_GATEWAY_WORK_FACTORY,
+  type CoordinatorGatewayWorkFactory,
+} from '@platform/contracts';
 import { SystemClock } from '../time/system-clock';
 import { UuidIdGenerator } from '../time/uuid-id-generator';
 import { InProcessEventBus } from '../events/in-process-event-bus';
@@ -84,6 +89,12 @@ export function activatePreparedPlatform(): number {
 @Global()
 @Module({
   providers: [
+    {
+      provide: COORDINATOR_GATEWAY_WORK_FACTORY,
+      useFactory: (): CoordinatorGatewayWorkFactory => ({
+        register: (id, stopAdmission) => coordinatorWorker(id, stopAdmission),
+      }),
+    },
     { provide: CLOCK, useClass: SystemClock },
     { provide: ID_GENERATOR, useClass: UuidIdGenerator },
     { provide: EVENT_BUS, useClass: InProcessEventBus },
@@ -110,6 +121,7 @@ export function activatePreparedPlatform(): number {
     },
   ],
   exports: [
+    COORDINATOR_GATEWAY_WORK_FACTORY,
     CLOCK,
     ID_GENERATOR,
     EVENT_BUS,

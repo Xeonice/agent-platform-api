@@ -7,6 +7,7 @@ export * from './ports/id-generator.port';
 export * from './ports/unit-of-work.port';
 export * from './ports/event-bus.port';
 export * from './ports/database.token';
+export * from './ports/coordinator-work-registry';
 export * from './domain/domain-event';
 export * from './domain/aggregate-root';
 export * from './domain/runtime-secret';

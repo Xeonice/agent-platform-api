@@ -298,6 +298,11 @@ export class ControlApplicationRegistry implements OnModuleInit {
       protocol: { min: 1, max: 2 },
     };
   }
+  /** Independent maintenance closes admission without releasing a writer or
+   * cancelling any accepted operation. The lifetime registry waits separately. */
+  closeRetirementAdmission(): void {
+    this.accepting = false;
+  }
   async quiesce(budgetMs: number): Promise<{ quiesced: true; activeMutations: 0 }> {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0 || budgetMs > 1500)
       throw new BadRequestException('Invalid bounded quiesce budget');

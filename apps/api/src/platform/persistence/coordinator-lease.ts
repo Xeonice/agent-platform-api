@@ -1,4 +1,4 @@
-import { isRecord } from '@platform/shared-kernel';
+import { coordinatorWorker, isRecord } from '@platform/shared-kernel';
 import type Database from 'better-sqlite3';
 import type { Clock, IdGenerator } from '@platform/shared-kernel';
 import { UpgradeError } from '../upgrade/upgrade-trust';
@@ -68,6 +68,7 @@ export function fenceCoordinatorConnection(
   clock: Clock,
   ids: IdGenerator,
 ): Database.Database {
+  const worker = coordinatorWorker('platform.writer-renewal');
   const priorSchema = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE name='platform_role_leases'")
     .get();
@@ -153,11 +154,11 @@ export function fenceCoordinatorConnection(
         .immediate();
     } catch {
       process.env.COORDINATOR_WRITER_FENCE_VALID = 'false';
-      clearInterval(renewal);
+      worker.cancel(renewal);
     }
   };
   const startRenewal = () => {
-    renewal = withoutUpgradeRecovery(() => setInterval(renew, 5000));
+    renewal = withoutUpgradeRecovery(() => worker.ownInterval(setInterval(renew, 5000)));
     renewal.unref();
   };
   startRenewal();
@@ -226,7 +227,7 @@ export function fenceCoordinatorConnection(
             lease.fence = next.fence;
             process.env.COORDINATOR_GENERATION = String(next.generation);
             process.env.COORDINATOR_WRITER_FENCE_VALID = 'true';
-            clearInterval(renewal);
+            worker.cancel(renewal);
             startRenewal();
             return next.generation;
           },
@@ -238,7 +239,7 @@ export function fenceCoordinatorConnection(
               )
               .run(holder, lease.generation, lease.fence);
             process.env.COORDINATOR_WRITER_FENCE_VALID = 'false';
-            clearInterval(renewal);
+            worker.cancel(renewal);
           },
         } satisfies CoordinatorWriterControl;
       if (property === 'prepare') return (source: string) => wrap(target.prepare(source));
@@ -268,7 +269,7 @@ export function fenceCoordinatorConnection(
       if (property === 'close')
         return () => {
           process.env.COORDINATOR_WRITER_FENCE_VALID = 'false';
-          clearInterval(renewal);
+          worker.cancel(renewal);
           try {
             sqlite
               .prepare(

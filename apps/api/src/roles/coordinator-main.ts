@@ -7,10 +7,18 @@ import { platformConnection } from '../platform/persistence/platform.module';
 import { PlatformLoggerService } from '../platform/logging';
 import { env } from '../platform/config/env';
 import { coordinatorArtifactIdentity } from '../platform/upgrade/coordinator-artifact-identity';
+import { CoordinatorWorkRegistry, installCoordinatorWorkRegistry } from '@platform/shared-kernel';
 
 async function main(): Promise<void> {
   process.env.PLATFORM_PROCESS_ROLE = 'coordinator';
-  const { AppModule } = await import('../app.module');
+  const workers = new CoordinatorWorkRegistry();
+  installCoordinatorWorkRegistry(workers);
+  const [{ AppModule }, { installNormalCoordinatorRetirement }, { sealCoordinatorWorkerManifest }] =
+    await Promise.all([
+      import('../app.module'),
+      import('../platform/upgrade/normal-coordinator-retirement'),
+      import('../platform/upgrade/coordinator-worker-manifest'),
+    ]);
   if (
     !process.env.PLATFORM_INSTANCE_ID ||
     !process.env.RUNTIME_OWNER_RPC_URL ||
@@ -27,11 +35,13 @@ async function main(): Promise<void> {
   platformConnection();
   process.env.SANDBOX_RECONCILE_ON_BOOT = 'false';
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
+  installNormalCoordinatorRetirement(app, workers);
   app.useLogger(app.get(PlatformLoggerService));
   configurePlatformApp(app, network);
   setupWebsockets(app, network);
   app.enableShutdownHooks();
   await app.listen(env.port, env.host);
+  sealCoordinatorWorkerManifest(app, workers, { prepared: false });
 }
 void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : 'COORDINATOR_BOOT_FAILED');

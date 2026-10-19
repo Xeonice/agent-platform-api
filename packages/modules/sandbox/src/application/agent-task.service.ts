@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import {
   HttpException,
   HttpStatus,
@@ -69,6 +70,8 @@ export interface OpenedArtifact {
  */
 @Injectable()
 export class AgentTaskApplicationService implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('sandbox.task-recovery');
+
   private recoveryTimer?: ReturnType<typeof setInterval>;
   constructor(
     @Inject(AGENT_TASK_REPOSITORY) private readonly tasks: AgentTaskRepository,
@@ -88,27 +91,33 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * where every row would look like an orphan.
    */
   async onApplicationBootstrap(): Promise<void> {
-    if (
-      process.env.PLATFORM_PROCESS_ROLE !== 'coordinator' &&
-      process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true'
-    )
-      return;
-    await this.resumeRunning().catch(() => undefined);
-    if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
-      this.recoveryTimer = setInterval(() => {
-        void this.resumeRunning().catch(() => undefined);
-      }, 15_000);
-      this.recoveryTimer.unref();
-    }
+    return this.worker.run(async () => {
+      if (
+        process.env.PLATFORM_PROCESS_ROLE !== 'coordinator' &&
+        process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true'
+      )
+        return;
+      await this.resumeRunning().catch(() => undefined);
+      if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
+        this.recoveryTimer = this.worker.ownInterval(
+          setInterval(() => {
+            void this.resumeRunning().catch(() => undefined);
+          }, 15_000),
+        );
+        this.recoveryTimer.unref();
+      }
+    });
   }
   onModuleDestroy(): void {
-    if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+    if (this.recoveryTimer) this.worker.cancel(this.recoveryTimer);
     this.workflow.shutdown();
   }
 
   /** Public so an operator — or a restart test — can trigger recovery explicitly. */
   resumeRunning(): Promise<number> {
-    return this.workflow.resumeRunning();
+    return this.worker.run(async () => {
+      return this.workflow.resumeRunning();
+    });
   }
 
   /**
@@ -119,7 +128,9 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * four hours.
    */
   async run(sandboxId: string, runtimeId: string, input: RunAgentTaskInput): Promise<AgentTaskDto> {
-    return this.runWithIdentity(sandboxId, runtimeId, input);
+    return this.worker.run(async () => {
+      return this.runWithIdentity(sandboxId, runtimeId, input);
+    });
   }
 
   /** Scheduler-only accepted identity. A browser/API body cannot allocate this. */
@@ -130,9 +141,11 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
     taskId: string,
     actorId: string,
   ): Promise<AgentTaskDto> {
-    return this.runWithIdentity(sandboxId, runtimeId, input, {
-      taskId,
-      actor: { kind: 'automation', id: actorId },
+    return this.worker.run(async () => {
+      return this.runWithIdentity(sandboxId, runtimeId, input, {
+        taskId,
+        actor: { kind: 'automation', id: actorId },
+      });
     });
   }
   private async runWithIdentity(
@@ -141,36 +154,40 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
     input: RunAgentTaskInput,
     accepted?: { taskId: string; actor: { kind: 'automation'; id: string } },
   ): Promise<AgentTaskDto> {
-    try {
-      const sandbox = await this.requireSandbox(sandboxId);
-      // An existing original task can be confirmed after its sandbox has finished;
-      // a fresh task still passes every normal admission gate.
-      if (!accepted || !(await this.tasks.findById(asAgentTaskId(accepted.taskId))))
-        this.assertRunnable(sandbox, runtimeId);
-      const task = await this.workflow.start(
-        sandbox,
-        {
-          sandboxId,
-          runtime: runtimeId,
-          prompt: input.prompt,
-          timeoutMinutes: input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
-          resumeFrom: input.resumeFrom,
-          // Already narrowed to the `TaskExtraArgSchema` enum by validation; passing the
-          // values through unchanged is the point — this is the LAST place they could be
-          // widened, and they are not.
-          extraArgs: input.extraArgs,
-        },
-        accepted,
-      );
-      return AgentTaskMapper.toDto(task);
-    } catch (e) {
-      throw mapProviderErrorToHttp(e);
-    }
+    return this.worker.run(async () => {
+      try {
+        const sandbox = await this.requireSandbox(sandboxId);
+        // An existing original task can be confirmed after its sandbox has finished;
+        // a fresh task still passes every normal admission gate.
+        if (!accepted || !(await this.tasks.findById(asAgentTaskId(accepted.taskId))))
+          this.assertRunnable(sandbox, runtimeId);
+        const task = await this.workflow.start(
+          sandbox,
+          {
+            sandboxId,
+            runtime: runtimeId,
+            prompt: input.prompt,
+            timeoutMinutes: input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
+            resumeFrom: input.resumeFrom,
+            // Already narrowed to the `TaskExtraArgSchema` enum by validation; passing the
+            // values through unchanged is the point — this is the LAST place they could be
+            // widened, and they are not.
+            extraArgs: input.extraArgs,
+          },
+          accepted,
+        );
+        return AgentTaskMapper.toDto(task);
+      } catch (e) {
+        throw mapProviderErrorToHttp(e);
+      }
+    });
   }
 
   /** `GET /api/sandboxes/:id/tasks/:taskId`. */
   async get(sandboxId: string, taskId: string): Promise<AgentTaskDto> {
-    return AgentTaskMapper.toDto(await this.requireTask(sandboxId, taskId));
+    return this.worker.run(async () => {
+      return AgentTaskMapper.toDto(await this.requireTask(sandboxId, taskId));
+    });
   }
 
   /**
@@ -183,12 +200,14 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * later without another round of protocol work.
    */
   async listBySandbox(sandboxId: string): Promise<AgentTaskDto[]> {
-    await this.requireSandbox(sandboxId);
-    const rows = await this.tasks.findBySandbox(asSandboxId(sandboxId));
-    return rows
-      .slice()
-      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
-      .map((t) => AgentTaskMapper.toDto(t));
+    return this.worker.run(async () => {
+      await this.requireSandbox(sandboxId);
+      const rows = await this.tasks.findBySandbox(asSandboxId(sandboxId));
+      return rows
+        .slice()
+        .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
+        .map((t) => AgentTaskMapper.toDto(t));
+    });
   }
 
   /**
@@ -205,22 +224,24 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * how a job gets released before its exit code was read.
    */
   async cancel(sandboxId: string, taskId: string): Promise<AgentTaskDto> {
-    const task = await this.requireTask(sandboxId, taskId);
-    if (!task.isRunning) {
-      throw mapProviderErrorToHttp(
-        new SandboxProviderError(
-          SandboxProviderErrorCode.INVALID_STATE,
-          `task ${taskId} already finished as '${task.status}'`,
-        ),
-      );
-    }
-    const sandbox = await this.requireSandbox(sandboxId);
-    try {
-      await this.workflow.cancel(task, sandbox);
-      return AgentTaskMapper.toDto(task);
-    } catch (e) {
-      throw mapProviderErrorToHttp(e);
-    }
+    return this.worker.run(async () => {
+      const task = await this.requireTask(sandboxId, taskId);
+      if (!task.isRunning) {
+        throw mapProviderErrorToHttp(
+          new SandboxProviderError(
+            SandboxProviderErrorCode.INVALID_STATE,
+            `task ${taskId} already finished as '${task.status}'`,
+          ),
+        );
+      }
+      const sandbox = await this.requireSandbox(sandboxId);
+      try {
+        await this.workflow.cancel(task, sandbox);
+        return AgentTaskMapper.toDto(task);
+      } catch (e) {
+        throw mapProviderErrorToHttp(e);
+      }
+    });
   }
 
   /**
@@ -240,47 +261,49 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * whenever it cannot — see `measureArtifact`.
    */
   async openArtifact(sandboxId: string, taskId: string, name: string): Promise<OpenedArtifact> {
-    const task = await this.requireTask(sandboxId, taskId);
-    const safe = sanitizeArtifactName(name);
-    if (safe === null) {
-      throw new HttpException(
-        { code: 'INVALID_ARTIFACT_NAME', message: `'${name}' is not a valid artifact name` },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-    if (task.artifacts.length > 0 && !task.artifacts.some((a) => a.name === safe)) {
-      throw new NotFoundException(`task ${taskId} has no artifact '${safe}'`);
-    }
-    const sandbox = await this.requireSandbox(sandboxId);
-    try {
-      if (sandbox.status === 'destroyed') {
-        const artifact =
-          !task.isRunning && sandbox.workspacePath
-            ? await this.retainedArtifacts?.open(sandbox.workspacePath, safe)
-            : null;
-        if (!artifact) throw new NotFoundException(`artifact '${safe}' is no longer retained`);
-        return { name: safe, ...artifact };
-      }
-      const provider = this.providers.get(sandbox.provider);
-      const files = provider.files;
-      if (!files) {
-        throw new SandboxProviderError(
-          SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
-          `provider '${provider.name}' has no file plane to read artifacts from`,
+    return this.worker.run(async () => {
+      const task = await this.requireTask(sandboxId, taskId);
+      const safe = sanitizeArtifactName(name);
+      if (safe === null) {
+        throw new HttpException(
+          { code: 'INVALID_ARTIFACT_NAME', message: `'${name}' is not a valid artifact name` },
+          HttpStatus.BAD_REQUEST,
         );
       }
-      const handle = handleOf(sandbox);
-      const path = `${TASK_ARTIFACT_DIR}/${safe}`;
-      // measured BEFORE the stream is opened, so the number describes the file the
-      // stream is about to read rather than one that has since been replaced.
-      const size = await this.measureArtifact(task, files, handle, path);
-      const stream = await files.openFileStream(handle, path);
-      // `null` is the file plane saying "not there" — a normal answer, not a fault.
-      if (!stream) throw new NotFoundException(`artifact '${safe}' is not in the sandbox`);
-      return { name: safe, stream, ...(size !== undefined ? { size } : {}) };
-    } catch (e) {
-      throw mapProviderErrorToHttp(e);
-    }
+      if (task.artifacts.length > 0 && !task.artifacts.some((a) => a.name === safe)) {
+        throw new NotFoundException(`task ${taskId} has no artifact '${safe}'`);
+      }
+      const sandbox = await this.requireSandbox(sandboxId);
+      try {
+        if (sandbox.status === 'destroyed') {
+          const artifact =
+            !task.isRunning && sandbox.workspacePath
+              ? await this.retainedArtifacts?.open(sandbox.workspacePath, safe)
+              : null;
+          if (!artifact) throw new NotFoundException(`artifact '${safe}' is no longer retained`);
+          return { name: safe, ...artifact };
+        }
+        const provider = this.providers.get(sandbox.provider);
+        const files = provider.files;
+        if (!files) {
+          throw new SandboxProviderError(
+            SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
+            `provider '${provider.name}' has no file plane to read artifacts from`,
+          );
+        }
+        const handle = handleOf(sandbox);
+        const path = `${TASK_ARTIFACT_DIR}/${safe}`;
+        // measured BEFORE the stream is opened, so the number describes the file the
+        // stream is about to read rather than one that has since been replaced.
+        const size = await this.measureArtifact(task, files, handle, path);
+        const stream = await files.openFileStream(handle, path);
+        // `null` is the file plane saying "not there" — a normal answer, not a fault.
+        if (!stream) throw new NotFoundException(`artifact '${safe}' is not in the sandbox`);
+        return { name: safe, stream, ...(size !== undefined ? { size } : {}) };
+      } catch (e) {
+        throw mapProviderErrorToHttp(e);
+      }
+    });
   }
 
   /**
@@ -315,18 +338,20 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
     handle: SandboxHandle,
     path: string,
   ): Promise<number | undefined> {
-    if (task.isRunning) return undefined;
-    const slash = path.lastIndexOf('/');
-    const dir = slash <= 0 ? '/' : path.slice(0, slash);
-    try {
-      const entries = await files.listFiles(handle, dir, { recursive: false });
-      const entry = entries.find((e) => e.path === path && e.kind === 'file');
-      return typeof entry?.size === 'number' ? entry.size : undefined;
-    } catch {
-      // a failed listing must not turn a working download into an error: the bytes are
-      // still there and still streamable, the caller merely loses the progress bar.
-      return undefined;
-    }
+    return this.worker.run(async () => {
+      if (task.isRunning) return undefined;
+      const slash = path.lastIndexOf('/');
+      const dir = slash <= 0 ? '/' : path.slice(0, slash);
+      try {
+        const entries = await files.listFiles(handle, dir, { recursive: false });
+        const entry = entries.find((e) => e.path === path && e.kind === 'file');
+        return typeof entry?.size === 'number' ? entry.size : undefined;
+      } catch {
+        // a failed listing must not turn a working download into an error: the bytes are
+        // still there and still streamable, the caller merely loses the progress bar.
+        return undefined;
+      }
+    });
   }
 
   /**
@@ -334,20 +359,26 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * replay the `/tasks` channel promises before it switches to live push.
    */
   async replay(taskId: string, fromSeq: number): Promise<{ seq: number; event: RuntimeEvent }[]> {
-    const task = await this.tasks.findById(asAgentTaskId(taskId));
-    if (!task) return [];
-    return this.workflow.replay(task, fromSeq);
+    return this.worker.run(async () => {
+      const task = await this.tasks.findById(asAgentTaskId(taskId));
+      if (!task) return [];
+      return this.workflow.replay(task, fromSeq);
+    });
   }
 
   /** The task itself, for consumers that need more than the DTO (the gateway). */
   findTask(taskId: string): Promise<AgentTask | null> {
-    return this.tasks.findById(asAgentTaskId(taskId));
+    return this.worker.run(async () => {
+      return this.tasks.findById(asAgentTaskId(taskId));
+    });
   }
 
   private async requireSandbox(sandboxId: string): Promise<Sandbox> {
-    const sandbox = await this.sandboxes.findById(asSandboxId(sandboxId));
-    if (!sandbox) throw new NotFoundException(`sandbox ${sandboxId} not found`);
-    return sandbox;
+    return this.worker.run(async () => {
+      const sandbox = await this.sandboxes.findById(asSandboxId(sandboxId));
+      if (!sandbox) throw new NotFoundException(`sandbox ${sandboxId} not found`);
+      return sandbox;
+    });
   }
 
   /**
@@ -380,23 +411,25 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
   }
 
   private async requireTask(sandboxId: string, taskId: string): Promise<AgentTask> {
-    const task = await this.tasks.findById(asAgentTaskId(taskId));
-    // The sandbox id in the path is part of the task's IDENTITY, not decoration: a task
-    // answered under a sandbox it does not belong to is a wrong answer, and a client
-    // that stashed `(sandboxId, taskId)` would silently keep working after the pair
-    // stopped being true.
-    //
-    // ⚠️ IT IS ADDRESSING, NOT AUTHORISATION — and the comment here used to claim
-    // otherwise. Authorisation on both shells is the access passcode (the REST guard,
-    // and the `/tasks` handshake re-checking it itself); there is no per-caller scope
-    // for this rule to enforce. The `/tasks` gateway now applies the SAME rule to every
-    // socket: its handshake REQUIRES `sandboxId` in the query (`SANDBOX_REQUIRED`
-    // otherwise) and `subscribe` compares it exactly as this does — so the two shells
-    // answer identically, and neither is a way around the other.
-    if (task?.sandboxId !== sandboxId) {
-      throw new NotFoundException(`task ${taskId} not found in sandbox ${sandboxId}`);
-    }
-    return task;
+    return this.worker.run(async () => {
+      const task = await this.tasks.findById(asAgentTaskId(taskId));
+      // The sandbox id in the path is part of the task's IDENTITY, not decoration: a task
+      // answered under a sandbox it does not belong to is a wrong answer, and a client
+      // that stashed `(sandboxId, taskId)` would silently keep working after the pair
+      // stopped being true.
+      //
+      // ⚠️ IT IS ADDRESSING, NOT AUTHORISATION — and the comment here used to claim
+      // otherwise. Authorisation on both shells is the access passcode (the REST guard,
+      // and the `/tasks` handshake re-checking it itself); there is no per-caller scope
+      // for this rule to enforce. The `/tasks` gateway now applies the SAME rule to every
+      // socket: its handshake REQUIRES `sandboxId` in the query (`SANDBOX_REQUIRED`
+      // otherwise) and `subscribe` compares it exactly as this does — so the two shells
+      // answer identically, and neither is a way around the other.
+      if (task?.sandboxId !== sandboxId) {
+        throw new NotFoundException(`task ${taskId} not found in sandbox ${sandboxId}`);
+      }
+      return task;
+    });
   }
 }
 

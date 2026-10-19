@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import {
   ConflictException,
   Inject,
@@ -46,6 +47,8 @@ import { SandboxApplicationService } from './sandbox-application.service';
 export class SandboxFacadeAdapter
   implements SandboxFacade, OnApplicationBootstrap, OnModuleDestroy
 {
+  private readonly worker = coordinatorWorker('sandbox.project-cleanup');
+
   private readonly logger = new Logger('SandboxFacadeAdapter');
   private retry: NodeJS.Timeout | undefined;
   private readonly cleaning = new Set<string>();
@@ -71,19 +74,23 @@ export class SandboxFacadeAdapter
   ) {}
 
   countByProject(projectIds: string[]): Promise<Record<string, number>> {
-    return this.repo.countActiveByProject(projectIds);
+    return this.worker.run(async () => {
+      return this.repo.countActiveByProject(projectIds);
+    });
   }
 
   async imageReferences(manifestId: string) {
-    const rows = await this.repo.findImageReferences(manifestId);
-    const waiting = this.waiting.filterWaiting(rows.map((row) => row.id));
-    return rows.map(({ headless, ...row }) => ({
-      ...row,
-      status:
-        !headless && ['running', 'idle'].includes(row.status) && waiting.has(row.id)
-          ? 'waiting_input'
-          : row.status,
-    }));
+    return this.worker.run(async () => {
+      const rows = await this.repo.findImageReferences(manifestId);
+      const waiting = this.waiting.filterWaiting(rows.map((row) => row.id));
+      return rows.map(({ headless, ...row }) => ({
+        ...row,
+        status:
+          !headless && ['running', 'idle'].includes(row.status) && waiting.has(row.id)
+            ? 'waiting_input'
+            : row.status,
+      }));
+    });
   }
 
   defaultCapacity() {
@@ -91,38 +98,44 @@ export class SandboxFacadeAdapter
   }
 
   async activeByProject(projectId: string): Promise<{ id: string; name: string }[]> {
-    return (await this.repo.findByProject(asProjectId(projectId)))
-      .filter((sandbox) => isProjectTaskActive(sandbox.status))
-      .map((sandbox) => ({ id: sandbox.id, name: sandbox.name }));
+    return this.worker.run(async () => {
+      return (await this.repo.findByProject(asProjectId(projectId)))
+        .filter((sandbox) => isProjectTaskActive(sandbox.status))
+        .map((sandbox) => ({ id: sandbox.id, name: sandbox.name }));
+    });
   }
 
   async credentialImpact(runtimeId: string, boundIds: string[]) {
-    const bound = new Set(boundIds);
-    const rows = (await this.repo.findAll()).filter((sandbox) => sandbox.status !== 'destroyed');
-    const waiting = this.waiting.filterWaiting(rows.map((sandbox) => sandbox.id));
-    const summary = (sandbox: (typeof rows)[number]) => ({
-      id: sandbox.id,
-      name: sandbox.name,
-      runtime: sandbox.runtime,
-      status:
-        !sandbox.headless && ['running', 'idle'].includes(sandbox.status) && waiting.has(sandbox.id)
-          ? 'waiting_input'
-          : sandbox.status,
-      headless: sandbox.headless,
+    return this.worker.run(async () => {
+      const bound = new Set(boundIds);
+      const rows = (await this.repo.findAll()).filter((sandbox) => sandbox.status !== 'destroyed');
+      const waiting = this.waiting.filterWaiting(rows.map((sandbox) => sandbox.id));
+      const summary = (sandbox: (typeof rows)[number]) => ({
+        id: sandbox.id,
+        name: sandbox.name,
+        runtime: sandbox.runtime,
+        status:
+          !sandbox.headless &&
+          ['running', 'idle'].includes(sandbox.status) &&
+          waiting.has(sandbox.id)
+            ? 'waiting_input'
+            : sandbox.status,
+        headless: sandbox.headless,
+      });
+      return {
+        affectedTasks: rows.filter((sandbox) => bound.has(sandbox.id)).map(summary),
+        preparingTasks: rows
+          .filter(
+            (sandbox) =>
+              sandbox.runtime === runtimeId &&
+              !bound.has(sandbox.id) &&
+              ['pending', 'scheduling', 'preparing-workspace', 'creating', 'starting'].includes(
+                sandbox.status,
+              ),
+          )
+          .map(summary),
+      };
     });
-    return {
-      affectedTasks: rows.filter((sandbox) => bound.has(sandbox.id)).map(summary),
-      preparingTasks: rows
-        .filter(
-          (sandbox) =>
-            sandbox.runtime === runtimeId &&
-            !bound.has(sandbox.id) &&
-            ['pending', 'scheduling', 'preparing-workspace', 'creating', 'starting'].includes(
-              sandbox.status,
-            ),
-        )
-        .map(summary),
-    };
   }
 
   deleteByProjectSync(tx: Tx, projectId: string): string[] {
@@ -142,83 +155,93 @@ export class SandboxFacadeAdapter
   }
 
   async removeProjectWorkspaces(paths: string[]): Promise<void> {
-    const requested = new Set(paths);
-    // Read committed jobs: a rolled-back project transaction cannot start cleanup.
-    const jobs = (await this.repo.listPendingProjectCleanup()).filter((job) =>
-      requested.has(cleanupKey(job)),
-    );
-    await Promise.all(jobs.map((job) => this.clean(job)));
+    return this.worker.run(async () => {
+      const requested = new Set(paths);
+      // Read committed jobs: a rolled-back project transaction cannot start cleanup.
+      const jobs = (await this.repo.listPendingProjectCleanup()).filter((job) =>
+        requested.has(cleanupKey(job)),
+      );
+      await Promise.all(jobs.map((job) => this.clean(job)));
+    });
   }
 
   async retryPending(): Promise<void> {
-    await Promise.all((await this.repo.listPendingProjectCleanup()).map((job) => this.clean(job)));
+    return this.worker.run(async () => {
+      await Promise.all(
+        (await this.repo.listPendingProjectCleanup()).map((job) => this.clean(job)),
+      );
+    });
   }
 
   private async clean(job: DeletedProjectSandbox): Promise<void> {
-    if (this.ownershipPaused || this.cleaning.has(job.id)) return;
-    this.cleaning.add(job.id);
-    const localEpoch = this.ownershipEpoch;
-    const writerEpoch = this.writer?.epoch?.() ?? 0;
-    const assertCurrent = (): void => {
-      if (
-        this.ownershipPaused ||
-        localEpoch !== this.ownershipEpoch ||
-        writerEpoch !== (this.writer?.epoch?.() ?? 0)
-      )
-        throw new Error('PROJECT_CLEANUP_OWNERSHIP_SUPERSEDED');
-      if (
-        ['coordinator', 'coordinator-prepared'].includes(process.env.PLATFORM_PROCESS_ROLE ?? '') &&
-        !this.writer?.run
-      )
-        throw new Error('PROJECT_CLEANUP_WRITER_AUTHORITY_REQUIRED');
-      this.writer?.assert();
-    };
-    try {
-      const cleanup = async (): Promise<void> => {
-        assertCurrent();
-        if (job.providerSandboxId) {
-          try {
-            await withTeardownDeadline(
-              this.providers.get(job.provider).destroy({
-                provider: job.provider,
-                providerSandboxId: job.providerSandboxId,
-                providerState: job.providerState ?? undefined,
-              }),
-              job.id,
-            );
-          } catch (error) {
-            if (
-              !(error instanceof SandboxProviderError) ||
-              error.code !== SandboxProviderErrorCode.NOT_FOUND
-            )
-              throw error;
-          }
-        }
-        assertCurrent();
-        await this.workspace.cleanup(job.id, { keep: false });
-        assertCurrent();
-        this.uow.run((tx) => {
-          assertCurrent();
-          this.terminalBookmarks?.deleteForSandboxSync(tx, job.id);
-          this.repo.completeProjectCleanupSync(tx, job.id);
-        });
+    return this.worker.run(async () => {
+      if (this.ownershipPaused || this.cleaning.has(job.id)) return;
+      this.cleaning.add(job.id);
+      const localEpoch = this.ownershipEpoch;
+      const writerEpoch = this.writer?.epoch?.() ?? 0;
+      const assertCurrent = (): void => {
+        if (
+          this.ownershipPaused ||
+          localEpoch !== this.ownershipEpoch ||
+          writerEpoch !== (this.writer?.epoch?.() ?? 0)
+        )
+          throw new Error('PROJECT_CLEANUP_OWNERSHIP_SUPERSEDED');
+        if (
+          ['coordinator', 'coordinator-prepared'].includes(
+            process.env.PLATFORM_PROCESS_ROLE ?? '',
+          ) &&
+          !this.writer?.run
+        )
+          throw new Error('PROJECT_CLEANUP_WRITER_AUTHORITY_REQUIRED');
+        this.writer?.assert();
       };
-      const withActor = () =>
-        this.authority
-          ? this.authority.run(
-              {
-                operationId: `project-cleanup:${job.id}`,
-                actor: { kind: 'system', id: 'committed-project-deletion' },
-              },
-              cleanup,
-            )
-          : cleanup();
-      await (this.writer?.run ? this.writer.run(withActor) : withActor());
-    } catch (error) {
-      this.logger.error(`project task cleanup pending for ${job.id}: ${String(error)}`);
-    } finally {
-      this.cleaning.delete(job.id);
-    }
+      try {
+        const cleanup = async (): Promise<void> => {
+          assertCurrent();
+          if (job.providerSandboxId) {
+            try {
+              await withTeardownDeadline(
+                this.providers.get(job.provider).destroy({
+                  provider: job.provider,
+                  providerSandboxId: job.providerSandboxId,
+                  providerState: job.providerState ?? undefined,
+                }),
+                job.id,
+              );
+            } catch (error) {
+              if (
+                !(error instanceof SandboxProviderError) ||
+                error.code !== SandboxProviderErrorCode.NOT_FOUND
+              )
+                throw error;
+            }
+          }
+          assertCurrent();
+          await this.workspace.cleanup(job.id, { keep: false });
+          assertCurrent();
+          this.uow.run((tx) => {
+            assertCurrent();
+            this.terminalBookmarks?.deleteForSandboxSync(tx, job.id);
+            this.repo.completeProjectCleanupSync(tx, job.id);
+          });
+        };
+        const withActor = () =>
+          this.authority
+            ? this.authority.run(
+                {
+                  operationId: `project-cleanup:${job.id}`,
+                  actor: { kind: 'system', id: 'committed-project-deletion' },
+                },
+                cleanup,
+              )
+            : cleanup();
+        await (this.writer?.run ? this.writer.run(withActor) : withActor());
+      } catch (error) {
+        this.logger.error(`project task cleanup pending for ${job.id}: ${String(error)}`);
+      } finally {
+        this.cleaning.delete(job.id);
+      }
+    });
   }
 
   /** A handoff cannot abandon an already dispatched explicit cleanup effect. */
@@ -240,12 +263,12 @@ export class SandboxFacadeAdapter
       });
     };
     recover();
-    this.retry = setInterval(recover, 15_000);
+    this.retry = this.worker.ownInterval(setInterval(recover, 15_000));
     this.retry.unref();
   }
 
   onModuleDestroy(): void {
-    if (this.retry) clearInterval(this.retry);
+    if (this.retry) this.worker.cancel(this.retry);
   }
 }
 

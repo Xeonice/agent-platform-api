@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { builtinImageRefFor } from '@platform/shared-kernel';
 import {
@@ -152,6 +153,8 @@ const COURTESY_STOP_MS = 20_000;
 
 @Injectable()
 export class HelperContainerSession implements OnApplicationBootstrap, HelperContainerAccess {
+  private readonly worker = coordinatorWorker('runtime.helper-preheat');
+
   private readonly logger = new Logger('HelperContainerSession');
 
   /**
@@ -203,20 +206,24 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    * 那时人在等,快速失败并说清原因,好过静默重试一分钟。
    */
   private async preheat(): Promise<void> {
-    for (let attempt = 1; attempt <= PREHEAT_ATTEMPTS; attempt += 1) {
-      try {
-        await this.ensure();
-        return;
-      } catch (e: unknown) {
-        const last = attempt === PREHEAT_ATTEMPTS;
-        this.logger.warn(
-          `auth helper 预热第 ${String(attempt)}/${String(PREHEAT_ATTEMPTS)} 次未成：${msgOf(e)}` +
-            (last ? '（登录功能将不可用，其余不受影响；用户点登录时仍会再试一次）' : '，稍后重试'),
-        );
-        if (last) return;
-        await new Promise((r) => setTimeout(r, PREHEAT_RETRY_MS));
+    return this.worker.run(async () => {
+      for (let attempt = 1; attempt <= PREHEAT_ATTEMPTS; attempt += 1) {
+        try {
+          await this.ensure();
+          return;
+        } catch (e: unknown) {
+          const last = attempt === PREHEAT_ATTEMPTS;
+          this.logger.warn(
+            `auth helper 预热第 ${String(attempt)}/${String(PREHEAT_ATTEMPTS)} 次未成：${msgOf(e)}` +
+              (last
+                ? '（登录功能将不可用，其余不受影响；用户点登录时仍会再试一次）'
+                : '，稍后重试'),
+          );
+          if (last) return;
+          await new Promise((r) => setTimeout(r, PREHEAT_RETRY_MS));
+        }
       }
-    }
+    });
   }
 
   /**
@@ -239,16 +246,18 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    *    真正的使用去重建。⚠️ 不抛：`DiagnoseCheck.run()` 的契约不许抛。
    */
   async observe(): Promise<HelperObservation> {
-    const base = this.status();
-    const cur = this.ready;
-    if (cur === null) {
-      return !base.starting && this.lastErrorKind === 'invalidated'
-        ? { ...base, awaitingRebuild: true }
-        : base;
-    }
-    const live = await this.liveness(cur);
-    if (live.verdict === 'unknown') return { ...base, probeError: live.detail };
-    return { ...base, instanceState: live.state, stale: live.verdict === 'gone' };
+    return this.worker.run(async () => {
+      const base = this.status();
+      const cur = this.ready;
+      if (cur === null) {
+        return !base.starting && this.lastErrorKind === 'invalidated'
+          ? { ...base, awaitingRebuild: true }
+          : base;
+      }
+      const live = await this.liveness(cur);
+      if (live.verdict === 'unknown') return { ...base, probeError: live.detail };
+      return { ...base, instanceState: live.state, stale: live.verdict === 'gone' };
+    });
   }
 
   /**
@@ -261,27 +270,29 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    *    ⛔ **不许降级到「在任务沙箱里登录」** —— 那会把决策 A 又退回去（05 §2 / 11 §1.1）。
    */
   async require(): Promise<{ provider: SandboxProvider; handle: SandboxHandle }> {
-    const cur = this.ready;
-    if (cur !== null) {
-      const live = await this.liveness(cur);
-      if (live.verdict === 'gone') {
-        this.invalidate(cur.handle, `存活复核：${live.detail}`);
-      } else if (this.ready === cur) {
-        // 问不出来按存活处理；但若复核期间别人已经作废 / 换掉了它，就落到下面去拿当前那个。
-        this.noteUnverified(cur, live);
-        return cur;
+    return this.worker.run(async () => {
+      const cur = this.ready;
+      if (cur !== null) {
+        const live = await this.liveness(cur);
+        if (live.verdict === 'gone') {
+          this.invalidate(cur.handle, `存活复核：${live.detail}`);
+        } else if (this.ready === cur) {
+          // 问不出来按存活处理；但若复核期间别人已经作废 / 换掉了它，就落到下面去拿当前那个。
+          this.noteUnverified(cur, live);
+          return cur;
+        }
       }
-    }
-    // ⚠️ **必须吞掉 `ensure()` 的原始错误再统一改写。** 此前这里是裸 `await`,
-    //    于是底层那句（「预制镜像还没注册进平台」之类）会**直接穿透出去**,
-    //    下面这句统一文案根本到不了 —— 上层 `beginAuth` 认的是这一句才包成
-    //    `PROVIDER_UNAVAILABLE`,穿透的那个会被当成未知错误变成哑巴 500。
-    //    ⚠️ 原因没有丢:它在 `lastError` 里,被下面这句带上。
-    await this.ensure().catch(() => undefined);
-    if (this.ready === null) {
-      throw new HelperUnavailableError(`auth helper 容器不可用：${this.lastError ?? '未知原因'}`);
-    }
-    return this.ready;
+      // ⚠️ **必须吞掉 `ensure()` 的原始错误再统一改写。** 此前这里是裸 `await`,
+      //    于是底层那句（「预制镜像还没注册进平台」之类）会**直接穿透出去**,
+      //    下面这句统一文案根本到不了 —— 上层 `beginAuth` 认的是这一句才包成
+      //    `PROVIDER_UNAVAILABLE`,穿透的那个会被当成未知错误变成哑巴 500。
+      //    ⚠️ 原因没有丢:它在 `lastError` 里,被下面这句带上。
+      await this.ensure().catch(() => undefined);
+      if (this.ready === null) {
+        throw new HelperUnavailableError(`auth helper 容器不可用：${this.lastError ?? '未知原因'}`);
+      }
+      return this.ready;
+    });
   }
 
   /**
@@ -340,128 +351,136 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    *    那一种仍由 `ContainerAuthHelper` 的「命令撞上实例级错误就作废重建」兜住。
    */
   private async liveness(cur: ReadyHelper): Promise<Liveness> {
-    try {
-      const status = await within(cur.provider.inspect(cur.handle), LIVENESS_TIMEOUT_MS);
-      if (status === TIMED_OUT) {
-        return {
-          verdict: 'unknown',
-          detail: `${String(LIVENESS_TIMEOUT_MS / 1000)} 秒内没有答复`,
-        };
-      }
-      return status.lifecycleState === 'instance_running'
-        ? { verdict: 'alive', state: status.lifecycleState }
-        : {
-            verdict: 'gone',
-            state: status.lifecycleState,
-            detail: `实例已不在运行（${status.lifecycleState}）`,
+    return this.worker.run(async () => {
+      try {
+        const status = await within(cur.provider.inspect(cur.handle), LIVENESS_TIMEOUT_MS);
+        if (status === TIMED_OUT) {
+          return {
+            verdict: 'unknown',
+            detail: `${String(LIVENESS_TIMEOUT_MS / 1000)} 秒内没有答复`,
           };
-    } catch (e: unknown) {
-      if (e instanceof SandboxProviderError && e.code === SandboxProviderErrorCode.NOT_FOUND) {
-        return {
-          verdict: 'gone',
-          state: 'instance_missing',
-          detail: `实例已不存在（${e.message}）`,
-        };
+        }
+        return status.lifecycleState === 'instance_running'
+          ? { verdict: 'alive', state: status.lifecycleState }
+          : {
+              verdict: 'gone',
+              state: status.lifecycleState,
+              detail: `实例已不在运行（${status.lifecycleState}）`,
+            };
+      } catch (e: unknown) {
+        if (e instanceof SandboxProviderError && e.code === SandboxProviderErrorCode.NOT_FOUND) {
+          return {
+            verdict: 'gone',
+            state: 'instance_missing',
+            detail: `实例已不存在（${e.message}）`,
+          };
+        }
+        return { verdict: 'unknown', detail: msgOf(e) };
       }
-      return { verdict: 'unknown', detail: msgOf(e) };
-    }
+    });
   }
 
   private async ensure(): Promise<void> {
-    if (this.ready !== null) return;
-    // 并发合流：两个请求同时进来只建一次。
-    this.inflight ??= this.createOnce().finally(() => {
-      this.inflight = null;
+    return this.worker.run(async () => {
+      if (this.ready !== null) return;
+      // 并发合流：两个请求同时进来只建一次。
+      this.inflight ??= this.createOnce().finally(() => {
+        this.inflight = null;
+      });
+      await this.inflight;
     });
-    await this.inflight;
   }
 
   private async createOnce(): Promise<void> {
-    try {
-      const provider = this.providers.get(this.providers.defaultProvider);
-      if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' && provider.originalHandle) {
-        const original = await provider.originalHandle(HelperContainerSession.SANDBOX_ID);
-        if (original) {
-          const live = await this.liveness({ provider, handle: original });
-          if (live.verdict !== 'gone') {
-            this.ready = { provider, handle: original };
-            this.lastError = null;
-            this.lastErrorKind = null;
-            return;
+    return this.worker.run(async () => {
+      try {
+        const provider = this.providers.get(this.providers.defaultProvider);
+        if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' && provider.originalHandle) {
+          const original = await provider.originalHandle(HelperContainerSession.SANDBOX_ID);
+          if (original) {
+            const live = await this.liveness({ provider, handle: original });
+            if (live.verdict !== 'gone') {
+              this.ready = { provider, handle: original };
+              this.lastError = null;
+              this.lastErrorKind = null;
+              return;
+            }
           }
         }
-      }
 
-      // ① 先清残留：api 重启后、或上一个实例失效后，那个旧实例还在，名字会撞。
-      //
-      // ⚠️ **排在最前**，在 `resolveImage` / `stageImage` 之前：镜像还没注册（与 `ImageSeeder`
-      //    抢先后）或者拉不下来时，旧 helper 也照样被清掉 —— 否则它会一直挂在那里，带着
-      //    shim.pid 的话发版探针就 fail-closed。也因此不再依赖开机对账和模块顺序。
-      //
-      // ⚠️⚠️ **这里此前是错的，而且从来没生效过**（2026-09-22 真机撞出来）：
-      // 原本传的是 `providerSandboxId: SANDBOX_ID`，而 aio/docker 的
-      // `providerSandboxId` 是**容器 ID**，容器名却是 `platform-aio-auth-helper`。
-      // ⇒ destroy 404（被 `.catch` 吞掉）⇒ create 撞
-      //   `409 Conflict: container name … is already in use`。
-      // ⛔ 修法**不是**在这里拼 `platform-<provider>-<sandboxId>`：那是 provider 的
-      // 私有命名规则，抄一份出来就是这个仓反复警告的那种「两处各有一份真相」。
-      // ⇒ 走契约的 `destroyBySandboxId`，命名规则留在 provider 家里（aio 与 boxlite 都实现了）。
-      //
-      // ⚠️ 清不掉只记 warn、照常往下建 —— 真撞名时 create 会如实报出来；⛔ 不再静默吞掉。
-      // ⚠️ 没有这只手的 provider ⇒ 跳过清理。降级是明确的：create 会撞名字冲突并
-      //    如实报出来，⛔ 而不是静默出错。
-      // ⚠️ 运行期重建时旧实例可能还在跑（被作废不等于已经死了）：boxlite 的实现先礼貌停机
-      //    再 force remove，真删掉了会在 provider 日志里留一行 —— 见它的 `destroyBySandboxId`。
-      if (typeof provider.destroyBySandboxId === 'function') {
-        await provider.destroyBySandboxId(HelperContainerSession.SANDBOX_ID).catch((e: unknown) => {
-          this.logger.warn(`auth helper 清残留失败：${msgOf(e)}`);
+        // ① 先清残留：api 重启后、或上一个实例失效后，那个旧实例还在，名字会撞。
+        //
+        // ⚠️ **排在最前**，在 `resolveImage` / `stageImage` 之前：镜像还没注册（与 `ImageSeeder`
+        //    抢先后）或者拉不下来时，旧 helper 也照样被清掉 —— 否则它会一直挂在那里，带着
+        //    shim.pid 的话发版探针就 fail-closed。也因此不再依赖开机对账和模块顺序。
+        //
+        // ⚠️⚠️ **这里此前是错的，而且从来没生效过**（2026-09-22 真机撞出来）：
+        // 原本传的是 `providerSandboxId: SANDBOX_ID`，而 aio/docker 的
+        // `providerSandboxId` 是**容器 ID**，容器名却是 `platform-aio-auth-helper`。
+        // ⇒ destroy 404（被 `.catch` 吞掉）⇒ create 撞
+        //   `409 Conflict: container name … is already in use`。
+        // ⛔ 修法**不是**在这里拼 `platform-<provider>-<sandboxId>`：那是 provider 的
+        // 私有命名规则，抄一份出来就是这个仓反复警告的那种「两处各有一份真相」。
+        // ⇒ 走契约的 `destroyBySandboxId`，命名规则留在 provider 家里（aio 与 boxlite 都实现了）。
+        //
+        // ⚠️ 清不掉只记 warn、照常往下建 —— 真撞名时 create 会如实报出来；⛔ 不再静默吞掉。
+        // ⚠️ 没有这只手的 provider ⇒ 跳过清理。降级是明确的：create 会撞名字冲突并
+        //    如实报出来，⛔ 而不是静默出错。
+        // ⚠️ 运行期重建时旧实例可能还在跑（被作废不等于已经死了）：boxlite 的实现先礼貌停机
+        //    再 force remove，真删掉了会在 provider 日志里留一行 —— 见它的 `destroyBySandboxId`。
+        if (typeof provider.destroyBySandboxId === 'function') {
+          await provider
+            .destroyBySandboxId(HelperContainerSession.SANDBOX_ID)
+            .catch((e: unknown) => {
+              this.logger.warn(`auth helper 清残留失败：${msgOf(e)}`);
+            });
+        }
+
+        const image = await this.resolveImage(provider.name);
+
+        // ⚠️⚠️ **先 stage 再 create —— `create()` 不会自己拉镜像。**
+        // 2026-09-22 真机上就撞在这：镜像只是「注册进平台」而**没下载到本机**，于是
+        // `create` 直接回 `No such image: …@sha256:0d89…`。平台的模型一贯是「先 stage
+        // 后 create」（向导第 3 步那个【准备镜像】干的就是 stage 这一步），helper 不能
+        // 假设别人已经替它做过。
+        // ⚠️ `stageImage` 是**可选方法**（没有 capability 位，判据就是这个 typeof），
+        //    且契约保证**幂等、已就绪时调也安全** —— 所以不必先问 `imageStaged`。
+        // ⚠️ 这一步可能要拉约 4GB，但它跑在后台预热里（见抬头），不挡 api 启动。
+        if (typeof provider.stageImage === 'function') {
+          this.logger.log(`auth helper：正在准备镜像 ${image.ref}（首次可能要拉约 4GB）`);
+          await provider.stageImage(image);
+        }
+
+        const handle = await provider.create({
+          sandboxId: HelperContainerSession.SANDBOX_ID,
+          quota: AUTH_HELPER_QUOTA,
+          image,
+          // ⛔ **不挂任何卷。** helper 是凭证链路的一部分，不是执行环境（11 §1.1 运行纪律）：
+          //    它不该看得见任何工作区，也就不可能把凭证写进某个项目目录。
+          env: {},
+          labels: { 'platform.role': 'auth-helper' },
         });
-      }
+        try {
+          await provider.start(handle);
+        } catch (e: unknown) {
+          // ② start 失败 ⇒ **当场销毁半成品**。名字是唯一的：留着它，本进程之后的每一次重试
+          //    （预热的 5 次、用户点登录）都撞名，要等到下次启动才被清掉。
+          await this.discardHalfBuilt(provider, handle);
+          throw e;
+        }
 
-      const image = await this.resolveImage(provider.name);
-
-      // ⚠️⚠️ **先 stage 再 create —— `create()` 不会自己拉镜像。**
-      // 2026-09-22 真机上就撞在这：镜像只是「注册进平台」而**没下载到本机**，于是
-      // `create` 直接回 `No such image: …@sha256:0d89…`。平台的模型一贯是「先 stage
-      // 后 create」（向导第 3 步那个【准备镜像】干的就是 stage 这一步），helper 不能
-      // 假设别人已经替它做过。
-      // ⚠️ `stageImage` 是**可选方法**（没有 capability 位，判据就是这个 typeof），
-      //    且契约保证**幂等、已就绪时调也安全** —— 所以不必先问 `imageStaged`。
-      // ⚠️ 这一步可能要拉约 4GB，但它跑在后台预热里（见抬头），不挡 api 启动。
-      if (typeof provider.stageImage === 'function') {
-        this.logger.log(`auth helper：正在准备镜像 ${image.ref}（首次可能要拉约 4GB）`);
-        await provider.stageImage(image);
-      }
-
-      const handle = await provider.create({
-        sandboxId: HelperContainerSession.SANDBOX_ID,
-        quota: AUTH_HELPER_QUOTA,
-        image,
-        // ⛔ **不挂任何卷。** helper 是凭证链路的一部分，不是执行环境（11 §1.1 运行纪律）：
-        //    它不该看得见任何工作区，也就不可能把凭证写进某个项目目录。
-        env: {},
-        labels: { 'platform.role': 'auth-helper' },
-      });
-      try {
-        await provider.start(handle);
+        this.ready = { provider, handle };
+        this.lastError = null;
+        this.lastErrorKind = null;
+        this.logger.log(
+          `auth helper 就绪（${provider.name} / ${image.ref} / ${handle.providerSandboxId}）`,
+        );
       } catch (e: unknown) {
-        // ② start 失败 ⇒ **当场销毁半成品**。名字是唯一的：留着它，本进程之后的每一次重试
-        //    （预热的 5 次、用户点登录）都撞名，要等到下次启动才被清掉。
-        await this.discardHalfBuilt(provider, handle);
+        this.lastError = msgOf(e);
+        this.lastErrorKind = 'create-failed';
         throw e;
       }
-
-      this.ready = { provider, handle };
-      this.lastError = null;
-      this.lastErrorKind = null;
-      this.logger.log(
-        `auth helper 就绪（${provider.name} / ${image.ref} / ${handle.providerSandboxId}）`,
-      );
-    } catch (e: unknown) {
-      this.lastError = msgOf(e);
-      this.lastErrorKind = 'create-failed';
-      throw e;
-    }
+    });
   }
 
   /**
@@ -471,23 +490,25 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    * 最可能没有这个兜底的 box。停机限时、失败照删 —— 停机是礼貌，删除才是权威。⛔ 从不抛。
    */
   private async discardHalfBuilt(provider: SandboxProvider, handle: SandboxHandle): Promise<void> {
-    const id = handle.providerSandboxId;
-    const stopped = await within(
-      provider.stop(handle).then(
-        () => null,
-        (e: unknown) => msgOf(e),
-      ),
-      COURTESY_STOP_MS,
-    );
-    if (stopped === TIMED_OUT) {
-      this.logger.warn(
-        `auth helper 半成品 ${id} 在 ${String(COURTESY_STOP_MS / 1000)} 秒内没停下，直接销毁`,
+    return this.worker.run(async () => {
+      const id = handle.providerSandboxId;
+      const stopped = await within(
+        provider.stop(handle).then(
+          () => null,
+          (e: unknown) => msgOf(e),
+        ),
+        COURTESY_STOP_MS,
       );
-    } else if (stopped !== null) {
-      this.logger.warn(`auth helper 半成品 ${id} 停机失败（${stopped}），直接销毁`);
-    }
-    await provider.destroy(handle).catch((d: unknown) => {
-      this.logger.warn(`auth helper 半成品 ${id} 销毁失败：${msgOf(d)}`);
+      if (stopped === TIMED_OUT) {
+        this.logger.warn(
+          `auth helper 半成品 ${id} 在 ${String(COURTESY_STOP_MS / 1000)} 秒内没停下，直接销毁`,
+        );
+      } else if (stopped !== null) {
+        this.logger.warn(`auth helper 半成品 ${id} 停机失败（${stopped}），直接销毁`);
+      }
+      await provider.destroy(handle).catch((d: unknown) => {
+        this.logger.warn(`auth helper 半成品 ${id} 销毁失败：${msgOf(d)}`);
+      });
     });
   }
 
@@ -499,16 +520,18 @@ export class HelperContainerSession implements OnApplicationBootstrap, HelperCon
    * 但 sandbox 用不了那份凭证」—— 那种 bug 极难查。
    */
   private async resolveImage(providerName: string): Promise<ResolvedImageSpec> {
-    const ref = builtinImageRefFor(providerName);
-    const registered = await this.images.findRegisteredByRef(ref);
-    if (registered === null) {
-      throw new Error(`预制镜像 '${ref}' 还没注册进平台 —— 先让开机播种把它登记上`);
-    }
-    return {
-      ref: registered.ref,
-      digest: registered.digest,
-      ...(registered.entrypoint ? { entrypoint: registered.entrypoint } : {}),
-    };
+    return this.worker.run(async () => {
+      const ref = builtinImageRefFor(providerName);
+      const registered = await this.images.findRegisteredByRef(ref);
+      if (registered === null) {
+        throw new Error(`预制镜像 '${ref}' 还没注册进平台 —— 先让开机播种把它登记上`);
+      }
+      return {
+        ref: registered.ref,
+        digest: registered.digest,
+        ...(registered.entrypoint ? { entrypoint: registered.entrypoint } : {}),
+      };
+    });
   }
 }
 

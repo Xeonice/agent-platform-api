@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { errorMessage } from '@platform/shared-kernel';
 import {
   Inject,
@@ -59,6 +60,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
  */
 @Injectable()
 export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly worker = coordinatorWorker('sandbox.credential-cleanup');
+
   private retry: NodeJS.Timeout | undefined;
   private readonly clearing = new Set<string>();
   private readonly logger = new Logger('CredentialRevokedHandler');
@@ -80,11 +83,13 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModul
           });
       }
     });
-    this.retry = setInterval(() => {
-      void this.retryPending().catch((error: unknown) => {
-        this.logger.error(`credential cleanup retry failed: ${String(error)}`);
-      });
-    }, 15_000);
+    this.retry = this.worker.ownInterval(
+      setInterval(() => {
+        void this.retryPending().catch((error: unknown) => {
+          this.logger.error(`credential cleanup retry failed: ${String(error)}`);
+        });
+      }, 15_000),
+    );
     this.retry.unref();
     void this.retryPending().catch((error: unknown) => {
       this.logger.error(`credential cleanup recovery failed: ${String(error)}`);
@@ -92,24 +97,28 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModul
   }
 
   onModuleDestroy(): void {
-    if (this.retry) clearInterval(this.retry);
+    if (this.retry) this.worker.cancel(this.retry);
   }
 
   async retryPending(): Promise<void> {
-    await Promise.allSettled(
-      (await this.bindings.listPendingRevocations()).map((binding) => this.clearBinding(binding)),
-    );
+    return this.worker.run(async () => {
+      await Promise.allSettled(
+        (await this.bindings.listPendingRevocations()).map((binding) => this.clearBinding(binding)),
+      );
+    });
   }
 
   async onRevoked(event: DomainEvent): Promise<void> {
-    if (!('credentialId' in event) || typeof event.credentialId !== 'string') return;
-    const credentialId = event.credentialId;
-    if (!credentialId) return;
-    const bound = await this.bindings.listForRevokedCredential(credentialId);
-    // Tear the bound sandboxes down CONCURRENTLY and INDEPENDENTLY (P0-1 ②): a single
-    // wedged container must never stall the queue for the other sandboxes that share
-    // this revoked credential. Each binding owns its own timeout + try/catch.
-    await Promise.allSettled(bound.map((b) => this.clearBinding(b)));
+    return this.worker.run(async () => {
+      if (!('credentialId' in event) || typeof event.credentialId !== 'string') return;
+      const credentialId = event.credentialId;
+      if (!credentialId) return;
+      const bound = await this.bindings.listForRevokedCredential(credentialId);
+      // Tear the bound sandboxes down CONCURRENTLY and INDEPENDENTLY (P0-1 ②): a single
+      // wedged container must never stall the queue for the other sandboxes that share
+      // this revoked credential. Each binding owns its own timeout + try/catch.
+      await Promise.allSettled(bound.map((b) => this.clearBinding(b)));
+    });
   }
 
   /**
@@ -119,17 +128,19 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModul
    * marking it "cleared" while a revoked credential is still injected in a live process.
    */
   private async clearBinding(b: CredentialRevocationBindingRef): Promise<void> {
-    if (this.clearing.has(b.bindingId)) return;
-    this.clearing.add(b.bindingId);
-    try {
-      const cleared = await this.destroyBound(b);
-      if (!cleared) return;
-      await this.bindings.confirmCleared(b);
-    } catch (error) {
-      this.logger.error(`credential cleanup pending for ${b.sandboxId}: ${String(error)}`);
-    } finally {
-      this.clearing.delete(b.bindingId);
-    }
+    return this.worker.run(async () => {
+      if (this.clearing.has(b.bindingId)) return;
+      this.clearing.add(b.bindingId);
+      try {
+        const cleared = await this.destroyBound(b);
+        if (!cleared) return;
+        await this.bindings.confirmCleared(b);
+      } catch (error) {
+        this.logger.error(`credential cleanup pending for ${b.sandboxId}: ${String(error)}`);
+      } finally {
+        this.clearing.delete(b.bindingId);
+      }
+    });
   }
 
   /**
@@ -140,47 +151,49 @@ export class CredentialRevokedHandler implements OnApplicationBootstrap, OnModul
    * also fails/times out do we return `false` so the binding survives for a later retry.
    */
   private async destroyBound(b: CredentialRevocationBindingRef): Promise<boolean> {
-    const sandboxId = b.sandboxId;
-    let sandbox;
-    try {
-      sandbox = await this.sandboxes.findById(asSandboxId(sandboxId));
-    } catch (e) {
-      this.logger.error(
-        `failed to load sandbox ${sandboxId} on credential revoke: ${errorMessage(e)}`,
-      );
-      return false;
-    }
-    if (!sandbox || sandbox.status === 'destroyed') return true;
+    return this.worker.run(async () => {
+      const sandboxId = b.sandboxId;
+      let sandbox;
+      try {
+        sandbox = await this.sandboxes.findById(asSandboxId(sandboxId));
+      } catch (e) {
+        this.logger.error(
+          `failed to load sandbox ${sandboxId} on credential revoke: ${errorMessage(e)}`,
+        );
+        return false;
+      }
+      if (!sandbox || sandbox.status === 'destroyed') return true;
 
-    try {
-      await withTimeout(
-        this.app.destroy(sandboxId, { keepVolume: true }),
-        GRACEFUL_DESTROY_TIMEOUT_MS,
-        `graceful destroy of ${sandboxId}`,
-      );
-      return true;
-    } catch (graceErr) {
-      this.logger.warn(
-        `graceful teardown of sandbox ${sandboxId} failed/timed out; escalating to force: ${errorMessage(graceErr)}`,
-      );
-    }
+      try {
+        await withTimeout(
+          this.app.destroy(sandboxId, { keepVolume: true }),
+          GRACEFUL_DESTROY_TIMEOUT_MS,
+          `graceful destroy of ${sandboxId}`,
+        );
+        return true;
+      } catch (graceErr) {
+        this.logger.warn(
+          `graceful teardown of sandbox ${sandboxId} failed/timed out; escalating to force: ${errorMessage(graceErr)}`,
+        );
+      }
 
-    try {
-      await withTimeout(
-        // S5 hook: prepare→inject→record is the injection path; here we UN-inject by
-        // force-destroying the sandbox (env vars can't be unset from outside — 05 §4).
-        this.app.destroy(sandboxId, { keepVolume: true, force: true }),
-        FORCE_DESTROY_TIMEOUT_MS,
-        `force destroy of ${sandboxId}`,
-      );
-      return true;
-    } catch (forceErr) {
-      // Not silent (05 §4): a wedged container is a logged error, and the binding is
-      // KEPT (return false) so it stays in the retriable set (P1-b).
-      this.logger.error(
-        `force teardown of sandbox ${sandboxId} on credential revoke FAILED; binding kept for retry: ${errorMessage(forceErr)}`,
-      );
-      return false;
-    }
+      try {
+        await withTimeout(
+          // S5 hook: prepare→inject→record is the injection path; here we UN-inject by
+          // force-destroying the sandbox (env vars can't be unset from outside — 05 §4).
+          this.app.destroy(sandboxId, { keepVolume: true, force: true }),
+          FORCE_DESTROY_TIMEOUT_MS,
+          `force destroy of ${sandboxId}`,
+        );
+        return true;
+      } catch (forceErr) {
+        // Not silent (05 §4): a wedged container is a logged error, and the binding is
+        // KEPT (return false) so it stays in the retriable set (P1-b).
+        this.logger.error(
+          `force teardown of sandbox ${sandboxId} on credential revoke FAILED; binding kept for retry: ${errorMessage(forceErr)}`,
+        );
+        return false;
+      }
+    });
   }
 }

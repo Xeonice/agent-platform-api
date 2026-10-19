@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { errorMessage, isRecord, asSandboxId } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
@@ -117,6 +118,10 @@ export interface StartAgentTaskInput {
  */
 @Injectable()
 export class RunAgentTaskWorkflow {
+  private readonly worker = coordinatorWorker('sandbox.task-pump', () => {
+    this.shutdown();
+  });
+
   private readonly logger = new Logger('RunAgentTaskWorkflow');
   /** Tasks this process is currently pumping — so a resume never doubles a pump. */
   private readonly pumping = new Map<string, number>();
@@ -175,32 +180,34 @@ export class RunAgentTaskWorkflow {
     input: StartAgentTaskInput,
     accepted?: { taskId: string; actor: RuntimeBusinessOperation['actor'] },
   ): Promise<AgentTask> {
-    const epoch = this.ownershipEpoch;
-    if (this.retired(epoch)) return Promise.reject(new Error('TASK_WRITER_QUIESCED'));
-    if (!accepted)
-      return this.startOnce(sandbox, input, asAgentTaskId(this.ids.next()), undefined, epoch);
-    const key = JSON.stringify({
-      sandboxId: sandbox.id,
-      ...normalizedStartInput(input),
-      actor: accepted.actor,
+    return this.worker.run(async () => {
+      const epoch = this.ownershipEpoch;
+      if (this.retired(epoch)) return Promise.reject(new Error('TASK_WRITER_QUIESCED'));
+      if (!accepted)
+        return this.startOnce(sandbox, input, asAgentTaskId(this.ids.next()), undefined, epoch);
+      const key = JSON.stringify({
+        sandboxId: sandbox.id,
+        ...normalizedStartInput(input),
+        actor: accepted.actor,
+      });
+      const pending = this.acceptedStarts.get(accepted.taskId);
+      if (pending?.epoch === epoch)
+        return pending.input === key
+          ? pending.promise
+          : Promise.reject(new Error('TASK_START_INTENT_CONFLICT'));
+      const promise = this.startOnce(
+        sandbox,
+        input,
+        asAgentTaskId(accepted.taskId),
+        accepted.actor,
+        epoch,
+      ).finally(() => {
+        if (this.acceptedStarts.get(accepted.taskId)?.epoch === epoch)
+          this.acceptedStarts.delete(accepted.taskId);
+      });
+      this.acceptedStarts.set(accepted.taskId, { input: key, promise, epoch });
+      return promise;
     });
-    const pending = this.acceptedStarts.get(accepted.taskId);
-    if (pending?.epoch === epoch)
-      return pending.input === key
-        ? pending.promise
-        : Promise.reject(new Error('TASK_START_INTENT_CONFLICT'));
-    const promise = this.startOnce(
-      sandbox,
-      input,
-      asAgentTaskId(accepted.taskId),
-      accepted.actor,
-      epoch,
-    ).finally(() => {
-      if (this.acceptedStarts.get(accepted.taskId)?.epoch === epoch)
-        this.acceptedStarts.delete(accepted.taskId);
-    });
-    this.acceptedStarts.set(accepted.taskId, { input: key, promise, epoch });
-    return promise;
   }
 
   private async startOnce(
@@ -210,140 +217,142 @@ export class RunAgentTaskWorkflow {
     acceptedActor?: RuntimeBusinessOperation['actor'],
     epoch = this.ownershipEpoch,
   ): Promise<AgentTask> {
-    const prior = await this.startIntents?.find(taskId);
-    const existing = await this.tasks.findById(taskId);
-    if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
-    if (prior) {
-      const stored = DurableAgentTaskStartSchema.parse(JSON.parse(prior.payload));
-      if (
-        prior.sandboxId !== sandbox.id ||
-        prior.provider !== sandbox.provider ||
-        JSON.stringify(stored.input) !== JSON.stringify(normalizedStartInput(input)) ||
-        (acceptedActor &&
-          (stored.operation.actor.kind !== acceptedActor.kind ||
-            stored.operation.actor.id !== acceptedActor.id)) ||
-        stored.operation.operationId !== `agent-task-${taskId}` ||
-        stored.handle.providerSandboxId !== handleOf(sandbox).providerSandboxId
-      )
-        throw new Error('TASK_START_INTENT_CONFLICT');
-      if (existing) {
-        if (existing.sandboxId !== sandbox.id || existing.runtime !== input.runtime)
+    return this.worker.run(async () => {
+      const prior = await this.startIntents?.find(taskId);
+      const existing = await this.tasks.findById(taskId);
+      if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
+      if (prior) {
+        const stored = DurableAgentTaskStartSchema.parse(JSON.parse(prior.payload));
+        if (
+          prior.sandboxId !== sandbox.id ||
+          prior.provider !== sandbox.provider ||
+          JSON.stringify(stored.input) !== JSON.stringify(normalizedStartInput(input)) ||
+          (acceptedActor &&
+            (stored.operation.actor.kind !== acceptedActor.kind ||
+              stored.operation.actor.id !== acceptedActor.id)) ||
+          stored.operation.operationId !== `agent-task-${taskId}` ||
+          stored.handle.providerSandboxId !== handleOf(sandbox).providerSandboxId
+        )
           throw new Error('TASK_START_INTENT_CONFLICT');
-        return existing;
+        if (existing) {
+          if (existing.sandboxId !== sandbox.id || existing.runtime !== input.runtime)
+            throw new Error('TASK_START_INTENT_CONFLICT');
+          return existing;
+        }
+        // A pending/unknown owner operation refuses replay. Only the same durable
+        // identity can confirm the original receipt or submit a proven absent intent.
+        if (!this.authority) throw new Error('ORIGINAL_TASK_START_UNCONFIRMED');
+        const { jobs } = this.planesOf(this.providers.get(sandbox.provider));
+        const job = await this.authority.run(stored.operation, () =>
+          jobs.startJob(stored.handle, stored.spec),
+        );
+        if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
+        const task = AgentTask.start({
+          id: taskId,
+          sandboxId: sandbox.id,
+          runtime: input.runtime,
+          jobHandle: { provider: job.provider, jobId: job.jobId },
+          logPath: stored.logPath,
+          timeoutMs: stored.timeoutMs,
+          resumeFrom: stored.input.resumeFrom,
+          now: prior.createdAt,
+        });
+        this.persist(task, taskId);
+        void this.pumpSafely(task, sandbox);
+        return task;
       }
-      // A pending/unknown owner operation refuses replay. Only the same durable
-      // identity can confirm the original receipt or submit a proven absent intent.
-      if (!this.authority) throw new Error('ORIGINAL_TASK_START_UNCONFIRMED');
-      const { jobs } = this.planesOf(this.providers.get(sandbox.provider));
-      const job = await this.authority.run(stored.operation, () =>
-        jobs.startJob(stored.handle, stored.spec),
-      );
+      if (existing) throw new Error('ORIGINAL_TASK_START_UNCONFIRMED');
+      if (acceptedActor && !this.startIntents) throw new Error('TASK_START_INTENTS_REQUIRED');
+      const provider = this.providers.get(sandbox.provider);
+      const { jobs } = this.planesOf(provider);
+      const adapter = this.runtimes.get(input.runtime);
+      const handle = handleOf(sandbox);
+      const timeoutMs = input.timeoutMinutes * 60_000;
+
+      const command = adapter.buildStartCommand({
+        prompt: input.prompt,
+        taskId,
+        headless: true,
+        // the ONLY format the platform can parse into events; `text` would reduce a Task
+        // to an opaque blob and delete the whole `/tasks` channel's reason to exist.
+        outputFormat: 'json-stream',
+        extraArgs: input.extraArgs,
+        workdir: SANDBOX_WORKSPACE_MOUNT,
+        resumeFrom: input.resumeFrom,
+      });
+
+      const logPath = await this.logs.prepare(taskId);
+      if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
+      const spec: JobSpec = {
+        cmd: command.cmd,
+        env: command.env,
+        cwd: command.cwd ?? SANDBOX_WORKSPACE_MOUNT,
+        timeoutMs,
+      };
+      const actor: RuntimeBusinessOperation['actor'] = acceptedActor ??
+        this.authority?.current?.()?.actor ?? { kind: 'system', id: 'state-coordinator' };
+      const operation: RuntimeBusinessOperation = { operationId: `agent-task-${taskId}`, actor };
+      if (this.startIntents) {
+        this.uow.run((tx) =>
+          this.startIntents?.createSync(tx, {
+            taskId,
+            sandboxId: sandbox.id,
+            provider: sandbox.provider,
+            payload: JSON.stringify({
+              version: 1,
+              input: normalizedStartInput(input),
+              handle,
+              spec,
+              logPath,
+              timeoutMs,
+              operation,
+            }),
+            createdAt: this.clock.now(),
+          }),
+        );
+      }
+      const job = this.authority
+        ? await this.authority.run(operation, () => jobs.startJob(handle, spec))
+        : await jobs.startJob(handle, spec);
+
       if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
       const task = AgentTask.start({
         id: taskId,
         sandboxId: sandbox.id,
         runtime: input.runtime,
         jobHandle: { provider: job.provider, jobId: job.jobId },
-        logPath: stored.logPath,
-        timeoutMs: stored.timeoutMs,
-        resumeFrom: stored.input.resumeFrom,
-        now: prior.createdAt,
+        logPath,
+        timeoutMs,
+        resumeFrom: input.resumeFrom,
+        now: this.clock.now(),
       });
-      this.persist(task, taskId);
+      // The row and the AgentTaskStarted audit event land in ONE transaction (28 §7.3
+      // R-3). This is the platform's first externally-triggered EXECUTION, so "we ran
+      // something but there is no record of it" must not be reachable by a crash.
+      try {
+        this.persist(task, taskId);
+      } catch (e) {
+        // ⚠️ THE JOB IS ALREADY RUNNING AND THE ROW IS THE ONLY THING THAT COULD FIND IT
+        // AGAIN. Reachable in practice: the sandbox is deleted between `startJob` and
+        // this write, and the FK cascade rejects the insert. Leaving it would burn a
+        // sandbox slot on an agent nobody can read, stop or account for — so the job is
+        // stopped and released on the way out, and the caller learns the start failed.
+        this.logger.error(`task ${taskId} could not be persisted: ${errorMessage(e)}`);
+        // A durable accepted command and owner receipt can reconcile this job. A lost
+        // writer lease/DB acknowledgement must not turn upgrade recovery into SIGKILL.
+        if (this.startIntents) throw e;
+        await jobs
+          .killJob(handle, { provider: job.provider, jobId: job.jobId }, 'SIGKILL')
+          .catch(() => undefined);
+        await jobs
+          .releaseJob(handle, { provider: job.provider, jobId: job.jobId })
+          .catch(() => undefined);
+        throw e;
+      }
+
       void this.pumpSafely(task, sandbox);
       return task;
-    }
-    if (existing) throw new Error('ORIGINAL_TASK_START_UNCONFIRMED');
-    if (acceptedActor && !this.startIntents) throw new Error('TASK_START_INTENTS_REQUIRED');
-    const provider = this.providers.get(sandbox.provider);
-    const { jobs } = this.planesOf(provider);
-    const adapter = this.runtimes.get(input.runtime);
-    const handle = handleOf(sandbox);
-    const timeoutMs = input.timeoutMinutes * 60_000;
-
-    const command = adapter.buildStartCommand({
-      prompt: input.prompt,
-      taskId,
-      headless: true,
-      // the ONLY format the platform can parse into events; `text` would reduce a Task
-      // to an opaque blob and delete the whole `/tasks` channel's reason to exist.
-      outputFormat: 'json-stream',
-      extraArgs: input.extraArgs,
-      workdir: SANDBOX_WORKSPACE_MOUNT,
-      resumeFrom: input.resumeFrom,
     });
-
-    const logPath = await this.logs.prepare(taskId);
-    if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
-    const spec: JobSpec = {
-      cmd: command.cmd,
-      env: command.env,
-      cwd: command.cwd ?? SANDBOX_WORKSPACE_MOUNT,
-      timeoutMs,
-    };
-    const actor: RuntimeBusinessOperation['actor'] = acceptedActor ??
-      this.authority?.current?.()?.actor ?? { kind: 'system', id: 'state-coordinator' };
-    const operation: RuntimeBusinessOperation = { operationId: `agent-task-${taskId}`, actor };
-    if (this.startIntents) {
-      this.uow.run((tx) =>
-        this.startIntents?.createSync(tx, {
-          taskId,
-          sandboxId: sandbox.id,
-          provider: sandbox.provider,
-          payload: JSON.stringify({
-            version: 1,
-            input: normalizedStartInput(input),
-            handle,
-            spec,
-            logPath,
-            timeoutMs,
-            operation,
-          }),
-          createdAt: this.clock.now(),
-        }),
-      );
-    }
-    const job = this.authority
-      ? await this.authority.run(operation, () => jobs.startJob(handle, spec))
-      : await jobs.startJob(handle, spec);
-
-    if (this.retired(epoch)) throw new Error('TASK_WRITER_QUIESCED');
-    const task = AgentTask.start({
-      id: taskId,
-      sandboxId: sandbox.id,
-      runtime: input.runtime,
-      jobHandle: { provider: job.provider, jobId: job.jobId },
-      logPath,
-      timeoutMs,
-      resumeFrom: input.resumeFrom,
-      now: this.clock.now(),
-    });
-    // The row and the AgentTaskStarted audit event land in ONE transaction (28 §7.3
-    // R-3). This is the platform's first externally-triggered EXECUTION, so "we ran
-    // something but there is no record of it" must not be reachable by a crash.
-    try {
-      this.persist(task, taskId);
-    } catch (e) {
-      // ⚠️ THE JOB IS ALREADY RUNNING AND THE ROW IS THE ONLY THING THAT COULD FIND IT
-      // AGAIN. Reachable in practice: the sandbox is deleted between `startJob` and
-      // this write, and the FK cascade rejects the insert. Leaving it would burn a
-      // sandbox slot on an agent nobody can read, stop or account for — so the job is
-      // stopped and released on the way out, and the caller learns the start failed.
-      this.logger.error(`task ${taskId} could not be persisted: ${errorMessage(e)}`);
-      // A durable accepted command and owner receipt can reconcile this job. A lost
-      // writer lease/DB acknowledgement must not turn upgrade recovery into SIGKILL.
-      if (this.startIntents) throw e;
-      await jobs
-        .killJob(handle, { provider: job.provider, jobId: job.jobId }, 'SIGKILL')
-        .catch(() => undefined);
-      await jobs
-        .releaseJob(handle, { provider: job.provider, jobId: job.jobId })
-        .catch(() => undefined);
-      throw e;
-    }
-
-    void this.pumpSafely(task, sandbox);
-    return task;
   }
 
   /**
@@ -375,95 +384,99 @@ export class RunAgentTaskWorkflow {
    * else survived.
    */
   async resumeRunning(): Promise<number> {
-    if (this.stopped) return 0;
-    const epoch = this.ownershipEpoch;
-    await this.resumePendingStarts(epoch);
-    if (this.retired(epoch)) return 0;
-    const running = await this.tasks.findRunning();
-    let resumed = 0;
-    for (const task of running) {
-      if (this.retired(epoch)) return resumed;
-      if (this.pumping.get(task.id) === this.ownershipEpoch) continue;
-      try {
-        const sandbox = await this.sandboxes.findById(task.sandboxId);
+    return this.worker.run(async () => {
+      if (this.stopped) return 0;
+      const epoch = this.ownershipEpoch;
+      await this.resumePendingStarts(epoch);
+      if (this.retired(epoch)) return 0;
+      const running = await this.tasks.findRunning();
+      let resumed = 0;
+      for (const task of running) {
         if (this.retired(epoch)) return resumed;
-        if (!sandbox) {
-          // the sandbox is gone, so the job is gone with it — land the task rather
-          // than leaving a row that claims to be running forever. ⚠️ AND SAY SO ON THE
-          // CHANNEL: a subscriber that is already attached has no other way to learn
-          // this happened, and would sit on "运行中" until the tab is closed.
-          this.landAndAnnounce(task, { status: 'failed', errorCode: 'SANDBOX_GONE' });
-          continue;
+        if (this.pumping.get(task.id) === this.ownershipEpoch) continue;
+        try {
+          const sandbox = await this.sandboxes.findById(task.sandboxId);
+          if (this.retired(epoch)) return resumed;
+          if (!sandbox) {
+            // the sandbox is gone, so the job is gone with it — land the task rather
+            // than leaving a row that claims to be running forever. ⚠️ AND SAY SO ON THE
+            // CHANNEL: a subscriber that is already attached has no other way to learn
+            // this happened, and would sit on "运行中" until the tab is closed.
+            this.landAndAnnounce(task, { status: 'failed', errorCode: 'SANDBOX_GONE' });
+            continue;
+          }
+          void this.pumpSafely(task, sandbox);
+          resumed += 1;
+        } catch (e) {
+          // Same reasoning: a task that cannot even be re-attached is not "still
+          // running", and leaving it that way is the orphan row this method exists to
+          // prevent. `RESUME_FAILED` names the fact that recovery — not the run — broke.
+          this.logger.warn(`could not resume task ${task.id}: ${errorMessage(e)}`);
+          if (!this.authority)
+            this.landAndAnnounce(task, { status: 'failed', errorCode: 'RESUME_FAILED' });
+          else
+            this.broadcaster.publish(task.id, {
+              type: 'error',
+              taskId: task.id,
+              code: 'RUNTIME_UNKNOWN',
+            });
         }
-        void this.pumpSafely(task, sandbox);
-        resumed += 1;
-      } catch (e) {
-        // Same reasoning: a task that cannot even be re-attached is not "still
-        // running", and leaving it that way is the orphan row this method exists to
-        // prevent. `RESUME_FAILED` names the fact that recovery — not the run — broke.
-        this.logger.warn(`could not resume task ${task.id}: ${errorMessage(e)}`);
-        if (!this.authority)
-          this.landAndAnnounce(task, { status: 'failed', errorCode: 'RESUME_FAILED' });
-        else
-          this.broadcaster.publish(task.id, {
-            type: 'error',
-            taskId: task.id,
-            code: 'RUNTIME_UNKNOWN',
-          });
       }
-    }
-    return resumed;
+      return resumed;
+    });
   }
 
   private async resumePendingStarts(epoch: number): Promise<void> {
-    if (!this.startIntents || !this.authority) return;
-    for (const intent of await this.startIntents.pending()) {
-      if (this.retired(epoch)) return;
-      try {
-        const id = asAgentTaskId(intent.taskId);
-        const existing = await this.tasks.findById(id);
+    return this.worker.run(async () => {
+      if (!this.startIntents || !this.authority) return;
+      for (const intent of await this.startIntents.pending()) {
         if (this.retired(epoch)) return;
-        if (existing) {
-          this.uow.run((tx) => this.startIntents?.completeSync(tx, id));
-          continue;
+        try {
+          const id = asAgentTaskId(intent.taskId);
+          const existing = await this.tasks.findById(id);
+          if (this.retired(epoch)) return;
+          if (existing) {
+            this.uow.run((tx) => this.startIntents?.completeSync(tx, id));
+            continue;
+          }
+          const sandbox = await this.sandboxes.findById(asSandboxId(intent.sandboxId));
+          if (this.retired(epoch)) return;
+          if (!sandbox || !['running', 'idle'].includes(sandbox.status)) continue;
+          const payload = DurableAgentTaskStartSchema.parse(JSON.parse(intent.payload));
+          if (
+            payload.operation.operationId !== `agent-task-${id}` ||
+            payload.handle.provider !== intent.provider ||
+            payload.handle.providerSandboxId !== handleOf(sandbox).providerSandboxId
+          ) {
+            throw new Error('TASK_START_INTENT_IDENTITY_MISMATCH');
+          }
+          const provider = this.providers.get(intent.provider),
+            { jobs } = this.planesOf(provider);
+          // The owner's durable operation journal returns the original completed job;
+          // pending/unknown refuses replay. A never-submitted accepted intent may start.
+          const job = await this.authority.run(payload.operation, () =>
+            jobs.startJob(payload.handle, payload.spec),
+          );
+          if (this.retired(epoch)) return;
+          const task = AgentTask.start({
+            id,
+            sandboxId: sandbox.id,
+            runtime: payload.input.runtime,
+            jobHandle: { provider: job.provider, jobId: job.jobId },
+            logPath: payload.logPath,
+            timeoutMs: payload.timeoutMs,
+            resumeFrom: payload.input.resumeFrom,
+            now: intent.createdAt,
+          });
+          this.persist(task, id);
+        } catch (error) {
+          // Keep the accepted command queryable. Uncertainty is not a guest failure.
+          this.logger.warn(
+            `pending task ${intent.taskId} awaits confirmation: ${errorMessage(error)}`,
+          );
         }
-        const sandbox = await this.sandboxes.findById(asSandboxId(intent.sandboxId));
-        if (this.retired(epoch)) return;
-        if (!sandbox || !['running', 'idle'].includes(sandbox.status)) continue;
-        const payload = DurableAgentTaskStartSchema.parse(JSON.parse(intent.payload));
-        if (
-          payload.operation.operationId !== `agent-task-${id}` ||
-          payload.handle.provider !== intent.provider ||
-          payload.handle.providerSandboxId !== handleOf(sandbox).providerSandboxId
-        ) {
-          throw new Error('TASK_START_INTENT_IDENTITY_MISMATCH');
-        }
-        const provider = this.providers.get(intent.provider),
-          { jobs } = this.planesOf(provider);
-        // The owner's durable operation journal returns the original completed job;
-        // pending/unknown refuses replay. A never-submitted accepted intent may start.
-        const job = await this.authority.run(payload.operation, () =>
-          jobs.startJob(payload.handle, payload.spec),
-        );
-        if (this.retired(epoch)) return;
-        const task = AgentTask.start({
-          id,
-          sandboxId: sandbox.id,
-          runtime: payload.input.runtime,
-          jobHandle: { provider: job.provider, jobId: job.jobId },
-          logPath: payload.logPath,
-          timeoutMs: payload.timeoutMs,
-          resumeFrom: payload.input.resumeFrom,
-          now: intent.createdAt,
-        });
-        this.persist(task, id);
-      } catch (error) {
-        // Keep the accepted command queryable. Uncertainty is not a guest failure.
-        this.logger.warn(
-          `pending task ${intent.taskId} awaits confirmation: ${errorMessage(error)}`,
-        );
       }
-    }
+    });
   }
 
   /**
@@ -481,82 +494,90 @@ export class RunAgentTaskWorkflow {
    * two racing ones.
    */
   async cancel(task: AgentTask, sandbox: Sandbox): Promise<void> {
-    const at = this.clock.now();
-    task.requestCancel(at);
-    // ⚠️ NOT `persist(task)`. This aggregate was loaded by an HTTP request and is by
-    // definition older than the pump's copy; a full-row upsert would write `cursor`,
-    // `last_seq`, `stdout_bytes`, `status` and `finished_at` BACKWARDS — measured: the
-    // cursor rewinds from {"o":900} to {"o":100} (⇒ every event in between is
-    // re-delivered with fresh seq numbers after the next restart) and an already
-    // `succeeded` row comes back as `running` with a NULL `finished_at`, i.e. a task
-    // stuck running forever. One conditional column cannot do either.
-    this.uow.run((tx) => {
-      this.tasks.requestCancelSync(tx, task.id, at);
-      this.events.publishInTx(tx, task.pullEvents());
+    return this.worker.run(async () => {
+      const at = this.clock.now();
+      task.requestCancel(at);
+      // ⚠️ NOT `persist(task)`. This aggregate was loaded by an HTTP request and is by
+      // definition older than the pump's copy; a full-row upsert would write `cursor`,
+      // `last_seq`, `stdout_bytes`, `status` and `finished_at` BACKWARDS — measured: the
+      // cursor rewinds from {"o":900} to {"o":100} (⇒ every event in between is
+      // re-delivered with fresh seq numbers after the next restart) and an already
+      // `succeeded` row comes back as `running` with a NULL `finished_at`, i.e. a task
+      // stuck running forever. One conditional column cannot do either.
+      this.uow.run((tx) => {
+        this.tasks.requestCancelSync(tx, task.id, at);
+        this.events.publishInTx(tx, task.pullEvents());
+      });
+      const provider = this.providers.get(sandbox.provider);
+      const { jobs } = this.planesOf(provider);
+      // SIGTERM → 5s grace → SIGKILL lives INSIDE the provider's killJob (03 §8.3);
+      // re-implementing it here would only shorten the grace the agent was given.
+      await jobs.killJob(handleOf(sandbox), jobHandleOf(task), 'SIGTERM');
     });
-    const provider = this.providers.get(sandbox.provider);
-    const { jobs } = this.planesOf(provider);
-    // SIGTERM → 5s grace → SIGKILL lives INSIDE the provider's killJob (03 §8.3);
-    // re-implementing it here would only shorten the grace the agent was given.
-    await jobs.killJob(handleOf(sandbox), jobHandleOf(task), 'SIGTERM');
   }
 
   /** Background runner — never rejects into an unhandled promise. */
   private async pumpSafely(task: AgentTask, sandbox: Sandbox): Promise<void> {
-    const epoch = this.ownershipEpoch;
-    if (this.retired(epoch) || this.pumping.get(task.id) === epoch) return;
-    this.pumping.set(task.id, epoch);
-    try {
-      await this.pump(task, sandbox, epoch);
-    } catch (e) {
-      if (this.retired(epoch) || this.authority) {
-        if (!this.retired(epoch))
-          this.broadcaster.publish(task.id, {
-            type: 'error',
-            taskId: task.id,
-            code: 'RUNTIME_UNKNOWN',
-          });
-        this.logger.warn(`task ${task.id} observation remains unconfirmed; original job retained`);
-        return;
+    return this.worker.run(async () => {
+      const epoch = this.ownershipEpoch;
+      if (this.retired(epoch) || this.pumping.get(task.id) === epoch) return;
+      this.pumping.set(task.id, epoch);
+      try {
+        await this.pump(task, sandbox, epoch);
+      } catch (e) {
+        if (this.retired(epoch) || this.authority) {
+          if (!this.retired(epoch))
+            this.broadcaster.publish(task.id, {
+              type: 'error',
+              taskId: task.id,
+              code: 'RUNTIME_UNKNOWN',
+            });
+          this.logger.warn(
+            `task ${task.id} observation remains unconfirmed; original job retained`,
+          );
+          return;
+        }
+        // Reached only when the pump could not be SET UP at all (a provider with no
+        // job plane, an unreadable job handle). Nothing was acquired, so there is
+        // nothing to release — the branches that DID acquire release inside `pump`.
+        this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
+        this.failWith(task, e);
+      } finally {
+        if (this.pumping.get(task.id) === epoch) this.pumping.delete(task.id);
       }
-      // Reached only when the pump could not be SET UP at all (a provider with no
-      // job plane, an unreadable job handle). Nothing was acquired, so there is
-      // nothing to release — the branches that DID acquire release inside `pump`.
-      this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
-      this.failWith(task, e);
-    } finally {
-      if (this.pumping.get(task.id) === epoch) this.pumping.delete(task.id);
-    }
+    });
   }
 
   private async pump(task: AgentTask, sandbox: Sandbox, epoch: number): Promise<void> {
-    const provider = this.providers.get(sandbox.provider);
-    const { jobs, files } = this.planesOf(provider);
-    const handle = handleOf(sandbox);
-    const job = jobHandleOf(task);
-    try {
-      await this.streamUntilTerminal(task, jobs, files, handle, job, epoch);
-    } catch (e) {
-      if (this.retired(epoch) || this.authority) {
-        if (!this.retired(epoch))
-          this.broadcaster.publish(task.id, {
-            type: 'error',
-            taskId: task.id,
-            code: 'RUNTIME_UNKNOWN',
-          });
-        this.logger.warn(
-          `task ${task.id} pump observation remains unconfirmed; original job retained`,
-        );
-        return;
+    return this.worker.run(async () => {
+      const provider = this.providers.get(sandbox.provider);
+      const { jobs, files } = this.planesOf(provider);
+      const handle = handleOf(sandbox);
+      const job = jobHandleOf(task);
+      try {
+        await this.streamUntilTerminal(task, jobs, files, handle, job, epoch);
+      } catch (e) {
+        if (this.retired(epoch) || this.authority) {
+          if (!this.retired(epoch))
+            this.broadcaster.publish(task.id, {
+              type: 'error',
+              taskId: task.id,
+              code: 'RUNTIME_UNKNOWN',
+            });
+          this.logger.warn(
+            `task ${task.id} pump observation remains unconfirmed; original job retained`,
+          );
+          return;
+        }
+        // ⚠️ THE FAILURE PATH RELEASES TOO. A read that finally gave up used to land the
+        // task and walk away, leaving the sandbox-side session and its attached
+        // websocket alive for the life of the sandbox — while the row, now terminal, was
+        // invisible to `findRunning()` and could never be cleaned up by anything else.
+        this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
+        this.failWith(task, e);
+        await this.releaseAndForget(task.id, jobs, handle, job);
       }
-      // ⚠️ THE FAILURE PATH RELEASES TOO. A read that finally gave up used to land the
-      // task and walk away, leaving the sandbox-side session and its attached
-      // websocket alive for the life of the sandbox — while the row, now terminal, was
-      // invisible to `findRunning()` and could never be cleaned up by anything else.
-      this.logger.error(`task ${task.id} pump failed: ${errorMessage(e)}`);
-      this.failWith(task, e);
-      await this.releaseAndForget(task.id, jobs, handle, job);
-    }
+    });
   }
 
   /**
@@ -571,98 +592,100 @@ export class RunAgentTaskWorkflow {
     job: JobHandle,
     epoch: number,
   ): Promise<void> {
-    const adapter = this.runtimes.get(task.runtime);
-    let cursor = task.cursor ?? undefined;
-    let seq = task.lastSeq;
-    let stdoutBytes = task.stdoutBytes;
-    let killEscalated = false;
-    let platformTimedOut = false;
+    return this.worker.run(async () => {
+      const adapter = this.runtimes.get(task.runtime);
+      let cursor = task.cursor ?? undefined;
+      let seq = task.lastSeq;
+      let stdoutBytes = task.stdoutBytes;
+      let killEscalated = false;
+      let platformTimedOut = false;
 
-    // ⓪ roll the raw log back to the length the persisted cursor admits.
-    //
-    // ⚠️ THIS IS WHAT MAKES THE APPEND IDEMPOTENT. The bytes are written before the
-    // cursor is persisted (the reverse would lose them), so a crash in between leaves a
-    // log LONGER than the cursor — and this resume, reading from that same cursor, is
-    // about to write the identical bytes again. Measured without it: 2 lines before the
-    // crash became 4 after recovery, replay produced more events than were ever pushed
-    // live, and every subsequent `seq` was permanently shifted. On the happy path the
-    // file is already exactly this long and the call is a no-op.
-    await this.logs.truncateStdout(task.id, stdoutBytes);
-    if (this.retired(epoch)) return;
-    this.seqIndex.delete(task.id);
+      // ⓪ roll the raw log back to the length the persisted cursor admits.
+      //
+      // ⚠️ THIS IS WHAT MAKES THE APPEND IDEMPOTENT. The bytes are written before the
+      // cursor is persisted (the reverse would lose them), so a crash in between leaves a
+      // log LONGER than the cursor — and this resume, reading from that same cursor, is
+      // about to write the identical bytes again. Measured without it: 2 lines before the
+      // crash became 4 after recovery, replay produced more events than were ever pushed
+      // live, and every subsequent `seq` was permanently shifted. On the happy path the
+      // file is already exactly this long and the call is a no-op.
+      await this.logs.truncateStdout(task.id, stdoutBytes);
+      if (this.retired(epoch)) return;
+      this.seqIndex.delete(task.id);
 
-    for (;;) {
-      if (this.retired(epoch)) return;
-      const chunk = await this.readWithRetry(task, jobs, handle, job, cursor, epoch);
-      if (chunk === null) return; // retired mid-backoff
-      // ⚠️ CHECK AGAIN AFTER THE READ, NOT ONLY BEFORE IT. A read can be in flight for
-      // the whole long-poll budget, and a retired pump that goes on to append, persist
-      // and FINALISE the chunk it happens to be holding is still the old process doing
-      // the work — which is exactly what let a gutted `resumeRunning()` keep 25 of 26
-      // tests green. Dropping the chunk is safe: the cursor has not moved, so the
-      // bytes are re-read by whoever picks the job up next.
-      if (this.retired(epoch)) return;
-      cursor = chunk.cursor;
+      for (;;) {
+        if (this.retired(epoch)) return;
+        const chunk = await this.readWithRetry(task, jobs, handle, job, cursor, epoch);
+        if (chunk === null) return; // retired mid-backoff
+        // ⚠️ CHECK AGAIN AFTER THE READ, NOT ONLY BEFORE IT. A read can be in flight for
+        // the whole long-poll budget, and a retired pump that goes on to append, persist
+        // and FINALISE the chunk it happens to be holding is still the old process doing
+        // the work — which is exactly what let a gutted `resumeRunning()` keep 25 of 26
+        // tests green. Dropping the chunk is safe: the cursor has not moved, so the
+        // bytes are re-read by whoever picks the job up next.
+        if (this.retired(epoch)) return;
+        cursor = chunk.cursor;
 
-      // ① raw first, parsed second. If the process dies between the two, the bytes are
-      // already durable and replay rebuilds the events; the other order would lose them.
-      if (chunk.stdout !== '') await this.logs.appendStdout(task.id, chunk.stdout);
-      if (this.retired(epoch)) return;
-      if (chunk.stderr !== '') await this.logs.appendStderr(task.id, chunk.stderr);
-      if (this.retired(epoch)) return;
-      const nextStdoutBytes = stdoutBytes + Buffer.byteLength(chunk.stdout, 'utf8');
+        // ① raw first, parsed second. If the process dies between the two, the bytes are
+        // already durable and replay rebuilds the events; the other order would lose them.
+        if (chunk.stdout !== '') await this.logs.appendStdout(task.id, chunk.stdout);
+        if (this.retired(epoch)) return;
+        if (chunk.stderr !== '') await this.logs.appendStderr(task.id, chunk.stderr);
+        if (this.retired(epoch)) return;
+        const nextStdoutBytes = stdoutBytes + Buffer.byteLength(chunk.stdout, 'utf8');
 
-      if (chunk.stdout !== '') {
-        const parsed = this.parse(adapter, chunk.stdout);
-        for (const event of parsed) {
-          seq += 1;
-          this.absorb(task, event);
-          this.broadcaster.publish(task.id, { type: 'event', taskId: task.id, seq, event });
+        if (chunk.stdout !== '') {
+          const parsed = this.parse(adapter, chunk.stdout);
+          for (const event of parsed) {
+            seq += 1;
+            this.absorb(task, event);
+            this.broadcaster.publish(task.id, { type: 'event', taskId: task.id, seq, event });
+          }
+        }
+
+        // ② persist the TRIPLE before looking at the exit, so a crash right here resumes
+        // from exactly what was already delivered AND from exactly what is on disk.
+        if (chunk.stdout !== '' || chunk.stderr !== '' || task.cursor !== cursor) {
+          task.advance(cursor, seq, nextStdoutBytes);
+          this.persist(task);
+          stdoutBytes = nextStdoutBytes;
+        }
+
+        if (chunk.status === 'exited') {
+          await this.finalize(
+            task,
+            files,
+            handle,
+            jobs,
+            job,
+            chunk.exitCode,
+            platformTimedOut,
+            epoch,
+            this.clock.now(),
+          );
+          return;
+        }
+
+        // ③ platform-side backstop. The sandbox-side `hard_timeout` is the first line and
+        // usually fires first; this covers the case where it cannot (an agent that
+        // ignores it, or one that stopped answering). SIGTERM once, then SIGKILL on the
+        // next pass — never a tight loop of signals.
+        if (this.overdue(task)) {
+          this.logger.warn(
+            `task ${task.id} exceeded ${String(task.timeoutMs)}ms — forcing termination`,
+          );
+          // ⚠️ REMEMBER WHY IT DIED. A signal-killed process has no exit code, so without
+          // this flag `verdictFromExitCode(undefined)` lands the run as a generic
+          // `failed` — and `timed_out` would then be reachable ONLY through the
+          // sandbox-side exit 124, i.e. exactly half of the two sources 03 §8.3 names.
+          // The one thing the platform knows here that nothing downstream can infer is
+          // that IT decided the deadline had passed.
+          platformTimedOut = true;
+          await jobs.killJob(handle, job, killEscalated ? 'SIGKILL' : 'SIGTERM');
+          killEscalated = true;
         }
       }
-
-      // ② persist the TRIPLE before looking at the exit, so a crash right here resumes
-      // from exactly what was already delivered AND from exactly what is on disk.
-      if (chunk.stdout !== '' || chunk.stderr !== '' || task.cursor !== cursor) {
-        task.advance(cursor, seq, nextStdoutBytes);
-        this.persist(task);
-        stdoutBytes = nextStdoutBytes;
-      }
-
-      if (chunk.status === 'exited') {
-        await this.finalize(
-          task,
-          files,
-          handle,
-          jobs,
-          job,
-          chunk.exitCode,
-          platformTimedOut,
-          epoch,
-          this.clock.now(),
-        );
-        return;
-      }
-
-      // ③ platform-side backstop. The sandbox-side `hard_timeout` is the first line and
-      // usually fires first; this covers the case where it cannot (an agent that
-      // ignores it, or one that stopped answering). SIGTERM once, then SIGKILL on the
-      // next pass — never a tight loop of signals.
-      if (this.overdue(task)) {
-        this.logger.warn(
-          `task ${task.id} exceeded ${String(task.timeoutMs)}ms — forcing termination`,
-        );
-        // ⚠️ REMEMBER WHY IT DIED. A signal-killed process has no exit code, so without
-        // this flag `verdictFromExitCode(undefined)` lands the run as a generic
-        // `failed` — and `timed_out` would then be reachable ONLY through the
-        // sandbox-side exit 124, i.e. exactly half of the two sources 03 §8.3 names.
-        // The one thing the platform knows here that nothing downstream can infer is
-        // that IT decided the deadline had passed.
-        platformTimedOut = true;
-        await jobs.killJob(handle, job, killEscalated ? 'SIGKILL' : 'SIGTERM');
-        killEscalated = true;
-      }
-    }
+    });
   }
 
   /**
@@ -687,20 +710,22 @@ export class RunAgentTaskWorkflow {
     cursor: string | undefined,
     epoch: number,
   ): Promise<Awaited<ReturnType<SandboxJobs['readJob']>> | null> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await jobs.readJob(handle, job, cursor, { waitMs: READ_WAIT_MS });
-      } catch (e) {
-        if (!isRetryable(e) || attempt >= READ_RETRY_LIMIT) throw e;
-        const backoff = Math.min(READ_RETRY_BASE_MS * 2 ** attempt, READ_RETRY_MAX_MS);
-        this.logger.warn(
-          `task ${task.id} read failed (${errorMessage(e)}); ` +
-            `retry ${String(attempt + 1)}/${String(READ_RETRY_LIMIT)} in ${String(backoff)}ms`,
-        );
-        await sleep(backoff);
-        if (this.retired(epoch)) return null;
+    return this.worker.run(async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await jobs.readJob(handle, job, cursor, { waitMs: READ_WAIT_MS });
+        } catch (e) {
+          if (!isRetryable(e) || attempt >= READ_RETRY_LIMIT) throw e;
+          const backoff = Math.min(READ_RETRY_BASE_MS * 2 ** attempt, READ_RETRY_MAX_MS);
+          this.logger.warn(
+            `task ${task.id} read failed (${errorMessage(e)}); ` +
+              `retry ${String(attempt + 1)}/${String(READ_RETRY_LIMIT)} in ${String(backoff)}ms`,
+          );
+          await sleep(backoff);
+          if (this.retired(epoch)) return null;
+        }
       }
-    }
+    });
   }
 
   /**
@@ -720,70 +745,72 @@ export class RunAgentTaskWorkflow {
     epoch = this.ownershipEpoch,
     observedAt = this.clock.now(),
   ): Promise<void> {
-    // ⚠️ RE-READ THE CANCEL INTENT FROM STORAGE. `cancel()` runs on the aggregate the
-    // REQUEST loaded, which is a DIFFERENT instance from the one this pump is holding —
-    // so the in-memory copy here never sees the flag, and every deliberate stop would
-    // land as a generic `failed`. The persisted row is the only thing the two share.
-    const persisted = await this.tasks.findById(task.id).catch(() => null);
-    if (this.retired(epoch)) return;
-    if (persisted?.cancelRequested && !task.cancelRequested) {
-      task.requestCancel(persisted.cancelRequestedAt ?? this.clock.now());
-    }
-    const artifacts = await this.collectArtifacts(files, handle).catch((e: unknown) => {
-      // artifact collection must never turn a SUCCEEDED run into a failure — the work
-      // is done, we merely could not enumerate what it left behind.
-      this.logger.warn(`task ${task.id} artifact listing failed: ${errorMessage(e)}`);
-      return [] as TaskArtifact[];
-    });
-    if (this.retired(epoch)) return;
-    // A cancelled run is `killed`, not `failed`: a signal-killed process has no exit
-    // code, so without the recorded intent every deliberate stop would be indistinguishable
-    // from a crash.
-    const status: AgentTaskStatus =
-      task.status !== 'running'
-        ? task.status
-        : task.cancelRequested
-          ? 'killed'
-          : // the PLATFORM-side backstop is the second documented source of `timed_out`
-            // (03 §8.3); the sandbox-side exit 124 is the first. A killed process has no
-            // exit code, so this flag is the only carrier of the fact.
-            platformTimedOut
-            ? 'timed_out'
-            : verdictFromExitCode(exitCode);
-    this.finishAndPersist(
-      task,
-      {
-        status,
-        exitCode,
-        artifacts,
-        errorCode: status === 'succeeded' ? undefined : `TASK_${status.toUpperCase()}`,
-      },
-      {
+    return this.worker.run(async () => {
+      // ⚠️ RE-READ THE CANCEL INTENT FROM STORAGE. `cancel()` runs on the aggregate the
+      // REQUEST loaded, which is a DIFFERENT instance from the one this pump is holding —
+      // so the in-memory copy here never sees the flag, and every deliberate stop would
+      // land as a generic `failed`. The persisted row is the only thing the two share.
+      const persisted = await this.tasks.findById(task.id).catch(() => null);
+      if (this.retired(epoch)) return;
+      if (persisted?.cancelRequested && !task.cancelRequested) {
+        task.requestCancel(persisted.cancelRequestedAt ?? this.clock.now());
+      }
+      const artifacts = await this.collectArtifacts(files, handle).catch((e: unknown) => {
+        // artifact collection must never turn a SUCCEEDED run into a failure — the work
+        // is done, we merely could not enumerate what it left behind.
+        this.logger.warn(`task ${task.id} artifact listing failed: ${errorMessage(e)}`);
+        return [] as TaskArtifact[];
+      });
+      if (this.retired(epoch)) return;
+      // A cancelled run is `killed`, not `failed`: a signal-killed process has no exit
+      // code, so without the recorded intent every deliberate stop would be indistinguishable
+      // from a crash.
+      const status: AgentTaskStatus =
+        task.status !== 'running'
+          ? task.status
+          : task.cancelRequested
+            ? 'killed'
+            : // the PLATFORM-side backstop is the second documented source of `timed_out`
+              // (03 §8.3); the sandbox-side exit 124 is the first. A killed process has no
+              // exit code, so this flag is the only carrier of the fact.
+              platformTimedOut
+              ? 'timed_out'
+              : verdictFromExitCode(exitCode);
+      this.finishAndPersist(
+        task,
+        {
+          status,
+          exitCode,
+          artifacts,
+          errorCode: status === 'succeeded' ? undefined : `TASK_${status.toUpperCase()}`,
+        },
+        {
+          taskId: task.id,
+          sandboxId: task.sandboxId,
+          jobHandle: { provider: job.provider, jobId: job.jobId },
+          cursor: task.cursor,
+          lastSeq: task.lastSeq,
+          exitCode: exitCode ?? null,
+          exitKind: task.cancelRequested
+            ? 'cancelled'
+            : platformTimedOut || (exitCode === 124 && this.overdue(task))
+              ? 'timeout'
+              : 'natural',
+          observedAt,
+        },
+      );
+      await this.logs.flush(task.id);
+      if (this.retired(epoch)) return;
+      this.broadcaster.publish(task.id, {
+        type: 'exit',
         taskId: task.id,
-        sandboxId: task.sandboxId,
-        jobHandle: { provider: job.provider, jobId: job.jobId },
-        cursor: task.cursor,
-        lastSeq: task.lastSeq,
-        exitCode: exitCode ?? null,
-        exitKind: task.cancelRequested
-          ? 'cancelled'
-          : platformTimedOut || (exitCode === 124 && this.overdue(task))
-            ? 'timeout'
-            : 'natural',
-        observedAt,
-      },
-    );
-    await this.logs.flush(task.id);
-    if (this.retired(epoch)) return;
-    this.broadcaster.publish(task.id, {
-      type: 'exit',
-      taskId: task.id,
-      status,
-      ...(exitCode !== undefined ? { exitCode } : {}),
+        status,
+        ...(exitCode !== undefined ? { exitCode } : {}),
+      });
+      // everything the platform needs is now durable ⇒ safe to drop the sandbox-side
+      // session. Failing here leaks a session, which the sandbox's own teardown reaps.
+      await this.releaseAndForget(task.id, jobs, handle, job);
     });
-    // everything the platform needs is now durable ⇒ safe to drop the sandbox-side
-    // session. Failing here leaks a session, which the sandbox's own teardown reaps.
-    await this.releaseAndForget(task.id, jobs, handle, job);
   }
 
   /**
@@ -802,11 +829,13 @@ export class RunAgentTaskWorkflow {
     handle: SandboxHandle,
     job: JobHandle,
   ): Promise<void> {
-    await jobs.releaseJob(handle, job).catch((e: unknown) => {
-      this.logger.warn(`task ${taskId} releaseJob failed: ${errorMessage(e)}`);
+    return this.worker.run(async () => {
+      await jobs.releaseJob(handle, job).catch((e: unknown) => {
+        this.logger.warn(`task ${taskId} releaseJob failed: ${errorMessage(e)}`);
+      });
+      this.seqIndex.delete(taskId);
+      await this.logs.release?.(taskId).catch(() => undefined);
     });
-    this.seqIndex.delete(taskId);
-    await this.logs.release?.(taskId).catch(() => undefined);
   }
 
   /**
@@ -818,28 +847,30 @@ export class RunAgentTaskWorkflow {
     files: SandboxFiles,
     handle: SandboxHandle,
   ): Promise<TaskArtifact[]> {
-    const entries = await files.listFiles(handle, TASK_ARTIFACT_DIR, {
-      recursive: true,
-      maxEntries: ARTIFACT_LIST_MAX,
+    return this.worker.run(async () => {
+      const entries = await files.listFiles(handle, TASK_ARTIFACT_DIR, {
+        recursive: true,
+        maxEntries: ARTIFACT_LIST_MAX,
+      });
+      return (
+        entries
+          .filter((e) => e.kind === 'file')
+          .map((e) => ({
+            // relative to the drop box — an absolute in-sandbox path is not something to
+            // hand an API client (`TaskArtifactSchema.name`).
+            name: relativeArtifactName(e.path),
+            size: e.size ?? 0,
+            // ⛔ 缺席原样传下去，不在这里补一个 `?? ''` —— 那会把「不知道」变回一句谎。
+            ...(e.modifiedAt === undefined ? {} : { modifiedAt: e.modifiedAt }),
+          }))
+          // ⚠️ A NAME IS DROPPED, NOT SANITISED. `relativeArtifactName` only strips the drop
+          // box prefix, so a listing that reported `../../etc/passwd` under it would put a
+          // traversal string on the DTO. The download endpoint refuses it (`sanitizeArtifactName`),
+          // but a name that can never resolve has no business being advertised either —
+          // defence in depth means the bad value does not exist at BOTH layers.
+          .filter((a) => a.name !== '' && isSafeArtifactName(a.name))
+      );
     });
-    return (
-      entries
-        .filter((e) => e.kind === 'file')
-        .map((e) => ({
-          // relative to the drop box — an absolute in-sandbox path is not something to
-          // hand an API client (`TaskArtifactSchema.name`).
-          name: relativeArtifactName(e.path),
-          size: e.size ?? 0,
-          // ⛔ 缺席原样传下去，不在这里补一个 `?? ''` —— 那会把「不知道」变回一句谎。
-          ...(e.modifiedAt === undefined ? {} : { modifiedAt: e.modifiedAt }),
-        }))
-        // ⚠️ A NAME IS DROPPED, NOT SANITISED. `relativeArtifactName` only strips the drop
-        // box prefix, so a listing that reported `../../etc/passwd` under it would put a
-        // traversal string on the DTO. The download endpoint refuses it (`sanitizeArtifactName`),
-        // but a name that can never resolve has no business being advertised either —
-        // defence in depth means the bad value does not exist at BOTH layers.
-        .filter((a) => a.name !== '' && isSafeArtifactName(a.name))
-    );
   }
 
   /**
@@ -852,26 +883,28 @@ export class RunAgentTaskWorkflow {
    * platform keep ONE copy of the output instead of three.
    */
   async replay(task: AgentTask, fromSeq: number): Promise<{ seq: number; event: RuntimeEvent }[]> {
-    const adapter = this.runtimes.get(task.runtime);
-    const index = this.indexFor(task.id);
-    // Where the first event this subscriber still needs can possibly live. Everything
-    // before it is READ (the log is a stream, not a random-access structure) but never
-    // PARSED and never materialised — which is where the 157 ms and the 77 MB went.
-    const startLine = firstLineAfter(index, fromSeq);
-    const out: { seq: number; event: RuntimeEvent }[] = [];
-    let seq = startLine > 0 ? index[startLine - 1] : 0;
-    let lineNo = 0;
-    for await (const line of this.logs.streamStdoutLines(task.id)) {
-      const at = lineNo++;
-      if (at < startLine) continue;
-      for (const event of this.parse(adapter, `${line}\n`)) {
-        seq += 1;
-        if (seq > fromSeq) out.push({ seq, event });
+    return this.worker.run(async () => {
+      const adapter = this.runtimes.get(task.runtime);
+      const index = this.indexFor(task.id);
+      // Where the first event this subscriber still needs can possibly live. Everything
+      // before it is READ (the log is a stream, not a random-access structure) but never
+      // PARSED and never materialised — which is where the 157 ms and the 77 MB went.
+      const startLine = firstLineAfter(index, fromSeq);
+      const out: { seq: number; event: RuntimeEvent }[] = [];
+      let seq = startLine > 0 ? index[startLine - 1] : 0;
+      let lineNo = 0;
+      for await (const line of this.logs.streamStdoutLines(task.id)) {
+        const at = lineNo++;
+        if (at < startLine) continue;
+        for (const event of this.parse(adapter, `${line}\n`)) {
+          seq += 1;
+          if (seq > fromSeq) out.push({ seq, event });
+        }
+        // extend the index only where it actually ends, so it stays a prefix of the log.
+        if (at === index.length) index.push(seq);
       }
-      // extend the index only where it actually ends, so it stays a prefix of the log.
-      if (at === index.length) index.push(seq);
-    }
-    return out;
+      return out;
+    });
   }
 
   /** The per-task line→seq index, created on demand and bounded in count. */
