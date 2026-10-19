@@ -73,6 +73,8 @@ export class RuntimeOwnerConnection {
   metadata!: RuntimeOwnerMetadata;
   private lease!: RuntimeOwnerLease;
   private renewal?: NodeJS.Timeout;
+  private activeHttp = 0;
+  private activeObservers = 0;
   private readonly endpoint: URL;
   constructor(readonly options: RuntimeOwnerClientOptions) {
     this.endpoint = new URL(options.endpoint);
@@ -137,9 +139,19 @@ export class RuntimeOwnerConnection {
       fence: this.lease.fence,
     });
     if (this.renewal) clearInterval(this.renewal);
+    this.renewal = undefined;
   }
   close(): void {
     if (this.renewal) clearInterval(this.renewal);
+    this.renewal = undefined;
+  }
+  /** Reads this connection only; never contacts an Owner or inspects a Guest. */
+  transportReferences(): { http: number; observers: number; renewals: number } {
+    return {
+      http: this.activeHttp,
+      observers: this.activeObservers,
+      renewals: this.renewal ? 1 : 0,
+    };
   }
   private async renew(): Promise<void> {
     this.assertBusinessWriter();
@@ -311,62 +323,67 @@ export class RuntimeOwnerConnection {
     signal: AbortSignal,
     onState?: (state: 'connected' | 'unconfirmed') => void,
   ): AsyncGenerator<RuntimeOwnerStreamFrame> {
-    let seq = 0;
-    let retries = 0;
-    while (!signal.aborted) {
-      try {
-        const response = await this.http(
-          `/runtime/streams/${encodeURIComponent(streamId)}?fromSeq=${String(seq)}`,
-          'GET',
-          undefined,
-          signal,
-        );
-        if (response.statusCode !== 200) await this.raise(response);
-        onState?.('connected');
-        let pending = '';
-        for await (const item of response) {
-          pending += ownerBytes(item).toString('utf8');
-          if (pending.length > 4 * 1024 * 1024)
-            throw new Error('Runtime stream frame exceeds limit');
-          let index: number;
-          while ((index = pending.indexOf('\n')) >= 0) {
-            const line = pending.slice(0, index);
-            pending = pending.slice(index + 1);
-            if (!line) continue;
-            const frame = RuntimeOwnerStreamFrameSchema.parse(JSON.parse(line) as unknown);
-            if (frame.seq <= seq) continue;
-            if (frame.type !== 'error' && frame.seq !== seq + 1)
-              throw new Error('Runtime stream sequence is not continuous');
-            seq = frame.seq;
-            retries = 0;
-            yield frame;
-            if (frame.type === 'exit' || frame.type === 'error') return;
-          }
-        }
-        if (pending) throw new Error('Truncated runtime stream frame');
-        throw new Error('Runtime transport ended without a process exit');
-      } catch (error) {
-        if (aborted(signal)) return;
-        onState?.('unconfirmed');
-        if (
-          error instanceof SandboxProviderError &&
-          error.code === SandboxProviderErrorCode.NOT_FOUND
-        )
-          throw error;
-        if (++retries > 5) throw error;
-        // Retry only observation of this same stream and cursor. Never replay input/spawn.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, Math.min(1000, retries * 200));
-          signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
+    this.activeObservers++;
+    try {
+      let seq = 0;
+      let retries = 0;
+      while (!signal.aborted) {
+        try {
+          const response = await this.http(
+            `/runtime/streams/${encodeURIComponent(streamId)}?fromSeq=${String(seq)}`,
+            'GET',
+            undefined,
+            signal,
           );
-        });
+          if (response.statusCode !== 200) await this.raise(response);
+          onState?.('connected');
+          let pending = '';
+          for await (const item of response) {
+            pending += ownerBytes(item).toString('utf8');
+            if (pending.length > 4 * 1024 * 1024)
+              throw new Error('Runtime stream frame exceeds limit');
+            let index: number;
+            while ((index = pending.indexOf('\n')) >= 0) {
+              const line = pending.slice(0, index);
+              pending = pending.slice(index + 1);
+              if (!line) continue;
+              const frame = RuntimeOwnerStreamFrameSchema.parse(JSON.parse(line) as unknown);
+              if (frame.seq <= seq) continue;
+              if (frame.type !== 'error' && frame.seq !== seq + 1)
+                throw new Error('Runtime stream sequence is not continuous');
+              seq = frame.seq;
+              retries = 0;
+              yield frame;
+              if (frame.type === 'exit' || frame.type === 'error') return;
+            }
+          }
+          if (pending) throw new Error('Truncated runtime stream frame');
+          throw new Error('Runtime transport ended without a process exit');
+        } catch (error) {
+          if (aborted(signal)) return;
+          onState?.('unconfirmed');
+          if (
+            error instanceof SandboxProviderError &&
+            error.code === SandboxProviderErrorCode.NOT_FOUND
+          )
+            throw error;
+          if (++retries > 5) throw error;
+          // Retry only observation of this same stream and cursor. Never replay input/spawn.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(1000, retries * 200));
+            signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
       }
+    } finally {
+      this.activeObservers--;
     }
   }
   private envelope(
@@ -425,7 +442,15 @@ export class RuntimeOwnerConnection {
     signal?: AbortSignal,
   ): Promise<IncomingMessage> {
     const body = data === undefined ? undefined : JSON.stringify(data);
-    return new Promise((resolve, reject) => {
+    this.activeHttp++;
+    let settled = false;
+    const done = () => {
+      if (!settled) {
+        settled = true;
+        this.activeHttp--;
+      }
+    };
+    return new Promise<IncomingMessage>((resolve, reject) => {
       const outgoing = request(
         new URL(path, this.endpoint),
         {
@@ -439,7 +464,13 @@ export class RuntimeOwnerConnection {
               : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }),
           },
         },
-        resolve,
+        (response) => {
+          // Keep the dependency until the actual response stream ends/closes.
+          response.once('end', done);
+          response.once('close', done);
+          response.once('error', done);
+          resolve(response);
+        },
       );
       outgoing.setTimeout(
         method === 'GET' && path.startsWith('/runtime/streams/') ? 0 : 120000,
@@ -447,9 +478,13 @@ export class RuntimeOwnerConnection {
           outgoing.destroy(unconfirmedTransport(new Error('RuntimeOwner HTTP response timeout'))),
       );
       outgoing.on('error', (error) => {
+        done();
         reject(error instanceof SandboxProviderError ? error : unconfirmedTransport(error));
       });
       outgoing.end(body);
+    }).catch((error: unknown) => {
+      done();
+      throw error;
     });
   }
   private async json(path: string, method = 'GET', data?: unknown): Promise<unknown> {
@@ -830,6 +865,24 @@ export class RuntimeOwnerProviderRegistry implements ProviderRegistry {
         ? { inputFingerprint: owner.metadata.inputFingerprint }
         : {}),
     }));
+  }
+  transportReferences(): {
+    complete: boolean;
+    owners: number;
+    http: number;
+    observers: number;
+    renewals: number;
+  } {
+    if (this.owners.size > 128)
+      return { complete: false, owners: this.owners.size, http: 0, observers: 0, renewals: 0 };
+    const totals = { complete: true, owners: this.owners.size, http: 0, observers: 0, renewals: 0 };
+    for (const owner of this.owners.values()) {
+      const value = owner.transportReferences();
+      totals.http += value.http;
+      totals.observers += value.observers;
+      totals.renewals += value.renewals;
+    }
+    return totals;
   }
   async addOwner(options: RuntimeOwnerClientOptions, active = false): Promise<void> {
     const connection = new RuntimeOwnerConnection(options);

@@ -1,6 +1,6 @@
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import 'reflect-metadata';
-import express, { type Request, type Response } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { request as httpRequest, createServer, type IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { connect } from 'node:net';
@@ -27,6 +27,7 @@ import { isRequestOriginAllowed } from '../bootstrap/public-origin-policy';
 import { createCoordinatorResolver } from '../platform/control-rpc/coordinator-routing';
 import { SystemClock } from '../platform/time/system-clock';
 import { installedApiIdentity } from '../platform/artifact-identity';
+import { RetirementWorkTracker } from '../platform/upgrade/retirement-census';
 import { UPGRADE_PROBE_IDENTITY_HEADERS } from '../platform/upgrade/upgrade-probe-identity';
 
 /** Public transport role: no database connection, migration, scheduler or SDK import. */
@@ -76,6 +77,17 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   if (!catalog.routes.length || catalog.protocol.min > 2 || catalog.protocol.max < 1)
     throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
   const app = express();
+  const retirement = new RetirementWorkTracker();
+  const tracked =
+    (handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) =>
+    (req: Request, res: Response, next: NextFunction): void => {
+      void retirement.run(() => handler(req, res, next)).catch(next);
+    };
+  app.use((req, res, next) => {
+    if (!['/internal/control/identity', '/internal/control/retirement'].includes(req.path))
+      retirement.request(req, res);
+    next();
+  });
   const ownProbeHeaders: Record<string, string> = {};
   const protectedProbeHeaders = new Set<string>(Object.values(UPGRADE_PROBE_IDENTITY_HEADERS));
   if (installedArtifact && process.env.PLATFORM_PROCESS_START_IDENTITY) {
@@ -132,11 +144,64 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     }
     next();
   });
-  app.get('/internal/control/identity', async (req, res) => {
+  app.get(
+    '/internal/control/identity',
+    tracked(async (req, res) => {
+      const supplied = req.headers['x-platform-internal-key'];
+      if (
+        typeof supplied !== 'string' ||
+        supplied.length !== key.length ||
+        !timingSafeEqual(Buffer.from(supplied), Buffer.from(key)) ||
+        req.headers['x-platform-instance-id'] !== instanceId ||
+        !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
+      ) {
+        res.sendStatus(403);
+        return;
+      }
+      // Imports and forbidden authority are verified from this role's actual
+      // loaded graph/environment. Physical coordinator evidence stays separate.
+      const loaded = Object.keys(require.cache);
+      const prohibited = loaded.some((path) =>
+        /@boxlite\/|better-sqlite3|platform\/persistence\/(?:platform\.module|drizzle\.connection)|sandbox\/.*providers\//.test(
+          path,
+        ),
+      );
+      let authority: Record<string, unknown> | null = null;
+      try {
+        const response = await fetch(
+          (await coordinatorTarget()).origin + '/internal/application/identity',
+          {
+            headers: internalHeaders,
+            signal: AbortSignal.timeout(1000),
+          },
+        );
+        if (response.ok) authority = z.record(z.unknown()).parse(await response.json());
+      } catch {
+        /* Missing authority evidence stays unknown. */
+      }
+      res.json({
+        instanceId,
+        role: 'control',
+        pid: process.pid,
+        startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
+        artifactDigest: installedArtifact?.artifactDigest ?? null,
+        inputFingerprint: installedArtifact?.inputFingerprint ?? null,
+        protocol: catalog.protocol,
+        controlOnly: !prohibited,
+        noRuntimeSideEffects: !prohibited,
+        applicationOperations: catalog.routes.length,
+        actualCoordinatorArtifactDigest: authority?.artifactDigest ?? null,
+        actualCoordinatorInputFingerprint: authority?.inputFingerprint ?? null,
+        coordinatorGeneration: authority?.coordinatorGeneration ?? null,
+        writerFenceValid: authority?.writerFenceValid ?? false,
+      });
+    }),
+  );
+  app.get('/internal/control/retirement', (req, res) => {
     const supplied = req.headers['x-platform-internal-key'];
     if (
       typeof supplied !== 'string' ||
-      supplied.length !== key.length ||
+      Buffer.byteLength(supplied) !== Buffer.byteLength(key) ||
       !timingSafeEqual(Buffer.from(supplied), Buffer.from(key)) ||
       req.headers['x-platform-instance-id'] !== instanceId ||
       !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
@@ -144,42 +209,33 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       res.sendStatus(403);
       return;
     }
-    // Imports and forbidden authority are verified from this role's actual
-    // loaded graph/environment. Physical coordinator evidence stays separate.
-    const loaded = Object.keys(require.cache);
-    const prohibited = loaded.some((path) =>
+    const prohibited = Object.keys(require.cache).some((path) =>
       /@boxlite\/|better-sqlite3|platform\/persistence\/(?:platform\.module|drizzle\.connection)|sandbox\/.*providers\//.test(
         path,
       ),
     );
-    let authority: Record<string, unknown> | null = null;
-    try {
-      const response = await fetch(
-        (await coordinatorTarget()).origin + '/internal/application/identity',
-        {
-          headers: internalHeaders,
-          signal: AbortSignal.timeout(1000),
-        },
-      );
-      if (response.ok) authority = z.record(z.unknown()).parse(await response.json());
-    } catch {
-      /* Missing authority evidence stays unknown. */
-    }
+    const counts = retirement.snapshot();
     res.json({
+      schemaVersion: 1,
       instanceId,
-      role: 'control',
+      role: 'api',
       pid: process.pid,
       startIdentity: process.env.PLATFORM_PROCESS_START_IDENTITY ?? null,
       artifactDigest: installedArtifact?.artifactDigest ?? null,
-      inputFingerprint: installedArtifact?.inputFingerprint ?? null,
-      protocol: catalog.protocol,
-      controlOnly: !prohibited,
-      noRuntimeSideEffects: !prohibited,
-      applicationOperations: catalog.routes.length,
-      actualCoordinatorArtifactDigest: authority?.artifactDigest ?? null,
-      actualCoordinatorInputFingerprint: authority?.inputFingerprint ?? null,
-      coordinatorGeneration: authority?.coordinatorGeneration ?? null,
-      writerFenceValid: authority?.writerFenceValid ?? false,
+      observedAt: clock.now().toISOString(),
+      complete: !prohibited,
+      writer: prohibited ? null : false,
+      counts: {
+        http: counts.http,
+        ws: counts.ws,
+        streams: streams.size + sses.size,
+        workers: counts.work + (refreshing ? 1 : 0),
+        owners: prohibited ? null : 0,
+        guests: prohibited ? null : 0,
+        handoff: prohibited ? null : 0,
+        recovery: prohibited ? null : 0,
+        userOperations: counts.work,
+      },
     });
   });
   function original(req: Request): ApplicationRequest['request'] {
@@ -227,55 +283,57 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     res: Response,
     operationId = String(req.headers['x-operation-id'] ?? ids.next()),
   ): Promise<void> {
-    const payload: ApplicationRequest = { operation, operationId, args, request: original(req) };
-    const abort = new AbortController();
-    res.once('close', () => {
-      abort.abort();
-    });
-    const rpc = await dispatch(payload, abort.signal, coordinatorDeadline(res));
-    if (!rpc.ok) {
-      const contentType = rpc.headers.get('content-type');
-      if (contentType) res.setHeader('content-type', contentType);
-      res.status(rpc.status).send(await rpc.text());
-      return;
-    }
-    if (!rpc.body) throw new Error('APPLICATION_RPC_NO_BODY');
-    let pending = '';
-    let stream = false;
-    for await (const bytes of rpc.body) {
-      pending += Buffer.from(bytes).toString('utf8');
-      if (pending.length > 32 * 1024 * 1024) throw new Error('APPLICATION_RPC_FRAME_TOO_LARGE');
-      let end: number;
-      while ((end = pending.indexOf('\n')) >= 0) {
-        const line = pending.slice(0, end);
-        pending = pending.slice(end + 1);
-        if (!line) continue;
-        const frame = ApplicationFrameSchema.parse(JSON.parse(line));
-        if (frame.type === 'headers' && !res.headersSent) {
-          res.status(frame.status);
-          for (const [name, value] of Object.entries(frame.headers)) {
-            if (
-              req.path === '/api/system/upgrade/probe' &&
-              protectedProbeHeaders.has(name.toLowerCase())
-            )
-              continue;
-            res.setHeader(name, value);
+    return retirement.run(async () => {
+      const payload: ApplicationRequest = { operation, operationId, args, request: original(req) };
+      const abort = new AbortController();
+      res.once('close', () => {
+        abort.abort();
+      });
+      const rpc = await dispatch(payload, abort.signal, coordinatorDeadline(res));
+      if (!rpc.ok) {
+        const contentType = rpc.headers.get('content-type');
+        if (contentType) res.setHeader('content-type', contentType);
+        res.status(rpc.status).send(await rpc.text());
+        return;
+      }
+      if (!rpc.body) throw new Error('APPLICATION_RPC_NO_BODY');
+      let pending = '';
+      let stream = false;
+      for await (const bytes of rpc.body) {
+        pending += Buffer.from(bytes).toString('utf8');
+        if (pending.length > 32 * 1024 * 1024) throw new Error('APPLICATION_RPC_FRAME_TOO_LARGE');
+        let end: number;
+        while ((end = pending.indexOf('\n')) >= 0) {
+          const line = pending.slice(0, end);
+          pending = pending.slice(end + 1);
+          if (!line) continue;
+          const frame = ApplicationFrameSchema.parse(JSON.parse(line));
+          if (frame.type === 'headers' && !res.headersSent) {
+            res.status(frame.status);
+            for (const [name, value] of Object.entries(frame.headers)) {
+              if (
+                req.path === '/api/system/upgrade/probe' &&
+                protectedProbeHeaders.has(name.toLowerCase())
+              )
+                continue;
+              res.setHeader(name, value);
+            }
+          } else if (frame.type === 'bytes') {
+            stream = true;
+            res.write(Buffer.from(frame.data, 'base64'));
+          } else if (frame.type === 'result' && !stream) {
+            if (res.statusCode === 204 || frame.value === undefined) res.end();
+            else res.json(frame.value);
+          } else if (frame.type === 'complete') {
+            res.end();
+            return;
+          } else if (frame.type === 'error') {
+            throw new Error(frame.code);
           }
-        } else if (frame.type === 'bytes') {
-          stream = true;
-          res.write(Buffer.from(frame.data, 'base64'));
-        } else if (frame.type === 'result' && !stream) {
-          if (res.statusCode === 204 || frame.value === undefined) res.end();
-          else res.json(frame.value);
-        } else if (frame.type === 'complete') {
-          res.end();
-          return;
-        } else if (frame.type === 'error') {
-          throw new Error(frame.code);
         }
       }
-    }
-    if (!res.writableEnded) throw new Error('APPLICATION_RESULT_UNCONFIRMED');
+      if (!res.writableEnded) throw new Error('APPLICATION_RESULT_UNCONFIRMED');
+    });
   }
   function failure(res: Response): void {
     if (!res.headersSent)
@@ -291,55 +349,59 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     signal?: AbortSignal,
     deadline = clock.now().getTime() + 1900,
   ): Promise<globalThis.Response> {
-    // Only an explicit rejection before journaling permits routing the SAME
-    // operation to the new writer. A lost response is never an instruction to
-    // retry a business effect.
-    for (;;) {
-      const target = await coordinatorTarget(deadline);
-      const response = await fetch(target.origin + '/internal/application/invoke', {
-        method: 'POST',
-        headers: { ...internalHeaders, 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal,
-      });
-      if (response.status !== 425) return response;
-      const rawRejection: unknown = await response
-        .clone()
-        .json()
-        .catch(() => null);
-      const rejection = isRecord(rawRejection) ? rawRejection : null;
-      if (
-        rejection?.code !== 'APPLICATION_WRITER_QUIESCED' ||
-        rejection.sideEffectFree !== true ||
-        clock.now().getTime() >= deadline
-      )
-        return response;
-      await response.body?.cancel();
-      await new Promise<void>((ok) => setTimeout(ok, 5));
-    }
+    return retirement.run(async () => {
+      // Only an explicit rejection before journaling permits routing the SAME
+      // operation to the new writer. A lost response is never an instruction to
+      // retry a business effect.
+      for (;;) {
+        const target = await coordinatorTarget(deadline);
+        const response = await fetch(target.origin + '/internal/application/invoke', {
+          method: 'POST',
+          headers: { ...internalHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        if (response.status !== 425) return response;
+        const rawRejection: unknown = await response
+          .clone()
+          .json()
+          .catch(() => null);
+        const rejection = isRecord(rawRejection) ? rawRejection : null;
+        if (
+          rejection?.code !== 'APPLICATION_WRITER_QUIESCED' ||
+          rejection.sideEffectFree !== true ||
+          clock.now().getTime() >= deadline
+        )
+          return response;
+        await response.body?.cancel();
+        await new Promise<void>((ok) => setTimeout(ok, 5));
+      }
+    });
   }
   let applicationRouter = buildApplicationRouter(catalog);
   let refreshing: Promise<void> | undefined;
   async function refreshCatalog(deadline = clock.now().getTime() + 1900): Promise<void> {
-    const target = await coordinatorTarget(deadline);
-    if (catalogOrigin === target.origin) return;
-    refreshing ??= (async () => {
-      const response = await fetch(target.origin + '/internal/application/catalog', {
-        headers: internalHeaders,
-        signal: AbortSignal.timeout(Math.max(1, deadline - clock.now().getTime())),
+    return retirement.run(async () => {
+      const target = await coordinatorTarget(deadline);
+      if (catalogOrigin === target.origin) return;
+      refreshing ??= (async () => {
+        const response = await fetch(target.origin + '/internal/application/catalog', {
+          headers: internalHeaders,
+          signal: AbortSignal.timeout(Math.max(1, deadline - clock.now().getTime())),
+        });
+        if (!response.ok) throw new Error('APPLICATION_CATALOG_NOT_READY');
+        const next = ApplicationCatalogSchema.parse(await response.json());
+        if (!next.routes.length || next.protocol.min > 2 || next.protocol.max < 1)
+          throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
+        const router = buildApplicationRouter(next);
+        catalog = next;
+        catalogOrigin = target.origin;
+        applicationRouter = router;
+      })().finally(() => {
+        refreshing = undefined;
       });
-      if (!response.ok) throw new Error('APPLICATION_CATALOG_NOT_READY');
-      const next = ApplicationCatalogSchema.parse(await response.json());
-      if (!next.routes.length || next.protocol.min > 2 || next.protocol.max < 1)
-        throw new Error('APPLICATION_PROTOCOL_INCOMPATIBLE');
-      const router = buildApplicationRouter(next);
-      catalog = next;
-      catalogOrigin = target.origin;
-      applicationRouter = router;
-    })().finally(() => {
-      refreshing = undefined;
+      await refreshing;
     });
-    await refreshing;
   }
   // The protocol catalog is a versioned allowlist of concrete application
   // operations. It is not an arbitrary HTTP path/method forwarding endpoint.
@@ -381,18 +443,20 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     }
     return router;
   }
-  app.use(async (req, res, next) => {
-    if (!req.path.startsWith('/api/')) {
-      next();
-      return;
-    }
-    try {
-      await refreshCatalog(coordinatorDeadline(res));
-      applicationRouter(req, res, next);
-    } catch {
-      failure(res);
-    }
-  });
+  app.use(
+    tracked(async (req, res, next) => {
+      if (!req.path.startsWith('/api/')) {
+        next();
+        return;
+      }
+      try {
+        await refreshCatalog(coordinatorDeadline(res));
+        applicationRouter(req, res, next);
+      } catch {
+        failure(res);
+      }
+    }),
+  );
   const mcpRequestScope = new AsyncLocalStorage<Request>();
   function mcp(): ReturnType<typeof createLegacyMcpServer> {
     const server = createLegacyMcpServer();
@@ -405,165 +469,222 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
         })),
       }),
     );
-    server.setRequestHandler(CallToolRequestSchema, async (input) => {
-      const req = mcpRequestScope.getStore();
-      if (!req) throw new Error('MCP_REQUEST_IDENTITY_UNCONFIRMED');
-      const tool = catalog.tools.find((t) => t.name === input.params.name);
-      if (!tool) throw new Error('MCP_TOOL_NOT_ALLOWED');
-      const result = await dispatch({
-        operation: tool.operation,
-        operationId: String(req.headers['x-operation-id'] ?? ids.next()),
-        args: [input.params.arguments],
-        request: original(req),
-      });
-      if (!result.ok) throw new Error('MCP_APPLICATION_REJECTED');
-      let value: unknown;
-      for (const line of (await result.text()).split('\n').filter(Boolean)) {
-        const frame = ApplicationFrameSchema.parse(JSON.parse(line));
-        if (frame.type === 'headers' && frame.status >= 400)
-          throw new Error('MCP_APPLICATION_REJECTED');
-        if (frame.type === 'error') throw new Error(frame.code);
-        if (frame.type === 'result') value = frame.value;
-      }
-      return CallToolResultSchema.parse(value);
-    });
+    server.setRequestHandler(CallToolRequestSchema, async (input) =>
+      retirement.run(async () => {
+        const req = mcpRequestScope.getStore();
+        if (!req) throw new Error('MCP_REQUEST_IDENTITY_UNCONFIRMED');
+        const tool = catalog.tools.find((t) => t.name === input.params.name);
+        if (!tool) throw new Error('MCP_TOOL_NOT_ALLOWED');
+        const result = await dispatch({
+          operation: tool.operation,
+          operationId: String(req.headers['x-operation-id'] ?? ids.next()),
+          args: [input.params.arguments],
+          request: original(req),
+        });
+        if (!result.ok) throw new Error('MCP_APPLICATION_REJECTED');
+        let value: unknown;
+        for (const line of (await result.text()).split('\n').filter(Boolean)) {
+          const frame = ApplicationFrameSchema.parse(JSON.parse(line));
+          if (frame.type === 'headers' && frame.status >= 400)
+            throw new Error('MCP_APPLICATION_REJECTED');
+          if (frame.type === 'error') throw new Error(frame.code);
+          if (frame.type === 'result') value = frame.value;
+        }
+        return CallToolResultSchema.parse(value);
+      }),
+    );
     return server;
   }
   const streams = new Map<string, StreamableHTTPServerTransport>(),
     sses = new Map<string, ReturnType<typeof createLegacySseTransport>>();
-  app.use(['/mcp', '/sse', '/messages'], async (req, res, next) => {
-    try {
-      await refreshCatalog(coordinatorDeadline(res));
-      const auth = await fetch(
-        (await coordinatorTarget()).origin + '/internal/application/authenticate',
-        {
-          method: 'POST',
-          headers: { ...internalHeaders, 'content-type': 'application/json' },
-          body: JSON.stringify({
-            operation: 'authenticate',
-            operationId: ids.next(),
-            args: [],
-            request: original(req),
-          }),
-        },
-      );
-      if (!auth.ok) {
-        const contentType = auth.headers.get('content-type');
-        if (contentType) res.setHeader('content-type', contentType);
-        res.status(auth.status).send(await auth.text());
-        return;
-      }
-      const result = z
-        .object({ headers: z.record(z.union([z.string(), z.number(), z.array(z.string())])) })
-        .parse(await auth.json());
-      for (const [name, value] of Object.entries(result.headers)) res.setHeader(name, value);
-      next();
-    } catch {
-      failure(res);
-    }
-  });
-  app.all('/mcp', async (req, res) => {
-    try {
-      const id = req.headers['mcp-session-id'];
-      let transport = typeof id === 'string' ? streams.get(id) : undefined;
-      if (!transport) {
-        if (req.method !== 'POST') {
-          res.sendStatus(400);
+  app.use(
+    ['/mcp', '/sse', '/messages'],
+    tracked(async (req, res, next) => {
+      try {
+        await refreshCatalog(coordinatorDeadline(res));
+        const auth = await fetch(
+          (await coordinatorTarget()).origin + '/internal/application/authenticate',
+          {
+            method: 'POST',
+            headers: { ...internalHeaders, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              operation: 'authenticate',
+              operationId: ids.next(),
+              args: [],
+              request: original(req),
+            }),
+          },
+        );
+        if (!auth.ok) {
+          const contentType = auth.headers.get('content-type');
+          if (contentType) res.setHeader('content-type', contentType);
+          res.status(auth.status).send(await auth.text());
           return;
         }
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => ids.next(),
-          onsessioninitialized: (sessionId) => {
-            if (!transport) throw new Error('MCP_TRANSPORT_NOT_INITIALIZED');
-            streams.set(sessionId, transport);
-          },
-        });
-        await mcp().connect(transport);
+        const result = z
+          .object({ headers: z.record(z.union([z.string(), z.number(), z.array(z.string())])) })
+          .parse(await auth.json());
+        for (const [name, value] of Object.entries(result.headers)) res.setHeader(name, value);
+        next();
+      } catch {
+        failure(res);
       }
-      await mcpRequestScope.run(req, () => transport.handleRequest(req, res, req.body));
-    } catch {
-      failure(res);
-    }
-  });
-  app.get('/sse', async (_req, res) => {
-    try {
-      const transport = createLegacySseTransport('/messages', res);
-      sses.set(transport.sessionId, transport);
-      res.once('close', () => sses.delete(transport.sessionId));
-      await mcp().connect(transport);
-    } catch {
-      failure(res);
-    }
-  });
-  app.post('/messages', async (req, res) => {
-    const transport =
-      typeof req.query.sessionId === 'string' ? sses.get(req.query.sessionId) : undefined;
-    if (!transport) {
-      res.sendStatus(404);
-      return;
-    }
-    await mcpRequestScope.run(req, () => transport.handlePostMessage(req, res, req.body));
-  });
+    }),
+  );
+  app.all(
+    '/mcp',
+    tracked(async (req, res) => {
+      try {
+        const id = req.headers['mcp-session-id'];
+        let transport = typeof id === 'string' ? streams.get(id) : undefined;
+        if (!transport) {
+          if (req.method !== 'POST') {
+            res.sendStatus(400);
+            return;
+          }
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => ids.next(),
+            onsessioninitialized: (sessionId) => {
+              if (!transport) throw new Error('MCP_TRANSPORT_NOT_INITIALIZED');
+              streams.set(sessionId, transport);
+              const current = transport,
+                previous = transport.onclose;
+              transport.onclose = () => {
+                if (streams.get(sessionId) === current) streams.delete(sessionId);
+                previous?.();
+              };
+            },
+          });
+          await mcp().connect(transport);
+        }
+        await mcpRequestScope.run(req, () => transport.handleRequest(req, res, req.body));
+      } catch {
+        failure(res);
+      }
+    }),
+  );
+  app.get(
+    '/sse',
+    tracked(async (_req, res) => {
+      try {
+        const transport = createLegacySseTransport('/messages', res);
+        sses.set(transport.sessionId, transport);
+        res.once('close', () => sses.delete(transport.sessionId));
+        await mcp().connect(transport);
+      } catch {
+        failure(res);
+      }
+    }),
+  );
+  app.post(
+    '/messages',
+    tracked(async (req, res) => {
+      const transport =
+        typeof req.query.sessionId === 'string' ? sses.get(req.query.sessionId) : undefined;
+      if (!transport) {
+        res.sendStatus(404);
+        return;
+      }
+      await mcpRequestScope.run(req, () => transport.handlePostMessage(req, res, req.body));
+    }),
+  );
   // Socket.IO retains its real Coordinator gateway and authenticated native
   // stream. This is transport plumbing; business HTTP/MCP use named DTO RPC.
-  app.use('/socket.io', async (req, res) => {
-    let actual: URL;
-    try {
-      actual = await coordinatorTarget();
-    } catch {
-      failure(res);
-      return;
-    }
-    const proxy = httpRequest(
-      {
-        hostname: actual.hostname,
-        port: actual.port,
-        method: req.method,
-        path: req.originalUrl,
-        headers: req.headers,
-      },
-      (upstream) => {
-        res.writeHead(upstream.statusCode ?? 502, upstream.headers);
-        upstream.pipe(res);
-      },
-    );
-    proxy.once('error', () => {
-      failure(res);
-    });
-    if (req.body !== undefined) proxy.end(JSON.stringify(req.body));
-    else req.pipe(proxy);
-  });
+  app.use(
+    '/socket.io',
+    tracked(async (req, res) => {
+      let actual: URL;
+      try {
+        actual = await coordinatorTarget();
+      } catch {
+        failure(res);
+        return;
+      }
+      const done = retirement.begin('work');
+      const proxy = httpRequest(
+        {
+          hostname: actual.hostname,
+          port: actual.port,
+          method: req.method,
+          path: req.originalUrl,
+          headers: req.headers,
+        },
+        (upstream) => {
+          upstream.once('close', done);
+          upstream.once('end', done);
+          res.writeHead(upstream.statusCode ?? 502, upstream.headers);
+          upstream.pipe(res);
+        },
+      );
+      proxy.once('error', () => {
+        done();
+        failure(res);
+      });
+      if (req.body !== undefined) proxy.end(JSON.stringify(req.body));
+      else req.pipe(proxy);
+    }),
+  );
   const server = createServer(app);
   server.on('upgrade', (req, socket, head) => {
-    void proxyUpgrade(req, socket, head).catch(() => socket.destroy());
-  });
-  async function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
-    const method = req.method,
-      url = req.url;
-    if (!method || !url?.startsWith('/socket.io') || !isRequestOriginAllowed(req, network)) {
-      socket.destroy();
-      return;
-    }
-    let actual: URL;
-    try {
-      actual = await coordinatorTarget();
-    } catch {
-      socket.destroy();
-      return;
-    }
-    const target = connect({ host: actual.hostname, port: Number(actual.port) });
-    target.once('connect', () => {
-      let headers = `${method} ${url} HTTP/${req.httpVersion}\r\n`;
-      for (let i = 0; i < req.rawHeaders.length; i += 2)
-        headers += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
-      target.write(headers + '\r\n');
-      if (head.length) target.write(head);
-      socket.pipe(target).pipe(socket);
+    const done = retirement.begin('ws');
+    let clientClosed = false,
+      upstreamClosed = true,
+      setupSettled = false;
+    const settled = () => {
+      if (clientClosed && upstreamClosed && setupSettled) done();
+    };
+    socket.once('close', () => {
+      clientClosed = true;
+      settled();
     });
-    socket.once('close', () => target.destroy());
-    target.once('close', () => socket.destroy());
-    target.once('error', () => socket.destroy());
-    socket.once('error', () => target.destroy());
+    void proxyUpgrade(req, socket, head, (upstream) => {
+      upstreamClosed = false;
+      upstream.once('close', () => {
+        upstreamClosed = true;
+        settled();
+      });
+    })
+      .catch(() => socket.destroy())
+      .finally(() => {
+        setupSettled = true;
+        settled();
+      });
+  });
+  async function proxyUpgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    register: (upstream: Duplex) => void,
+  ): Promise<void> {
+    return retirement.run(async () => {
+      const method = req.method,
+        url = req.url;
+      if (!method || !url?.startsWith('/socket.io') || !isRequestOriginAllowed(req, network)) {
+        socket.destroy();
+        return;
+      }
+      let actual: URL;
+      try {
+        actual = await coordinatorTarget();
+      } catch {
+        socket.destroy();
+        return;
+      }
+      const target = connect({ host: actual.hostname, port: Number(actual.port) });
+      register(target);
+      target.once('connect', () => {
+        let headers = `${method} ${url} HTTP/${req.httpVersion}\r\n`;
+        for (let i = 0; i < req.rawHeaders.length; i += 2)
+          headers += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
+        target.write(headers + '\r\n');
+        if (head.length) target.write(head);
+        socket.pipe(target).pipe(socket);
+      });
+      socket.once('close', () => target.destroy());
+      target.once('close', () => socket.destroy());
+      target.once('error', () => socket.destroy());
+      socket.once('error', () => target.destroy());
+    });
   }
   await new Promise<void>((ok, fail) => {
     server.once('error', fail);

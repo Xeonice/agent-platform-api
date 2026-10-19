@@ -1,3 +1,7 @@
+import {
+  RetirementWorkTracker,
+  preparedRetirementRows,
+} from '../platform/upgrade/retirement-census';
 import { HttpException } from '@nestjs/common';
 import { upgradeRecord, requiredUpgradeValue } from '../platform/upgrade/upgrade-values';
 import type { HandoffRow } from '../platform/upgrade/coordinator-handoff';
@@ -62,6 +66,9 @@ export async function startPreparedCoordinator(): Promise<void> {
   let state: 'prepared' | 'adopting' | 'ready' | 'unknown' = 'prepared';
   let adopting: Promise<Record<string, unknown>> | null = null;
   let adoptedIntent: string | null = null;
+  let moduleInitializationStarted = false;
+  let recoveryWatch: NodeJS.Timeout | undefined = undefined;
+  const retirement = new RetirementWorkTracker();
   const identity = () => ({
     role: state === 'ready' ? 'coordinator' : 'coordinator-prepared',
     instanceId,
@@ -136,6 +143,7 @@ export async function startPreparedCoordinator(): Promise<void> {
       configurePlatformApp(app, network);
       setupWebsockets(app, network);
       app.enableShutdownHooks();
+      moduleInitializationStarted = true;
       await withoutBusinessAction(() => app.listen(env.port, env.host));
       assertCurrentBusinessAction();
       const continuity = await app
@@ -182,13 +190,64 @@ export async function startPreparedCoordinator(): Promise<void> {
     return adopting;
   }
   const management = createServer((req, res) => {
-    void managementRequest(req, res).catch(() => res.destroy());
+    if (req.url !== '/internal/coordinator/retirement') retirement.request(req, res);
+    const work = () => managementRequest(req, res);
+    void (req.url === '/internal/coordinator/retirement' ? work() : retirement.run(work)).catch(
+      () => res.destroy(),
+    );
   });
   async function managementRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       requireUpgrade(authorized(req), 'PREPARED_INTERNAL_AUTH', 403);
       let value: unknown;
-      if (req.method === 'GET' && req.url === '/internal/coordinator/identity') value = identity();
+      if (req.method === 'GET' && req.url === '/internal/coordinator/retirement') {
+        const actual = identity(),
+          transports = owners.transportReferences(),
+          counts = retirement.snapshot();
+        // Readonly connection + never called listen/init is actual local state,
+        // not an inference from workersStarted or desired configuration.
+        const dormant =
+          state === 'prepared' &&
+          !moduleInitializationStarted &&
+          !adopting &&
+          store.sqlite.readonly;
+        const rows = preparedRetirementRows(store.sqlite, {
+          startIdentity: String(actual.startIdentity),
+          artifactDigest: String(actual.artifactDigest),
+          generation: actual.generation,
+        });
+        const transportCount = transports.complete
+          ? transports.http + transports.observers + transports.renewals
+          : null;
+        value = {
+          schemaVersion: 1,
+          ...actual,
+          role: 'coordinator',
+          observedAt: clock.now().toISOString(),
+          complete:
+            dormant && transports.complete && rows.handoff !== null && rows.recovery !== null,
+          writer: dormant ? false : null,
+          counts: {
+            http: counts.http,
+            ws: dormant ? 0 : null,
+            streams: dormant ? 0 : null,
+            workers: dormant ? counts.work + (recoveryWatch ? 1 : 0) : null,
+            owners: transportCount,
+            guests: transportCount,
+            handoff: rows.handoff,
+            recovery: rows.recovery,
+            userOperations: dormant ? counts.work : null,
+          },
+          proof: {
+            moduleInitializationStarted,
+            adopting: !!adopting,
+            ledgerReadonly: store.sqlite.readonly,
+            recoveryWatch: !!recoveryWatch,
+            ownerPoolCount: transports.owners,
+          },
+        };
+      } else if (req.method === 'GET' && req.url === '/internal/coordinator/identity')
+        value = identity();
       else if (req.method === 'POST' && req.url === '/internal/coordinator/adopt') {
         let body = '';
         for await (const chunk of req) {
@@ -245,7 +304,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     management.once('error', fail);
     management.listen(Number(process.env.COORDINATOR_PREPARED_PORT), '127.0.0.1', ok);
   });
-  const recoveryWatch = store.ledgerReadonly
+  recoveryWatch = store.ledgerReadonly
     ? undefined
     : setInterval(() => {
         if (state !== 'prepared' || adopting) return;
