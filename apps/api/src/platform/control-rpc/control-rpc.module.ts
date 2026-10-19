@@ -386,7 +386,9 @@ export class ControlApplicationRegistry implements OnModuleInit {
     request.emit = events.emit.bind(events);
     return request;
   }
-  authenticate(input: ApplicationRequest): { headers: Record<string, string | number | string[]> } {
+  async authenticate(
+    input: ApplicationRequest,
+  ): Promise<{ headers: Record<string, string | number | string[]> }> {
     const req = this.request(input),
       output = new RpcOutput(() => undefined);
     const res: Response = prototypeClone(express.response);
@@ -404,7 +406,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     };
     const context = new ExecutionContextHost([req, res]);
     context.setType('http');
-    this.auth.canActivate(context);
+    if (!(await this.auth.canActivate(context))) throw new UnauthorizedException();
     return { headers: output.headers };
   }
   async invoke(input: ApplicationRequest, response: Response): Promise<void> {
@@ -506,8 +508,11 @@ export class ControlApplicationRegistry implements OnModuleInit {
     context.setType('http');
     // The sampler is independently authenticated by the UpgradeController;
     // its Controller key never authorizes an ordinary business operation.
-    if (!['UpgradeController.probe', 'UpgradeController.readProbe'].includes(input.operation))
-      this.auth.canActivate(context);
+    if (
+      !['UpgradeController.probe', 'UpgradeController.readProbe'].includes(input.operation) &&
+      !(await this.auth.canActivate(context))
+    )
+      throw new UnauthorizedException();
     const actor = this.actor(req);
     const mutation = !!tool || (binding?.route.verb !== 'GET' && binding?.route.verb !== 'HEAD');
     const digest = createHash('sha256')
@@ -654,7 +659,7 @@ export class ControlRpcController {
     this.authorize(req);
     return this.registry.identity();
   }
-  @Post('authenticate') authenticate(@Req() req: Request): object {
+  @Post('authenticate') authenticate(@Req() req: Request): Promise<object> {
     this.authorize(req);
     return this.registry.authenticate(ApplicationRequestSchema.parse(req.body));
   }

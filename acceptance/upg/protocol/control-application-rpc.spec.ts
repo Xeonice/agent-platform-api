@@ -31,6 +31,8 @@ import { ApplicationOperationSchema } from '../../../apps/api/src/platform/contr
 import { UpgradeCatalog } from '../../../apps/api/src/platform/upgrade/upgrade-catalog';
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
 import { UpgradeStore } from '../../../apps/api/src/platform/upgrade/upgrade-store';
+import { ControlRpcModule } from '../../../apps/api/src/platform/control-rpc/control-rpc.module';
+import { PasscodeGuard } from '../../../apps/api/src/platform/access-passcode/passcode.guard';
 import { freezeUpgradeChain } from '../../../apps/api/src/platform/upgrade/upgrade-chain';
 import { withCoordinatorBusinessEpoch } from '../../../apps/api/src/platform/persistence/coordinator-lease';
 import { planFixtureEnvelope, planFixtureSource } from '../../support/upgrade-plan-fixture';
@@ -220,6 +222,53 @@ afterAll(async () => {
 });
 
 describe('UPG C/I · actual Coordinator usecases through an independent ControlAPI process', () => {
+  it('private authentication and invocation await an authority decision before replying or touching business state', async () => {
+    const auth = coordinator.app.select(ControlRpcModule).get(PasscodeGuard, { strict: true });
+    for (const path of ['authenticate', 'invoke']) {
+      let entered: () => void = () => undefined,
+        release: () => void = () => undefined,
+        replied = false;
+      const reached = new Promise<void>((resolve) => {
+          entered = resolve;
+        }),
+        pendingDecision = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      const check = vi.spyOn(auth, 'canActivate').mockImplementation(async () => {
+        entered();
+        await pendingDecision;
+        return false;
+      });
+      const name = `pending-auth-${randomUUID()}`,
+        operationId = randomUUID();
+      const pending = request(coordinator.url)
+        .post(`/internal/application/${path}`)
+        .set(internal())
+        .send(original('ProjectController.create', [{ name, sourceType: 'empty' }], operationId))
+        .then((response) => {
+          replied = true;
+          return response;
+        });
+      try {
+        await reached;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(replied).toBe(false);
+        expect(
+          db.prepare('SELECT id FROM application_operations WHERE id=?').get(operationId),
+        ).toBeUndefined();
+        release();
+        expect((await pending).status).toBe(401);
+        expect(db.prepare('SELECT id FROM projects WHERE name=?').get(name)).toBeUndefined();
+        expect(
+          db.prepare('SELECT id FROM application_operations WHERE id=?').get(operationId),
+        ).toBeUndefined();
+      } finally {
+        release();
+        await pending;
+        check.mockRestore();
+      }
+    }
+  });
   it('actual private HTTP rejects wrong authority and advertises concrete controller/tool operations', async () => {
     await request(coordinator.url).get('/internal/application/catalog').expect(401);
     await request(coordinator.url)
