@@ -159,6 +159,15 @@ export class BoxliteSandboxProvider implements SandboxProvider {
           image: pinnedImageRef(ctx.image),
           memoryMib: ctx.quota.ramMb,
           cpus: ctx.quota.cores,
+          // Host-side virtiofs caches one O_PATH fd per referenced workspace inode.
+          // The SDK's 1024 default can therefore starve gvproxy during a repository scan.
+          // Keep a finite larger limit and retain the other SDK 0.9.7 resource defaults:
+          // its Node security converter replaces ResourceLimits rather than merging them.
+          security: {
+            maxOpenFiles: 65_536,
+            maxFileSize: 1024 * 1024 * 1024,
+            maxProcesses: 1024,
+          },
           autoRemove: false,
           // detached: the micro-VM SURVIVES the backend process exiting — parity with
           // aio's docker container. 实测：另起一个进程只凭 box id `runtime.get()` 就能
