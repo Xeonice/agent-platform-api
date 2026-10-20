@@ -11,6 +11,7 @@ import type {
   ProjectFacade,
   ProviderRegistry,
   RuntimeBusinessAuthorityPort,
+  RuntimeOwnerScheduling,
   RegisterRetainedVolumeCommand,
   RuntimeAdapterRegistry,
   SandboxProvider,
@@ -60,6 +61,7 @@ export function harness(
     reservations?: readonly PlatformReservation[];
     durableStarts?: boolean;
     authority?: RuntimeBusinessAuthorityPort;
+    ownerScheduling?: RuntimeOwnerScheduling;
   } = {},
 ) {
   const { sqlite, db, uow } = currentDatabase();
@@ -222,6 +224,8 @@ export function harness(
     { next: () => `allocation-${++allocationSerial}` },
     schedulerQueue,
     options.reservations,
+    options.ownerScheduling,
+    repo,
   );
   const installInputs: EnsureRuntimeInstalledInput[] = [];
   const bootstrapInputs: BootstrapAgentSessionInput[] = [];

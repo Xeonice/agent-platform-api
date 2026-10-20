@@ -88,6 +88,7 @@ async function fixture(dropSecondDestroyAck = false) {
   );
   const proxy = client.get(provider.name);
   const create = async (sandboxId: string) => {
+    client.pin(sandboxId, client.activeOwnerId);
     const handle = await proxy.create({
       sandboxId,
       quota: { cores: 1, ramMb: 128, diskMb: 100 },

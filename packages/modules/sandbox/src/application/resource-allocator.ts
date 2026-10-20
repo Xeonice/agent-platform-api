@@ -12,16 +12,30 @@ import type {
 } from '@platform/shared-kernel';
 import {
   PLATFORM_RESERVATIONS,
+  RUNTIME_OWNER_SCHEDULING,
   SandboxProviderError,
   SandboxProviderErrorCode,
 } from '@platform/contracts';
-import type { PlatformReservation, ResourceQuota } from '@platform/contracts';
+import type {
+  PlatformReservation,
+  ResourceQuota,
+  RuntimeOwnerScheduling,
+} from '@platform/contracts';
 import { ResourceAllocation } from '../domain/entities/resource-allocation.entity';
 import { RESOURCE_ALLOCATION_REPOSITORY } from '../domain/repositories/resource-allocation.repository';
 import type { ResourceAllocationRepository } from '../domain/repositories/resource-allocation.repository';
 import { HOST_CAPACITY_PROBE } from '../domain/ports/host-capacity.port';
 import type { HostCapacityProbe } from '../domain/ports/host-capacity.port';
 import { SchedulerQueue } from './scheduler-queue';
+import {
+  SANDBOX_REPOSITORY,
+  type SandboxRepository,
+} from '../domain/repositories/sandbox.repository';
+import {
+  ownerResourcePool,
+  unavailableOwnerCapacity,
+  sandboxOwnerEvidence,
+} from './owner-resource-pool';
 import {
   DEFAULT_SCHEDULING_POLICY,
   snapshotOf,
@@ -88,9 +102,15 @@ export class ResourceAllocator {
     @Optional()
     @Inject(PLATFORM_RESERVATIONS)
     private readonly reservations: readonly PlatformReservation[] = [],
+    @Optional()
+    @Inject(RUNTIME_OWNER_SCHEDULING)
+    private readonly ownerScheduling?: RuntimeOwnerScheduling,
+    @Optional()
+    @Inject(SANDBOX_REPOSITORY)
+    private readonly sandboxes?: SandboxRepository,
   ) {}
 
-  /** 单机恒 `'local'`（13 §2.1.3）；多节点时由部署填。 */
+  /** Local-mode pool only. Remote placement is captured from the actual Owner observation. */
   get nodeId(): NodeId {
     return asNodeId(process.env.SCHEDULER_NODE_ID ?? 'local');
   }
@@ -130,10 +150,16 @@ export class ResourceAllocator {
    */
   async reserve(
     input: { sandboxId: SandboxId; quota: ResourceQuota },
-    alsoInTx?: (tx: Tx) => void,
+    alsoInTx?: (tx: Tx, pendingProviderState?: Record<string, unknown>) => void,
   ): Promise<ResourceAllocation> {
     return this.queue.submit('create', input.sandboxId, async () => {
-      const verdict = await this.evaluate(input.quota);
+      const observation = await this.observePool();
+      const verdict = trySchedule(
+        input.quota,
+        observation.pool,
+        observation.host.diskAvailableBytes,
+        this.policy,
+      );
       if (!verdict.ok) {
         throw new SandboxProviderError(
           SandboxProviderErrorCode.RESOURCE_EXHAUSTED,
@@ -148,12 +174,23 @@ export class ResourceAllocator {
       const allocation = ResourceAllocation.allocate({
         id: this.ids.next(),
         sandboxId: input.sandboxId,
-        nodeId: this.nodeId,
+        nodeId: observation.nodeId,
         quota: input.quota,
         now: this.clock.now(),
       });
+      if (this.ownerScheduling && observation.ownerObservation) {
+        this.ownerScheduling.assertCurrent(observation.ownerObservation);
+        if (!alsoInTx) return unavailableOwnerCapacity('atomic placement consumer is missing');
+        // Keep the shared node ledger readable by old binaries. The separate
+        // opaque pending state is persisted with the sandbox in this same T1.
+      }
       this.uow.run((tx) => {
-        alsoInTx?.(tx);
+        alsoInTx?.(
+          tx,
+          observation.ownerObservation
+            ? { runtimeOwnerPlacement: { ownerId: observation.ownerObservation.ownerId } }
+            : undefined,
+        );
         this.allocations.saveSync(tx, allocation);
       });
       return allocation;
@@ -242,24 +279,18 @@ export class ResourceAllocator {
 
   /** Same ledger and host policy as admission; no reservation or queue entry. */
   async defaultCapacity(quota: ResourceQuota) {
-    const [active, host] = await Promise.all([
-      this.allocations.listActive(this.nodeId),
-      this.host.capacity(),
-    ]);
-    const policy = this.policy;
-    return capacityOf(
+    const observed = await this.observePool();
+    const result = capacityOf(
       quota,
-      snapshotOf(
-        active.map((row) => row.quota),
-        host,
-        policy,
-        this.reservations,
-      ),
-      host.diskAvailableBytes,
-      policy,
-      active.length,
-      this.reservations,
+      observed.pool,
+      observed.host.diskAvailableBytes,
+      this.policy,
+      observed.registeredTasks,
+      observed.reservations,
     );
+    if (this.ownerScheduling)
+      result.basis += '；CPU/内存仅当前 Owner 池，登记任务与磁盘为全实例口径';
+    return result;
   }
 
   /** 这条 sandbox 当前登记了多少 —— provision 拿它去建实例，账本与实参因此不会分叉。 */
@@ -268,38 +299,112 @@ export class ResourceAllocator {
     return active?.quota ?? null;
   }
 
-  /** 当前资源池视图（治理展示 / 对账 / 测试）。 */
-  async snapshot(): Promise<ResourcePoolSnapshot> {
-    const [active, host] = await Promise.all([
-      this.allocations.listActive(this.nodeId),
-      this.host.capacity(),
-    ]);
-    return snapshotOf(
-      active.map((a) => a.quota),
-      host,
-      this.policy,
-      this.reservations,
-    );
+  /** Reconstruct placement from the durable row before create or original-result lookup.
+   * Missing pre-intent work remains unknown; this never replays create or changes Owner. */
+  async pinReservedOwner(sandboxId: SandboxId): Promise<void> {
+    return this.pinOriginalOwner(sandboxId, false);
   }
 
-  /**
-   * 读-判定的那一半。**调用方必须已经持有 mutex** —— 它单独存在只是为了让 `reserve`
-   * 与 `probe` 共用同一段判据（两份会分头漂移，而漂移的方向一定是「probe 说行、reserve
-   * 说不行」这种查不出来的样子）。
-   */
+  /** Result observation cannot create a replacement, so a proved existing Owner
+   * remains readable even when a historical allocation is missing. */
+  async pinOriginalOwnerForLookup(sandboxId: SandboxId): Promise<void> {
+    return this.pinOriginalOwner(sandboxId, true);
+  }
+
+  private async pinOriginalOwner(sandboxId: SandboxId, observationOnly: boolean): Promise<void> {
+    if (!this.ownerScheduling) return;
+    const row = await this.allocations.findActiveBySandbox(sandboxId);
+    if (!row && !observationOnly) return unavailableOwnerCapacity('durable allocation is missing');
+    const node = row ? String(row.nodeId) : 'local';
+    const sandbox = await this.sandboxes?.findById(sandboxId);
+    const evidence = sandbox ? sandboxOwnerEvidence(sandbox) : undefined;
+    if (evidence === null) return unavailableOwnerCapacity('original handle Owner is unknown');
+    const claim = this.ownerScheduling.originalOwnerId(sandboxId);
+    const selected = evidence ?? claim;
+    if (node !== 'local' || !selected || (claim && evidence && claim !== evidence))
+      return unavailableOwnerCapacity('legacy original Owner is unknown');
+    this.ownerScheduling.pin(sandboxId, selected);
+  }
+
+  async assertOriginalOwnerHandle(
+    sandboxId: SandboxId,
+    handle: { providerState?: Record<string, unknown> },
+  ): Promise<void> {
+    if (!this.ownerScheduling) return;
+    await this.pinOriginalOwnerForLookup(sandboxId);
+    const reference = handle.providerState?.runtimeOwner;
+    if (
+      typeof reference !== 'object' ||
+      reference === null ||
+      !('ownerId' in reference) ||
+      !('sandboxId' in reference) ||
+      reference.ownerId !== this.ownerScheduling.originalOwnerId(sandboxId) ||
+      reference.sandboxId !== sandboxId
+    )
+      return unavailableOwnerCapacity('returned handle does not match original Owner placement');
+  }
+
+  async snapshot(): Promise<ResourcePoolSnapshot> {
+    return (await this.observePool()).pool;
+  }
+
   private async evaluate(quota: ResourceQuota): Promise<SchedulingVerdict> {
-    const [active, host] = await Promise.all([
-      this.allocations.listActive(this.nodeId),
-      this.host.capacity(),
+    const observed = await this.observePool();
+    return trySchedule(quota, observed.pool, observed.host.diskAvailableBytes, this.policy);
+  }
+
+  private async observePool() {
+    if (!this.ownerScheduling) {
+      const [active, host] = await Promise.all([
+        this.allocations.listActive(this.nodeId),
+        this.host.capacity(),
+      ]);
+      return {
+        nodeId: this.nodeId,
+        host,
+        pool: snapshotOf(
+          active.map((row) => row.quota),
+          host,
+          this.policy,
+          this.reservations,
+        ),
+        reservations: this.reservations,
+        registeredTasks: active.length,
+        ownerObservation: undefined,
+      };
+    }
+    const [active, observation] = await Promise.all([
+      this.allocations.listActiveAll(),
+      this.ownerScheduling.snapshot(),
     ]);
-    const policy = this.policy;
+    if (active.length > 10000 || !this.sandboxes)
+      return unavailableOwnerCapacity('active ledger is not bounded or available');
+    const handles = new Map<string, string | null>();
+    for (const row of active) {
+      const sandbox = await this.sandboxes.findById(row.sandboxId);
+      if (!sandbox) return unavailableOwnerCapacity('allocation sandbox is missing');
+      const evidence = sandboxOwnerEvidence(sandbox);
+      if (evidence !== undefined) handles.set(String(row.sandboxId), evidence);
+    }
+    this.ownerScheduling.assertCurrent(observation);
+    const scope = ownerResourcePool(observation, active, handles, this.reservations);
+    const host = observation.capacity;
     const pool = snapshotOf(
-      active.map((a) => a.quota),
+      scope.selected.map((row) => row.quota),
       host,
-      policy,
-      this.reservations,
+      this.policy,
+      scope.reservations,
     );
-    return trySchedule(quota, pool, host.diskAvailableBytes, policy);
+    // All Owners use a shared data filesystem. Never duplicate its disk budget per CPU/RAM pool.
+    pool.usedDiskMb = active.reduce((total, row) => total + row.quota.diskMb, 0);
+    return {
+      nodeId: asNodeId('local'),
+      host,
+      pool,
+      reservations: scope.reservations,
+      registeredTasks: active.length,
+      ownerObservation: observation,
+    };
   }
 }
 

@@ -7039,6 +7039,27 @@
       "SystemResourcesResponseDto": {
         "type": "object",
         "properties": {
+          "capacityAvailability": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unavailable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "OWNER_CAPACITY_UNAVAILABLE"
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ]
+          },
           "capacity": {
             "type": "object",
             "properties": {

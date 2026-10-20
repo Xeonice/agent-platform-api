@@ -20,11 +20,13 @@ import {
   RuntimeOwnerContextSchema,
   RuntimeOwnerImageSchema,
   RuntimeOwnerHandleSchema,
+  RuntimeOwnerCapacitySchema,
   SandboxProviderError,
   SandboxProviderErrorCode,
   type RuntimeOwnerCall,
   type RuntimeOwnerMetadata,
   type RuntimeOwnerMethod,
+  type RuntimeOwnerCapacity,
   type RuntimeOwnerStreamFrame,
   type SandboxHandle,
   type SandboxProvider,
@@ -71,6 +73,7 @@ export interface RuntimeOwnerServerOptions {
   artifactIdentity?: { artifactDigest: string; inputFingerprint: string } | null;
   startIdentity?: string;
   privateDatabaseIsolation?: true;
+  capacity?: () => Promise<RuntimeOwnerCapacity['capacity']>;
 }
 
 /** Stable SDK/PTY owner. HTTP and browser lifetimes never own sandbox lifetimes. */
@@ -233,6 +236,32 @@ export class RuntimeOwnerServer {
     }
     if (request.method === 'GET' && url.pathname === '/runtime/metadata') {
       this.json(response, 200, this.metadata());
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/runtime/capacity' && this.options.capacity) {
+      const observedAt = this.options.clock.now().getTime();
+      const started = performance.now();
+      try {
+        const capacity = await this.options.capacity();
+        if (performance.now() - started > 2000) throw new Error('Capacity observation expired');
+        const value = RuntimeOwnerCapacitySchema.parse({
+          schemaVersion: 1,
+          instanceId: this.options.instanceId,
+          ownerId: this.options.ownerId,
+          startIdentity: this.options.startIdentity,
+          artifactDigest: this.options.artifactIdentity?.artifactDigest,
+          observedAt,
+          capacity,
+        });
+        this.json(response, 200, value);
+      } catch {
+        throw new SandboxProviderError(
+          SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+          'RuntimeOwner capacity could not be confirmed',
+          undefined,
+          true,
+        );
+      }
       return;
     }
     if (request.method === 'GET' && url.pathname === '/runtime/assignments') {

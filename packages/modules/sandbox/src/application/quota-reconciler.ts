@@ -1,5 +1,4 @@
 import { coordinatorWorker } from '@platform/shared-kernel';
-import { asNodeId } from '@platform/shared-kernel';
 import { errorMessage } from '@platform/shared-kernel';
 import {
   Inject,
@@ -9,7 +8,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { CLOCK, EVENT_BUS } from '@platform/shared-kernel';
-import type { Clock, EventBus, NodeId } from '@platform/shared-kernel';
+import type { Clock, EventBus } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
 import type { ProviderRegistry, SandboxHandle } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
@@ -157,7 +156,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
   /** 开机那次：全部活跃登记，一条不落。Public so an operator/test can trigger it. */
   async reconcile(): Promise<QuotaReconcileReport> {
     return this.worker.run(async () => {
-      return this.check(await this.allocations.listActive(nodeId()));
+      return this.check(await this.allocations.listActiveAll());
     });
   }
 
@@ -171,7 +170,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
     return this.worker.run(async () => {
       const now = this.clock.now().getTime();
       const stale = staleMs();
-      const due = (await this.allocations.listActive(nodeId()))
+      const due = (await this.allocations.listActiveAll())
         .map((a) => ({ a, since: this.lastCheckedAt.get(a.id) ?? a.allocatedAt.getTime() }))
         .filter(({ since }) => now - since >= stale)
         .sort((x, y) => x.since - y.since)
@@ -254,10 +253,6 @@ function handleOf(sandbox: Sandbox): SandboxHandle | null {
         providerState: sandbox.providerState ?? undefined,
       }
     : null;
-}
-
-function nodeId(): NodeId {
-  return asNodeId(process.env.SCHEDULER_NODE_ID ?? 'local');
 }
 
 function staleMs(): number {

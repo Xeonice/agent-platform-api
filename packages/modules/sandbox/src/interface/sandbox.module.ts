@@ -10,6 +10,7 @@ import {
   TASK_LOG_STORE,
   WORKSPACE_PREPARER,
   RUNTIME_BUSINESS_AUTHORITY,
+  RUNTIME_OWNER_SCHEDULING,
 } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.repository';
@@ -43,6 +44,7 @@ import { SqliteSandboxStartupProgress } from '../infrastructure/persistence/sqli
 import { SqliteSandboxStopIntents } from '../infrastructure/persistence/sqlite/sandbox-stop-intents.impl';
 import { SqliteResourceAllocationRepository } from '../infrastructure/persistence/sqlite/resource-allocation.repository.impl';
 import { OsHostCapacityProbe } from '../infrastructure/scheduler/host-capacity.probe';
+import { RuntimeOwnerCapacityProbe } from '../infrastructure/scheduler/runtime-owner-capacity.probe';
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
 import { FsWorkspaceArtifactReader } from '../infrastructure/tasks/fs-workspace-artifact-reader';
 import { WORKSPACE_ARTIFACT_READER } from '../domain/ports/workspace-artifact-reader.port';
@@ -112,7 +114,10 @@ const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
     { provide: SANDBOX_STARTUP_PROGRESS, useClass: SqliteSandboxStartupProgress },
     { provide: SANDBOX_STOP_INTENTS, useClass: SqliteSandboxStopIntents },
     { provide: RESOURCE_ALLOCATION_REPOSITORY, useClass: SqliteResourceAllocationRepository },
-    { provide: HOST_CAPACITY_PROBE, useClass: OsHostCapacityProbe },
+    {
+      provide: HOST_CAPACITY_PROBE,
+      useClass: remoteRuntime ? RuntimeOwnerCapacityProbe : OsHostCapacityProbe,
+    },
     // 03 §3：显式 FIFO（创建/销毁/对账的读-改-写都从它过）+ 互斥登记
     // —— `RESOURCE_EXHAUSTED` 的唯一真实抛出点。
     SchedulerQueue,
@@ -124,6 +129,7 @@ const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
     SandboxHealthMonitor,
     ...(remoteRuntime
       ? [
+          { provide: RUNTIME_OWNER_SCHEDULING, useExisting: SANDBOX_PROVIDER_REGISTRY },
           {
             provide: SANDBOX_PROVIDER_REGISTRY,
             useFactory: (clock: Clock) => createRuntimeOwnerProviderRegistry(clock),
@@ -150,6 +156,7 @@ const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
   ],
   exports: [
     RUNTIME_BUSINESS_AUTHORITY,
+    ...(remoteRuntime ? [RUNTIME_OWNER_SCHEDULING] : []),
     AGENT_TASK_START_INTENTS,
     SANDBOX_CREATE_INTENTS,
     SandboxApplicationService,

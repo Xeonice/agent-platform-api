@@ -55,6 +55,7 @@ async function fixture() {
     generation: 1,
   });
   const provider = remote.get(external.name);
+  remote.pin('decoding-sandbox', remote.activeOwnerId);
   const handle = await provider.create({
     sandboxId: 'decoding-sandbox',
     quota: { cores: 1, ramMb: 128, diskMb: 100 },

@@ -298,6 +298,24 @@ export class Sandbox extends AggregateRoot<SandboxId> {
     return this._version;
   }
 
+  /** Persist provider-owned initial opaque state before any runtime exists.
+   * The aggregate enforces lifecycle and one-time assignment, never interprets a key. */
+  setPendingProviderState(state: Record<string, unknown>): void {
+    if (
+      this._status !== 'pending' ||
+      this._providerSandboxId !== null ||
+      this._providerState !== null
+    )
+      throw new Error('PENDING_PROVIDER_STATE_ALREADY_BOUND');
+    const encoded = JSON.stringify(state);
+    if (!encoded || encoded.length > 16384 || Object.getPrototypeOf(state) !== Object.prototype)
+      throw new Error('PENDING_PROVIDER_STATE_INVALID');
+    const decoded: unknown = JSON.parse(encoded);
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded))
+      throw new Error('PENDING_PROVIDER_STATE_INVALID');
+    this._providerState = { ...decoded };
+  }
+
   /** Record the provider handle + host workspace once created (03 §4). */
   bindRuntime(input: {
     providerSandboxId: string;

@@ -79,6 +79,7 @@ async function fixture() {
 }
 async function sandbox(registry: RuntimeOwnerProviderRegistry) {
   const provider = registry.get('counter-process');
+  registry.pin('original-sandbox', registry.activeOwnerId);
   const handle = await provider.create({
     sandboxId: 'original-sandbox',
     quota: { cores: 1, ramMb: 128, diskMb: 100 },
@@ -154,6 +155,7 @@ describe('RuntimeOwner real socket, durable SQLite and external process boundary
       image: { ref: 'fixture@sha256:' + 'a'.repeat(64), digest: 'sha256:' + 'a'.repeat(64) },
       env: {},
     };
+    registry.pin(context.sandboxId, registry.activeOwnerId);
     await expect(provider.create(context)).rejects.toThrow();
     const dispatches = f.requests.filter(
       (row) => row.method === 'POST' && row.path === '/runtime/call',

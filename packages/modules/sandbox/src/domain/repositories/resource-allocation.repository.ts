@@ -8,6 +8,8 @@ import type { ResourceAllocation } from '../entities/resource-allocation.entity'
 export interface ResourceAllocationRepository {
   /** 全部未释放的登记（`released_at IS NULL`），走 `(node_id, released_at)` 索引。 */
   listActive(nodeId: NodeId): Promise<ResourceAllocation[]>;
+  /** All pools, active rows only. Retained Owners share the disk and reconciliation ledger. */
+  listActiveAll(): Promise<ResourceAllocation[]>;
   /** 一条 sandbox 当前的活跃登记；没有 ⇒ `null`（I-RA-2 保证至多一条）。 */
   findActiveBySandbox(sandboxId: SandboxId): Promise<ResourceAllocation | null>;
   /** 全部登记（含已释放）—— 对账与测试用。 */

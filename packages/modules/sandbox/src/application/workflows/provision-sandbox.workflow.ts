@@ -25,6 +25,8 @@ import {
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_BUSINESS_AUTHORITY,
   RuntimeOwnerHandleSchema,
+  SandboxProviderError,
+  SandboxProviderErrorCode,
   SANDBOX_PROVIDER_REGISTRY,
   RUNTIME_INSTALL_ORCHESTRATOR,
   SANDBOX_EVENT_BROADCASTER,
@@ -248,12 +250,25 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
           }
           const provider = this.providers.get(sandbox.provider);
           if (sandbox.status === 'creating') {
+            try {
+              await this.resources.pinOriginalOwnerForLookup(sandbox.id);
+            } catch (error) {
+              // An unresolved original placement is retained independently; it
+              // must not starve other accepted Guest/receipt continuations.
+              if (
+                error instanceof SandboxProviderError &&
+                error.code === SandboxProviderErrorCode.PROVIDER_UNAVAILABLE
+              )
+                continue;
+              throw error;
+            }
             const receipt = await provider.observeOperation?.(sandbox.id, intent.operationId);
             this.assertEpoch(epoch);
             if (receipt?.state !== 'complete') continue;
             const handle = RuntimeOwnerHandleSchema.parse(receipt.result);
             if (handle.provider !== sandbox.provider)
               throw new Error('ORIGINAL_PROVIDER_CREATE_RECEIPT_MISMATCH');
+            await this.resources.assertOriginalOwnerHandle(sandbox.id, handle);
             sandbox.bindRuntime({
               providerSandboxId: handle.providerSandboxId,
               providerState: handle.providerState ?? null,
@@ -516,6 +531,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
         // ⚠️ **实例拿到的就是账本里登记的那份**（`create` 互斥区写下的）。曾经这里是一个
         // 写死的 `DEFAULT_QUOTA`：账本说这条 Task 占 3.2GB 盘、容器却按 1GB 建，于是「防
         // 超分配」防的是一个与真实占用无关的数。
+        await this.resources.pinReservedOwner(sandbox.id);
         const quota = (await this.resources.reservedQuotaOf(sandbox.id)) ?? FALLBACK_QUOTA;
         try {
           const usable = await this.reserveInjection(sandbox, credentials);
@@ -563,6 +579,7 @@ export class ProvisionSandboxWorkflow implements OnApplicationBootstrap, OnModul
             ? await this.authority.run(operation, () => provider.create(createInput))
             : await provider.create(createInput);
           this.assertActive(sandbox.id);
+          await this.resources.assertOriginalOwnerHandle(sandbox.id, handle);
           sandbox.bindRuntime({
             providerSandboxId: handle.providerSandboxId,
             workspacePath: ws.hostPath,

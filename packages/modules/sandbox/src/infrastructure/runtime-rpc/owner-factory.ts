@@ -10,13 +10,16 @@ import {
   writeFileSync,
   unlinkSync,
   chmodSync,
+  lstatSync,
+  realpathSync,
 } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Clock } from '@platform/shared-kernel';
 import type { ProviderRegistry } from '@platform/contracts';
 import { RuntimeOwnerServer } from './owner-server';
 import { ownerArtifactIdentity } from './artifact-identity';
 import { RuntimeOwnerProviderRegistry } from './owner-client';
+import { sampleRuntimeOwnerCapacity } from './owner-capacity';
 
 /** Exclusive process lock complements the SDK home lock, including AIO owners. */
 export class RuntimeOwnerHomeLock {
@@ -88,6 +91,7 @@ export class RuntimeOwnerHomeLock {
 export function acquireRuntimeOwnerHomeLock(): RuntimeOwnerHomeLock {
   const { home, instanceId, ownerId } = assertRuntimeOwnerEnvironment();
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  assertOwnerDirectory(home);
   chmodSync(home, 0o700);
   return new RuntimeOwnerHomeLock(resolve(home, 'owner-process.lock'), instanceId, ownerId);
 }
@@ -200,12 +204,57 @@ export function assertRuntimeOwnerEnvironment(): {
   return { instanceId, ownerId, key, home };
 }
 
+function assertOwnerDirectory(path: string) {
+  const value = lstatSync(path);
+  if (
+    !value.isDirectory() ||
+    value.isSymbolicLink() ||
+    typeof process.getuid !== 'function' ||
+    value.uid !== process.getuid() ||
+    (value.mode & 0o022) !== 0
+  )
+    throw new Error('RuntimeOwner directory is not trusted');
+  return value;
+}
+
+/** Establish only empty directories while holding the Owner lock. Lazy SDK
+ * initialization must not be a prerequisite for the first capacity admission. */
+function ensureRuntimeOwnerSdkHome(home: string, sdkHome: string): void {
+  const before = assertOwnerDirectory(home);
+  if ((before.mode & 0o077) !== 0) throw new Error('RuntimeOwner home is not private');
+  const canonicalHome = realpathSync(home);
+  const child = relative(resolve(home), resolve(sdkHome));
+  if (!child || child === '..' || child.startsWith('../') || isAbsolute(child))
+    throw new Error('RuntimeOwner SDK home left its private root');
+  let current = canonicalHome;
+  for (const part of child.split('/')) {
+    current = join(current, part);
+    try {
+      mkdirSync(current, { mode: 0o700 });
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error;
+    }
+    assertOwnerDirectory(current);
+    if (realpathSync(current) !== current)
+      throw new Error('RuntimeOwner SDK home contains an untrusted link');
+  }
+  const after = assertOwnerDirectory(home);
+  if (before.dev !== after.dev || before.ino !== after.ino || realpathSync(home) !== canonicalHome)
+    throw new Error('RuntimeOwner home changed during SDK directory preparation');
+}
+
 export async function startRuntimeOwnerFromEnvironment(
   clock: Clock,
   registry: ProviderRegistry,
   lock: RuntimeOwnerHomeLock,
 ): Promise<{ server: RuntimeOwnerServer; close(): Promise<void> }> {
   const { instanceId, ownerId, key, home } = assertRuntimeOwnerEnvironment();
+  lock.assertHeld();
+  const capacityRoots = {
+    sdkRoot: process.env.BOXLITE_HOME ?? '',
+    workspaceRoot: '/data/workspaces',
+  };
+  ensureRuntimeOwnerSdkHome(home, capacityRoots.sdkRoot);
   lock.assertHeld();
   let server: RuntimeOwnerServer | undefined;
   try {
@@ -219,6 +268,7 @@ export async function startRuntimeOwnerFromEnvironment(
       privateDatabaseIsolation: true,
       journalPath: resolve(home, 'runtime-owner.sqlite'),
       registry,
+      capacity: () => sampleRuntimeOwnerCapacity(capacityRoots),
     });
     await server.listen(Number(process.env.RUNTIME_OWNER_PORT ?? '3231'));
   } catch (error) {

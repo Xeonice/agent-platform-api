@@ -53,7 +53,15 @@ async function fixture() {
     PLATFORM_INSTANCE_ID: 'automation-protocol-fixture',
     PLATFORM_PROCESS_ROLE: undefined,
   });
-  const h = harness({ durableStarts: true, authority });
+  let schedulingOwner: RuntimeOwnerProviderRegistry;
+  const ownerScheduling = {
+    snapshot: () => schedulingOwner.snapshot(),
+    pin: (id: string, owner: string) => schedulingOwner.pin(id, owner),
+    originalOwnerId: (id: string) => schedulingOwner.originalOwnerId(id),
+    assertCurrent: (observation: Awaited<ReturnType<RuntimeOwnerProviderRegistry['snapshot']>>) =>
+      schedulingOwner.assertCurrent(observation),
+  };
+  const h = harness({ authority, ownerScheduling, durableStarts: true });
   h.sqlite
     .prepare(
       "INSERT INTO projects(id,name,source_type,clone_status,baseline_path,created_at,updated_at) VALUES('prj-1','fixture','empty','ready','/tmp/aut-protocol',0,0)",
@@ -76,6 +84,17 @@ async function fixture() {
   const owner = new RuntimeOwnerServer({
     instanceId: 'automation-protocol-fixture',
     ownerId: 'original-guest-owner',
+    startIdentity: 'original-guest-owner-start-identity',
+    artifactIdentity: {
+      artifactDigest: 'sha256:' + 'a'.repeat(64),
+      inputFingerprint: 'sha256:' + 'b'.repeat(64),
+    },
+    capacity: async () => ({
+      cores: 64,
+      ramMb: 262144,
+      diskTotalBytes: 4 * 1024 ** 4,
+      diskAvailableBytes: 3 * 1024 ** 4,
+    }),
     key,
     journalPath: join(directory, 'owner.sqlite'),
     registry: external,
@@ -110,6 +129,7 @@ async function fixture() {
   };
   let remote = await connect(1);
   const bind = (registry: RuntimeOwnerProviderRegistry) => {
+    schedulingOwner = registry;
     h.registry.get = (name) => registry.get(name);
     h.registry.has = (name) => registry.has(name);
     h.registry.list = () => registry.list();

@@ -30,6 +30,18 @@ export class SqliteResourceAllocationRepository implements ResourceAllocationRep
     });
   }
 
+  listActiveAll(): Promise<ResourceAllocation[]> {
+    return readSqlite(() =>
+      this.db
+        .select()
+        .from(resourceAllocations)
+        .where(isNull(resourceAllocations.releasedAt))
+        .orderBy(asc(resourceAllocations.allocatedAt))
+        .all()
+        .map(toDomain),
+    );
+  }
+
   findActiveBySandbox(sandboxId: SandboxId): Promise<ResourceAllocation | null> {
     return readSqlite(() => {
       const row = this.db

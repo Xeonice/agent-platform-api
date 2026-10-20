@@ -38,7 +38,14 @@ async function fixture(fault: 'none' | 'body-reset' = 'none') {
     PLATFORM_INSTANCE_ID: 'provision-timeout-fixture',
     PLATFORM_PROCESS_ROLE: undefined,
   });
-  const h = harness({ authority });
+  const ownerScheduling = {
+    snapshot: () => schedulingOwner.snapshot(),
+    pin: (id: string, owner: string) => schedulingOwner.pin(id, owner),
+    originalOwnerId: (id: string) => schedulingOwner.originalOwnerId(id),
+    assertCurrent: (observation: Awaited<ReturnType<RuntimeOwnerProviderRegistry['snapshot']>>) =>
+      schedulingOwner.assertCurrent(observation),
+  };
+  const h = harness({ authority, ownerScheduling });
   h.sqlite
     .prepare(
       "INSERT INTO projects(id,name,source_type,clone_status,baseline_path,created_at,updated_at) VALUES('prj-1','fixture','empty','ready','/tmp/fixture-baseline',0,0)",
@@ -84,6 +91,17 @@ async function fixture(fault: 'none' | 'body-reset' = 'none') {
   const owner = new RuntimeOwnerServer({
     instanceId: 'provision-timeout-fixture',
     ownerId: 'original-owner',
+    startIdentity: 'original-owner-start-identity',
+    artifactIdentity: {
+      artifactDigest: 'sha256:' + 'a'.repeat(64),
+      inputFingerprint: 'sha256:' + 'b'.repeat(64),
+    },
+    capacity: async () => ({
+      cores: 64,
+      ramMb: 262144,
+      diskTotalBytes: 4 * 1024 ** 4,
+      diskAvailableBytes: 3 * 1024 ** 4,
+    }),
     key,
     journalPath: join(home, 'owner.sqlite'),
     registry: external,
@@ -135,6 +153,7 @@ async function fixture(fault: 'none' | 'body-reset' = 'none') {
     },
     true,
   );
+  const schedulingOwner = remote;
   h.registry.get = (name) => remote.get(name);
   const runs = vi.spyOn(h.provision, 'runSafely');
   const setRunning = () => {

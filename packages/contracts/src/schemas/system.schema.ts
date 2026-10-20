@@ -395,6 +395,14 @@ export type ResourceLevel = z.infer<typeof ResourceLevelSchema>;
  * **clone 写到最后 ENOSPC**、镜像拉一半失败 —— 后者既更常见也更难自我解释。
  */
 export const SystemResourcesDtoSchema = z.object({
+  /** Scheduling pool cannot currently be proved; host health below is not Guest capacity. */
+  capacityAvailability: z
+    .object({
+      state: z.literal('unavailable'),
+      reason: z.literal('OWNER_CAPACITY_UNAVAILABLE'),
+    })
+    .strict()
+    .optional(),
   capacity: z
     .object({
       remainingTasks: z.number().int().nonnegative(),

@@ -1,3 +1,4 @@
+import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
@@ -85,7 +86,18 @@ export class SystemResourcesService {
   }
 
   async snapshot(): Promise<SystemResourcesDto> {
-    const capacity = await this.sandbox?.defaultCapacity();
+    let capacity: SystemResourcesDto['capacity'];
+    let capacityAvailability: SystemResourcesDto['capacityAvailability'];
+    try {
+      capacity = await this.sandbox?.defaultCapacity();
+    } catch (error) {
+      if (
+        !(error instanceof SandboxProviderError) ||
+        error.code !== SandboxProviderErrorCode.PROVIDER_UNAVAILABLE
+      )
+        throw error;
+      capacityAvailability = { state: 'unavailable', reason: 'OWNER_CAPACITY_UNAVAILABLE' };
+    }
     const cores = Math.max(cpus().length, 1);
     const load = loadavg()[0] ?? 0;
     const cpuPercent = (load / cores) * 100;
@@ -103,6 +115,7 @@ export class SystemResourcesService {
 
     return {
       ...(capacity === undefined ? {} : { capacity }),
+      ...(capacityAvailability === undefined ? {} : { capacityAvailability }),
       cpu: {
         cores,
         loadAvg1m: round(load, 2),

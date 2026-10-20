@@ -1,6 +1,6 @@
 import { assertDefined } from '../../support/assert-defined';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer, type AddressInfo } from 'node:net';
@@ -130,7 +130,10 @@ describe('production Owner composition and out-of-tree DI registration', () => {
     expect(actual.providers.map((provider) => provider.name).sort()).toEqual(['aio', 'boxlite']);
     expect(actual.defaultProvider).toBe('boxlite');
     expect((await stat(join(owner.home, 'runtime-owner.sqlite'))).isFile()).toBe(true);
-    await expect(stat(join(owner.home, 'sdk'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const sdk = await stat(join(owner.home, 'sdk'));
+    expect(sdk.isDirectory()).toBe(true);
+    expect(sdk.mode & 0o777).toBe(0o700);
+    expect(await readdir(join(owner.home, 'sdk'))).toEqual([]); // Empty setup directory, no SDK initialization.
   });
 
   it('finishes third-party async DI registration before listening and uses it through the real Coordinator proxy', async () => {
@@ -158,6 +161,7 @@ describe('production Owner composition and out-of-tree DI registration', () => {
       expect(registry.defaultProvider).toBe('installation-provider');
       expect(registry.list().map((provider) => provider.name)).toContain('installation-provider');
       const provider = registry.get('installation-provider');
+      registry.pin('first-task', registry.activeOwnerId);
       const handle = await provider.create(context('first-task'));
       await provider.start(handle);
       expect(await provider.inspect(handle)).toMatchObject({
@@ -196,12 +200,14 @@ describe('production Owner composition and out-of-tree DI registration', () => {
     try {
       const registry = await directory(firstEndpoint);
       const provider = registry.get('installation-provider');
+      registry.pin('retained-task', registry.activeOwnerId);
       const original = await provider.create(context('retained-task'));
       await provider.start(original);
       await registry.addOwner(
         { endpoint: secondEndpoint, key, instanceId, generation: 1, clock: new SystemClock() },
         true,
       );
+      registry.pin('new-task', registry.activeOwnerId);
       const added = await provider.create(context('new-task'));
       await provider.start(added);
       expect(await provider.inspect(original)).toMatchObject({

@@ -14,6 +14,7 @@ export * from './registry.tokens';
 export * from './reserved-env';
 export * from './sandbox-provider.contract';
 export * from './runtime-owner.contract';
+export * from './runtime-owner-capacity.contract';
 export * from './platform-instances';
 export * from './runtime-adapter.contract';
 export * from './adapter-auth.error';
@@ -48,3 +49,5 @@ export * from './upgrade.contract';
 export * from './runtime-business-authority.port';
 export * from './terminal-bookmark-cleanup.port';
 export * from './coordinator-gateway-work.port';
+
+export * from './runtime-owner-scheduling.contract';

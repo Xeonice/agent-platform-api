@@ -11,6 +11,7 @@ import { EventEmitter } from 'node:events';
 import type { Clock } from '@platform/shared-kernel';
 import {
   RuntimeOwnerMetadataSchema,
+  RuntimeOwnerCapacitySchema,
   RuntimeOwnerHandleSchema,
   RuntimeOwnerLeaseSchema,
   RuntimeOwnerStreamFrameSchema,
@@ -22,6 +23,8 @@ import {
   type RuntimeOwnerMetadata,
   type RuntimeOwnerMethod,
   type RuntimeOwnerStreamFrame,
+  type RuntimeOwnerScheduling,
+  type RuntimeOwnerSchedulingSnapshot,
   type ProviderRegistry,
   type SandboxProvider,
   type SandboxHandle,
@@ -237,6 +240,75 @@ export class RuntimeOwnerConnection {
         true,
       );
   }
+  /** Short, bounded, read-only scheduling RPCs never claim/renew a lease. */
+  private async schedulingJson(
+    path: string,
+    signal: AbortSignal,
+    limit = 2 * 1024 * 1024,
+  ): Promise<unknown> {
+    const response = await this.http(path, 'GET', undefined, signal);
+    if (response.statusCode !== 200) {
+      response.destroy();
+      throw unconfirmedTransport(new Error('Owner scheduling observation unavailable'));
+    }
+    return JSON.parse(await this.text(response, limit)) as unknown;
+  }
+  async schedulingMetadata(signal: AbortSignal): Promise<RuntimeOwnerMetadata> {
+    const value = RuntimeOwnerMetadataSchema.parse(
+      await this.schedulingJson('/runtime/metadata', signal, 64 * 1024),
+    );
+    if (
+      value.instanceId !== this.options.instanceId ||
+      value.ownerId !== this.metadata.ownerId ||
+      !value.startIdentity ||
+      value.startIdentity !== this.metadata.startIdentity ||
+      value.artifactDigest !== this.metadata.artifactDigest
+    )
+      throw unconfirmedTransport(new Error('Owner process identity changed'));
+    return value;
+  }
+  async schedulingCapacity(signal: AbortSignal) {
+    const value = RuntimeOwnerCapacitySchema.parse(
+      await this.schedulingJson('/runtime/capacity', signal, 16 * 1024),
+    );
+    const age = this.options.clock.now().getTime() - value.observedAt;
+    if (
+      value.instanceId !== this.options.instanceId ||
+      value.ownerId !== this.metadata.ownerId ||
+      value.startIdentity !== this.metadata.startIdentity ||
+      value.artifactDigest !== this.metadata.artifactDigest ||
+      age < 0 ||
+      age > 5000
+    )
+      throw unconfirmedTransport(
+        new Error('Owner capacity identity or freshness is not confirmed'),
+      );
+    return value.capacity;
+  }
+  async schedulingAssignments(
+    signal: AbortSignal,
+  ): Promise<{ sandboxId: string; state: 'owned' | 'unconfirmed' }[]> {
+    const items = await this.schedulingJson('/runtime/assignments', signal);
+    if (!Array.isArray(items) || items.length > 10000)
+      throw unconfirmedTransport(new Error('Owner inventory is not bounded'));
+    const active: { sandboxId: string; state: 'owned' | 'unconfirmed' }[] = [];
+    const seen = new Set<string>();
+    for (const item of items) {
+      const value = ownerRecord(item);
+      if (
+        typeof value.sandboxId !== 'string' ||
+        !value.sandboxId ||
+        value.sandboxId.length > 256 ||
+        !['owned', 'unconfirmed', 'destroyed'].includes(String(value.state)) ||
+        seen.has(value.sandboxId)
+      )
+        throw unconfirmedTransport(new Error('Owner inventory is not confirmed'));
+      seen.add(value.sandboxId);
+      if (value.state === 'owned' || value.state === 'unconfirmed')
+        active.push({ sandboxId: value.sandboxId, state: value.state });
+    }
+    return active;
+  }
   async assignments(): Promise<{ sandboxId: string; state: string }[]> {
     const items = await this.json('/runtime/assignments');
     if (!Array.isArray(items)) throw new Error('Runtime assignment inventory is not confirmed');
@@ -283,9 +355,10 @@ export class RuntimeOwnerConnection {
   ): Promise<NodeJS.ReadableStream | null> {
     return this.openFile(provider, handle, path, sandboxId);
   }
-  async originalHandle(sandboxId: string): Promise<SandboxHandle | null> {
+  async originalHandle(sandboxId: string, signal?: AbortSignal): Promise<SandboxHandle | null> {
+    const path = '/runtime/original-handle/' + encodeURIComponent(sandboxId);
     const result = ownerRecord(
-      await this.json('/runtime/original-handle/' + encodeURIComponent(sandboxId)),
+      signal ? await this.schedulingJson(path, signal, 64 * 1024) : await this.json(path),
     );
     if (result.handle === null) return null;
     const handle = ownerRecord(result.handle);
@@ -492,15 +565,14 @@ export class RuntimeOwnerConnection {
     if (response.statusCode !== 200) await this.raise(response);
     return JSON.parse(await this.text(response)) as unknown;
   }
-  private async text(response: IncomingMessage): Promise<string> {
+  private async text(response: IncomingMessage, limit = 32 * 1024 * 1024): Promise<string> {
     const chunks: Buffer[] = [];
     let bytes = 0;
     try {
       for await (const item of response) {
         const chunk = ownerBytes(item);
         bytes += chunk.length;
-        if (bytes > 32 * 1024 * 1024)
-          throw new Error('Runtime response exceeds control-message limit');
+        if (bytes > limit) throw new Error('Runtime response exceeds control-message limit');
         chunks.push(chunk);
       }
     } catch (error) {
@@ -726,7 +798,25 @@ export class RuntimeOwnerProvider implements SandboxProvider {
     if (descriptor.methods.includes('watchEvents')) this.watchEvents = () => this.providerEvents();
   }
   async create(context: SandboxProviderContext): Promise<SandboxHandle> {
-    const connection = this.registry.assignedOwner(context.sandboxId) ?? this.registry.active;
+    const assigned = this.registry.assignedOwner(context.sandboxId);
+    // User sandbox placement is persisted at T1. Only the separate fixed helper
+    // has no allocation row and may choose its future default Owner here.
+    if (!assigned && context.sandboxId !== 'auth-helper')
+      throw unconfirmedTransport(new Error('A durable Owner reservation is required'));
+    if (
+      context.sandboxId === 'auth-helper' &&
+      assigned &&
+      assigned.metadata.ownerId !== this.registry.activeOwnerId
+    ) {
+      // A lost pre-journal helper call cannot be retried under a new default.
+      // Preserve its original route and observe only; a later authority may
+      // choose a new future helper only after fencing the previous actor.
+      const original = await assigned.originalHandle(context.sandboxId, AbortSignal.timeout(2000));
+      if (original?.provider !== this.name)
+        throw unconfirmedTransport(new Error('Original helper result is unconfirmed'));
+      return original;
+    }
+    const connection = assigned ?? this.registry.active;
     this.registry.noteAssignment(context.sandboxId, connection.metadata.ownerId);
     const handle = RuntimeOwnerHandleSchema.parse(
       await connection.call(this.name, 'create', [context], context.sandboxId),
@@ -837,7 +927,7 @@ export class RuntimeOwnerProvider implements SandboxProvider {
   }
 }
 
-export class RuntimeOwnerProviderRegistry implements ProviderRegistry {
+export class RuntimeOwnerProviderRegistry implements ProviderRegistry, RuntimeOwnerScheduling {
   private readonly owners = new Map<string, RuntimeOwnerConnection>();
   private readonly providers = new Map<string, SandboxProvider>();
   private readonly assignments = new Map<string, string>();
@@ -930,8 +1020,101 @@ export class RuntimeOwnerProviderRegistry implements ProviderRegistry {
     const id = this.assignments.get(sandboxId);
     return id ? this.connection(id) : undefined;
   }
-  noteAssignment(sandboxId: string, ownerId: string): void {
+  pin(sandboxId: string, ownerId: string): void {
+    this.connection(ownerId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(ownerId))
+      throw unconfirmedTransport(new Error('Owner placement identity is invalid'));
+    const existing = this.assignments.get(sandboxId);
+    if (existing && existing !== ownerId)
+      throw unconfirmedTransport(new Error('Original Owner assignment conflicts with reservation'));
     this.assignments.set(sandboxId, ownerId);
+  }
+  noteAssignment(sandboxId: string, ownerId: string): void {
+    this.pin(sandboxId, ownerId);
+  }
+  originalOwnerId(sandboxId: string): string | undefined {
+    return this.assignments.get(sandboxId);
+  }
+  assertCurrent(observation: RuntimeOwnerSchedulingSnapshot): void {
+    const age = this.active.options.clock.now().getTime() - observation.observedAt;
+    if (
+      this.activeId !== observation.ownerId ||
+      age < 0 ||
+      age > 5000 ||
+      observation.ownerIds.length !== this.owners.size ||
+      observation.ownerIds.some((id) => !this.owners.has(id))
+    )
+      throw unconfirmedTransport(new Error('Owner selection is no longer fresh/current'));
+  }
+  async snapshot(): Promise<RuntimeOwnerSchedulingSnapshot> {
+    const ownerId = this.activeId;
+    const observedAt = this.active.options.clock.now().getTime();
+    if (!ownerId || this.owners.size > 128)
+      throw unconfirmedTransport(new Error('Owner inventory is not complete'));
+    const owners = [...this.owners.values()];
+    const abort = new AbortController();
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(2000)]);
+    try {
+      const records: {
+        ownerId: string;
+        assignments: { sandboxId: string; state: 'owned' | 'unconfirmed' }[];
+        capacity: RuntimeOwnerSchedulingSnapshot['capacity'] | null;
+      }[] = [];
+      let next = 0,
+        assignmentCount = 0;
+      // Bound aggregate inventories as well as each response. Await every actual
+      // read task on failure; no orphan sampling Promise survives the caller.
+      const workers = await Promise.allSettled(
+        Array.from({ length: Math.min(8, owners.length) }, async () => {
+          try {
+            while (next < owners.length) {
+              if (signal.aborted) throw new Error('Owner observation budget ended');
+              const owner = owners[next++];
+              await owner.schedulingMetadata(signal);
+              const assignments = await owner.schedulingAssignments(signal);
+              assignmentCount += assignments.length;
+              if (assignmentCount > 10000)
+                throw new Error('Owner assignment inventory exceeds limit');
+              const capacity =
+                owner.metadata.ownerId === ownerId ? await owner.schedulingCapacity(signal) : null;
+              await owner.schedulingMetadata(signal);
+              records.push({ ownerId: owner.metadata.ownerId, assignments, capacity });
+            }
+          } catch (error) {
+            abort.abort();
+            throw error;
+          }
+        }),
+      );
+      for (const worker of workers) if (worker.status === 'rejected') throw worker.reason;
+      if (this.activeId !== ownerId || owners.length !== this.owners.size || signal.aborted)
+        throw new Error('Default Owner changed during capacity observation');
+      const capacity = records.find((row) => row.ownerId === ownerId)?.capacity;
+      if (!capacity) throw new Error('Default Owner capacity is unavailable');
+      const assignments = records.flatMap((row) =>
+        row.assignments.map((item) => ({ ...item, ownerId: row.ownerId })),
+      );
+      if (
+        assignments.length > 10000 ||
+        new Set(assignments.map((item) => item.sandboxId)).size !== assignments.length
+      )
+        throw new Error('Owner assignment inventory has conflicts');
+      for (const claim of assignments) this.pin(claim.sandboxId, claim.ownerId);
+      const helperPin = this.assignments.get('auth-helper');
+      const helperClaim = assignments.find((item) => item.sandboxId === 'auth-helper');
+      if (!helperClaim && helperPin && helperPin !== ownerId)
+        throw new Error('Original helper result must be observed before changing its pool');
+      return {
+        ownerId,
+        observedAt,
+        capacity,
+        ownerIds: records.map((row) => row.ownerId),
+        helperOwnerId: this.assignments.get('auth-helper') ?? ownerId,
+        assignments,
+      };
+    } catch (error) {
+      throw unconfirmedTransport(error);
+    }
   }
   register(provider: SandboxProvider): void {
     if (this.providers.has(provider.name)) throw new Error('Duplicate remote provider');

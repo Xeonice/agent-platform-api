@@ -259,12 +259,16 @@ export class SandboxApplicationService {
       // 冲着这件事来的。缺席 = 保守读法，代价只是前端把它当「可能有副作用」；而
       // `retryable:true` 已经把用户真正需要的下一步（等一会儿再来）说清楚了。
       try {
-        await this.resources.reserve({ sandboxId: sandbox.id, quota: admitted.quota }, (tx) => {
-          this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
-          this.repo.saveSync(tx, sandbox);
-          if (accepted) this.admissionIntents?.reserveSync(tx, sandbox.id, accepted.input);
-          this.events.publishInTx(tx, sandbox.pullEvents());
-        });
+        await this.resources.reserve(
+          { sandboxId: sandbox.id, quota: admitted.quota },
+          (tx, pendingProviderState) => {
+            this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
+            if (pendingProviderState) sandbox.setPendingProviderState(pendingProviderState);
+            this.repo.saveSync(tx, sandbox);
+            if (accepted) this.admissionIntents?.reserveSync(tx, sandbox.id, accepted.input);
+            this.events.publishInTx(tx, sandbox.pullEvents());
+          },
+        );
       } catch (e) {
         if (e instanceof ProjectAccessError) {
           // The final project check precedes every write in this transaction. It
