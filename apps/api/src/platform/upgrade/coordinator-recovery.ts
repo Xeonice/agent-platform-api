@@ -201,23 +201,56 @@ export class CoordinatorRecovery implements OnApplicationBootstrap, OnModuleDest
           witness.proof_digest === upgradeDigest(rawProof),
         'CONTROL_STABILIZATION_WITNESS_CHANGED',
       );
+      const Peer = z.object({
+        containerId: z.string().min(1).max(128),
+        startIdentity: z.string().min(1).max(180),
+        artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        observedAt: z.string().datetime(),
+      });
+      const ExitedPeer = Peer.extend({
+        generation: z.null(),
+        writerFenceValid: z.literal(false),
+        receiptDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        exitedAt: z.string().datetime(),
+      });
+      const Coordinator = z
+        .discriminatedUnion('kind', [
+          Peer.extend({
+            kind: z.literal('live'),
+            generation: z.number().int().nonnegative(),
+            writerFenceValid: z.boolean(),
+          }).strict(),
+          ExitedPeer.extend({
+            kind: z.literal('normal-exit'),
+            receiptKind: z.literal('coordinator-normal-exit'),
+          }).strict(),
+          ExitedPeer.extend({
+            kind: z.literal('legacy-inert'),
+            receiptKind: z.literal('legacy-coordinator-inert-history'),
+            exitCode: z.number().int().min(0).max(255),
+            recordedAt: z.string().datetime(),
+            artifactLabel: z.null(),
+          }).strict(),
+        ])
+        .superRefine((peer, context) => {
+          if (peer.kind === 'live') return;
+          if (
+            Date.parse(peer.exitedAt) > Date.parse(peer.observedAt) ||
+            (peer.kind === 'legacy-inert' &&
+              (Date.parse(peer.exitedAt) > Date.parse(peer.recordedAt) ||
+                Date.parse(peer.recordedAt) > Date.parse(peer.observedAt)))
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'Retired witness time order changed',
+            });
+          }
+        });
       const proof = z
         .object({
           instanceId: z.string(),
           writer: Writer,
-          coordinators: z
-            .array(
-              z.object({
-                containerId: z.string().min(1).max(128),
-                startIdentity: z.string().min(1).max(180),
-                artifactDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-                generation: z.number().int().nonnegative(),
-                writerFenceValid: z.boolean(),
-                observedAt: z.string().datetime(),
-              }),
-            )
-            .min(1)
-            .max(256),
+          coordinators: z.array(Coordinator).min(1).max(256),
           observedAt: z.string().datetime(),
         })
         .parse(rawProof);

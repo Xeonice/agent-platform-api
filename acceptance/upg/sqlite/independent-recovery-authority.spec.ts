@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { fromEpochMs } from '@platform/shared-kernel';
 import { createUpgradeControlStores } from '../../../apps/api/src/platform/upgrade/control-store-factory';
@@ -46,6 +48,77 @@ function phase(value: string, fixed = true) {
   ledger
     .prepare('UPDATE control_recovery_intents SET phase=?,plan=?,plan_digest=? WHERE recovery_id=?')
     .run(value, fixed ? canonicalUpgrade(plan) : null, fixed ? plan.planDigest : null, recoveryId);
+}
+function generateControlStabilizationWitness(writerIdentity: {
+  artifactDigest: string;
+  startIdentity: string;
+  generation: number;
+  fence: number;
+  holderId: string;
+}) {
+  // The real control producer uses its private HTTP client and a second real
+  // SQLite connection. Docker identities are explicit transport fixtures, not
+  // Native/Guest qualification. No SDK or model endpoint is instantiated.
+  const source = String.raw`
+import fs from 'node:fs';
+import http from 'node:http';
+import {createRequire} from 'node:module';
+import {dirname,join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {generateKeyPairSync,sign} from 'node:crypto';
+const p=JSON.parse(fs.readFileSync(0,'utf8'));
+const {createControlStabilization}=await import(pathToFileURL(p.modulePath));
+const {digest,canonical,runInputFingerprint}=await import(pathToFileURL(join(dirname(p.modulePath),'trust.mjs')));
+const {projectLegacyCoordinatorInertHistory,verifyLegacyCoordinatorInertHistory}=await import(pathToFileURL(join(dirname(p.modulePath),'coordinator-inert-history.mjs')));
+const Database=createRequire(p.apiPackage)('better-sqlite3'), db=new Database(p.ledgerPath);
+const key=generateKeyPairSync('ed25519'),m=p.manifest;
+m.packages[0].platform='linux';m.packages[0].arch='arm64';
+for(const e of m.evidence)e.inputFingerprint=runInputFingerprint(m);
+const roots={schemaVersion:1,channel:m.channel,distributionOrigins:['https://distribution.invalid'],keys:[{id:'witness-fixture',publicKey:key.publicKey.export({type:'spki',format:'pem'})}]};
+const envelope={manifest:m,manifestDigest:digest(m),signature:{algorithm:'Ed25519',keyId:'witness-fixture',value:sign(null,Buffer.from(canonical(m)),key.privateKey).toString('base64')}};
+const trustPath=join(p.directory,'witness-trust.json');fs.writeFileSync(trustPath,JSON.stringify(roots),{mode:0o600});
+const at=new Date(p.now).toISOString(),artifactRoot='/fixture/artifacts/'+m.packages[0].digest.slice(7),legacyId='c'.repeat(64),legacyStart='legacy-exited-physical-birth';
+const row={Config:{Labels:{'agent-platform.role':'coordinator','agent-platform.instance':p.instanceId},Env:['PLATFORM_ARTIFACT_DIGEST='+m.components.coordinator.artifactDigest],Entrypoint:['node'],Cmd:[artifactRoot+'/api/apps/api/dist/roles/coordinator-main.js'],WorkingDir:artifactRoot+'/api'},State:{Running:false,Dead:false,Restarting:false,Error:''},Mounts:[{Type:'bind',Source:artifactRoot,Destination:artifactRoot,RW:false}]};
+const legacyPhysical={containerId:legacyId,startIdentity:legacyStart,artifactDigest:null,role:'coordinator',imageDigest:digest('runtime-image'),startedAt:new Date(p.now-6000).toISOString(),finishedAt:new Date(p.now-2000).toISOString(),exitCode:1,running:false,hostPid:0,paused:false,restartPolicy:'no',restartCount:0,oomKilled:false,legacyInertProof:projectLegacyCoordinatorInertHistory(row),mounts:[{type:'bind',source:artifactRoot,destination:artifactRoot,rw:false}]};
+const legacyRecord={kind:'coordinator',instanceId:p.instanceId,containerId:legacyId,startIdentity:legacyStart,artifactDigest:m.components.coordinator.artifactDigest};
+const facts={schemaVersion:1,kind:'legacy-coordinator-inert-history',instanceId:p.instanceId,recordedAt:new Date(p.now-1000).toISOString(),target:{containerId:legacyId,startIdentity:legacyStart,artifactDigest:legacyRecord.artifactDigest,artifactRoot,imageDigest:legacyPhysical.imageDigest,startedAt:legacyPhysical.startedAt,finishedAt:legacyPhysical.finishedAt,restartCount:0,exitCode:1},proof:legacyPhysical.legacyInertProof,signedManifest:envelope,manifestDigest:envelope.manifestDigest,packageDigest:m.packages[0].digest};
+const legacy={...legacyRecord,physical:{...legacyPhysical,DockerStartedAt:legacyPhysical.startedAt,declaredEnvArtifactDigest:legacyRecord.artifactDigest},retiredPhysical:verifyLegacyCoordinatorInertHistory({...facts,receiptDigest:digest(facts)},{instanceId:p.instanceId,record:legacyRecord,physical:legacyPhysical,roots,now:p.now})};
+const target={containerId:'d'.repeat(64),startIdentity:'normal-exited-physical-birth',artifactDigest:digest('normal-old'),DockerStartedAt:new Date(p.now-7000).toISOString(),restartCount:0};
+const normalFacts={schemaVersion:1,kind:'coordinator-normal-exit',instanceId:p.instanceId,migrationId:'old-migration',originalCommandId:'old-migration:stop-writer',target,after:{running:false,hostPid:0,restartPolicy:'no',restartCount:0},exitedAt:new Date(p.now-3000).toISOString()};
+const normal={...target,physical:{...target,running:false,hostPid:0,paused:false,restartPolicy:'no'},retiredPhysical:{...normalFacts,receiptDigest:digest(normalFacts),observedAt:at}};
+let origin,requests=0;
+const server=http.createServer((req,res)=>{requests++;const expected=req.url==='/coordinator-inventory'?'s'.repeat(32):'b'.repeat(32);if(req.headers['x-platform-instance-id']!==p.instanceId||req.headers['x-platform-internal-key']!==expected){res.writeHead(403);res.end('{}');return;}res.setHeader('content-type','application/json');
+if(req.url==='/coordinator-inventory'){res.end(JSON.stringify({instanceId:p.instanceId,complete:true,observedAt:at,coordinators:[{containerId:'a'.repeat(64),startIdentity:p.writer.startIdentity,artifactDigest:p.writer.artifactDigest,applicationOrigin:origin,physical:{running:true,paused:false,startIdentity:p.writer.startIdentity},actualIdentity:{instanceId:p.instanceId,...p.writer,writerFenceValid:true,observedAt:at}},{containerId:'b'.repeat(64),startIdentity:'prepared-physical-birth',artifactDigest:digest('prepared'),physical:{running:true,paused:false,startIdentity:'prepared-physical-birth'},actualIdentity:{instanceId:p.instanceId,startIdentity:'prepared-physical-birth',artifactDigest:digest('prepared'),generation:0,writerFenceValid:false,observedAt:at}},normal,legacy]}));return;}
+if(req.url==='/internal/upgrades/inspection'){res.end(JSON.stringify({instanceId:p.instanceId,action:'writerIdentity',result:{instanceId:p.instanceId,...p.writer,writerFenceValid:true,accepting:false,observedAt:at,lease:{instanceId:p.instanceId,holderId:p.writer.holderId,generation:p.writer.generation,fence:p.writer.fence,expiresAt:p.now+30000}}}));return;}res.writeHead(404);res.end('{}');});
+await new Promise(ok=>server.listen(0,'127.0.0.1',ok));origin='http://127.0.0.1:'+server.address().port;
+try{const client=createControlStabilization({sqlite:db,instanceId:p.instanceId,supervisorOrigin:origin,supervisorKey:'s'.repeat(32),controllerKey:'b'.repeat(32),trustRootPath:trustPath,clock:()=>p.now});const result=await client.capture({recoveryId:p.recoveryId});console.log(JSON.stringify({result,requests}));}finally{db.close();await new Promise(ok=>server.close(ok));}
+`;
+  const modulePath = fileURLToPath(
+    new URL('../../../../deploy/upgrade/control-stabilization.mjs', import.meta.url),
+  );
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    input: JSON.stringify({
+      modulePath,
+      apiPackage: fileURLToPath(new URL('../../../package.json', import.meta.url)),
+      ledgerPath: join(directory, 'control.db'),
+      directory,
+      instanceId,
+      recoveryId,
+      now,
+      writer: writerIdentity,
+      manifest: planFixtureEnvelope(planFixtureSource(), '0.2.11').manifest,
+    }),
+    encoding: 'utf8',
+    timeout: 10000,
+    maxBuffer: 1024 * 1024,
+  });
+  expect(result.status, result.stderr).toBe(0);
+  const generated: {
+    result: { writer: typeof writerIdentity; inventoryDigest: string };
+    requests: number;
+  } = JSON.parse(result.stdout);
+  expect(generated.requests).toBe(2);
+  return generated.result;
 }
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'independent-recovery-'));
@@ -227,7 +300,8 @@ describe('independent recovery authority and business participant barriers', () 
       holderId: lease.holder_id,
     };
     const snapshot = writer.snapshot(attemptId),
-      inventoryDigest = upgradeDigest({ immutableInventory: ['source', 'prepared'] });
+      stabilization = generateControlStabilizationWitness(writerIdentity),
+      inventoryDigest = stabilization.inventoryDigest;
     const authorization = {
       triggeringAttemptId: attemptId,
       targetDigest: snapshot.attempt.targetDigest,
@@ -238,43 +312,25 @@ describe('independent recovery authority and business participant barriers', () 
     ledger
       .prepare('UPDATE control_recovery_intents SET authorization_plan=?,authorization_digest=?')
       .run(canonicalUpgrade(authorization), upgradeDigest(authorization));
-    const proof = {
-      instanceId,
-      writer: writerIdentity,
-      coordinators: [
-        {
-          containerId: 'source-container',
-          startIdentity: writerIdentity.startIdentity,
-          artifactDigest: writerIdentity.artifactDigest,
-          generation: lease.generation,
-          writerFenceValid: true,
-          observedAt: clock.now().toISOString(),
-        },
-        {
-          containerId: 'prepared-container',
-          startIdentity: 'fixed-prepared-birth',
-          artifactDigest: 'sha256:' + 'b'.repeat(64),
-          generation: 0,
-          writerFenceValid: false,
-          observedAt: clock.now().toISOString(),
-        },
-      ],
-      observedAt: clock.now().toISOString(),
-    };
-    ledger.exec(
-      'CREATE TABLE control_stabilization_witnesses(recovery_id TEXT PRIMARY KEY,instance_id TEXT,writer_digest TEXT,inventory_digest TEXT,proof TEXT,proof_digest TEXT,observed_at INTEGER)',
-    );
-    ledger
-      .prepare('INSERT INTO control_stabilization_witnesses VALUES(?,?,?,?,?,?,?)')
-      .run(
-        recoveryId,
-        instanceId,
-        upgradeDigest(writerIdentity),
-        inventoryDigest,
-        canonicalUpgrade(proof),
-        upgradeDigest(proof),
-        now,
-      );
+    const witness = ledger
+      .prepare<unknown[], { proof: string; proof_digest: string }>(
+        'SELECT proof,proof_digest FROM control_stabilization_witnesses WHERE recovery_id=?',
+      )
+      .get(recoveryId);
+    if (!witness) throw new Error('real control producer did not persist its witness');
+    const proof: { coordinators: Record<string, unknown>[] } = JSON.parse(witness.proof);
+    expect(proof.coordinators.map((peer) => peer.kind).sort()).toEqual([
+      'legacy-inert',
+      'live',
+      'live',
+      'normal-exit',
+    ]);
+    expect(proof.coordinators.find((peer) => peer.kind === 'legacy-inert')).toMatchObject({
+      generation: null,
+      writerFenceValid: false,
+      exitCode: 1,
+      artifactLabel: null,
+    });
     business.exec(
       'CREATE TABLE coordinator_handoffs(attempt_id TEXT PRIMARY KEY,stage TEXT,source_generation INTEGER)',
     );
@@ -303,6 +359,40 @@ describe('independent recovery authority and business participant barriers', () 
         participant.admitRecovery(attemptId, epoch),
       );
       const input = { fence: epoch, operationId: recoveryId + ':stabilize-current-writer' };
+      // Recompute the persisted digest after each tamper: the semantic typed
+      // evidence must reject it, rather than relying on a checksum mismatch.
+      const invalidPeers = [
+        ['live', { generation: null }],
+        ['normal-exit', { generation: 0 }],
+        ['normal-exit', { receiptKind: 'legacy-coordinator-inert-history' }],
+        ['legacy-inert', { writerFenceValid: true }],
+        ['legacy-inert', { artifactLabel: writerIdentity.artifactDigest }],
+        ['legacy-inert', { recordedAt: new Date(now - 10000).toISOString() }],
+        ['legacy-inert', { observedAt: new Date(now - 10000).toISOString() }],
+        ['legacy-inert', { receiptDigest: 'missing' }],
+      ] as const;
+      for (const [kind, changes] of invalidPeers) {
+        const invalid = structuredClone(proof),
+          peer = invalid.coordinators.find((row) => row.kind === kind);
+        if (!peer) throw new Error('typed control fixture peer missing');
+        Object.assign(peer, changes);
+        ledger
+          .prepare(
+            'UPDATE control_stabilization_witnesses SET proof=?,proof_digest=? WHERE recovery_id=?',
+          )
+          .run(canonicalUpgrade(invalid), upgradeDigest(invalid), recoveryId);
+        await expect(
+          participant.recoveryRequest(request(), attemptId, 'stabilize', () =>
+            coordinator.stabilize(attemptId, input),
+          ),
+        ).rejects.toThrow();
+        expect(resumed).toBe(0);
+      }
+      ledger
+        .prepare(
+          'UPDATE control_stabilization_witnesses SET proof=?,proof_digest=? WHERE recovery_id=?',
+        )
+        .run(witness.proof, witness.proof_digest, recoveryId);
       const run = () =>
         participant.recoveryRequest(request(), attemptId, 'stabilize', () =>
           participant.recoveryAction(attemptId, 'stabilize-current-writer', input, () =>
