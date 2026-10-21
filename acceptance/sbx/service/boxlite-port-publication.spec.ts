@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -126,8 +127,56 @@ function context(image: ResolvedImageSpec, sandboxId = 'task-1'): SandboxProvide
 async function createdWith(image: ResolvedImageSpec, sandboxId?: string) {
   await new BoxliteSandboxProvider().create(context(image, sandboxId));
   expect(native.creates).toHaveLength(1);
-  return native.creates[0]!;
+  return assertDefined(native.creates[0]);
 }
+
+describe('BoxLite host resource limits support workspace traversal without weakening isolation', () => {
+  it.each(['task-1', AUTH_HELPER_SANDBOX_ID])(
+    'gives %s bounded descriptor capacity while preserving its creation settings',
+    async (sandboxId) => {
+      const image = stagedImage(undefined);
+      const ctx: SandboxProviderContext = {
+        ...context(image, sandboxId),
+        quota: { cores: 2, ramMb: 1536, diskMb: 4096 },
+        volumes: [
+          { source: '/fixture/workspace', target: '/workspace', mode: 'rw', kind: 'host-path' },
+          { source: '/fixture/reference', target: '/reference', mode: 'ro', kind: 'host-path' },
+        ],
+      };
+      const handle = await new BoxliteSandboxProvider().create(ctx);
+      expect(native.creates).toHaveLength(1);
+      const { options, name } = assertDefined(native.creates[0]);
+
+      // Node SDK 0.9.7 replaces its ResourceLimits on any security override. Omitting
+      // maxFileSize/maxProcesses here would silently remove the existing safeguards.
+      expect(options.security).toEqual({
+        maxOpenFiles: 65_536,
+        maxFileSize: 1024 * 1024 * 1024,
+        maxProcesses: 1024,
+      });
+      expect(options).toMatchObject({
+        image: `${image.ref}@${image.digest}`,
+        memoryMib: 1536,
+        cpus: 2,
+        autoRemove: false,
+        detach: true,
+        volumes: [
+          { hostPath: '/fixture/workspace', guestPath: '/workspace', readOnly: false },
+          { hostPath: '/fixture/reference', guestPath: '/reference', readOnly: true },
+        ],
+      });
+      expect(options.env).toEqual(
+        expect.arrayContaining([
+          { key: 'USER_VAR', value: 'kept' },
+          { key: 'JWT_PUBLIC_KEY', value: expect.stringMatching(/^[A-Za-z0-9+/=]{100,}$/) },
+        ]),
+      );
+      expect(options).not.toHaveProperty('ports');
+      expect(name).toBe(`${boxliteNamePrefix()}${sandboxId}`);
+      expect(handle).toEqual({ provider: 'boxlite', providerSandboxId: 'box-1' });
+    },
+  );
+});
 
 describe('BoxLite publishes host ports only for ports the image itself declares', () => {
   it('an image without EXPOSE gets no port mapping at all and keeps the gateway lock env', async () => {
@@ -143,10 +192,12 @@ describe('BoxLite publishes host ports only for ports the image itself declares'
     const ports = options.ports as { hostPort: number; guestPort: number }[];
     expect(ports).toHaveLength(1);
     expect(ports[0]).toMatchObject({ guestPort: 8080 });
-    expect(Number.isInteger(ports[0]!.hostPort) && ports[0]!.hostPort > 0).toBe(true);
+    expect(
+      Number.isInteger(assertDefined(ports[0]).hostPort) && assertDefined(ports[0]).hostPort > 0,
+    ).toBe(true);
     // An ephemeral port is never the declared one: publishing 8080 on 8080 is exactly the
     // fixed-port collision that kept a second box from starting.
-    expect(ports[0]!.hostPort).not.toBe(8080);
+    expect(assertDefined(ports[0]).hostPort).not.toBe(8080);
     expect(ports[0]).not.toHaveProperty('hostIp');
   });
 

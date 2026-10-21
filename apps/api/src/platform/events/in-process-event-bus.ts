@@ -1,5 +1,7 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Injectable, Logger } from '@nestjs/common';
 import type { EventBus, Tx, DomainEvent } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 
 /**
  * In-process EventBus (01 §5; 26 §10 决策 B; 28 §7.3). `publishInTx` records the
@@ -14,8 +16,10 @@ import type { EventBus, Tx, DomainEvent } from '@platform/shared-kernel';
  */
 @Injectable()
 export class InProcessEventBus implements EventBus {
+  private readonly worker = coordinatorWorker('platform.events');
+
   private readonly logger = new Logger(InProcessEventBus.name);
-  private readonly handlers: Array<(events: DomainEvent[]) => void> = [];
+  private readonly handlers: ((events: DomainEvent[]) => void)[] = [];
   private buffer: DomainEvent[] = [];
   private flushScheduled = false;
 
@@ -24,7 +28,9 @@ export class InProcessEventBus implements EventBus {
     this.buffer.push(...events);
     if (!this.flushScheduled) {
       this.flushScheduled = true;
-      queueMicrotask(() => this.flush());
+      this.worker.queue(() => {
+        this.flush();
+      });
     }
   }
 
@@ -42,7 +48,7 @@ export class InProcessEventBus implements EventBus {
       try {
         handler(batch);
       } catch (e) {
-        this.logger.error(`event subscriber threw: ${(e as Error).message}`);
+        this.logger.error(`event subscriber threw: ${errorMessage(e)}`);
       }
     }
   }

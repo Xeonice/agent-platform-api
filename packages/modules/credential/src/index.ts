@@ -10,9 +10,11 @@ export type {
 } from './application/runtime-credential.service';
 export { credentials } from './infrastructure/persistence/schema/credential.sqlite';
 export { credentialSandboxBindings } from './infrastructure/persistence/schema/credential-sandbox-binding.sqlite';
-export { CREDENTIAL_SANDBOX_BINDING_REPOSITORY } from './domain/repositories/credential-sandbox-binding.repository';
-export type { CredentialSandboxBindingRepository } from './domain/repositories/credential-sandbox-binding.repository';
-export type { CredentialSandboxBinding } from './domain/entities/credential-sandbox-binding.entity';
+export { CREDENTIAL_REVOCATION_FACADE } from './application/credential-revocation.facade';
+export type {
+  CredentialRevocationFacade,
+  CredentialRevocationBindingRef,
+} from './application/credential-revocation.facade';
 export type {
   RuntimeSecretPayload,
   RuntimeCredentialFileMaterial,

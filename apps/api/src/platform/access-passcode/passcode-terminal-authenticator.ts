@@ -21,7 +21,8 @@ export class PasscodeTerminalAuthenticator implements TerminalAuthenticator {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
-  authorize(credentials: TerminalHandshakeCredentials): boolean {
+  authorize(credentials: TerminalHandshakeCredentials): boolean | Promise<boolean> {
+    if (this.passcodes.authorityEnabled) return this.passcodes.authorizeTerminal(credentials);
     if (!this.passcodes.enabled || this.passcodes.allowsLoopback(credentials.remoteAddress))
       return true;
     const now = this.clock.now().getTime();

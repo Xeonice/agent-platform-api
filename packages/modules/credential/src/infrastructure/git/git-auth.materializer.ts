@@ -99,14 +99,14 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     //    pre-seeded global known_hosts). Without this, pinning is not a real guarantee.
     // We supply everything explicitly (-i + IdentitiesOnly + our UserKnownHostsFile).
     const gitSshCommand = `ssh -F /dev/null -i "${keyfile}" -o IdentitiesOnly=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="${knownHosts}" -o StrictHostKeyChecking=${strict}`;
-    return {
+    return Promise.resolve({
       env: {},
       gitSshCommand,
-      readKnownHosts: async () => readKnownHostFingerprints(knownHosts, host),
+      readKnownHosts: async () => Promise.resolve(readKnownHostFingerprints(knownHosts, host)),
       dispose: async () => {
         await rm(dir, { recursive: true, force: true });
       },
-    };
+    });
   }
 
   private materializeHttps(
@@ -145,8 +145,8 @@ export class FsGitAuthMaterializer implements GitAuthMaterializer {
     env.GIT_CONFIG_KEY_0 = 'credential.helper';
     env.GIT_CONFIG_VALUE_0 = '';
     hosts.forEach((host, i) => {
-      env[`GIT_CONFIG_KEY_${i + 1}`] = `credential.${helperScheme}://${host}.helper`;
-      env[`GIT_CONFIG_VALUE_${i + 1}`] = HTTPS_HELPER;
+      env[`GIT_CONFIG_KEY_${String(i + 1)}`] = `credential.${helperScheme}://${host}.helper`;
+      env[`GIT_CONFIG_VALUE_${String(i + 1)}`] = HTTPS_HELPER;
     });
     env.GIT_CONFIG_COUNT = String(hosts.length + 1);
     return {

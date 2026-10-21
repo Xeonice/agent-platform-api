@@ -77,8 +77,26 @@ export function builtinImageRefFor(provider: string): string {
   //
   //    ⇒ 平台按机器选对那一张，用户不必知道自己该用 aio 还是 boxlite。
   const published = PUBLISHED_IMAGE_BY_PROVIDER[provider];
-  if (published !== undefined && !isBuiltinImageConfigured()) return published;
+  // The old bootstrap wrote our mutable official alias explicitly. Treat only
+  // those two exact legacy aliases as managed defaults of THIS installed code.
+  // Provider overrides, third-party repositories and pinned user refs retain
+  // precedence; reverting this package also restores its previous resolution.
+  if (published !== undefined && isManagedBuiltinImageDefault(provider)) return published;
   return builtinImageRef();
+}
+
+/** Explicit provider overrides and pinned user defaults are never update-managed. */
+export function isManagedBuiltinImageDefault(provider: string): boolean {
+  const override = (process.env[`SANDBOX_${provider.toUpperCase()}_IMAGE`] ?? '').trim();
+  const legacyOfficial = [
+    'ghcr.io/xeonice/agent-platform-sandbox:latest',
+    'ghcr.io/xeonice/agent-platform-boxlite:latest',
+  ].includes(builtinImageRef());
+  return (
+    override === '' &&
+    publishedImageFor(provider) !== undefined &&
+    (!isBuiltinImageConfigured() || legacyOfficial)
+  );
 }
 
 /**
@@ -94,9 +112,9 @@ export function builtinImageRefFor(provider: string): string {
  * ⚠️ 第三方 provider 不在这张表里 ⇒ 回落到 `builtinImageRef()`，与改动前一字不差：
  * 平台不知道一个外部 provider 该用哪张镜像，**猜一个比让它响亮失败更糟**。
  */
-const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Record<string, string>> = {
-  aio: 'ghcr.io/xeonice/agent-platform-sandbox:latest',
-  boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:latest',
+const PUBLISHED_IMAGE_BY_PROVIDER: Readonly<Partial<Record<string, string>>> = {
+  aio: 'ghcr.io/xeonice/agent-platform-sandbox:v0.3.12-cli.20261017.1',
+  boxlite: 'ghcr.io/xeonice/agent-platform-boxlite:v0.3.12-cli.20261017.1',
 };
 
 /** 平台发布的按档镜像坐标（只读视图，给诊断与错误消息用）。 */
@@ -121,6 +139,7 @@ export function publishedImageFor(provider: string): string | undefined {
 export function isPublishedImageRef(ref: string): boolean {
   const path = repositoryPathOf(ref);
   return Object.values(PUBLISHED_IMAGE_BY_PROVIDER).some((published) => {
+    if (published === undefined) return false;
     const repo = repositoryPathOf(published);
     return path === repo || path.endsWith(`/${repo.split('/').pop() ?? repo}`);
   });

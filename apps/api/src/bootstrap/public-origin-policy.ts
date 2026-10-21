@@ -50,7 +50,14 @@ export function configurePublicHttp(app: INestApplication, config: PublicNetwork
       origin: req.headers.origin ?? false,
       credentials: true,
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Access-Passcode', 'X-Schema-Hash'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Access-Passcode',
+        'X-Schema-Hash',
+        'X-Upgrade-CSRF',
+        'X-Operation-Id',
+      ],
       exposedHeaders: ['X-Schema-Hash', 'Content-Disposition', 'Content-Length'],
       maxAge: 600,
     });

@@ -1,0 +1,68 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SandboxMapper = void 0;
+/**
+ * Mapper — the ONLY place domain ↔ wire DTO conversion happens (28 §4/§8).
+ * `waitingInput` is a derived field projected from the terminal gateway; it is
+ * passed in, never read off the aggregate (28 §4).
+ *
+ * ★ `initialTask.prompt` is NEVER mapped (裁决 D-14): REST and MCP share this DTO, so
+ * echoing it would hand any upstream agent every historical task instruction through
+ * one `list_sandboxes`. `name` (derived from it at create time) is the display half.
+ */
+exports.SandboxMapper = {
+    /**
+     * `health` 与 `waitingInput` 一样是**派生字段**：它不在聚合上，由调用方从
+     * `SandboxHealthMonitor` 的当前观测里取（03 §7.8）。
+     *
+     * ⚠️ **没有观测就整个字段缺席**，不退化成 `unknown` 或 `healthy` —— 缺席的语义是
+     * 「平台这一刻没有观测」，而老客户端读不到它时行为与今天完全一致（`status` 仍是
+     * `running`）。这正是可选字段相对枚举扩展的全部好处。
+     */
+    toDto(agg, waitingInput, health, image, startupObservation) {
+        return {
+            id: agg.id,
+            projectId: agg.projectId,
+            runtime: agg.runtime,
+            // 「这个沙箱里能跑哪几个 CLI」——终端「+ 新终端」下拉的数据源（06 §5.6）。
+            // ⛔ 记录 ∪ 默认，不是推导：见 `Sandbox.availableRuntimes`。
+            availableRuntimes: [...agg.availableRuntimes],
+            // the registry key the frontend needs to look this sandbox's capabilities up
+            // against `GET /api/providers` after a reload.
+            provider: agg.provider,
+            ...(image == null
+                ? {}
+                : {
+                    image: image.ref,
+                    imageId: image.manifestId,
+                    imageDigest: image.digest,
+                    imageIsBuiltin: image.isBuiltin,
+                }),
+            name: agg.name,
+            status: agg.status,
+            ...(startupObservation ? { startupObservation } : {}),
+            headless: agg.headless,
+            timeoutMinutes: timeoutTier(agg.timeoutMinutes),
+            idleTimeoutSec: agg.idleTimeoutSec,
+            waitingInput,
+            version: agg.version,
+            // async provisioning has no response left to carry a failure (04 §4), so the
+            // persisted code is what survives a page reload and teardown retries.
+            failureCode: agg.failureCode ?? undefined,
+            failureMessage: agg.failureReason ?? undefined,
+            failureOperation: agg.failureOperation ?? undefined,
+            hasRun: agg.hasRun,
+            createdAt: agg.createdAt?.toISOString(),
+            updatedAt: agg.updatedAt?.toISOString(),
+            sourceAutomationId: agg.sourceAutomationId ?? undefined,
+            sourceAutomationName: agg.sourceAutomationName ?? undefined,
+            ...(health === undefined ? {} : { health }),
+        };
+    },
+};
+function timeoutTier(value) {
+    if (value === null || value === 30 || value === 60 || value === 120 || value === 240)
+        return value;
+    throw new Error('INVALID_SANDBOX_TIMEOUT_TIER');
+}
+//# sourceMappingURL=sandbox.mapper.js.map

@@ -1,4 +1,4 @@
-import type { CredentialId, DomainEvent } from '@platform/shared-kernel';
+import type { CredentialId, DomainEvent } from '@platform/shared-kernel/pure';
 import type { ObtainedVia } from '../value-objects/obtained-via.vo';
 
 /**

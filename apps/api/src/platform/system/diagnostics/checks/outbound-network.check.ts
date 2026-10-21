@@ -8,7 +8,7 @@ import type { DiagnoseCheck, DiagnoseCheckResult, DiagnoseContext } from './chec
  * 诊断第 ⑤ 项：**外网连通**（镜像仓库 / 模型 API）。
  *
  * ⚠️ **模型 API 与镜像仓库的失败不是一回事**，这一项的分级完全建立在这条区分上：
- *   · 模型 API 全挂 ⇒ **Agent 不可用**，这是 P21-8 §1 的物理约束，不是配置问题 ⇒ ❌
+ *   · 声明的模型目标未通过 ⇒ 如实报告本次探测失败，不推导所有任务／Agent不可用。
  *   · 只是镜像仓库挂 ⇒ 拉不到新镜像，已经 staged 的照样能跑 ⇒ ⚠️
  * 合成一句「外网不通」会让一个只是内网镜像站没配好的部署被告知「Agent 将不可用」，
  * 而那句话会让人去查一件完全无关的事。
@@ -62,12 +62,22 @@ export function outboundVerdict(results: readonly ConnectivityResult[]): Diagnos
   const failed = results.filter((r) => !r.ok);
   const detail = { results };
 
+  if (results.length === 0) {
+    return {
+      status: 'warn',
+      headline: '尚无联网探测结果',
+      detailText: '当前没有可用于判断的探测结果。任务实际连通性以其配置为准。',
+      detail,
+    };
+  }
+
   if (failed.length === 0) {
-    const fastest = Math.min(...results.map((r) => r.latencyMs ?? 0));
+    const latencies = results.flatMap((r) => (r.latencyMs === undefined ? [] : [r.latencyMs]));
+    const timing = latencies.length > 0 ? `，最快 ${String(Math.min(...latencies))}ms` : '';
     return {
       status: 'ok',
-      headline: '外网都能连上',
-      detailText: `${results.map((r) => r.target).join('、')} 均可达，最快 ${String(fastest)}ms。`,
+      headline: '本次探测目标均已通过',
+      detailText: `${results.map((r) => r.target).join('、')} 均在本次探测中通过${timing}。`,
       detail,
     };
   }
@@ -84,8 +94,8 @@ export function outboundVerdict(results: readonly ConnectivityResult[]): Diagnos
     //    断言「Agent 将不可用」，是**断言一件它证明不了的事**：用户看着能正常干活的
     //    机器被告知不可用，而那条红条还会驱动向导要求他确认「以离线模式继续」。
     //
-    // ⚠️ 真的够不着（连接被拒 / 解析不了 / 被重置）仍然是 ❌ 并宣布离线 —— 那一档
-    //    的证据是确凿的。⇒ 分档的依据是**证据强度**，不是失败与否。
+    // 连接被拒／解析失败／被重置仍报告探测失败；这也只证明本次目标的状态，
+    // 不能推断任务自己的模型配置、沙箱网络或其他目标不可用。
     if (modelApis.every((r) => r.timedOut === true)) {
       return {
         status: 'warn',
@@ -95,31 +105,28 @@ export function outboundVerdict(results: readonly ConnectivityResult[]): Diagnos
           `${line}。模型 API 都没在超时时限内应答 —— 这不等于连不上：` +
           '一条时快时慢的链路会周期性越过时限，而 Agent 用的是长连接，可能照样能用。',
         nextStep:
-          '重跑一次诊断看它稳不稳定：偶发多半只是慢，可以直接往下走；每次都这样就按不通处理' +
-          '（内网常见形态是「网络通、但要走代理」，在系统设置里填 HTTPS_PROXY 后重试）。',
+          '重新检测并核对目标地址与探测代理。探测代理不会自动改变任务自己的模型地址或代理配置。',
         detail,
       };
     }
     return {
       status: 'fail',
-      headline: '连不上模型 API，Agent 不可用',
-      detailText: `${line}。当前是离线环境。`,
+      headline: '本次模型 API 探测未通过',
+      detailText: `${line}。任务实际连通性以其配置为准。`,
       ...nextStepOf(failed),
       detail,
     };
   }
+  const registryOnlyFailure =
+    modelApis.length > 0 && others.some((r) => !r.ok) && modelApis.every((r) => r.ok);
   return {
     status: 'warn',
-    headline:
-      others.some((r) => !r.ok) && modelApis.every((r) => r.ok)
-        ? '拉不到新镜像，Agent 仍可用'
-        : '部分目标没通过检查',
+    headline: registryOnlyFailure ? '镜像下载源本次检查未通过' : '部分目标没通过检查',
     // ⚠️ `line` 里每条已经分别写了「不可达」还是「未在超时时限内应答」，
     //    这里的收尾句就不要再把它们压回同一个词。
-    detailText:
-      others.some((r) => !r.ok) && modelApis.every((r) => r.ok)
-        ? `${line}。模型 API 正常，Agent 可用；镜像仓库连不上只影响拉新镜像。`
-        : `${line}。`,
+    detailText: registryOnlyFailure
+      ? `${line}。本次模型 API 目标检查通过；镜像仓库未通过只影响从该源拉新镜像。任务实际连通性以其配置为准。`
+      : `${line}。`,
     ...nextStepOf(failed),
     detail,
   };

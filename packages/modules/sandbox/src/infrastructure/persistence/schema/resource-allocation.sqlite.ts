@@ -33,7 +33,7 @@ export const resourceAllocations = sqliteTable(
     sandboxId: text('sandbox_id')
       .notNull()
       .references(() => sandboxes.id, { onDelete: 'cascade' }),
-    /** 多节点预留；单机恒 `'local'`。FK 见文件头。 */
+    /** Shared local ledger remains readable by old binaries; placement is separate opaque sandbox state. */
     nodeId: text('node_id').notNull().default('local'),
     coresReserved: real('cores_reserved').notNull(),
     ramMbReserved: integer('ram_mb_reserved').notNull(),
@@ -45,7 +45,11 @@ export const resourceAllocations = sqliteTable(
     allocatedAt: integer('allocated_at', { mode: 'timestamp' }).notNull(),
     /** **NULL = 当前活跃占用**；置值后不可回退（23 I-RA-1）。 */
     releasedAt: integer('released_at', { mode: 'timestamp' }),
-    reconciliationStatus: text('reconciliation_status').notNull().default('pending'),
+    reconciliationStatus: text('reconciliation_status', {
+      enum: ['confirmed', 'pending', 'orphaned'],
+    })
+      .notNull()
+      .default('pending'),
   },
   (t) => ({
     sandboxIdx: index('idx_alloc_sandbox').on(t.sandboxId),

@@ -1,4 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  TERMINAL_BOOKMARKS,
+  type TerminalBookmarks,
+  type TerminalBookmark,
+} from '../domain/ports/terminal-bookmarks.port';
 import {
   ImageContractViolationError,
   PLATFORM_AGENT_TMUX_SESSION,
@@ -18,7 +23,6 @@ import type {
   SandboxPtyPort,
 } from '@platform/contracts';
 import {
-  attachOrCreateCmd,
   attachOrCreateRuntimeCmd,
   attachOrCreateShellCmd,
   attachSessionCmd,
@@ -31,6 +35,7 @@ import {
   TMUX_PROBE_CMD,
 } from '../domain/services/tmux-command.policy';
 import type { ShellSessionSummary } from '../domain/services/tmux-command.policy';
+import { errorMessage } from '@platform/shared-kernel';
 
 const TMUX_CMD_TIMEOUT_MS = 30_000;
 
@@ -55,13 +60,19 @@ export type TerminalTarget =
    */
   | { kind: 'agent' }
   /** 用户自己开的纯终端。`shellId` 由网关铸；调用方不许自造。 */
-  | { kind: 'shell'; shellId: string }
+  | { kind: 'shell'; shellId: string; create?: boolean }
   /**
    * 用户自己开的 **agent CLI 标签**（06 §5.6）：独立会话里跑 `buildAttachCommand()`。
    * ⛔ 它**不是任务**：不带指令、不建 AgentTask。两者的分界见
    * `attachOrCreateRuntimeCmd` 的注释。
    */
-  | { kind: 'runtime'; shellId: string; runtimeId: string };
+  | { kind: 'runtime'; shellId: string; runtimeId: string; create?: boolean };
+
+export class TerminalAttachError extends Error {
+  constructor(readonly code: 'RUNTIME_UNKNOWN' | 'TERMINAL_GONE' | 'PROTOCOL_INCOMPATIBLE') {
+    super(code);
+  }
+}
 
 /**
  * The terminal context's application facade — the ONE door in each direction
@@ -95,6 +106,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     @Inject(RUNTIME_ADAPTER_REGISTRY) private readonly runtimes: RuntimeAdapterRegistry,
     @Inject(SANDBOX_EXEC_PORT) private readonly sandboxes: SandboxExecPort,
     @Inject(SANDBOX_PTY_PORT) private readonly pty: SandboxPtyPort,
+    @Optional() @Inject(TERMINAL_BOOKMARKS) private readonly bookmarks?: TerminalBookmarks,
   ) {}
 
   /**
@@ -134,7 +146,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     );
     if (r.exitCode !== 0) {
       throw new Error(
-        `failed to start the agent tmux session (exit ${r.exitCode}): ${r.stdout.trim()}`,
+        `failed to start the agent tmux session (exit ${String(r.exitCode)}): ${r.stdout.trim()}`,
       );
     }
     return { promptConsumed: carriesPrompt, reusedExisting: false };
@@ -142,9 +154,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
 
   /**
    * Open a terminal onto the sandbox — ALWAYS by attaching the existing agent session
-   * (26 §8). If it is unexpectedly gone (killed from inside the sandbox, name removed)
-   * a clean one is started from `buildAttachCommand()` and a warning is logged; the
-   * initial instruction is NEVER replayed on this path (I-SBX-10).
+   * (26 §8). Missing originals are reported; reconnect cannot create a replacement.
    */
   async openSession(
     sandboxId: string,
@@ -153,11 +163,96 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     const { target = { kind: 'agent' }, ...ptyOpts } = opts;
     const cmd =
       target.kind === 'runtime'
-        ? await this.runtimeCommandFor(sandboxId, target.shellId, target.runtimeId)
+        ? target.create
+          ? await this.runtimeCommandFor(sandboxId, target.shellId, target.runtimeId)
+          : await this.existingCommand(sandboxId, shellSessionName(target.shellId))
         : target.kind === 'shell'
-          ? await this.shellCommandFor(sandboxId, target.shellId)
+          ? target.create
+            ? await this.shellCommandFor(sandboxId, target.shellId)
+            : await this.existingCommand(sandboxId, shellSessionName(target.shellId))
           : await this.attachCommandFor(sandboxId);
     return this.pty.openPty(sandboxId, { ...ptyOpts, cmd });
+  }
+  async resolveBookmark(sandboxId: string, terminalIdentity: string): Promise<TerminalTarget> {
+    if (!this.bookmarks) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    const record = await this.bookmarks.resolve(sandboxId, terminalIdentity);
+    if (!record) throw new TerminalAttachError('TERMINAL_GONE');
+    if (record.kind === 'agent') return { kind: 'agent' };
+    if (record.kind === 'runtime' && record.runtimeId)
+      return { kind: 'runtime', shellId: record.privateSessionId, runtimeId: record.runtimeId };
+    return { kind: 'shell', shellId: record.privateSessionId };
+  }
+  async bookmark(sandboxId: string, target: TerminalTarget): Promise<TerminalBookmark> {
+    if (!this.bookmarks) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    return this.bookmarks.ensure(
+      sandboxId,
+      target.kind,
+      target.kind === 'agent' ? PLATFORM_AGENT_TMUX_SESSION : target.shellId,
+      target.kind === 'runtime' ? target.runtimeId : undefined,
+    );
+  }
+  async confirmedIdentity(
+    sandboxId: string,
+    target: TerminalTarget,
+    terminalIdentity: string,
+    actualRuntimeIdentity: string | null | undefined,
+  ): Promise<string | null> {
+    if (!actualRuntimeIdentity || !this.bookmarks) return null;
+    const exec = await this.sandboxes.execFor(sandboxId);
+    const session =
+      target.kind === 'agent' ? PLATFORM_AGENT_TMUX_SESSION : shellSessionName(target.shellId);
+    const result = await exec(
+      [
+        'tmux',
+        '-u',
+        'display-message',
+        '-p',
+        '-t',
+        session,
+        '#{pid}:#{session_id}:#{session_created}',
+      ],
+      { timeoutMs: 5000 },
+    );
+    if (result.exitCode !== 0) {
+      await this.existingCommand(sandboxId, session);
+      throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    }
+    if (!/^\d+:\$\d+:\d+\s*$/.test(result.stdout)) throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    const identity = `${actualRuntimeIdentity}/tmux:${result.stdout.trim()}`;
+    if (!(await this.bookmarks.confirm(sandboxId, terminalIdentity, identity)))
+      throw new TerminalAttachError('TERMINAL_GONE');
+    return identity;
+  }
+  private async existingCommand(sandboxId: string, session: string): Promise<string[]> {
+    let r: Awaited<ReturnType<SandboxExecFn>>;
+    try {
+      r = await (
+        await this.sandboxes.execFor(sandboxId)
+      )(hasSessionCmd(session), { timeoutMs: 5000 });
+    } catch {
+      throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    }
+    if (r.exitCode !== 0) {
+      // A missing session on a healthy tmux server is a confirmed terminal exit;
+      // no server / unreachable transport remains an unknown runtime.
+      const health = await (
+        await this.sandboxes.execFor(sandboxId)
+      )(listSessionsCmd(), { timeoutMs: 5000 });
+      if (health.exitCode === 0) throw new TerminalAttachError('TERMINAL_GONE');
+      // A genuine all-sessions exit removes tmux's server/socket too. Distinguish
+      // that confirmed guest result from transport errors or permissions.
+      if (
+        health.exitCode === 1 &&
+        /no server running|No such file or directory/i.test(health.stderr)
+      ) {
+        const guest = await (
+          await this.sandboxes.execFor(sandboxId)
+        )(['sh', '-c', 'test -d /proc/self && command -v tmux >/dev/null'], { timeoutMs: 5000 });
+        if (guest.exitCode === 0) throw new TerminalAttachError('TERMINAL_GONE');
+      }
+      throw new TerminalAttachError('RUNTIME_UNKNOWN');
+    }
+    return attachSessionCmd(session);
   }
 
   /** Headless tasks retain hard-timeout semantics when inspected through a TTY. */
@@ -183,7 +278,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     } catch (e) {
       // 与 agent 那条路同一条取舍：沙箱可能整个没了，让 pty 层报真正的错，
       // 而不是被一次 binding 查询的失败盖住。少一个 `-c` 只是起点目录不同。
-      this.logger.warn(`sandbox ${sandboxId}: binding unavailable (${(e as Error).message})`);
+      this.logger.warn(`sandbox ${sandboxId}: binding unavailable (${errorMessage(e)})`);
     }
     return attachOrCreateShellCmd(session, workdir);
   }
@@ -236,6 +331,7 @@ export class TerminalSessionService implements AgentSessionBootstrap {
    */
   async closeShellSession(sandboxId: string, shellId: string): Promise<void> {
     const cmd = killShellSessionCmd(shellId); // 形状不对就在这里抛
+    await this.bookmarks?.markCloseRequested?.(sandboxId, shellId);
     const exec = await this.sandboxes.execFor(sandboxId);
     const r = await exec(cmd, { timeoutMs: TMUX_CMD_TIMEOUT_MS });
     if (r.exitCode !== 0) {
@@ -265,16 +361,14 @@ export class TerminalSessionService implements AgentSessionBootstrap {
     try {
       exec = await this.sandboxes.execFor(sandboxId);
     } catch (e) {
-      this.logger.warn(
-        `sandbox ${sandboxId}: 列终端会话失败（exec 不可达）：${(e as Error).message}`,
-      );
+      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败（exec 不可达）：${errorMessage(e)}`);
       return null;
     }
     let r: Awaited<ReturnType<SandboxExecFn>>;
     try {
       r = await exec(listSessionsCmd(), { timeoutMs: TMUX_CMD_TIMEOUT_MS });
     } catch (e) {
-      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败：${(e as Error).message}`);
+      this.logger.warn(`sandbox ${sandboxId}: 列终端会话失败：${errorMessage(e)}`);
       return null;
     }
     if (r.exitCode !== 0) {
@@ -282,35 +376,30 @@ export class TerminalSessionService implements AgentSessionBootstrap {
       // ⚠️ 它**不是**「没有用户终端」—— 那种情况下 agent 会话也不该在，属于异常。
       this.logger.warn(
         `sandbox ${sandboxId}: 列终端会话失败（tmux 退出码 ${String(r.exitCode)}）：` +
-          `${r.stderr.trim() || r.stdout.trim()}`,
+          (r.stderr.trim() || r.stdout.trim()),
       );
       return null;
     }
-    return parseShellSessionList(r.stdout);
+    const shells = parseShellSessionList(r.stdout);
+    const bookmarks = this.bookmarks;
+    if (!bookmarks) return shells;
+    return Promise.all(
+      shells.map(async (shell) => ({
+        ...shell,
+        terminalIdentity: (
+          await bookmarks.ensure(
+            sandboxId,
+            shell.runtimeId ? 'runtime' : 'shell',
+            shell.shellId,
+            shell.runtimeId,
+          )
+        ).terminalIdentity,
+      })),
+    );
   }
 
   private async attachCommandFor(sandboxId: string): Promise<string[]> {
-    let exec: SandboxExecFn;
-    try {
-      exec = await this.sandboxes.execFor(sandboxId);
-    } catch (e) {
-      // The instance may be gone entirely; let the pty layer produce the real error
-      // rather than masking it with a tmux probe failure.
-      this.logger.warn(`sandbox ${sandboxId}: exec unavailable (${(e as Error).message})`);
-      return attachSessionCmd(PLATFORM_AGENT_TMUX_SESSION);
-    }
-    if (await this.sessionExists(exec)) return attachSessionCmd(PLATFORM_AGENT_TMUX_SESSION);
-
-    const binding = await this.sandboxes.bindingOf(sandboxId);
-    this.logger.warn(
-      `sandbox ${sandboxId}: agent session '${PLATFORM_AGENT_TMUX_SESSION}' is missing; ` +
-        'starting a clean one (the initial instruction is NOT replayed)',
-    );
-    const attach = this.runtimes.get(binding.runtimeId).buildAttachCommand();
-    return attachOrCreateCmd(PLATFORM_AGENT_TMUX_SESSION, {
-      ...attach,
-      cwd: attach.cwd ?? binding.workdir,
-    });
+    return this.existingCommand(sandboxId, PLATFORM_AGENT_TMUX_SESSION);
   }
 
   /**

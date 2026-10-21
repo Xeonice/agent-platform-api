@@ -1,0 +1,1145 @@
+import {
+  OwnerJobHandleSchema,
+  OwnerJobChunkSchema,
+  OwnerFileEntriesSchema,
+  OwnerRuntimeStatusSchema,
+  ownerBytes,
+} from './owner-values';
+import { createHash, randomBytes } from 'node:crypto';
+import { request, type IncomingMessage } from 'node:http';
+import { EventEmitter } from 'node:events';
+import type { Clock } from '@platform/shared-kernel';
+import {
+  RuntimeOwnerMetadataSchema,
+  RuntimeOwnerCapacitySchema,
+  RuntimeOwnerHandleSchema,
+  RuntimeOwnerLeaseSchema,
+  RuntimeOwnerStreamFrameSchema,
+  SandboxProviderError,
+  SandboxProviderErrorCode,
+  type RuntimeOwnerCall,
+  type RuntimeOwnerFence,
+  type RuntimeOwnerLease,
+  type RuntimeOwnerMetadata,
+  type RuntimeOwnerMethod,
+  type RuntimeOwnerStreamFrame,
+  type RuntimeOwnerScheduling,
+  type RuntimeOwnerSchedulingSnapshot,
+  type ProviderRegistry,
+  type SandboxProvider,
+  type SandboxHandle,
+  type SandboxProviderContext,
+  type ProcessSpec,
+  type ProcessStream,
+  type SandboxRuntimeStatus,
+  type SandboxJobs,
+  type SandboxFiles,
+  type ResolvedImageSpec,
+  type ResourceQuota,
+  type ProviderEvent,
+} from '@platform/contracts';
+import { explicitRuntimeBusinessAuthority, runtimeBusinessAuthority } from './authority-context';
+import { decodeOwnerValue, encodeOwnerValue, ownerRecord } from './wire-codec';
+
+export interface RuntimeOwnerClientOptions {
+  endpoint: string;
+  instanceId: string;
+  key: string;
+  generation: number;
+  clock: Clock;
+  deferClaim?: boolean;
+}
+function unconfirmedTransport(cause: unknown): SandboxProviderError {
+  return new SandboxProviderError(
+    SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+    'Runtime operation result is not confirmed; look up the original intent',
+    cause,
+    true,
+  );
+}
+
+interface RuntimeReference {
+  ownerId: string;
+  sandboxId: string;
+}
+function runtimeReference(handle: SandboxHandle): RuntimeReference {
+  const value = handle.providerState?.runtimeOwner;
+  const reference = ownerRecord(value);
+  if (typeof reference.ownerId !== 'string' || typeof reference.sandboxId !== 'string')
+    throw new Error('Runtime ownership is unconfirmed');
+  return { ownerId: reference.ownerId, sandboxId: reference.sandboxId };
+}
+
+/** Shared connection per owner; only StateCoordinator has the required key. */
+export class RuntimeOwnerConnection {
+  readonly sessionId = randomBytes(20).toString('hex');
+  metadata!: RuntimeOwnerMetadata;
+  private lease!: RuntimeOwnerLease;
+  private renewal?: NodeJS.Timeout;
+  private activeHttp = 0;
+  private activeObservers = 0;
+  private readonly endpoint: URL;
+  constructor(readonly options: RuntimeOwnerClientOptions) {
+    this.endpoint = new URL(options.endpoint);
+    if (
+      this.endpoint.protocol !== 'http:' ||
+      !['127.0.0.1', 'localhost', '[::1]'].includes(this.endpoint.hostname) ||
+      this.endpoint.username ||
+      this.endpoint.password ||
+      this.endpoint.search ||
+      this.endpoint.hash
+    ) {
+      throw new Error('RuntimeOwner endpoint must be a configured loopback HTTP origin');
+    }
+    if (
+      options.key.length < 32 ||
+      !Number.isSafeInteger(options.generation) ||
+      options.generation < 1
+    )
+      throw new Error('RuntimeOwner coordinator authority is not configured');
+  }
+  async connect(): Promise<void> {
+    this.metadata = RuntimeOwnerMetadataSchema.parse(await this.json('/runtime/metadata'));
+    if (this.metadata.instanceId !== this.options.instanceId)
+      throw new Error('RuntimeOwner belongs to another instance');
+    if (this.options.deferClaim) {
+      if (!this.metadata.lease)
+        throw new Error('Prepared coordinator needs an existing business writer');
+      this.lease = this.metadata.lease;
+      return;
+    }
+    await this.activate(this.options.generation);
+  }
+  async activate(generation: number): Promise<void> {
+    this.assertBusinessWriter(true);
+    this.options.generation = generation;
+    this.options.deferClaim = false;
+    this.metadata = RuntimeOwnerMetadataSchema.parse(await this.json('/runtime/metadata'));
+    this.lease = RuntimeOwnerLeaseSchema.parse(
+      await this.json('/runtime/lease', 'POST', {
+        instanceId: this.options.instanceId,
+        holderId: 'state-coordinator',
+        sessionId: this.sessionId,
+        generation,
+        expectedFence: this.metadata.lease?.fence ?? 0,
+        ttlMs: 30000,
+      }),
+    );
+    if (this.renewal) clearInterval(this.renewal);
+    this.renewal = setInterval(() => {
+      void this.renew().catch(() => {
+        /* Expired authority rejects mutations; never stop the running owner. */
+      });
+    }, 10000);
+    this.renewal.unref();
+  }
+  async release(): Promise<void> {
+    await this.json('/runtime/lease/release', 'POST', {
+      instanceId: this.options.instanceId,
+      holderId: 'state-coordinator',
+      sessionId: this.sessionId,
+      generation: this.options.generation,
+      fence: this.lease.fence,
+    });
+    if (this.renewal) clearInterval(this.renewal);
+    this.renewal = undefined;
+  }
+  close(): void {
+    if (this.renewal) clearInterval(this.renewal);
+    this.renewal = undefined;
+  }
+  /** Reads this connection only; never contacts an Owner or inspects a Guest. */
+  transportReferences(): { http: number; observers: number; renewals: number } {
+    return {
+      http: this.activeHttp,
+      observers: this.activeObservers,
+      renewals: this.renewal ? 1 : 0,
+    };
+  }
+  private async renew(): Promise<void> {
+    this.assertBusinessWriter();
+    this.lease = RuntimeOwnerLeaseSchema.parse(
+      await this.json('/runtime/lease', 'POST', {
+        instanceId: this.options.instanceId,
+        holderId: 'state-coordinator',
+        sessionId: this.sessionId,
+        generation: this.options.generation,
+        expectedFence: this.lease.fence,
+        ttlMs: 30000,
+      }),
+    );
+  }
+  async call(
+    provider: string,
+    method: RuntimeOwnerMethod,
+    args: unknown[],
+    sandboxId?: string,
+  ): Promise<unknown> {
+    if (
+      ![
+        'inspect',
+        'imageStaged',
+        'watchEvents',
+        'jobs.readJob',
+        'files.readFile',
+        'files.listFiles',
+        'files.openFileStream',
+        'stream.detach',
+      ].includes(method)
+    )
+      this.assertBusinessWriter();
+    const call = this.envelope(provider, method, args, sandboxId);
+    if (
+      method === 'jobs.startJob' ||
+      method === 'create' ||
+      (method === 'stop' && explicitRuntimeBusinessAuthority()) ||
+      (method === 'destroy' && explicitRuntimeBusinessAuthority())
+    ) {
+      const digest = createHash('sha256')
+        .update(JSON.stringify(encodeOwnerValue({ provider, method, args, sandboxId })))
+        .digest('hex');
+      const original = await this.observeOperation(call.fence.operationId);
+      if (original.state !== 'absent') {
+        if (
+          original.state === 'complete' &&
+          original.digest === digest &&
+          (method === 'stop' ||
+            original.result !== undefined ||
+            (method === 'destroy' && Object.prototype.hasOwnProperty.call(original, 'result')))
+        )
+          return original.result;
+        throw new SandboxProviderError(
+          SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+          'Original runtime operation is unconfirmed; only its recorded result may be observed',
+          undefined,
+          method === 'stop',
+        );
+      }
+    }
+    const response = ownerRecord(
+      await this.json('/runtime/call', 'POST', { ...call, args: args.map(encodeOwnerValue) }),
+    );
+    return decodeOwnerValue(response.value);
+  }
+  private assertBusinessWriter(allowPreparation = false): void {
+    if (this.options.deferClaim && !allowPreparation)
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Prepared coordinator has no runtime business authority',
+        undefined,
+        true,
+      );
+    if (
+      process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
+      process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
+    )
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Coordinator business writer fence is not authoritative',
+        undefined,
+        true,
+      );
+  }
+  /** Short, bounded, read-only scheduling RPCs never claim/renew a lease. */
+  private async schedulingJson(
+    path: string,
+    signal: AbortSignal,
+    limit = 2 * 1024 * 1024,
+  ): Promise<unknown> {
+    const response = await this.http(path, 'GET', undefined, signal);
+    if (response.statusCode !== 200) {
+      response.destroy();
+      throw unconfirmedTransport(new Error('Owner scheduling observation unavailable'));
+    }
+    return JSON.parse(await this.text(response, limit)) as unknown;
+  }
+  async schedulingMetadata(signal: AbortSignal): Promise<RuntimeOwnerMetadata> {
+    const value = RuntimeOwnerMetadataSchema.parse(
+      await this.schedulingJson('/runtime/metadata', signal, 64 * 1024),
+    );
+    if (
+      value.instanceId !== this.options.instanceId ||
+      value.ownerId !== this.metadata.ownerId ||
+      !value.startIdentity ||
+      value.startIdentity !== this.metadata.startIdentity ||
+      value.artifactDigest !== this.metadata.artifactDigest
+    )
+      throw unconfirmedTransport(new Error('Owner process identity changed'));
+    return value;
+  }
+  async schedulingCapacity(signal: AbortSignal) {
+    const value = RuntimeOwnerCapacitySchema.parse(
+      await this.schedulingJson('/runtime/capacity', signal, 16 * 1024),
+    );
+    const age = this.options.clock.now().getTime() - value.observedAt;
+    if (
+      value.instanceId !== this.options.instanceId ||
+      value.ownerId !== this.metadata.ownerId ||
+      value.startIdentity !== this.metadata.startIdentity ||
+      value.artifactDigest !== this.metadata.artifactDigest ||
+      age < 0 ||
+      age > 5000
+    )
+      throw unconfirmedTransport(
+        new Error('Owner capacity identity or freshness is not confirmed'),
+      );
+    return value.capacity;
+  }
+  async schedulingAssignments(
+    signal: AbortSignal,
+  ): Promise<{ sandboxId: string; state: 'owned' | 'unconfirmed' }[]> {
+    const items = await this.schedulingJson('/runtime/assignments', signal);
+    if (!Array.isArray(items) || items.length > 10000)
+      throw unconfirmedTransport(new Error('Owner inventory is not bounded'));
+    const active: { sandboxId: string; state: 'owned' | 'unconfirmed' }[] = [];
+    const seen = new Set<string>();
+    for (const item of items) {
+      const value = ownerRecord(item);
+      if (
+        typeof value.sandboxId !== 'string' ||
+        !value.sandboxId ||
+        value.sandboxId.length > 256 ||
+        !['owned', 'unconfirmed', 'destroyed'].includes(String(value.state)) ||
+        seen.has(value.sandboxId)
+      )
+        throw unconfirmedTransport(new Error('Owner inventory is not confirmed'));
+      seen.add(value.sandboxId);
+      if (value.state === 'owned' || value.state === 'unconfirmed')
+        active.push({ sandboxId: value.sandboxId, state: value.state });
+    }
+    return active;
+  }
+  async assignments(): Promise<{ sandboxId: string; state: string }[]> {
+    const items = await this.json('/runtime/assignments');
+    if (!Array.isArray(items)) throw new Error('Runtime assignment inventory is not confirmed');
+    return items.map((item) => {
+      const value = ownerRecord(item);
+      if (typeof value.sandboxId !== 'string' || typeof value.state !== 'string')
+        throw new Error('Invalid runtime assignment inventory');
+      return { sandboxId: value.sandboxId, state: value.state };
+    });
+  }
+  async observeOperation(operationId: string): Promise<{
+    state: 'pending' | 'complete' | 'failed' | 'absent' | 'unknown';
+    digest?: string;
+    result?: unknown;
+  }> {
+    try {
+      const value = ownerRecord(
+        await this.json('/runtime/operations/' + encodeURIComponent(operationId)),
+      );
+      if (
+        value.state !== 'pending' &&
+        value.state !== 'complete' &&
+        value.state !== 'failed' &&
+        value.state !== 'absent' &&
+        value.state !== 'unknown'
+      )
+        return { state: 'unknown' };
+      return {
+        state: value.state,
+        ...(typeof value.digest === 'string' ? { digest: value.digest } : {}),
+        ...(value.result === null || value.result === undefined
+          ? {}
+          : { result: decodeOwnerValue(value.result) }),
+      };
+    } catch {
+      return { state: 'unknown' };
+    }
+  }
+  async file(
+    provider: string,
+    handle: SandboxHandle,
+    path: string,
+    sandboxId: string,
+  ): Promise<NodeJS.ReadableStream | null> {
+    return this.openFile(provider, handle, path, sandboxId);
+  }
+  async originalHandle(sandboxId: string, signal?: AbortSignal): Promise<SandboxHandle | null> {
+    const path = '/runtime/original-handle/' + encodeURIComponent(sandboxId);
+    const result = ownerRecord(
+      signal ? await this.schedulingJson(path, signal, 64 * 1024) : await this.json(path),
+    );
+    if (result.handle === null) return null;
+    const handle = ownerRecord(result.handle);
+    if (typeof handle.provider !== 'string' || typeof handle.providerSandboxId !== 'string')
+      throw new Error('Original handle is unconfirmed');
+    return {
+      provider: handle.provider,
+      providerSandboxId: handle.providerSandboxId,
+      providerState: {
+        runtimeOwner: { ownerId: this.metadata.ownerId, sandboxId },
+        original: handle.providerState ?? {},
+      },
+    };
+  }
+  private async openFile(
+    provider: string,
+    handle: SandboxHandle,
+    path: string,
+    sandboxId: string,
+  ): Promise<NodeJS.ReadableStream | null> {
+    const call = this.envelope(provider, 'files.openFileStream', [handle, path], sandboxId);
+    const response = await this.http('/runtime/call', 'POST', {
+      ...call,
+      args: call.args.map(encodeOwnerValue),
+    });
+    if (response.statusCode === 404) {
+      response.resume();
+      return null;
+    }
+    if (response.statusCode !== 200) await this.raise(response);
+    return response;
+  }
+  async *frames(
+    streamId: string,
+    signal: AbortSignal,
+    onState?: (state: 'connected' | 'unconfirmed') => void,
+  ): AsyncGenerator<RuntimeOwnerStreamFrame> {
+    this.activeObservers++;
+    try {
+      let seq = 0;
+      let retries = 0;
+      while (!signal.aborted) {
+        try {
+          const response = await this.http(
+            `/runtime/streams/${encodeURIComponent(streamId)}?fromSeq=${String(seq)}`,
+            'GET',
+            undefined,
+            signal,
+          );
+          if (response.statusCode !== 200) await this.raise(response);
+          onState?.('connected');
+          let pending = '';
+          for await (const item of response) {
+            pending += ownerBytes(item).toString('utf8');
+            if (pending.length > 4 * 1024 * 1024)
+              throw new Error('Runtime stream frame exceeds limit');
+            let index: number;
+            while ((index = pending.indexOf('\n')) >= 0) {
+              const line = pending.slice(0, index);
+              pending = pending.slice(index + 1);
+              if (!line) continue;
+              const frame = RuntimeOwnerStreamFrameSchema.parse(JSON.parse(line) as unknown);
+              if (frame.seq <= seq) continue;
+              if (frame.type !== 'error' && frame.seq !== seq + 1)
+                throw new Error('Runtime stream sequence is not continuous');
+              seq = frame.seq;
+              retries = 0;
+              yield frame;
+              if (frame.type === 'exit' || frame.type === 'error') return;
+            }
+          }
+          if (pending) throw new Error('Truncated runtime stream frame');
+          throw new Error('Runtime transport ended without a process exit');
+        } catch (error) {
+          if (aborted(signal)) return;
+          onState?.('unconfirmed');
+          if (
+            error instanceof SandboxProviderError &&
+            error.code === SandboxProviderErrorCode.NOT_FOUND
+          )
+            throw error;
+          if (++retries > 5) throw error;
+          // Retry only observation of this same stream and cursor. Never replay input/spawn.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(1000, retries * 200));
+            signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
+      }
+    } finally {
+      this.activeObservers--;
+    }
+  }
+  private envelope(
+    provider: string,
+    method: RuntimeOwnerMethod,
+    args: unknown[],
+    sandboxId?: string,
+  ): RuntimeOwnerCall {
+    const authority = runtimeBusinessAuthority();
+    const stable = explicitRuntimeBusinessAuthority();
+    if (method === 'jobs.startJob' && !stable)
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Starting a job requires a persisted run intent',
+      );
+    const digest = createHash('sha256')
+      .update(JSON.stringify(encodeOwnerValue({ provider, method, args, sandboxId })))
+      .digest('hex');
+    const operationId =
+      method === 'jobs.startJob' && stable
+        ? `job:${stable.operationId}:${digest}`
+        : method === 'stop' && stable
+          ? `stop:${stable.operationId}`
+          : method === 'destroy' && stable
+            ? `destroy:${stable.operationId}:${digest}`
+            : method === 'create' && sandboxId && !sandboxId.startsWith('auth-helper')
+              ? stable
+                ? `create:${stable.operationId}`
+                : `create:${sandboxId}:${digest}`
+              : `rpc:${randomBytes(20).toString('hex')}`;
+    const observe = [
+      'inspect',
+      'imageStaged',
+      'watchEvents',
+      'jobs.readJob',
+      'files.readFile',
+      'files.listFiles',
+      'files.openFileStream',
+      'stream.detach',
+    ].includes(method);
+    const fence: RuntimeOwnerFence = {
+      ...this.lease,
+      instanceId: this.options.instanceId,
+      holderId: 'state-coordinator',
+      operationId,
+      sandboxId,
+      actor: authority.actor,
+      authority: observe ? 'observe' : 'business',
+    };
+    return { provider, method, args, fence };
+  }
+  private http(
+    path: string,
+    method = 'GET',
+    data?: unknown,
+    signal?: AbortSignal,
+  ): Promise<IncomingMessage> {
+    const body = data === undefined ? undefined : JSON.stringify(data);
+    this.activeHttp++;
+    let settled = false;
+    const done = () => {
+      if (!settled) {
+        settled = true;
+        this.activeHttp--;
+      }
+    };
+    return new Promise<IncomingMessage>((resolve, reject) => {
+      const outgoing = request(
+        new URL(path, this.endpoint),
+        {
+          method,
+          signal,
+          headers: {
+            'x-platform-internal-key': this.options.key,
+            'x-platform-instance-id': this.options.instanceId,
+            ...(body === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }),
+          },
+        },
+        (response) => {
+          // Keep the dependency until the actual response stream ends/closes.
+          response.once('end', done);
+          response.once('close', done);
+          response.once('error', done);
+          resolve(response);
+        },
+      );
+      outgoing.setTimeout(
+        method === 'GET' && path.startsWith('/runtime/streams/') ? 0 : 120000,
+        () =>
+          outgoing.destroy(unconfirmedTransport(new Error('RuntimeOwner HTTP response timeout'))),
+      );
+      outgoing.on('error', (error) => {
+        done();
+        reject(error instanceof SandboxProviderError ? error : unconfirmedTransport(error));
+      });
+      outgoing.end(body);
+    }).catch((error: unknown) => {
+      done();
+      throw error;
+    });
+  }
+  private async json(path: string, method = 'GET', data?: unknown): Promise<unknown> {
+    const response = await this.http(path, method, data);
+    if (response.statusCode !== 200) await this.raise(response);
+    return JSON.parse(await this.text(response)) as unknown;
+  }
+  private async text(response: IncomingMessage, limit = 32 * 1024 * 1024): Promise<string> {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    try {
+      for await (const item of response) {
+        const chunk = ownerBytes(item);
+        bytes += chunk.length;
+        if (bytes > limit) throw new Error('Runtime response exceeds control-message limit');
+        chunks.push(chunk);
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ERR_STREAM_PREMATURE_CLOSE'].includes(
+          String(error.code),
+        )
+      )
+        throw unconfirmedTransport(error);
+      throw error;
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  private async raise(response: IncomingMessage): Promise<never> {
+    let error: Record<string, unknown> = {};
+    try {
+      error = ownerRecord(ownerRecord(JSON.parse(await this.text(response)) as unknown).error);
+    } catch {
+      /* Never include raw upstream body in logs/errors. */
+    }
+    const code =
+      Object.values(SandboxProviderErrorCode).find((code) => code === error.code) ??
+      SandboxProviderErrorCode.PROVIDER_UNAVAILABLE;
+    throw new SandboxProviderError(
+      code,
+      typeof error.message === 'string' ? error.message : 'RuntimeOwner state is not confirmed',
+      undefined,
+      error.retryable === true,
+    );
+  }
+}
+
+export class RuntimeOwnerProcessStream implements ProcessStream {
+  private readonly events = new EventEmitter();
+  private readonly abort = new AbortController();
+  private pending: Buffer[] = [];
+  private pendingBytes = 0;
+  private exit: { code: number | null } | undefined;
+  private detached = false;
+  readonly connectionErrors = new EventEmitter();
+  private connectionState: 'connected' | 'unconfirmed' = 'unconfirmed';
+  private connectionStateObserved = false;
+  constructor(
+    readonly ref: string,
+    private readonly id: string,
+    private readonly provider: string,
+    private readonly connection: RuntimeOwnerConnection,
+    private readonly sandboxId?: string,
+    readonly runtimeIdentity: string | null = null,
+  ) {
+    void this.pump();
+  }
+  onData(cb: (chunk: Buffer) => void): void {
+    this.events.on('data', cb);
+    for (const chunk of this.pending) cb(chunk);
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+  onExit(cb: (code: number | null) => void): void {
+    this.events.on('exit', cb);
+    if (this.exit) cb(this.exit.code);
+  }
+  onConnectionState(cb: (state: 'connected' | 'unconfirmed') => void): void {
+    this.events.on('connection', cb);
+    if (this.connectionStateObserved) cb(this.connectionState);
+  }
+  write(data: string | Buffer): void {
+    if (!this.detached)
+      void this.connection
+        .call(this.provider, 'stream.write', [this.id, data], this.sandboxId)
+        .catch((error: unknown) => {
+          this.unconfirmed(error);
+        });
+  }
+  resize(cols: number, rows: number): void {
+    if (!this.detached)
+      void this.connection
+        .call(this.provider, 'stream.resize', [this.id, cols, rows], this.sandboxId)
+        .catch((error: unknown) => {
+          this.unconfirmed(error);
+        });
+  }
+  async kill(signal?: NodeJS.Signals): Promise<void> {
+    await this.connection.call(this.provider, 'stream.kill', [this.id, signal], this.sandboxId);
+  }
+  detach(): void {
+    if (this.detached) return;
+    this.detached = true;
+    this.abort.abort();
+    this.events.removeAllListeners();
+    this.pending = [];
+    this.pendingBytes = 0;
+    void this.connection
+      .call(this.provider, 'stream.detach', [this.id], this.sandboxId)
+      .catch(() => {
+        /* Detach failure must never be escalated to kill. */
+      });
+  }
+  private async pump(): Promise<void> {
+    try {
+      for await (const frame of this.connection.frames(this.id, this.abort.signal, (state) => {
+        this.observeConnectionState(state);
+      })) {
+        if (frame.type === 'data') {
+          const data = Buffer.from(frame.data, 'base64');
+          if (this.events.listenerCount('data')) this.events.emit('data', data);
+          else {
+            this.pendingBytes += data.length;
+            if (this.pendingBytes > 2 * 1024 * 1024)
+              throw new Error('Unobserved runtime output exceeded cursor retention');
+            this.pending.push(data);
+          }
+        } else if (frame.type === 'exit') {
+          this.exit = { code: frame.code };
+          this.events.emit('exit', frame.code);
+        } else if (frame.type === 'error') throw new Error(frame.code);
+      }
+    } catch (error) {
+      // Connection loss is not a guest process exit. The gateway can expose unknown.
+      if (!this.detached) this.unconfirmed(error);
+    }
+  }
+  private unconfirmed(error: unknown): void {
+    this.observeConnectionState('unconfirmed');
+    this.connectionErrors.emit('unconfirmed', error);
+  }
+  private observeConnectionState(state: 'connected' | 'unconfirmed'): void {
+    // The constructor's initial value is not a failed read. Only replay actual
+    // HTTP observation, including a first failure before any successful read.
+    const changed = !this.connectionStateObserved || this.connectionState !== state;
+    this.connectionStateObserved = true;
+    this.connectionState = state;
+    if (changed) this.events.emit('connection', state);
+  }
+}
+
+/** SPI proxy preserves opaque original handles and routes old resources to their owner. */
+export class RuntimeOwnerProvider implements SandboxProvider {
+  readonly name: string;
+  readonly capabilities: SandboxProvider['capabilities'];
+  readonly jobs?: SandboxJobs;
+  readonly files?: SandboxFiles;
+  readonly imageStaged?: (image: ResolvedImageSpec) => Promise<boolean>;
+  readonly stageImage?: (
+    image: ResolvedImageSpec,
+    progress?: (bytes: number) => void,
+  ) => Promise<void>;
+  readonly destroyBySandboxId?: (sandboxId: string) => Promise<void>;
+  readonly updateResources?: (handle: SandboxHandle, quota: ResourceQuota) => Promise<void>;
+  readonly watchEvents?: () => AsyncIterable<ProviderEvent>;
+  constructor(
+    descriptor: RuntimeOwnerMetadata['providers'][number],
+    private readonly registry: RuntimeOwnerProviderRegistry,
+  ) {
+    this.name = descriptor.name;
+    this.capabilities = descriptor.capabilities;
+    if (descriptor.methods.includes('jobs.startJob'))
+      this.jobs = {
+        startJob: async (h, spec) =>
+          OwnerJobHandleSchema.parse(await this.call(h, 'jobs.startJob', [spec])),
+        readJob: async (h, job, cursor, opts) =>
+          OwnerJobChunkSchema.parse(await this.call(h, 'jobs.readJob', [job, cursor, opts])),
+        killJob: async (h, job, signal) => {
+          await this.call(h, 'jobs.killJob', [job, signal]);
+        },
+        releaseJob: async (h, job) => {
+          await this.call(h, 'jobs.releaseJob', [job]);
+        },
+      };
+    if (descriptor.methods.includes('files.readFile'))
+      this.files = {
+        readFile: async (h, path) => {
+          const result = await this.call(h, 'files.readFile', [path]);
+          if (result === null || Buffer.isBuffer(result)) return result;
+          throw new Error('Invalid owner file result');
+        },
+        openFileStream: async (h, path) => {
+          const ref = runtimeReference(h);
+          return this.registry.connection(ref.ownerId).file(this.name, h, path, ref.sandboxId);
+        },
+        writeFile: async (h, path, content) => {
+          await this.call(h, 'files.writeFile', [path, content]);
+        },
+        listFiles: async (h, path, opts) =>
+          OwnerFileEntriesSchema.parse(await this.call(h, 'files.listFiles', [path, opts])),
+      };
+    if (descriptor.methods.includes('imageStaged'))
+      this.imageStaged = async (image) => {
+        const result = await this.registry.active.call(this.name, 'imageStaged', [image]);
+        if (typeof result !== 'boolean') throw new Error('Invalid owner image observation');
+        return result;
+      };
+    if (descriptor.methods.includes('stageImage'))
+      this.stageImage = async (image, progress) => {
+        const connection = this.registry.active;
+        const result = ownerRecord(await connection.call(this.name, 'stageImage', [image]));
+        const signal = new AbortController();
+        try {
+          for await (const frame of connection.frames(String(result.streamId), signal.signal)) {
+            if (frame.type === 'progress') progress?.(frame.bytes);
+            if (frame.type === 'error' || (frame.type === 'exit' && frame.code !== 0))
+              throw new SandboxProviderError(
+                SandboxProviderErrorCode.IMAGE_PULL_FAILED,
+                'Image staging did not complete',
+              );
+          }
+        } finally {
+          signal.abort();
+          await connection.call(this.name, 'stream.detach', [String(result.streamId)]);
+        }
+      };
+    if (descriptor.methods.includes('destroyBySandboxId'))
+      this.destroyBySandboxId = async (id) => {
+        const connection = this.registry.assignedOwner(id) ?? this.registry.active;
+        await connection.call(this.name, 'destroyBySandboxId', [id], id);
+      };
+    if (descriptor.methods.includes('updateResources'))
+      this.updateResources = async (h, q) => {
+        await this.call(h, 'updateResources', [q]);
+      };
+    if (descriptor.methods.includes('watchEvents')) this.watchEvents = () => this.providerEvents();
+  }
+  async create(context: SandboxProviderContext): Promise<SandboxHandle> {
+    const assigned = this.registry.assignedOwner(context.sandboxId);
+    // User sandbox placement is persisted at T1. Only the separate fixed helper
+    // has no allocation row and may choose its future default Owner here.
+    if (!assigned && context.sandboxId !== 'auth-helper')
+      throw unconfirmedTransport(new Error('A durable Owner reservation is required'));
+    if (
+      context.sandboxId === 'auth-helper' &&
+      assigned &&
+      assigned.metadata.ownerId !== this.registry.activeOwnerId
+    ) {
+      // A lost pre-journal helper call cannot be retried under a new default.
+      // Preserve its original route and observe only; a later authority may
+      // choose a new future helper only after fencing the previous actor.
+      const original = await assigned.originalHandle(context.sandboxId, AbortSignal.timeout(2000));
+      if (original?.provider !== this.name)
+        throw unconfirmedTransport(new Error('Original helper result is unconfirmed'));
+      return original;
+    }
+    const connection = assigned ?? this.registry.active;
+    this.registry.noteAssignment(context.sandboxId, connection.metadata.ownerId);
+    const handle = RuntimeOwnerHandleSchema.parse(
+      await connection.call(this.name, 'create', [context], context.sandboxId),
+    );
+    this.registry.noteAssignment(context.sandboxId, connection.metadata.ownerId);
+    return {
+      ...handle,
+      providerState: {
+        runtimeOwner: { ownerId: connection.metadata.ownerId, sandboxId: context.sandboxId },
+        original: handle.providerState ?? {},
+      },
+    };
+  }
+  async observeOperation(
+    sandboxId: string,
+    operationId: string,
+  ): Promise<{
+    state: 'pending' | 'complete' | 'failed' | 'absent' | 'unknown';
+    result?: unknown;
+  }> {
+    const connection = this.registry.assignedOwner(sandboxId);
+    if (!connection) return { state: 'unknown' };
+    const stopping = operationId.startsWith('sandbox-stop-');
+    const observation = await connection.observeOperation(
+      (stopping ? 'stop:' : 'create:') + operationId,
+    );
+    if (stopping) return observation;
+    if (observation.state !== 'complete') return observation;
+    const handle = ownerRecord(observation.result);
+    if (handle.provider !== this.name || typeof handle.providerSandboxId !== 'string')
+      return { state: 'unknown' };
+    return {
+      ...observation,
+      result: {
+        ...handle,
+        providerState: {
+          runtimeOwner: { ownerId: connection.metadata.ownerId, sandboxId },
+          original: handle.providerState ?? {},
+        },
+      },
+    };
+  }
+  async start(handle: SandboxHandle): Promise<void> {
+    await this.call(handle, 'start', []);
+  }
+  async originalHandle(sandboxId: string): Promise<SandboxHandle | null> {
+    const owner = this.registry.assignedOwner(sandboxId);
+    if (!owner) return null;
+    const handle = await owner.originalHandle(sandboxId);
+    if (handle && handle.provider !== this.name)
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Original helper belongs to another provider',
+        undefined,
+        true,
+      );
+    return handle;
+  }
+  async stop(handle: SandboxHandle, opts?: { timeoutSec?: number }): Promise<void> {
+    await this.call(handle, 'stop', [opts]);
+  }
+  async destroy(handle: SandboxHandle): Promise<void> {
+    await this.call(handle, 'destroy', []);
+  }
+  async inspect(handle: SandboxHandle): Promise<SandboxRuntimeStatus> {
+    return OwnerRuntimeStatusSchema.parse(await this.call(handle, 'inspect', []));
+  }
+  async spawn(handle: SandboxHandle, spec: ProcessSpec): Promise<ProcessStream> {
+    const reference = runtimeReference(handle);
+    const connection = this.registry.connection(reference.ownerId);
+    const result = ownerRecord(
+      await connection.call(this.name, 'spawn', [handle, spec], reference.sandboxId),
+    );
+    if (typeof result.ref !== 'string' || typeof result.streamId !== 'string')
+      throw new Error('Runtime stream identity is not confirmed');
+    return new RuntimeOwnerProcessStream(
+      result.ref,
+      result.streamId,
+      this.name,
+      connection,
+      reference.sandboxId,
+      typeof result.runtimeIdentity === 'string' ? result.runtimeIdentity : null,
+    );
+  }
+  private call(
+    handle: SandboxHandle,
+    method: RuntimeOwnerMethod,
+    args: unknown[],
+  ): Promise<unknown> {
+    const reference = runtimeReference(handle);
+    return this.registry
+      .connection(reference.ownerId)
+      .call(this.name, method, [handle, ...args], reference.sandboxId);
+  }
+  private async *providerEvents(): AsyncGenerator<ProviderEvent> {
+    const connection = this.registry.active;
+    const result = ownerRecord(await connection.call(this.name, 'watchEvents', []));
+    const abort = new AbortController();
+    try {
+      for await (const frame of connection.frames(String(result.streamId), abort.signal)) {
+        if (frame.type === 'provider-event') yield frame.event;
+        if (frame.type === 'error') throw new Error(frame.code);
+      }
+    } finally {
+      abort.abort();
+      await connection.call(this.name, 'stream.detach', [String(result.streamId)]);
+    }
+  }
+}
+
+export class RuntimeOwnerProviderRegistry implements ProviderRegistry, RuntimeOwnerScheduling {
+  private readonly owners = new Map<string, RuntimeOwnerConnection>();
+  private readonly providers = new Map<string, SandboxProvider>();
+  private readonly assignments = new Map<string, string>();
+  private activeId = '';
+  get active(): RuntimeOwnerConnection {
+    return this.connection(this.activeId);
+  }
+  get defaultProvider(): string {
+    return this.active.metadata.defaultProvider;
+  }
+  get activeOwnerId(): string {
+    return this.activeId;
+  }
+  installedRoutes(): {
+    ownerId: string;
+    endpoint: string;
+    artifactDigest?: string;
+    inputFingerprint?: string;
+  }[] {
+    return [...this.owners.values()].map((owner) => ({
+      ownerId: owner.metadata.ownerId,
+      endpoint: owner.options.endpoint,
+      ...(owner.metadata.artifactDigest ? { artifactDigest: owner.metadata.artifactDigest } : {}),
+      ...(owner.metadata.inputFingerprint
+        ? { inputFingerprint: owner.metadata.inputFingerprint }
+        : {}),
+    }));
+  }
+  transportReferences(): {
+    complete: boolean;
+    owners: number;
+    http: number;
+    observers: number;
+    renewals: number;
+  } {
+    if (this.owners.size > 128)
+      return { complete: false, owners: this.owners.size, http: 0, observers: 0, renewals: 0 };
+    const totals = { complete: true, owners: this.owners.size, http: 0, observers: 0, renewals: 0 };
+    for (const owner of this.owners.values()) {
+      const value = owner.transportReferences();
+      totals.http += value.http;
+      totals.observers += value.observers;
+      totals.renewals += value.renewals;
+    }
+    return totals;
+  }
+  async addOwner(options: RuntimeOwnerClientOptions, active = false): Promise<void> {
+    const connection = new RuntimeOwnerConnection(options);
+    await connection.connect();
+    const id = connection.metadata.ownerId;
+    if (this.owners.has(id)) {
+      connection.close();
+      throw new Error('RuntimeOwner is already registered');
+    }
+    this.owners.set(id, connection);
+    if (active || !this.activeId) this.activeId = id;
+    for (const descriptor of connection.metadata.providers)
+      if (!this.providers.has(descriptor.name))
+        this.providers.set(descriptor.name, new RuntimeOwnerProvider(descriptor, this));
+    for (const assignment of await connection.assignments())
+      if (assignment.state === 'owned' || assignment.state === 'unconfirmed') {
+        const existing = this.assignments.get(assignment.sandboxId);
+        if (existing && existing !== id)
+          throw new Error('Runtime assignment is claimed by two owners');
+        this.assignments.set(assignment.sandboxId, id);
+      }
+  }
+  activateOwner(ownerId: string): void {
+    this.connection(ownerId);
+    this.activeId = ownerId;
+  }
+  async activateBusinessAuthority(generation: number): Promise<void> {
+    for (const owner of this.owners.values()) await owner.activate(generation);
+  }
+  async releaseBusinessAuthority(): Promise<void> {
+    for (const owner of this.owners.values()) await owner.release();
+  }
+  connection(ownerId: string): RuntimeOwnerConnection {
+    const owner = this.owners.get(ownerId);
+    if (!owner)
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
+        'Original RuntimeOwner is not confirmed',
+        undefined,
+        true,
+      );
+    return owner;
+  }
+  assignedOwner(sandboxId: string): RuntimeOwnerConnection | undefined {
+    const id = this.assignments.get(sandboxId);
+    return id ? this.connection(id) : undefined;
+  }
+  pin(sandboxId: string, ownerId: string): void {
+    this.connection(ownerId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(ownerId))
+      throw unconfirmedTransport(new Error('Owner placement identity is invalid'));
+    const existing = this.assignments.get(sandboxId);
+    if (existing && existing !== ownerId)
+      throw unconfirmedTransport(new Error('Original Owner assignment conflicts with reservation'));
+    this.assignments.set(sandboxId, ownerId);
+  }
+  noteAssignment(sandboxId: string, ownerId: string): void {
+    this.pin(sandboxId, ownerId);
+  }
+  originalOwnerId(sandboxId: string): string | undefined {
+    return this.assignments.get(sandboxId);
+  }
+  assertCurrent(observation: RuntimeOwnerSchedulingSnapshot): void {
+    const age = this.active.options.clock.now().getTime() - observation.observedAt;
+    if (
+      this.activeId !== observation.ownerId ||
+      age < 0 ||
+      age > 5000 ||
+      observation.ownerIds.length !== this.owners.size ||
+      observation.ownerIds.some((id) => !this.owners.has(id))
+    )
+      throw unconfirmedTransport(new Error('Owner selection is no longer fresh/current'));
+  }
+  async snapshot(): Promise<RuntimeOwnerSchedulingSnapshot> {
+    const ownerId = this.activeId;
+    const observedAt = this.active.options.clock.now().getTime();
+    if (!ownerId || this.owners.size > 128)
+      throw unconfirmedTransport(new Error('Owner inventory is not complete'));
+    const owners = [...this.owners.values()];
+    const abort = new AbortController();
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(2000)]);
+    try {
+      const records: {
+        ownerId: string;
+        assignments: { sandboxId: string; state: 'owned' | 'unconfirmed' }[];
+        capacity: RuntimeOwnerSchedulingSnapshot['capacity'] | null;
+      }[] = [];
+      let next = 0,
+        assignmentCount = 0;
+      // Bound aggregate inventories as well as each response. Await every actual
+      // read task on failure; no orphan sampling Promise survives the caller.
+      const workers = await Promise.allSettled(
+        Array.from({ length: Math.min(8, owners.length) }, async () => {
+          try {
+            while (next < owners.length) {
+              if (signal.aborted) throw new Error('Owner observation budget ended');
+              const owner = owners[next++];
+              await owner.schedulingMetadata(signal);
+              const assignments = await owner.schedulingAssignments(signal);
+              assignmentCount += assignments.length;
+              if (assignmentCount > 10000)
+                throw new Error('Owner assignment inventory exceeds limit');
+              const capacity =
+                owner.metadata.ownerId === ownerId ? await owner.schedulingCapacity(signal) : null;
+              await owner.schedulingMetadata(signal);
+              records.push({ ownerId: owner.metadata.ownerId, assignments, capacity });
+            }
+          } catch (error) {
+            abort.abort();
+            throw error;
+          }
+        }),
+      );
+      for (const worker of workers) if (worker.status === 'rejected') throw worker.reason;
+      if (this.activeId !== ownerId || owners.length !== this.owners.size || signal.aborted)
+        throw new Error('Default Owner changed during capacity observation');
+      const capacity = records.find((row) => row.ownerId === ownerId)?.capacity;
+      if (!capacity) throw new Error('Default Owner capacity is unavailable');
+      const assignments = records.flatMap((row) =>
+        row.assignments.map((item) => ({ ...item, ownerId: row.ownerId })),
+      );
+      if (
+        assignments.length > 10000 ||
+        new Set(assignments.map((item) => item.sandboxId)).size !== assignments.length
+      )
+        throw new Error('Owner assignment inventory has conflicts');
+      for (const claim of assignments) this.pin(claim.sandboxId, claim.ownerId);
+      const helperPin = this.assignments.get('auth-helper');
+      const helperClaim = assignments.find((item) => item.sandboxId === 'auth-helper');
+      if (!helperClaim && helperPin && helperPin !== ownerId)
+        throw new Error('Original helper result must be observed before changing its pool');
+      return {
+        ownerId,
+        observedAt,
+        capacity,
+        ownerIds: records.map((row) => row.ownerId),
+        helperOwnerId: this.assignments.get('auth-helper') ?? ownerId,
+        assignments,
+      };
+    } catch (error) {
+      throw unconfirmedTransport(error);
+    }
+  }
+  register(provider: SandboxProvider): void {
+    if (this.providers.has(provider.name)) throw new Error('Duplicate remote provider');
+    throw new Error('Providers must be installed in an authenticated RuntimeOwner');
+  }
+  get(name: string): SandboxProvider {
+    const provider = this.providers.get(name);
+    if (!provider)
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.NOT_FOUND,
+        'Provider is not registered in RuntimeOwner',
+      );
+    return provider;
+  }
+  has(name: string): boolean {
+    return this.providers.has(name);
+  }
+  list(): SandboxProvider[] {
+    return [...this.providers.values()];
+  }
+  onModuleDestroy(): void {
+    for (const owner of this.owners.values()) owner.close();
+  }
+}
+
+function aborted(signal: AbortSignal): boolean {
+  return signal.aborted;
+}

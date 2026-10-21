@@ -188,7 +188,7 @@ function awaitShellReady(ws: WebSocket): Promise<void> {
       // the worse failure.
       if ((ready && quietEnough) || outOfPatience) done();
     }, PTY_READY_TICK_MS);
-    timer.unref?.();
+    timer.unref();
     ws.addEventListener('message', onMessage);
   });
 }
@@ -199,24 +199,30 @@ function awaitShellReady(ws: WebSocket): Promise<void> {
  * one maps onto the agent API. `spec.user` is REJECTED rather than dropped: the
  * agent API has no user-switching parameter (04 §4 `UNSUPPORTED_CAPABILITY`).
  */
-export async function exec(http: AioAgentHttp, spec: ProcessSpec): Promise<ProcessStream> {
-  if (spec.user !== undefined && spec.user !== '') {
-    throw new SandboxProviderError(
-      SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
-      'the in-sandbox AIO agent exposes no user-switching parameter; ' +
-        'ProcessSpec.user is not supported on the agent data plane',
+export function exec(http: AioAgentHttp, spec: ProcessSpec): Promise<ProcessStream> {
+  return new Promise((resolve) => {
+    if (spec.user !== undefined && spec.user !== '') {
+      throw new SandboxProviderError(
+        SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
+        'the in-sandbox AIO agent exposes no user-switching parameter; ' +
+          'ProcessSpec.user is not supported on the agent data plane',
+      );
+    }
+    // Client-chosen session id: it is the KILL HANDLE, so it must be known BEFORE
+    // the (blocking) exec request is in flight — otherwise `kill()` has nothing to
+    // target until the command has already finished. The agent accepts an
+    // arbitrary caller-supplied `session_id` and creates the session on demand.
+    const sessionId = `platform-exec-${randomBytes(8).toString('hex')}`;
+    const abort = new AbortController();
+    const result = runExec(http, spec, sessionId, abort);
+    resolve(
+      new AioExecProcessStream(result, {
+        signal: (sig) => http.killSession(sessionId, sig),
+        abort: () => {
+          abort.abort();
+        },
+      }),
     );
-  }
-  // Client-chosen session id: it is the KILL HANDLE, so it must be known BEFORE
-  // the (blocking) exec request is in flight — otherwise `kill()` has nothing to
-  // target until the command has already finished. The agent accepts an
-  // arbitrary caller-supplied `session_id` and creates the session on demand.
-  const sessionId = `platform-exec-${randomBytes(8).toString('hex')}`;
-  const abort = new AbortController();
-  const result = runExec(http, spec, sessionId, abort);
-  return new AioExecProcessStream(result, {
-    signal: (sig) => http.killSession(sessionId, sig),
-    abort: () => abort.abort(),
   });
 }
 
@@ -243,7 +249,9 @@ async function runExec(
   let stdinDir: string | undefined;
   const timer =
     spec.timeoutMs !== undefined
-      ? setTimeout(() => abort.abort(), spec.timeoutMs + ABORT_SLACK_MS)
+      ? setTimeout(() => {
+          abort.abort();
+        }, spec.timeoutMs + ABORT_SLACK_MS)
       : undefined;
   timer?.unref();
   try {

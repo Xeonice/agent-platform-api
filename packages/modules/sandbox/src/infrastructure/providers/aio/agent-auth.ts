@@ -133,7 +133,7 @@ export async function assertAgentRejectsAnonymous(
   if (res.status < 400) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.PROVIDER_UNAVAILABLE,
-      `in-sandbox agent at ${base} answered an UNAUTHENTICATED request (HTTP ${res.status}) ` +
+      `in-sandbox agent at ${base} answered an UNAUTHENTICATED request (HTTP ${String(res.status)}) ` +
         `even though ${AGENT_API_KEY_ENV} was injected — this image does not enforce ` +
         'the agent auth gateway, so its loopback-published port would be an open shell for ' +
         'every local process. Refusing to run (SANDBOX-RUNTIME-DECISIONS 安全姿态).',

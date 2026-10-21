@@ -1,0 +1,58 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resourceAllocationSchema = exports.resourceAllocations = void 0;
+const drizzle_orm_1 = require("drizzle-orm");
+const sqlite_core_1 = require("drizzle-orm/sqlite-core");
+const sandbox_sqlite_1 = require("./sandbox.sqlite");
+/**
+ * `resource_allocations`（13 §2.1.3，9 列逐列对齐）—— 配额账本。
+ *
+ * ⚠️ **`uq_alloc_active` 是本表的重点，不是一个附带的索引。** 13 §2.1.3 原话：
+ * 「这是把『至多一条活跃』从应用层不变量下沉到存储层的关键一招——并发创建时它是最后
+ * 一道防超分配的闸」。drizzle 的写法是 `uniqueIndex(...).on(...).where(...)`；**`where`
+ * 掉了这条索引就退化成「一个 sandbox 一辈子只能有一条登记」**，于是「销毁后重建」直接
+ * 写不进去 —— 而那不会在任何只建不销毁的测试里暴露（`test/integration/
+ * resource-allocation-repository.spec.ts` 专门有一条盯着它）。
+ *
+ * ⚠️ **`node_id` 上没有 FK，尽管 13 §2.1.3 画了一条 `FK→nodes.id`。** `nodes` 是多节点
+ * 预留表（13 §2.8.3），**至今没有建**（§2.0 的「⏳ 仍未建」名单里有它）。指向一张不存在
+ * 的表的外键建不出来，硬写只会让迁移在 `foreign_keys=ON` 时炸。列与索引照建、默认值恒
+ * `'local'`，等 `nodes` 落地时再补 FK —— 这与 13 §2.9 对 #7 的记法一致（「目标表根本不
+ * 存在」）。
+ */
+exports.resourceAllocations = (0, sqlite_core_1.sqliteTable)('resource_allocations', {
+    id: (0, sqlite_core_1.text)('id').primaryKey(),
+    sandboxId: (0, sqlite_core_1.text)('sandbox_id')
+        .notNull()
+        .references(() => sandbox_sqlite_1.sandboxes.id, { onDelete: 'cascade' }),
+    /** 多节点预留；单机恒 `'local'`。FK 见文件头。 */
+    nodeId: (0, sqlite_core_1.text)('node_id').notNull().default('local'),
+    coresReserved: (0, sqlite_core_1.real)('cores_reserved').notNull(),
+    ramMbReserved: (0, sqlite_core_1.integer)('ram_mb_reserved').notNull(),
+    /**
+     * 磁盘进调度（审计 P1-9）：互斥区内按 `projects.baseline_size_bytes × 1.2` 登记
+     * （空项目取配置下限，默认 512MB）。登记在此而非准备阶段预检，是为了**消除 TOCTOU**。
+     */
+    diskMbReserved: (0, sqlite_core_1.integer)('disk_mb_reserved').notNull(),
+    allocatedAt: (0, sqlite_core_1.integer)('allocated_at', { mode: 'timestamp' }).notNull(),
+    /** **NULL = 当前活跃占用**；置值后不可回退（23 I-RA-1）。 */
+    releasedAt: (0, sqlite_core_1.integer)('released_at', { mode: 'timestamp' }),
+    reconciliationStatus: (0, sqlite_core_1.text)('reconciliation_status', {
+        enum: ['confirmed', 'pending', 'orphaned'],
+    })
+        .notNull()
+        .default('pending'),
+}, (t) => ({
+    sandboxIdx: (0, sqlite_core_1.index)('idx_alloc_sandbox').on(t.sandboxId),
+    // 13 §2.1.3「资源池一次扫描同时算出 cores/ram/disk 三个维度的
+    // SUM(...) WHERE released_at IS NULL」
+    nodeReleasedIdx: (0, sqlite_core_1.index)('idx_alloc_node_released').on(t.nodeId, t.releasedAt),
+    // 23 I-RA-2：同一 sandbox 同时至多一条活跃登记。**部分**唯一索引 —— 见文件头。
+    activeUq: (0, sqlite_core_1.uniqueIndex)('uq_alloc_active')
+        .on(t.sandboxId)
+        .where((0, drizzle_orm_1.sql) `released_at is null`),
+    reconciliationCk: (0, sqlite_core_1.check)('resource_allocations_reconciliation_ck', (0, drizzle_orm_1.sql) `${t.reconciliationStatus} IN ('confirmed','pending','orphaned')`),
+    positiveCk: (0, sqlite_core_1.check)('resource_allocations_positive_ck', (0, drizzle_orm_1.sql) `${t.coresReserved} > 0 AND ${t.ramMbReserved} > 0 AND ${t.diskMbReserved} > 0`),
+}));
+exports.resourceAllocationSchema = { resourceAllocations: exports.resourceAllocations };
+//# sourceMappingURL=resource-allocation.sqlite.js.map

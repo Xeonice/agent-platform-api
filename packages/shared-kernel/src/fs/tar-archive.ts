@@ -136,7 +136,8 @@ async function* streamFileExactly(source: string, size: number): AsyncGenerator<
   try {
     const stream = createReadStream(source);
     for await (const chunk of stream) {
-      const buf = chunk as Buffer;
+      if (!Buffer.isBuffer(chunk)) throw new Error('Expected binary archive content');
+      const buf = chunk;
       if (sent >= size) break;
       const slice = sent + buf.length > size ? buf.subarray(0, size - sent) : buf;
       sent += slice.length;
@@ -394,7 +395,7 @@ async function walkDiskUsage(path: string, seen: Set<string>): Promise<number> {
     if (seen.has(key)) return 0;
     seen.add(key);
   }
-  let total = Number(st.blocks) * 512;
+  let total = st.blocks * 512;
   if (st.isDirectory()) {
     let names: string[];
     try {

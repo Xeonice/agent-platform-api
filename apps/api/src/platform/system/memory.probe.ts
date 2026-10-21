@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { execFile } from 'node:child_process';
 import { totalmem } from 'node:os';
 import { readFile } from 'node:fs/promises';
@@ -108,9 +109,10 @@ export const systemMemorySources: MemorySources = {
   readProcMeminfo: () => readFile('/proc/meminfo', 'utf8'),
   runVmStat: () =>
     new Promise((resolve, reject) => {
-      execFile('vm_stat', [], { timeout: 3000 }, (error, stdout) =>
-        error ? reject(error) : resolve(stdout),
-      );
+      execFile('vm_stat', [], { timeout: 3000 }, (error, stdout) => {
+        if (error) reject(error instanceof Error ? error : new Error(errorMessage(error)));
+        else resolve(stdout);
+      });
     }),
   // `os.totalmem()` 是可信的（它就是物理内存总量）—— 不可信的只有 `freemem()`。
   totalBytes: () => totalmem(),
@@ -142,7 +144,7 @@ export async function readMemory(os: string, src: MemorySources): Promise<Memory
       source: 'vm_stat free+inactive+speculative',
     };
   } catch (e) {
-    return { kind: 'unmeasurable', reason: `${strategy} 读取失败：${(e as Error).message}` };
+    return { kind: 'unmeasurable', reason: `${strategy} 读取失败：${errorMessage(e)}` };
   }
 }
 

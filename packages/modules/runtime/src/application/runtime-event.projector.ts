@@ -24,7 +24,9 @@ export class RuntimeEventProjector implements OnApplicationBootstrap {
   ) {}
 
   onApplicationBootstrap(): void {
-    this.events.subscribe((batch) => this.onEvents(batch));
+    this.events.subscribe((batch) => {
+      this.onEvents(batch);
+    });
   }
 
   private onEvents(batch: DomainEvent[]): void {

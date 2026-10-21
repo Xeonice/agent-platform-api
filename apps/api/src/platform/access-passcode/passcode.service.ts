@@ -1,13 +1,23 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import { env } from '../config/env';
 import { SYSTEM_SETTINGS_ROW_ID, systemSettings } from '../system/system-settings.sqlite';
 import { hashPasscode, verifyPasscode } from './passcode-hash';
+import type { Request } from 'express';
+import { SESSION_COOKIE, readCookie, presentedAccessPasscode } from './session-cookie';
+import {
+  authorityRequest,
+  createAccessAuthorityClient,
+  type AccessAuthorityClient,
+  type AuthorityDecision,
+  type AuthorityAction,
+  type AuthorityStatus,
+} from './access-authority-client';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 const COOKIE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (11 §3.1)
 // base58-ish alphabet without 0 O l 1 (11 §3.1)
@@ -48,9 +58,24 @@ export class PasscodeService {
   private storedHash: string | null = null;
   /** Cached signing secret; `''` until first use (it is generated lazily). */
   private sessionSecret = '';
+  readonly authorityEnabled: boolean;
+  private readonly authorityClient?: AccessAuthorityClient;
+  private readonly verifiedRequests = new WeakMap<Request, AuthorityDecision>();
+  private readonly changedSessions = new WeakMap<Request, string>();
 
   constructor(@Inject(DATABASE) private readonly db: Db) {
     this.envPasscode = env.accessPasscode;
+    const origin = process.env.UPGRADE_ACCESS_AUTHORITY_ORIGIN;
+    this.authorityEnabled = Boolean(origin);
+    if (origin) {
+      this.authorityClient = createAccessAuthorityClient({
+        origin,
+        key:
+          process.env.UPGRADE_ACCESS_AUTHORITY_KEY ?? process.env.PLATFORM_CONTROLLER_RPC_KEY ?? '',
+        instanceId: process.env.PLATFORM_INSTANCE_ID ?? '',
+      });
+      return; // The independent authority is the only reader/writer of access policy.
+    }
     const fresh = this.row() === undefined;
     this.reload();
     if (fresh && this.envPasscode === '' && process.env.ACCESS_PASSCODE_AUTO_GENERATE !== 'false') {
@@ -80,6 +105,7 @@ export class PasscodeService {
 
   /** Re-read the stored hash from the row. Called on boot and after every write. */
   reload(): void {
+    this.assertLegacy();
     this.storedHash = this.row()?.accessPasscodeHash ?? null;
   }
 
@@ -88,11 +114,13 @@ export class PasscodeService {
   }
 
   get source(): PasscodeSource {
+    this.assertLegacy();
     if (this.envPasscode.length > 0) return 'env';
     return this.storedHash === null ? 'none' : 'stored';
   }
 
   get sessionSecretPinned(): boolean {
+    this.assertLegacy();
     return (process.env.PASSCODE_COOKIE_SECRET ?? '') !== '';
   }
 
@@ -100,6 +128,16 @@ export class PasscodeService {
     if (process.env.ACCESS_PASSCODE_ALLOW_LOOPBACK !== 'true' || !address) return false;
     const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
     return normalized === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
+  }
+
+  /** Read-only authorization check using exactly the instance's existing access policy.
+   * The HTTP guard still owns lockout accounting and issuing access cookies. */
+  authenticatesRequest(req: Request, now: number): boolean {
+    if (this.authorityEnabled) return this.verifiedRequests.get(req)?.authorized === true;
+    if (!this.enabled || this.allowsLoopback(req.socket.remoteAddress)) return true;
+    if (this.verifySessionToken(readCookie(req, SESSION_COOKIE), now)) return true;
+    const presented = presentedAccessPasscode(req);
+    return presented !== undefined && this.matches(presented);
   }
 
   /** When the stored passcode was last written — `undefined` for env / never set. */
@@ -145,6 +183,7 @@ export class PasscodeService {
    * kind of behaviour nobody notices until the day they rotate.
    */
   setStoredPasscode(plain: string | null, now: Date, invalidateSessions = false): void {
+    this.assertLegacy();
     const secret = invalidateSessions ? randomBytes(32).toString('hex') : undefined;
     this.ensureRow();
     this.db
@@ -160,17 +199,19 @@ export class PasscodeService {
     this.reload();
   }
 
-  /** `${expiresAt}.${hmac}` — verified without server-side session state. */
+  /** `${String(expiresAt)}.${hmac}` — verified without server-side session state. */
   issueCurrentSessionToken(): string {
     return this.issueSessionToken(Date.now());
   }
 
   issueSessionToken(now: number): string {
+    this.assertLegacy();
     const expiresAt = now + COOKIE_TTL_MS;
-    return `${expiresAt}.${this.sign(String(expiresAt))}`;
+    return `${String(expiresAt)}.${this.sign(String(expiresAt))}`;
   }
 
   verifySessionToken(token: string | undefined, now: number): boolean {
+    this.assertLegacy();
     if (!token) return false;
     const dot = token.lastIndexOf('.');
     if (dot < 0) return false;
@@ -182,6 +223,96 @@ export class PasscodeService {
     const b = Buffer.from(expected);
     if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
     return Number(expiresAt) > now;
+  }
+
+  private assertLegacy(): void {
+    if (this.authorityEnabled)
+      throw new HttpException(
+        {
+          code: 'ACCESS_AUTHORITY_REQUIRED',
+          message: '访问策略由独立控制服务管理',
+          retryable: false,
+          sideEffectFree: true,
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+  }
+  accessStatus(): Promise<AuthorityStatus> {
+    if (this.authorityClient) return this.authorityClient.status();
+    return Promise.resolve({
+      enabled: this.enabled,
+      source: this.source,
+      envOverride: this.source === 'env',
+      sessionSecretPinned: this.sessionSecretPinned,
+      revision: 1,
+      updatedAt: this.updatedAt?.toISOString() ?? null,
+    });
+  }
+  async isEnabledAsync(): Promise<boolean> {
+    return (await this.accessStatus()).enabled;
+  }
+  async authorizeRequest(req: Request): Promise<AuthorityDecision> {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    const decision = await this.authorityClient.authenticate(authorityRequest(req));
+    this.verifiedRequests.set(req, decision);
+    return decision;
+  }
+  authorityDecision(req: Request): AuthorityDecision | undefined {
+    return this.verifiedRequests.get(req);
+  }
+  async authorizeTerminal(credentials: {
+    remoteAddress?: string;
+    sessionToken?: string;
+    passcode?: string;
+  }): Promise<boolean> {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    const remoteAddress = credentials.remoteAddress ?? null;
+    const value = await this.authorityClient.authenticate(
+      {
+        remoteAddress,
+        clientIp: remoteAddress?.replace(/^::ffff:/, '') ?? 'unknown',
+        ...(credentials.sessionToken
+          ? { cookie: `ap_session=${encodeURIComponent(credentials.sessionToken)}` }
+          : {}),
+        ...(credentials.passcode !== undefined ? { passcode: credentials.passcode } : {}),
+      },
+      'ws',
+    );
+    return value.authorized;
+  }
+  async unlockAtAuthority(req: Request, plain: string): Promise<AuthorityDecision> {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    return this.authorityClient.unlock(authorityRequest(req, plain));
+  }
+  async changeAtAuthority(req: Request, input: AuthorityAction) {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    const change = await this.authorityClient.change(authorityRequest(req), input);
+    if (change.sessionToken) this.changedSessions.set(req, change.sessionToken);
+    return change;
+  }
+  issueCurrentSessionTokenAsync(req?: Request): Promise<string> {
+    if (!this.authorityEnabled) return Promise.resolve(this.issueCurrentSessionToken());
+    const token = req ? this.changedSessions.get(req) : undefined;
+    if (!token)
+      throw new HttpException(
+        {
+          code: 'ACCESS_AUTHORITY_REQUIRED',
+          message: '无法确认本次会话变更',
+          retryable: false,
+          sideEffectFree: false,
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    if (req) this.changedSessions.delete(req);
+    return Promise.resolve(token);
+  }
+  authorityFingerprint() {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    return this.authorityClient.fingerprint();
+  }
+  authorityChallenge(legacyBaseline: boolean) {
+    if (!this.authorityClient) throw new Error('Independent access authority is not configured');
+    return this.authorityClient.challenge(legacyBaseline);
   }
 
   private sign(payload: string): string {

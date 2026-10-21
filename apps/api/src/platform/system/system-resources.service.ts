@@ -1,3 +1,4 @@
+import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cpus, freemem, loadavg, platform, totalmem } from 'node:os';
@@ -12,7 +13,7 @@ import { env } from '../config/env';
 import { MEMORY_SOURCES, readMemory, type MemoryReading, type MemorySources } from './memory.probe';
 import { DISK_CRITICAL_PERCENT, DISK_WARN_PERCENT } from './diagnostics/checks/disk-space.check';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** CPU/RAM 三态（P21-5 §5）：<80% ✅ / 80–95% ⚠️ / ≥95% 🔴。 */
 const COMPUTE_WARN_PERCENT = 80;
@@ -85,7 +86,18 @@ export class SystemResourcesService {
   }
 
   async snapshot(): Promise<SystemResourcesDto> {
-    const capacity = await this.sandbox?.defaultCapacity();
+    let capacity: SystemResourcesDto['capacity'];
+    let capacityAvailability: SystemResourcesDto['capacityAvailability'];
+    try {
+      capacity = await this.sandbox?.defaultCapacity();
+    } catch (error) {
+      if (
+        !(error instanceof SandboxProviderError) ||
+        error.code !== SandboxProviderErrorCode.PROVIDER_UNAVAILABLE
+      )
+        throw error;
+      capacityAvailability = { state: 'unavailable', reason: 'OWNER_CAPACITY_UNAVAILABLE' };
+    }
     const cores = Math.max(cpus().length, 1);
     const load = loadavg()[0] ?? 0;
     const cpuPercent = (load / cores) * 100;
@@ -103,6 +115,7 @@ export class SystemResourcesService {
 
     return {
       ...(capacity === undefined ? {} : { capacity }),
+      ...(capacityAvailability === undefined ? {} : { capacityAvailability }),
       cpu: {
         cores,
         loadAvg1m: round(load, 2),
@@ -143,7 +156,7 @@ export class SystemResourcesService {
       .from(sandboxes)
       .where(inArray(sandboxes.status, [...ACTIVE_STATUSES]))
       .all();
-    return Number(rows[0]?.n ?? 0);
+    return rows[0]?.n ?? 0;
   }
 
   /**
@@ -219,7 +232,8 @@ async function dirDiskUsage(
   const stack = [dir];
   while (stack.length > 0) {
     if (visited >= budget) return { bytes, visited, truncated: true };
-    const current = stack.pop()!;
+    const current = stack.pop();
+    if (current === undefined) break;
     let items;
     try {
       items = await readdir(current, { withFileTypes: true });

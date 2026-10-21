@@ -1,0 +1,16 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.InvalidSandboxTransitionError = void 0;
+/** Illegal state-machine move (28 §11) → interface layer maps to HTTP 409. */
+class InvalidSandboxTransitionError extends Error {
+    from;
+    to;
+    constructor(from, to) {
+        super(`Illegal sandbox transition: ${from} -> ${to}`);
+        this.from = from;
+        this.to = to;
+        this.name = 'InvalidSandboxTransitionError';
+    }
+}
+exports.InvalidSandboxTransitionError = InvalidSandboxTransitionError;
+//# sourceMappingURL=invalid-transition.error.js.map

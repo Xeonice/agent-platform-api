@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import {
   isOciDigest,
   parseImageRef,
@@ -126,16 +127,16 @@ export async function imageStageProgress(
   const doc = await readPlatformManifest(home, manifestDigest, platformArch, fs, join);
   if (doc === null) return null;
 
-  const layers = doc['layers'];
+  const layers = doc.layers;
   if (!Array.isArray(layers) || layers.length === 0) return null;
 
   let total = 0;
   let have = 0;
   for (const raw of layers) {
-    if (typeof raw !== 'object' || raw === null) return null;
-    const layer = raw as Record<string, unknown>;
-    const digest = layer['digest'];
-    const size = layer['size'];
+    if (!isRecord(raw)) return null;
+    const layer = raw;
+    const digest = layer.digest;
+    const size = layer.size;
     if (typeof digest !== 'string' || typeof size !== 'number') return null;
     total += size;
     try {
@@ -166,9 +167,7 @@ async function readStoreJson(
 ): Promise<Record<string, unknown> | null> {
   try {
     const parsed: unknown = JSON.parse(await fs.readFile(path, 'utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -199,19 +198,15 @@ export async function readPlatformManifest(
   const doc = await readStoreJson(fs, manifestPath(manifestDigest));
   if (doc === null) return null;
 
-  const children = doc['manifests'];
+  const children = doc.manifests;
   if (!Array.isArray(children)) return doc;
   const match = children.find((m): m is Record<string, unknown> => {
-    if (typeof m !== 'object' || m === null) return false;
-    const p = (m as Record<string, unknown>)['platform'];
-    return (
-      typeof p === 'object' &&
-      p !== null &&
-      (p as Record<string, unknown>)['architecture'] === platformArch
-    );
+    if (!isRecord(m)) return false;
+    const p = m.platform;
+    return isRecord(p) && p.architecture === platformArch;
   });
   if (match === undefined) return null;
-  const childDigest = match['digest'];
+  const childDigest = match.digest;
   if (typeof childDigest !== 'string') return null;
   return readStoreJson(fs, manifestPath(childDigest));
 }
@@ -247,9 +242,9 @@ export async function imageExposedPorts(
 ): Promise<ExposedPort[] | null> {
   const manifest = await readPlatformManifest(home, manifestDigest, platformArch, fs, join);
   if (manifest === null) return null;
-  const pointer = manifest['config'];
-  if (typeof pointer !== 'object' || pointer === null) return null;
-  const configDigest = (pointer as Record<string, unknown>)['digest'];
+  const pointer = manifest.config;
+  if (!isRecord(pointer)) return null;
+  const configDigest = pointer.digest;
   // ⚠️ 校验 digest 形状再拼路径：这个值来自磁盘上的 JSON，不是平台自己算的。
   if (typeof configDigest !== 'string' || !isOciDigest(configDigest)) return null;
 
@@ -258,10 +253,10 @@ export async function imageExposedPorts(
     join(home, 'images', 'configs', storeFileName(configDigest)),
   );
   if (blob === null) return null;
-  const config = blob['config'];
+  const config = blob.config;
   if (config === undefined || config === null) return [];
-  if (typeof config !== 'object' || Array.isArray(config)) return null;
-  const exposed = (config as Record<string, unknown>)['ExposedPorts'];
+  if (!isRecord(config)) return null;
+  const exposed = config.ExposedPorts;
   if (exposed === undefined || exposed === null) return [];
   if (typeof exposed !== 'object' || Array.isArray(exposed)) return null;
 

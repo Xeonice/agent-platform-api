@@ -12,7 +12,9 @@ export class TerminalOutputBatcher {
   write(chunk: Buffer): void {
     if (this.closed) return;
     this.pending += this.decoder.write(chunk);
-    if (!this.timer) this.timer = setTimeout(() => this.flush(), 16);
+    this.timer ??= setTimeout(() => {
+      this.flush();
+    }, 16);
   }
 
   flush(): void {

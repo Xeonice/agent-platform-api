@@ -26,7 +26,7 @@ export type MergedEnv = MergedEnvEntry[];
  * with no mocks at all.
  */
 export function mergeEnv(image: EnvVarSet, project: EnvVarSet, task: EnvVarSet): MergedEnv {
-  const layers: Array<[EnvSource, EnvVarSet]> = [
+  const layers: [EnvSource, EnvVarSet][] = [
     ['image', image],
     ['project', project],
     ['task', task],

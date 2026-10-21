@@ -1,4 +1,5 @@
-import { HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { HttpStatus, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import {
   CLOCK,
   ID_GENERATOR,
@@ -7,7 +8,7 @@ import {
   asSandboxId,
   asProjectId,
 } from '@platform/shared-kernel';
-import type { Clock, IdGenerator, UnitOfWork, EventBus } from '@platform/shared-kernel';
+import type { Clock, IdGenerator, UnitOfWork, EventBus, Tx } from '@platform/shared-kernel';
 import {
   RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
@@ -23,6 +24,8 @@ import {
   isSandboxFailureCode,
   INTERNAL_ERROR_CODE,
   WAITING_INPUT_QUERY,
+  TERMINAL_BOOKMARK_CLEANUP,
+  RUNTIME_BUSINESS_AUTHORITY,
 } from '@platform/contracts';
 import type {
   ResourceQuota,
@@ -36,7 +39,6 @@ import type {
   SandboxDto,
   ProviderRegistry,
   SandboxProvider,
-  SandboxProviderCapabilities,
   SandboxHandle,
   WorkspacePreparer,
   ProjectAccessErrorCode,
@@ -46,6 +48,8 @@ import type {
   WorkspaceSource,
   RegisterRetainedVolumeCommand,
   WaitingInputQueryPort,
+  TerminalBookmarkCleanup,
+  RuntimeBusinessAuthorityPort,
 } from '@platform/contracts';
 import { ProvisionSandboxWorkflow } from './workflows/provision-sandbox.workflow';
 import { ResourceAllocator } from './resource-allocator';
@@ -65,6 +69,14 @@ import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import type { SandboxRepository } from '../domain/repositories/sandbox.repository';
 import { SandboxMapper } from './dto/sandbox.mapper';
 import { planQuota } from '../domain/services/resource-pool.domain-service';
+import {
+  SANDBOX_ADMISSION_INTENTS,
+  type SandboxAdmissionIntents,
+} from '../domain/ports/sandbox-admission-intents.port';
+import {
+  SANDBOX_STOP_INTENTS,
+  type SandboxStopIntents,
+} from '../domain/ports/sandbox-stop-intents.port';
 
 /**
  * How long a `POST /api/sandboxes/:id/exec` command may run.
@@ -134,7 +146,13 @@ interface AdmittedCreate {
  */
 @Injectable()
 export class SandboxApplicationService {
+  private readonly worker = coordinatorWorker('sandbox.operations');
+
   private readonly teardowns = new Map<string, Teardown>();
+  private readonly acceptedCreates = new Map<
+    string,
+    { input: string; promise: Promise<SandboxDto> }
+  >();
   constructor(
     @Inject(SANDBOX_REPOSITORY) private readonly repo: SandboxRepository,
     @Inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
@@ -152,6 +170,18 @@ export class SandboxApplicationService {
     /** 03 §3 的互斥登记 —— `RESOURCE_EXHAUSTED` 在本平台唯一的真实抛出点。 */
     private readonly resources: ResourceAllocator,
     @Inject(WAITING_INPUT_QUERY) private readonly waiting: WaitingInputQueryPort,
+    @Optional()
+    @Inject(SANDBOX_ADMISSION_INTENTS)
+    private readonly admissionIntents?: SandboxAdmissionIntents,
+    @Optional()
+    @Inject(TERMINAL_BOOKMARK_CLEANUP)
+    private readonly terminalBookmarks?: TerminalBookmarkCleanup,
+    @Optional()
+    @Inject(SANDBOX_STOP_INTENTS)
+    private readonly stopIntents?: SandboxStopIntents,
+    @Optional()
+    @Inject(RUNTIME_BUSINESS_AUTHORITY)
+    private readonly authority?: RuntimeBusinessAuthorityPort,
   ) {}
 
   /**
@@ -183,77 +213,132 @@ export class SandboxApplicationService {
       sourceAutomationName?: string;
       artifactRetentionDays?: 3 | 7 | 30;
     },
+    accepted?: { sandboxId: string; input: string },
   ): Promise<SandboxDto> {
-    const admitted = await this.admit(input);
-    // Fetch display metadata before reserving capacity or persisting the task.
-    const image = await this.imageFacade.findTaskImageSummary(admitted.imageRef);
+    return this.worker.run(async () => {
+      const admitted = await this.admit(input);
+      // Fetch display metadata before reserving capacity or persisting the task.
+      const image = await this.imageFacade.findTaskImageSummary(admitted.imageRef);
 
-    const headless = input.headless ?? false;
-    const sandbox = Sandbox.create({
-      id: asSandboxId(this.ids.next()),
-      projectId: asProjectId(input.projectId),
-      runtime: input.runtime,
-      runtimeLabel: this.runtimeLabel(input.runtime),
-      provider: admitted.providerName,
-      imageRef: admitted.imageRef,
-      headless,
-      sourceAutomationId: input.sourceAutomationId,
-      sourceAutomationName: input.sourceAutomationName,
-      artifactRetentionDays: input.artifactRetentionDays,
-      // T-1: the instruction is PERSISTED here, in T1. Its consumer
-      // (`bootstrapAgentSession`) runs after the 202 in a workflow whose only input is
-      // a `sandboxId` (26 §1) — anything crossing that boundary needs storage, and the
-      // queue is an in-memory FIFO, i.e. a strictly weaker store than the DB.
-      initialPrompt: input.initialPrompt,
-      timeoutMinutes: headless ? (input.timeoutMinutes ?? 30) : null,
-      idleTimeoutSec: 1800,
-      now: this.clock.now(),
-    });
-
-    // ── 03 §3 互斥区：校验剩余容量 → 登记占用 → 落库，**一个事务** ────────────────
-    //
-    // ⚠️ **它必须在这里、在 `create` 同步返回之前。** 下面那行 `void runSafely(...)` 是
-    // 分钟级的后台流水线；把容量判定留在里面，失败就不在 `createSandbox` 的调用栈上，
-    // `AutomationTaskLauncherAdapter` 的 catch 一次都接不到，而 03 §8.2 决策表行 3
-    // （排队重试、不计失败）整条就是死代码 —— 那正是本切片之前的状态。
-    //
-    // ⚠️ **登记与 sandbox 行同事务。** 容量不够时抛 `RESOURCE_EXHAUSTED` 而**一行都没写**：
-    // 否则自动化那 5 次排队重试会在任务列表里留下 5 个空壳沙箱。
-    //
-    // ⚠️ **它刻意不带 `sideEffectFree`，尽管这次拒绝确实什么都没写。** 那个标记的可信度
-    // 来自它是**位置**决定的（`atDoor` 包住的那一段结构上就碰不到 `uow`，§3.1）；在门外
-    // 手写一个 `true`，等于把「零副作用」从一条结构性事实退回成一句每个抛出点各自记得
-    // 的承诺 —— 而 `create-door.spec.ts` 整个「零副作用靠位置而不是靠记性」的守卫就是
-    // 冲着这件事来的。缺席 = 保守读法，代价只是前端把它当「可能有副作用」；而
-    // `retryable:true` 已经把用户真正需要的下一步（等一会儿再来）说清楚了。
-    try {
-      await this.resources.reserve({ sandboxId: sandbox.id, quota: admitted.quota }, (tx) => {
-        this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
-        this.repo.saveSync(tx, sandbox);
-        this.events.publishInTx(tx, sandbox.pullEvents());
+      const headless = input.headless ?? false;
+      const sandbox = Sandbox.create({
+        id: asSandboxId(accepted?.sandboxId ?? this.ids.next()),
+        projectId: asProjectId(input.projectId),
+        runtime: input.runtime,
+        runtimeLabel: this.runtimeLabel(input.runtime),
+        provider: admitted.providerName,
+        imageRef: admitted.imageRef,
+        headless,
+        sourceAutomationId: input.sourceAutomationId,
+        sourceAutomationName: input.sourceAutomationName,
+        artifactRetentionDays: input.artifactRetentionDays,
+        // T-1: the instruction is PERSISTED here, in T1. Its consumer
+        // (`bootstrapAgentSession`) runs after the 202 in a workflow whose only input is
+        // a `sandboxId` (26 §1) — anything crossing that boundary needs storage, and the
+        // queue is an in-memory FIFO, i.e. a strictly weaker store than the DB.
+        initialPrompt: input.initialPrompt,
+        timeoutMinutes: headless ? (input.timeoutMinutes ?? 30) : null,
+        idleTimeoutSec: 1800,
+        now: this.clock.now(),
       });
-    } catch (e) {
-      if (e instanceof ProjectAccessError) {
-        // The final project check precedes every write in this transaction. It
-        // closes deletion/reclone races after the asynchronous admission reads.
-        return atDoor(async () => {
-          throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
-        });
-      }
-      throw this.mapProviderError(e);
-    }
 
-    // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
-    // MUST NOT block on provision→start→readiness — boxlite cold-pull alone
-    // is ~220s, a cold runtime-CLI install was measured at 753s, and even a WARM
-    // micro-VM takes 3.2s to boot before its first exec (实测 2026-08-26). Snapshot the
-    // `pending` DTO NOW (before provision runs — it advances the aggregate
-    // synchronously up to its first await), return it immediately, and let provision
-    // drive the state machine in the background (each transition persists + publishes
-    // a SandboxStateChanged event for the WS relay). Failures land `failed`.
-    const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
-    void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
-    return dto;
+      // ── 03 §3 互斥区：校验剩余容量 → 登记占用 → 落库，**一个事务** ────────────────
+      //
+      // ⚠️ **它必须在这里、在 `create` 同步返回之前。** 下面那行 `void runSafely(...)` 是
+      // 分钟级的后台流水线；把容量判定留在里面，失败就不在 `createSandbox` 的调用栈上，
+      // `AutomationTaskLauncherAdapter` 的 catch 一次都接不到，而 03 §8.2 决策表行 3
+      // （排队重试、不计失败）整条就是死代码 —— 那正是本切片之前的状态。
+      //
+      // ⚠️ **登记与 sandbox 行同事务。** 容量不够时抛 `RESOURCE_EXHAUSTED` 而**一行都没写**：
+      // 否则自动化那 5 次排队重试会在任务列表里留下 5 个空壳沙箱。
+      //
+      // ⚠️ **它刻意不带 `sideEffectFree`，尽管这次拒绝确实什么都没写。** 那个标记的可信度
+      // 来自它是**位置**决定的（`atDoor` 包住的那一段结构上就碰不到 `uow`，§3.1）；在门外
+      // 手写一个 `true`，等于把「零副作用」从一条结构性事实退回成一句每个抛出点各自记得
+      // 的承诺 —— 而 `create-door.spec.ts` 整个「零副作用靠位置而不是靠记性」的守卫就是
+      // 冲着这件事来的。缺席 = 保守读法，代价只是前端把它当「可能有副作用」；而
+      // `retryable:true` 已经把用户真正需要的下一步（等一会儿再来）说清楚了。
+      try {
+        await this.resources.reserve(
+          { sandboxId: sandbox.id, quota: admitted.quota },
+          (tx, pendingProviderState) => {
+            this.projectFacade.assertCanCreateTaskSync(tx, input.projectId);
+            if (pendingProviderState) sandbox.setPendingProviderState(pendingProviderState);
+            this.repo.saveSync(tx, sandbox);
+            if (accepted) this.admissionIntents?.reserveSync(tx, sandbox.id, accepted.input);
+            this.events.publishInTx(tx, sandbox.pullEvents());
+          },
+        );
+      } catch (e) {
+        if (e instanceof ProjectAccessError) {
+          // The final project check precedes every write in this transaction. It
+          // closes deletion/reclone races after the asynchronous admission reads.
+          return atDoor(() =>
+            Promise.reject(doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message)),
+          );
+        }
+        throw this.mapProviderError(e);
+      }
+
+      // ASYNC lifecycle (03 / P20 §3.3 four-phase progress card): the request path
+      // MUST NOT block on provision→start→readiness — boxlite cold-pull alone
+      // is ~220s, a cold runtime-CLI install was measured at 753s, and even a WARM
+      // micro-VM takes 3.2s to boot before its first exec (实测 2026-08-26). Snapshot the
+      // `pending` DTO NOW (before provision runs — it advances the aggregate
+      // synchronously up to its first await), return it immediately, and let provision
+      // drive the state machine in the background (each transition persists + publishes
+      // a SandboxStateChanged event for the WS relay). Failures land `failed`.
+      const dto = SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
+      void this.provision.runSafely(sandbox, admitted.provider, admitted.workspaceSource);
+      return dto;
+    });
+  }
+
+  /** A retry confirms the originally accepted sandbox, never allocates another. */
+  createAccepted(
+    input: CreateSandboxInput & {
+      sourceAutomationId?: string;
+      sourceAutomationName?: string;
+      artifactRetentionDays?: 3 | 7 | 30;
+    },
+    sandboxId: string,
+  ): Promise<SandboxDto> {
+    return this.worker.run(async () => {
+      const frozen = JSON.stringify(input);
+      const inFlight = this.acceptedCreates.get(sandboxId);
+      if (inFlight)
+        return inFlight.input === frozen
+          ? inFlight.promise
+          : Promise.reject(new Error('SANDBOX_ADMISSION_INTENT_CONFLICT'));
+      const promise = this.createAcceptedOnce(input, sandboxId, frozen).finally(() =>
+        this.acceptedCreates.delete(sandboxId),
+      );
+      this.acceptedCreates.set(sandboxId, { input: frozen, promise });
+      return promise;
+    });
+  }
+  private async createAcceptedOnce(
+    input: CreateSandboxInput & {
+      sourceAutomationId?: string;
+      sourceAutomationName?: string;
+      artifactRetentionDays?: 3 | 7 | 30;
+    },
+    sandboxId: string,
+    frozen: string,
+  ): Promise<SandboxDto> {
+    return this.worker.run(async () => {
+      if (!this.admissionIntents) throw new Error('SANDBOX_ADMISSION_INTENTS_REQUIRED');
+      const prior = await this.admissionIntents.find(sandboxId);
+      if (prior !== null) {
+        if (prior !== frozen) throw new Error('SANDBOX_ADMISSION_INTENT_CONFLICT');
+        // Existing/ended sandbox identity is authoritative, even if capacity or the
+        // current rule changed. Recovery does not create, reprovision or start it.
+        return this.get(sandboxId);
+      }
+      if (await this.repo.findById(asSandboxId(sandboxId)))
+        throw new Error('ORIGINAL_SANDBOX_ADMISSION_UNCONFIRMED');
+      return this.create(input, { sandboxId, input: frozen });
+    });
   }
 
   /**
@@ -269,20 +354,24 @@ export class SandboxApplicationService {
    * 日志里还看不出来的分叉。`admit` 是只读的（§3.1 零副作用），所以复用它没有代价。
    */
   async hasCapacityFor(input: CreateSandboxInput): Promise<boolean> {
-    const admitted = await this.admit(input);
-    const verdict = await this.resources.probe(admitted.quota);
-    return verdict.ok;
+    return this.worker.run(async () => {
+      const admitted = await this.admit(input);
+      const verdict = await this.resources.probe(admitted.quota);
+      return verdict.ok;
+    });
   }
 
   async defaultCapacity() {
-    const image = await this.resolveImage(undefined, this.registry.defaultProvider);
-    return this.resources.defaultCapacity(
-      planQuota({
-        imageDefaults: image.resourceDefaults,
-        baselineSizeBytes: null,
-        diskFloorMb: this.resources.diskFloorMb,
-      }),
-    );
+    return this.worker.run(async () => {
+      const image = await this.resolveImage(undefined, this.registry.defaultProvider);
+      return this.resources.defaultCapacity(
+        planQuota({
+          imageDefaults: image.resourceDefaults,
+          baselineSizeBytes: null,
+          diskFloorMb: this.resources.diskFloorMb,
+        }),
+      );
+    });
   }
 
   /**
@@ -316,43 +405,45 @@ export class SandboxApplicationService {
    * seventh, and it obeys the same 「retryable:false」 rule for the same reason.
    */
   private admit(input: CreateSandboxInput): Promise<AdmittedCreate> {
-    return atDoor(async () => {
-      const providerName = input.provider ?? this.registry.defaultProvider;
-      if (!this.registry.has(providerName)) {
-        throw doorRejection(
-          HttpStatus.BAD_REQUEST,
-          UNKNOWN_PROVIDER_CODE,
-          `unknown provider '${providerName}'`,
-        );
-      }
-      const provider = this.registry.get(providerName);
-      // capability mismatches are rejected HERE — before the project lookup, before a
-      // row is written, before anything is scheduled.
-      this.assertCapabilities(provider, input.require, input.headless ?? false);
-      this.assertRuntimeRegistered(input.runtime);
-      // ⚠️ **provider 必须先定下来**：两档的预制镜像不再是同一张（ADR 决策 C），
-      // 所以「不给镜像时用哪一张」与「这张镜像跑不跑得了」都取决于它。
-      const image = await this.resolveImage(input.image, provider.name);
+    return this.worker.run(async () => {
+      return atDoor(async () => {
+        const providerName = input.provider ?? this.registry.defaultProvider;
+        if (!this.registry.has(providerName)) {
+          throw doorRejection(
+            HttpStatus.BAD_REQUEST,
+            UNKNOWN_PROVIDER_CODE,
+            `unknown provider '${providerName}'`,
+          );
+        }
+        const provider = this.registry.get(providerName);
+        // capability mismatches are rejected HERE — before the project lookup, before a
+        // row is written, before anything is scheduled.
+        this.assertCapabilities(provider, input.require, input.headless ?? false);
+        this.assertRuntimeRegistered(input.runtime);
+        // ⚠️ **provider 必须先定下来**：两档的预制镜像不再是同一张（ADR 决策 C），
+        // 所以「不给镜像时用哪一张」与「这张镜像跑不跑得了」都取决于它。
+        const image = await this.resolveImage(input.image, provider.name);
 
-      // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
-      // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
-      // which we surface as HTTP BEFORE any sandbox row is written. `branch` is
-      // validated in the SAME call — against the baseline's local refs (03 §7.2★).
-      const projectCtx = await this.resolveProject(input.projectId, input.branch);
+        // validate the project + resolve its baseline AT CREATE time (S2, 26 §3 link①):
+        // the facade runs Project.assertCanAcceptTask and throws ProjectAccessError,
+        // which we surface as HTTP BEFORE any sandbox row is written. `branch` is
+        // validated in the SAME call — against the baseline's local refs (03 §7.2★).
+        const projectCtx = await this.resolveProject(input.projectId, input.branch);
 
-      return {
-        providerName,
-        provider,
-        imageRef: image.manifestId,
-        workspaceSource: { baselinePath: projectCtx.baselinePath, branch: projectCtx.branch },
-        // 03 §1「quota 值的来源」：镜像的 `resource_defaults` 给 CPU/内存，项目的基线体积
-        // 给磁盘。两个来源都是**这道门刚刚已经读过**的东西 —— 没有新增一次 IO。
-        quota: planQuota({
-          imageDefaults: image.resourceDefaults,
-          baselineSizeBytes: projectCtx.baselineSizeBytes,
-          diskFloorMb: this.resources.diskFloorMb,
-        }),
-      };
+        return {
+          providerName,
+          provider,
+          imageRef: image.manifestId,
+          workspaceSource: { baselinePath: projectCtx.baselinePath, branch: projectCtx.branch },
+          // 03 §1「quota 值的来源」：镜像的 `resource_defaults` 给 CPU/内存，项目的基线体积
+          // 给磁盘。两个来源都是**这道门刚刚已经读过**的东西 —— 没有新增一次 IO。
+          quota: planQuota({
+            imageDefaults: image.resourceDefaults,
+            baselineSizeBytes: projectCtx.baselineSizeBytes,
+            diskFloorMb: this.resources.diskFloorMb,
+          }),
+        };
+      });
     });
   }
 
@@ -393,41 +484,43 @@ export class SandboxApplicationService {
     requested: string | undefined,
     provider: string,
   ): Promise<{ manifestId: string; resourceDefaults: ResourceQuota }> {
-    const ref = (requested ?? '').trim();
-    if (ref !== '' && /[\s\p{Cc}]/u.test(ref)) {
-      throw doorRejection(
-        HttpStatus.BAD_REQUEST,
-        INVALID_IMAGE_REFERENCE_CODE,
-        `invalid image reference '${requested}'`,
-      );
-    }
-    try {
-      const selected = await this.imageFacade.resolveForTask(
-        ref === '' ? undefined : ref,
-        provider,
-      );
-      // 03 §1：CPU/内存那两维**由镜像声明**，不由请求方提供。
-      return {
-        manifestId: selected.manifestId,
-        resourceDefaults: selected.manifest.resourceDefaults,
-      };
-    } catch (e) {
-      if (e instanceof ImageAccessError) {
-        // 400 alongside `UNKNOWN_PROVIDER` / `UNKNOWN_RUNTIME`: the request named
-        // something outside the set the platform offers. `retryable:false` and
-        // `sideEffectFree:true` are both earned by POSITION — this runs inside
-        // `admit`'s `atDoor` region, which holds no `uow` and calls nothing.
-        //
-        // ⚠️ **码要透传，不能在这里钉死一个。** 原本这里硬写 `INVALID_IMAGE_REFERENCE`,
-        // 于是「全新部署、一张镜像都没注册」也报「你的镜像地址里有空白或控制字符」——
-        // 而用户什么都没填。facade 分了三个码正是为了让它们拿到不同的出路
-        // （改地址 / 去镜像管理 / 换一档），在出口合并回一个等于把那次区分抹掉。
-        // ⚠️ 第三个码 `IMAGE_PROVIDER_MISMATCH` 尤其不能并进前两个：它的出路
-        // （换 provider 或换一张这一档的镜像）在另外两条建议下做**都没有用**。
-        throw doorRejection(HttpStatus.BAD_REQUEST, e.code, e.message);
+    return this.worker.run(async () => {
+      const ref = (requested ?? '').trim();
+      if (ref !== '' && /[\s\p{Cc}]/u.test(ref)) {
+        throw doorRejection(
+          HttpStatus.BAD_REQUEST,
+          INVALID_IMAGE_REFERENCE_CODE,
+          `invalid image reference '${String(requested)}'`,
+        );
       }
-      throw e;
-    }
+      try {
+        const selected = await this.imageFacade.resolveForTask(
+          ref === '' ? undefined : ref,
+          provider,
+        );
+        // 03 §1：CPU/内存那两维**由镜像声明**，不由请求方提供。
+        return {
+          manifestId: selected.manifestId,
+          resourceDefaults: selected.manifest.resourceDefaults,
+        };
+      } catch (e) {
+        if (e instanceof ImageAccessError) {
+          // 400 alongside `UNKNOWN_PROVIDER` / `UNKNOWN_RUNTIME`: the request named
+          // something outside the set the platform offers. `retryable:false` and
+          // `sideEffectFree:true` are both earned by POSITION — this runs inside
+          // `admit`'s `atDoor` region, which holds no `uow` and calls nothing.
+          //
+          // ⚠️ **码要透传，不能在这里钉死一个。** 原本这里硬写 `INVALID_IMAGE_REFERENCE`,
+          // 于是「全新部署、一张镜像都没注册」也报「你的镜像地址里有空白或控制字符」——
+          // 而用户什么都没填。facade 分了三个码正是为了让它们拿到不同的出路
+          // （改地址 / 去镜像管理 / 换一档），在出口合并回一个等于把那次区分抹掉。
+          // ⚠️ 第三个码 `IMAGE_PROVIDER_MISMATCH` 尤其不能并进前两个：它的出路
+          // （换 provider 或换一张这一档的镜像）在另外两条建议下做**都没有用**。
+          throw doorRejection(HttpStatus.BAD_REQUEST, e.code, e.message);
+        }
+        throw e;
+      }
+    });
   }
 
   /**
@@ -503,8 +596,14 @@ export class SandboxApplicationService {
     headless: boolean,
   ): void {
     const caps = provider.capabilities;
-    for (const [bit, demanded] of Object.entries(require ?? {})) {
-      if (demanded === true && !caps[bit as keyof SandboxProviderCapabilities]) {
+    for (const bit of [
+      'spawnTty',
+      'volumeMount',
+      'updateResources',
+      'pauseResume',
+      'snapshot',
+    ] as const) {
+      if (require?.[bit] && !caps[bit]) {
         throw this.unsupported(
           `provider '${provider.name}' does not support '${bit}', which this request requires`,
         );
@@ -546,21 +645,25 @@ export class SandboxApplicationService {
    * holds for `BRANCH_NOT_FOUND`: the caller must pick a branch that exists.
    */
   private async resolveProject(projectId: string, branch?: string): Promise<ProjectRuntimeContext> {
-    try {
-      return await this.projectFacade.getRuntimeContextForTask(projectId, branch);
-    } catch (e) {
-      if (e instanceof ProjectAccessError) {
-        throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
+    return this.worker.run(async () => {
+      try {
+        return await this.projectFacade.getRuntimeContextForTask(projectId, branch);
+      } catch (e) {
+        if (e instanceof ProjectAccessError) {
+          throw doorRejection(PROJECT_ACCESS_STATUS[e.code], e.code, e.message);
+        }
+        throw e;
       }
-      throw e;
-    }
+    });
   }
 
   async get(id: string): Promise<SandboxDto> {
-    const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox || sandbox.status === 'destroyed')
-      throw new NotFoundException(`sandbox ${id} not found`);
-    return this.toDto(sandbox);
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(id));
+      if (!sandbox || sandbox.status === 'destroyed')
+        throw new NotFoundException(`sandbox ${id} not found`);
+      return this.toDto(sandbox);
+    });
   }
 
   /**
@@ -593,83 +696,132 @@ export class SandboxApplicationService {
    *     swallows it, and the caller is told the sandbox is starting when nothing is.
    */
   async start(id: string): Promise<SandboxDto> {
-    const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    if (sandbox.status !== 'stopped') {
-      throw this.invalidState(
-        `sandbox ${id} is '${sandbox.status}'; only a 'stopped' sandbox can be started ` +
-          '(I-SBX-1). A failed one has to be destroyed and re-created.',
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(id));
+      if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+      if (sandbox.status !== 'stopped') {
+        throw this.invalidState(
+          `sandbox ${id} is '${sandbox.status}'; only a 'stopped' sandbox can be started ` +
+            '(I-SBX-1). A failed one has to be destroyed and re-created.',
+        );
+      }
+      if (!sandbox.providerSandboxId) {
+        throw this.invalidState(
+          `sandbox ${id} has no provider instance to start — it never reached the point ` +
+            'where one was created, so there is nothing to bring back up (I-SBX-3).',
+        );
+      }
+      const provider = this.registry.get(sandbox.provider);
+      const image =
+        sandbox.imageRef === ''
+          ? null
+          : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
+      try {
+        this.advance(sandbox, 'starting', 'user');
+      } catch (error) {
+        throw this.mapProviderError(error);
+      }
+      void this.provision.restartSafely(sandbox, provider);
+      return SandboxMapper.toDto(
+        sandbox,
+        false,
+        this.health.healthOf(sandbox.id),
+        image,
+        this.provision.startupObservation(sandbox.id),
       );
-    }
-    if (!sandbox.providerSandboxId) {
-      throw this.invalidState(
-        `sandbox ${id} has no provider instance to start — it never reached the point ` +
-          'where one was created, so there is nothing to bring back up (I-SBX-3).',
-      );
-    }
-    const provider = this.registry.get(sandbox.provider);
-    const image =
-      sandbox.imageRef === ''
-        ? null
-        : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
-    try {
-      this.advance(sandbox, 'starting', 'user');
-    } catch (error) {
-      throw this.mapProviderError(error);
-    }
-    void this.provision.restartSafely(sandbox, provider);
-    return SandboxMapper.toDto(sandbox, false, this.health.healthOf(sandbox.id), image);
+    });
   }
 
   /**
    * `POST /api/sandboxes/:id/stop` (27 §2) — graceful shutdown, instance kept.
    *
-   * ⚠️ THIS ONE IS SYNCHRONOUS, AND THE ASYMMETRY WITH `start` IS THE POINT. Stopping
-   * is one `provider.stop()` call — no image staging, no CLI install, no agent
-   * bootstrap — which is why `destroy` (which walks the same `running → stopping →
-   * stopped` edge inline) has always awaited it too. Returning early here would mean
-   * inventing a second async path for the cheap half of the pair.
+   * The normal response awaits the one accepted `provider.stop()` call. Its intent
+   * and `stopping` transition commit together before dispatch. A transport timeout
+   * only ends that wait: the original stop, Guest and reservation stay intact.
+   * The existing owner reconciliation sweep queries that exact journal receipt
+   * and assigned handle; it never dispatches another stop.
    *
    * ⚠️ IT DOES NOT DESTROY ANYTHING. The workspace directory, the instance and the
    * `providerSandboxId` all survive — that is what makes `start` above possible. What
    * does NOT survive is the agent's conversation: `stopped → start` is a NEW session
    * (P22 §2), which is why the UI has to say so rather than calling it "resume".
    *
-   * The failure path mirrors `destroy`: mark `failed` best-effort so a wedged instance
-   * does not sit in `stopping` forever, then surface the provider's own code (04 §4).
+   * A definite provider failure records `failed` and releases its reservation.
+   * Unknown/inflight results preserve `stopping` and occupancy. A late original
+   * acknowledgement cannot overwrite a newer explicit lifecycle action.
    */
   async stop(id: string): Promise<SandboxDto> {
-    const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    if (sandbox.status !== 'running' && sandbox.status !== 'idle') {
-      throw this.invalidState(
-        `sandbox ${id} is '${sandbox.status}'; only a 'running' or 'idle' sandbox can be ` +
-          'stopped (I-SBX-1).',
-      );
-    }
-    const provider = this.registry.get(sandbox.provider);
-    const handle = this.handleOf(sandbox);
-    try {
-      this.advance(sandbox, 'stopping', 'user');
-    } catch (error) {
-      throw this.mapProviderError(error);
-    }
-    try {
-      if (handle) await provider.stop(handle);
-      const current = await this.repo.findById(sandbox.id);
-      if (!current || current.status === 'destroying' || current.status === 'destroyed') {
-        throw this.invalidState('任务正在删除，请刷新任务状态。');
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(id));
+      if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+      if (sandbox.status !== 'running' && sandbox.status !== 'idle') {
+        throw this.invalidState(
+          `sandbox ${id} is '${sandbox.status}'; only a 'running' or 'idle' sandbox can be ` +
+            'stopped (I-SBX-1).',
+        );
       }
-      this.advance(current, 'stopped', 'user');
-      return this.toDto(current);
-    } catch (e) {
-      const current = await this.repo.findById(sandbox.id);
-      if (current?.status === 'stopping') this.recordFailure(current, e, 'stop');
-      // `stopped` **保留**登记（工作区还在盘上、实例还在，`start` 会把它接回来）；
-      // `failed` 不会 —— 它是终态，这条沙箱不会再回来占任何东西。
-      await this.resources.release(sandbox.id);
-      throw this.mapProviderError(e);
-    }
+      const provider = this.registry.get(sandbox.provider);
+      const handle = this.handleOf(sandbox);
+      const operation = {
+        operationId: `sandbox-stop-${sandbox.id}:${String(sandbox.version + 1)}`,
+        actor: this.authority?.current?.()?.actor ?? { kind: 'user' as const, id: 'platform-user' },
+      };
+      try {
+        sandbox.transitionTo('stopping', 'user', this.clock.now());
+        this.persist(sandbox, (tx) =>
+          this.stopIntents?.reserveSync(
+            tx,
+            { sandboxId: sandbox.id, ...operation },
+            this.clock.now(),
+          ),
+        );
+      } catch (error) {
+        throw this.mapProviderError(error);
+      }
+      try {
+        if (handle) {
+          if (this.authority) await this.authority.run(operation, () => provider.stop(handle));
+          else await provider.stop(handle);
+        }
+        const current = await this.repo.findById(sandbox.id);
+        if (!current || current.status === 'destroying' || current.status === 'destroyed') {
+          throw this.invalidState('任务正在删除，请刷新任务状态。');
+        }
+        // The original receipt can arrive after its read-only reconciliation (or a
+        // later explicit lifecycle action). Never mutate that newer aggregate.
+        if (current.version !== sandbox.version || current.status !== 'stopping') {
+          this.uow.run((tx) =>
+            this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+          );
+          return await this.toDto(current);
+        }
+        current.transitionTo('stopped', 'user', this.clock.now());
+        this.persist(current, (tx) =>
+          this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+        );
+        return await this.toDto(current);
+      } catch (e) {
+        const current = await this.repo.findById(sandbox.id);
+        if (
+          (e instanceof Error && ['AbortError', 'TimeoutError', 'TypeError'].includes(e.name)) ||
+          (e instanceof SandboxProviderError && e.retryable)
+        ) {
+          // A transport wait ended, not the original stop effect. The existing
+          // provision reconciliation sweep only looks up this exact durable intent.
+          throw this.mapProviderError(e);
+        }
+        if (current?.status !== 'stopping' || current.version !== sandbox.version)
+          throw this.mapProviderError(e);
+        this.recordFailure(current, e, 'stop');
+        this.uow.run((tx) =>
+          this.stopIntents?.finishSync(tx, operation.operationId, this.clock.now()),
+        );
+        // `stopped` **保留**登记（工作区还在盘上、实例还在，`start` 会把它接回来）；
+        // `failed` 不会 —— 它是终态，这条沙箱不会再回来占任何东西。
+        await this.resources.release(sandbox.id);
+        throw this.mapProviderError(e);
+      }
+    });
   }
 
   /**
@@ -695,27 +847,29 @@ export class SandboxApplicationService {
    * a provider being well-behaved.
    */
   async exec(id: string, input: ExecInSandboxInput): Promise<ExecResult> {
-    const sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    const handle = this.handleOf(sandbox);
-    if ((sandbox.status !== 'running' && sandbox.status !== 'idle') || !handle) {
-      throw this.invalidState(
-        `sandbox ${id} is '${sandbox.status}'; a command can only be executed in a ` +
-          "'running' or 'idle' sandbox (I-SBX-3).",
-      );
-    }
-    const provider = this.registry.get(sandbox.provider);
-    const exec = toExecFn(provider, handle);
-    try {
-      // `sh -c` so the caller's shell syntax (pipes, redirects, `&&`) means what it
-      // reads as — the same form the platform's own probes use (install-plan.util).
-      return await this.withDeadline(
-        exec(['sh', '-c', input.command], { timeoutMs: EXEC_TIMEOUT_MS }),
-        id,
-      );
-    } catch (e) {
-      throw this.mapProviderError(e);
-    }
+    return this.worker.run(async () => {
+      const sandbox = await this.repo.findById(asSandboxId(id));
+      if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+      const handle = this.handleOf(sandbox);
+      if ((sandbox.status !== 'running' && sandbox.status !== 'idle') || !handle) {
+        throw this.invalidState(
+          `sandbox ${id} is '${sandbox.status}'; a command can only be executed in a ` +
+            "'running' or 'idle' sandbox (I-SBX-3).",
+        );
+      }
+      const provider = this.registry.get(sandbox.provider);
+      const exec = toExecFn(provider, handle);
+      try {
+        // `sh -c` so the caller's shell syntax (pipes, redirects, `&&`) means what it
+        // reads as — the same form the platform's own probes use (install-plan.util).
+        return await this.withDeadline(
+          exec(['sh', '-c', input.command], { timeoutMs: EXEC_TIMEOUT_MS }),
+          id,
+        );
+      } catch (e) {
+        throw this.mapProviderError(e);
+      }
+    });
   }
 
   /**
@@ -727,26 +881,26 @@ export class SandboxApplicationService {
    * would mean a second, platform-side kill path for the same process.
    */
   private async withDeadline(work: Promise<ExecResult>, id: string): Promise<ExecResult> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () =>
+    return this.worker.run(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
           reject(
             new SandboxProviderError(
               SandboxProviderErrorCode.TIMEOUT,
-              `command in sandbox ${id} did not finish within ${EXEC_TIMEOUT_MS / 1000}s`,
+              `command in sandbox ${id} did not finish within ${String(EXEC_TIMEOUT_MS / 1000)}s`,
               undefined,
               true,
             ),
-          ),
-        EXEC_TIMEOUT_MS,
-      );
+          );
+        }, EXEC_TIMEOUT_MS);
+      });
+      try {
+        return await Promise.race([work, deadline]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     });
-    try {
-      return await Promise.race([work, deadline]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
   }
 
   /** 409 `INVALID_STATE` through the SAME contract→HTTP table as provider errors (04 §4). */
@@ -768,38 +922,46 @@ export class SandboxApplicationService {
    * 两条路径共用这一处过滤，谁改都得一起改——不然计数与列表又会各说各话。
    */
   async list(projectId?: string): Promise<SandboxDto[]> {
-    const sandboxes = projectId
-      ? await this.repo.findByProject(asProjectId(projectId))
-      : await this.repo.findAll();
-    const visible = sandboxes.filter((s) => s.status !== 'destroyed');
-    const waiting = this.waiting.filterWaiting(visible.map((s) => s.id));
-    const imageIds = [...new Set(visible.map((s) => s.imageRef).filter((id) => id !== ''))];
-    const images = new Map(
-      await Promise.all(
-        imageIds.map(async (id) => [id, await this.imageFacade.findTaskImageSummary(id)] as const),
-      ),
-    );
-    return visible.map((s) =>
-      SandboxMapper.toDto(
-        s,
-        this.waitingDisplayApplies(s) && waiting.has(s.id),
-        this.health.healthOf(s.id),
-        images.get(s.imageRef),
-      ),
-    );
+    return this.worker.run(async () => {
+      const sandboxes = projectId
+        ? await this.repo.findByProject(asProjectId(projectId))
+        : await this.repo.findAll();
+      const visible = sandboxes.filter((s) => s.status !== 'destroyed');
+      const waiting = this.waiting.filterWaiting(visible.map((s) => s.id));
+      const imageIds = [...new Set(visible.map((s) => s.imageRef).filter((id) => id !== ''))];
+      const images = new Map(
+        await Promise.all(
+          imageIds.map(
+            async (id) => [id, await this.imageFacade.findTaskImageSummary(id)] as const,
+          ),
+        ),
+      );
+      return visible.map((s) =>
+        SandboxMapper.toDto(
+          s,
+          this.waitingDisplayApplies(s) && waiting.has(s.id),
+          this.health.healthOf(s.id),
+          images.get(s.imageRef),
+          this.provision.startupObservation(s.id),
+        ),
+      );
+    });
   }
 
   private async toDto(sandbox: Sandbox): Promise<SandboxDto> {
-    const image =
-      sandbox.imageRef === ''
-        ? null
-        : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
-    return SandboxMapper.toDto(
-      sandbox,
-      this.waitingDisplayApplies(sandbox) && this.waiting.isWaiting(sandbox.id),
-      this.health.healthOf(sandbox.id),
-      image,
-    );
+    return this.worker.run(async () => {
+      const image =
+        sandbox.imageRef === ''
+          ? null
+          : await this.imageFacade.findTaskImageSummary(sandbox.imageRef);
+      return SandboxMapper.toDto(
+        sandbox,
+        this.waitingDisplayApplies(sandbox) && this.waiting.isWaiting(sandbox.id),
+        this.health.healthOf(sandbox.id),
+        image,
+        this.provision.startupObservation(sandbox.id),
+      );
+    });
   }
 
   private waitingDisplayApplies(sandbox: Sandbox): boolean {
@@ -814,16 +976,20 @@ export class SandboxApplicationService {
    * so a wedged container can never block clearing a revoked credential's bindings.
    */
   destroy(id: string, input: DestroySandboxOptions = {}): Promise<void> {
-    const existing = this.teardowns.get(id);
-    if (existing) {
-      if (input.force) existing.force.abort();
-      return existing.promise;
-    }
-    const force = new AbortController();
-    if (input.force) force.abort();
-    const promise = this.teardown(id, input, force.signal).finally(() => this.teardowns.delete(id));
-    this.teardowns.set(id, { promise, force });
-    return promise;
+    return this.worker.run(async () => {
+      const existing = this.teardowns.get(id);
+      if (existing) {
+        if (input.force) existing.force.abort();
+        return existing.promise;
+      }
+      const force = new AbortController();
+      if (input.force) force.abort();
+      const promise = this.teardown(id, input, force.signal).finally(() =>
+        this.teardowns.delete(id),
+      );
+      this.teardowns.set(id, { promise, force });
+      return promise;
+    });
   }
 
   private async teardown(
@@ -831,71 +997,76 @@ export class SandboxApplicationService {
     input: DestroySandboxOptions,
     force: AbortSignal,
   ): Promise<void> {
-    // Cancellation is synchronous: no suspended workflow may write its old aggregate
-    // after this request has expressed deletion intent.
-    const drained = this.provision.cancel(id);
-    let sandbox = await this.repo.findById(asSandboxId(id));
-    if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
-    if (sandbox.status === 'destroyed') return;
-    const previous = sandbox.status;
-    if (sandbox.status !== 'destroying') this.advance(sandbox, 'destroying', 'user');
-    const provider = this.registry.get(sandbox.provider);
-    try {
-      // Workspace preparation/provider.create may still finish. Wait for its handle
-      // before cleanup so neither a copied directory nor a late instance can reappear.
-      if (!sandbox.providerSandboxId) {
-        await withTeardownDeadline(drained, id);
-        sandbox = (await this.repo.findById(sandbox.id)) ?? sandbox;
+    return this.worker.run(async () => {
+      // Cancellation is synchronous: no suspended workflow may write its old aggregate
+      // after this request has expressed deletion intent.
+      const drained = this.provision.cancel(id);
+      let sandbox = await this.repo.findById(asSandboxId(id));
+      if (!sandbox) throw new NotFoundException(`sandbox ${id} not found`);
+      if (sandbox.status === 'destroyed') {
+        this.uow.run((tx) => this.terminalBookmarks?.deleteForSandboxSync(tx, id));
+        return;
       }
-      const handle = this.handleOf(sandbox);
-      if (
-        handle &&
-        !force.aborted &&
-        ['running', 'idle', 'starting', 'stopping'].includes(previous)
-      ) {
-        await this.stopForTeardown(provider, handle, force);
-      }
-      if (handle) {
-        try {
-          await withTeardownDeadline(provider.destroy(handle), id);
-        } catch (error) {
-          if (
-            !(error instanceof SandboxProviderError) ||
-            error.code !== SandboxProviderErrorCode.NOT_FOUND
-          )
-            throw error;
+      const previous = sandbox.status;
+      if (sandbox.status !== 'destroying') this.advance(sandbox, 'destroying', 'user');
+      const provider = this.registry.get(sandbox.provider);
+      try {
+        // Workspace preparation/provider.create may still finish. Wait for its handle
+        // before cleanup so neither a copied directory nor a late instance can reappear.
+        if (!sandbox.providerSandboxId) {
+          await withTeardownDeadline(drained, id);
+          sandbox = (await this.repo.findById(sandbox.id)) ?? sandbox;
         }
-      }
-      const retained = await this.workspace.cleanup(id, { keep: input.keepVolume ?? false });
-      if (retained !== null) {
-        await this.projectFacade.registerRetainedVolume({
-          projectId: sandbox.projectId,
-          sandboxId: id,
-          sandboxName: sandbox.name,
-          workspacePath: retained.hostPath,
-          source: 'manual-destroy',
-          ...input.retained,
-        });
-      }
-      const current = await this.repo.findById(sandbox.id);
-      if (current && current.status !== 'destroyed') this.advance(current, 'destroyed', 'user');
-    } catch (error) {
-      const current = await this.repo.findById(sandbox.id);
-      if (current?.status === 'destroying') {
-        // A rule scheduler may observe this only after cleanup. Preserve the original
-        // pre-run failure signal (especially resource exhaustion) through retries.
+        const handle = this.handleOf(sandbox);
         if (
-          current.sourceAutomationId &&
-          current.automationFinishedAt &&
-          current.failureOperation === 'provision'
-        )
-          this.advance(current, 'failed', 'user');
-        else this.recordFailure(current, error, 'destroy');
+          handle &&
+          !force.aborted &&
+          ['running', 'idle', 'starting', 'stopping'].includes(previous)
+        ) {
+          await this.stopForTeardown(provider, handle, force);
+        }
+        if (handle) {
+          try {
+            await withTeardownDeadline(provider.destroy(handle), id);
+          } catch (error) {
+            if (
+              !(error instanceof SandboxProviderError) ||
+              error.code !== SandboxProviderErrorCode.NOT_FOUND
+            )
+              throw error;
+          }
+        }
+        const retained = await this.workspace.cleanup(id, { keep: input.keepVolume ?? false });
+        if (retained !== null) {
+          await this.projectFacade.registerRetainedVolume({
+            projectId: sandbox.projectId,
+            sandboxId: id,
+            sandboxName: sandbox.name,
+            workspacePath: retained.hostPath,
+            source: 'manual-destroy',
+            ...input.retained,
+          });
+        }
+        const current = await this.repo.findById(sandbox.id);
+        if (current && current.status !== 'destroyed') this.advance(current, 'destroyed', 'user');
+      } catch (error) {
+        const current = await this.repo.findById(sandbox.id);
+        if (current?.status === 'destroying') {
+          // A rule scheduler may observe this only after cleanup. Preserve the original
+          // pre-run failure signal (especially resource exhaustion) through retries.
+          if (
+            current.sourceAutomationId &&
+            current.automationFinishedAt &&
+            current.failureOperation === 'provision'
+          )
+            this.advance(current, 'failed', 'user');
+          else this.recordFailure(current, error, 'destroy');
+        }
+        throw this.mapProviderError(error);
+      } finally {
+        await this.resources.release(sandbox.id);
       }
-      throw this.mapProviderError(error);
-    } finally {
-      await this.resources.release(sandbox.id);
-    }
+    });
   }
 
   private async stopForTeardown(
@@ -903,18 +1074,20 @@ export class SandboxApplicationService {
     handle: SandboxHandle,
     force: AbortSignal,
   ): Promise<void> {
-    if (force.aborted) return;
-    // Stop is a courtesy; removal is authoritative. A stuck stop must not keep a
-    // revoked token alive, and escalation can interrupt this wait immediately.
-    await new Promise<void>((resolve) => {
-      const finish = (): void => {
-        clearTimeout(timer);
-        force.removeEventListener('abort', finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, 20_000);
-      force.addEventListener('abort', finish, { once: true });
-      void provider.stop(handle).then(finish, finish);
+    return this.worker.run(async () => {
+      if (force.aborted) return;
+      // Stop is a courtesy; removal is authoritative. A stuck stop must not keep a
+      // revoked token alive, and escalation can interrupt this wait immediately.
+      await new Promise<void>((resolve) => {
+        const finish = (): void => {
+          clearTimeout(timer);
+          force.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, 20_000);
+        force.addEventListener('abort', finish, { once: true });
+        void provider.stop(handle).then(finish, finish);
+      });
     });
   }
 
@@ -948,9 +1121,12 @@ export class SandboxApplicationService {
     this.persist(sandbox);
   }
 
-  private persist(sandbox: Sandbox): void {
+  private persist(sandbox: Sandbox, afterSave?: (tx: Tx) => void): void {
     this.uow.run((tx) => {
       this.repo.saveSync(tx, sandbox);
+      afterSave?.(tx);
+      if (sandbox.status === 'destroyed')
+        this.terminalBookmarks?.deleteForSandboxSync(tx, sandbox.id);
       this.events.publishInTx(tx, sandbox.pullEvents());
     });
   }

@@ -7,13 +7,17 @@ import { Automation } from '../../../domain/entities/automation.entity';
 import type { ConcurrencyMode } from '../../../domain/entities/automation.entity';
 import type { AutomationRepository } from '../../../domain/repositories/automation.repository';
 import { Schedule } from '../../../domain/value-objects/schedule.vo';
-import type { ScheduleConfig, ScheduleKind } from '../../../domain/value-objects/schedule.vo';
 import { TimeoutPolicy, assertRetentionDays } from '../../../domain/value-objects/policies.vo';
 import { WebhookTarget } from '../../../domain/value-objects/webhook-target.vo';
-import type { TriggerOn } from '../../../domain/value-objects/webhook-target.vo';
 import { automations, type AutomationRow } from '../schema/automation.sqlite';
+import { asAutomationId, asProjectId } from '@platform/shared-kernel';
+import {
+  AutomationScheduleConfigSchema,
+  ScheduleKindSchema,
+  TriggerOnSchema,
+} from '@platform/contracts';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 @Injectable()
 export class SqliteAutomationRepository implements AutomationRepository {
@@ -23,7 +27,7 @@ export class SqliteAutomationRepository implements AutomationRepository {
 
   async findById(id: AutomationId): Promise<Automation | null> {
     const row = this.db.select().from(automations).where(eq(automations.id, id)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async listByProject(projectId: ProjectId): Promise<Automation[]> {
@@ -33,7 +37,7 @@ export class SqliteAutomationRepository implements AutomationRepository {
       .where(eq(automations.projectId, projectId))
       .orderBy(asc(automations.createdAt))
       .all();
-    return hydrateAll(rows, this.logger, 'listByProject');
+    return Promise.resolve(hydrateAll(rows, this.logger, 'listByProject'));
   }
 
   async countByProject(projectId: ProjectId): Promise<number> {
@@ -42,7 +46,7 @@ export class SqliteAutomationRepository implements AutomationRepository {
       .from(automations)
       .where(eq(automations.projectId, projectId))
       .get();
-    return row?.n ?? 0;
+    return Promise.resolve(row?.n ?? 0);
   }
 
   /**
@@ -59,12 +63,12 @@ export class SqliteAutomationRepository implements AutomationRepository {
       .where(and(eq(automations.enabled, true), lte(automations.nextTriggerAt, now)))
       .orderBy(asc(automations.nextTriggerAt))
       .all();
-    return hydrateAll(rows, this.logger, 'listDue');
+    return Promise.resolve(hydrateAll(rows, this.logger, 'listDue'));
   }
 
   async listAllForSweep(): Promise<Automation[]> {
     const rows = this.db.select().from(automations).orderBy(asc(automations.createdAt)).all();
-    return hydrateAll(rows, this.logger, 'listAllForSweep');
+    return Promise.resolve(hydrateAll(rows, this.logger, 'listAllForSweep'));
   }
 
   saveSync(_tx: Tx, a: Automation): void {
@@ -130,32 +134,37 @@ export class SqliteAutomationRepository implements AutomationRepository {
 
 function toDomain(row: AutomationRow): Automation {
   return Automation.rehydrate({
-    id: row.id as AutomationId,
-    projectId: row.projectId as ProjectId,
+    id: asAutomationId(row.id),
+    projectId: asProjectId(row.projectId),
     name: row.name,
     description: row.description,
     runtimeId: row.runtimeId,
     prompt: row.prompt,
     schedule: Schedule.create(
-      row.scheduleKind as ScheduleKind,
-      row.scheduleConfig as ScheduleConfig,
+      ScheduleKindSchema.parse(row.scheduleKind),
+      AutomationScheduleConfigSchema.parse(row.scheduleConfig),
       row.timezone,
     ),
     enabled: row.enabled,
     degraded: row.degraded,
-    concurrency: row.concurrencyMode as ConcurrencyMode,
+    concurrency: decodeConcurrency(row.concurrencyMode),
     timeout: TimeoutPolicy.of(row.timeoutMinutes),
     retentionDays: assertRetentionDays(row.artifactRetentionDays),
     webhook:
       row.webhookUrl === null
         ? null
-        : WebhookTarget.create(row.webhookUrl, row.triggerOn as TriggerOn),
+        : WebhookTarget.create(row.webhookUrl, TriggerOnSchema.parse(row.triggerOn)),
     failureCount: row.consecutiveFailures,
     lastTriggeredAt: row.lastTriggeredAt,
     nextTriggerAt: row.nextTriggerAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });
+}
+
+function decodeConcurrency(value: string): ConcurrencyMode {
+  if (value === 'skip' || value === 'queue' || value === 'concurrent') return value;
+  throw new Error('Invalid persisted automation concurrency');
 }
 /**
  * 逐行水化，**一行坏数据不许拖垮整批**。
@@ -184,7 +193,7 @@ function hydrateAll(rows: readonly AutomationRow[], logger: Logger, where: strin
     } catch (e) {
       logger.error(
         `automation ${row.id} 的行数据无法水化（${where}），本轮跳过它、其余规则照常跑：` +
-          `${e instanceof Error ? e.message : String(e)}`,
+          (e instanceof Error ? e.message : String(e)),
       );
     }
   }

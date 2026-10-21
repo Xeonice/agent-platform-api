@@ -4,6 +4,7 @@
   "owner": "xeonice",
   "platforms": ["linux/amd64", "linux/arm64"],
   "defaultTag": "latest",
+  "versionTag": "v0.3.12-cli.20261017.1",
   "tagPrefix": "sandbox-image-",
   "images": [
     {

@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { randomBytes } from 'node:crypto';
 import {
   SandboxProviderError,
@@ -74,7 +75,7 @@ const TIMEOUT_KILL_AFTER_SECONDS = 5;
  */
 const SETUP_SCRIPT =
   `d=$1; need_timeout=$2\n` +
-  `if [ "$need_timeout" = 1 ] && ! command -v timeout >/dev/null 2>&1; then exit ${EXIT_NO_TIMEOUT_BINARY}; fi\n` +
+  `if [ "$need_timeout" = 1 ] && ! command -v timeout >/dev/null 2>&1; then exit ${String(EXIT_NO_TIMEOUT_BINARY)}; fi\n` +
   `rm -rf -- "$d" && mkdir -m 700 -p -- "$d" && : > "$d/stdout" && : > "$d/stderr" && cat > "$d/run.sh"`;
 
 /** payload 走 stdin，只有路径进 argv（05 §7 #3）。 */
@@ -119,12 +120,12 @@ const STATUS_SNIPPET =
 
 const READ_SCRIPT =
   `d=$1; n1=$2; n2=$3; ticks=$4\n` +
-  `[ -d "$d" ] || exit ${EXIT_NO_JOB_DIR}\n` +
+  `[ -d "$d" ] || exit ${String(EXIT_NO_JOB_DIR)}\n` +
   `exec 3>&2 2>/dev/null\n` +
   `i=0\n` +
   `while [ "$i" -lt "$ticks" ] && [ ! -f "$d/exit" ] ` +
   `&& [ "$(wc -c < "$d/stdout")" -le "$n1" ] && [ "$(wc -c < "$d/stderr")" -le "$n2" ]; do\n` +
-  `  sleep ${GUEST_WAIT_TICK_SECONDS}; i=$((i+1))\n` +
+  `  sleep ${String(GUEST_WAIT_TICK_SECONDS)}; i=$((i+1))\n` +
   `done\n` +
   `${STATUS_SNIPPET}\n` +
   `printf '%s\\n' "$st"\n` +
@@ -139,7 +140,10 @@ const READ_SCRIPT =
  * 宽限窗里会反复搬运几百 MB。
  */
 const STATUS_SCRIPT =
-  `d=$1\n` + `[ -d "$d" ] || exit ${EXIT_NO_JOB_DIR}\n` + `${STATUS_SNIPPET}\n` + `printf %s "$st"`;
+  `d=$1\n` +
+  `[ -d "$d" ] || exit ${String(EXIT_NO_JOB_DIR)}\n` +
+  `${STATUS_SNIPPET}\n` +
+  `printf %s "$st"`;
 
 /**
  * 往整个进程组投信号。
@@ -180,7 +184,7 @@ export class BoxliteSandboxJobs implements SandboxJobs {
     if (setup.code === EXIT_NO_TIMEOUT_BINARY) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.UNSUPPORTED_CAPABILITY,
-        `this sandbox image has no timeout(1), so a job's ${spec.timeoutMs}ms sandbox-side ` +
+        `this sandbox image has no timeout(1), so a job's ${String(spec.timeoutMs)}ms sandbox-side ` +
           'deadline cannot be honoured. Refusing the job up front rather than accepting it and ' +
           'letting it run unbounded (04 §2.6 JobSpec.timeoutMs).',
       );
@@ -238,7 +242,7 @@ export class BoxliteSandboxJobs implements SandboxJobs {
     if (r.code !== 0) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INTERNAL,
-        `boxlite job read failed: exit=${r.code} ${r.stderr.trim()}`.trim(),
+        `boxlite job read failed: exit=${String(r.code)} ${r.stderr.trim()}`.trim(),
       );
     }
 
@@ -303,7 +307,7 @@ export class BoxliteSandboxJobs implements SandboxJobs {
     for (let i = 0; i < rounds; i++) {
       await new Promise((resolve) => {
         const timer = setTimeout(resolve, KILL_POLL_MS);
-        timer.unref?.();
+        timer.unref();
       });
       const r = await runGuestScript(box, STATUS_SCRIPT, [dir]).catch(() => null);
       if (r === null || r.code === EXIT_NO_JOB_DIR) return true;
@@ -353,7 +357,7 @@ function runnerScript(dir: string, spec: JobSpec): string {
   const command =
     spec.timeoutMs === undefined
       ? argv
-      : `timeout -k ${TIMEOUT_KILL_AFTER_SECONDS} ${Math.ceil(spec.timeoutMs / 1000)} ${argv}`;
+      : `timeout -k ${String(TIMEOUT_KILL_AFTER_SECONDS)} ${String(Math.ceil(spec.timeoutMs / 1000))} ${argv}`;
   const stdinSource = spec.stdin === undefined ? '/dev/null' : shQuote(`${dir}/stdin`);
   return (
     `trap '${record('143').replace(/'/g, `'\\''`)}; exit 143' INT TERM HUP\n` +
@@ -404,8 +408,7 @@ function decodeJobId(jobId: string): string {
   } catch {
     raw = null;
   }
-  const dir =
-    typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['d'] : undefined;
+  const dir = isRecord(raw) ? raw.d : undefined;
   if (typeof dir !== 'string' || !dir.startsWith(`${JOB_ROOT}/.platform-job-`)) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INVALID_STATE,
@@ -428,8 +431,8 @@ function decodeCursor(cursor?: JobCursor): DecodedCursor {
   if (cursor === undefined || cursor === '') return { stdout: 0, stderr: 0 };
   try {
     const raw: unknown = JSON.parse(cursor);
-    if (typeof raw !== 'object' || raw === null) return { stdout: 0, stderr: 0 };
-    const o = raw as Record<string, unknown>;
+    if (!isRecord(raw)) return { stdout: 0, stderr: 0 };
+    const o = raw;
     const num = (v: unknown): number => (typeof v === 'number' && v >= 0 ? v : 0);
     return { stdout: num(o.o), stderr: num(o.e) };
   } catch {

@@ -1,4 +1,9 @@
-import type { RegisteredImageSummary, SandboxDto, SandboxHealthWire } from '@platform/contracts';
+import type {
+  RegisteredImageSummary,
+  SandboxDto,
+  SandboxHealthWire,
+  StartupObservation,
+} from '@platform/contracts';
 import type { Sandbox } from '../../domain/entities/sandbox.entity';
 
 /**
@@ -24,10 +29,11 @@ export const SandboxMapper = {
     waitingInput: boolean,
     health?: SandboxHealthWire,
     image?: RegisteredImageSummary | null,
+    startupObservation?: StartupObservation,
   ): SandboxDto {
     return {
-      id: agg.id as string,
-      projectId: agg.projectId as string,
+      id: agg.id,
+      projectId: agg.projectId,
       runtime: agg.runtime,
       // 「这个沙箱里能跑哪几个 CLI」——终端「+ 新终端」下拉的数据源（06 §5.6）。
       // ⛔ 记录 ∪ 默认，不是推导：见 `Sandbox.availableRuntimes`。
@@ -45,8 +51,9 @@ export const SandboxMapper = {
           }),
       name: agg.name,
       status: agg.status,
+      ...(startupObservation ? { startupObservation } : {}),
       headless: agg.headless,
-      timeoutMinutes: agg.timeoutMinutes as SandboxDto['timeoutMinutes'],
+      timeoutMinutes: timeoutTier(agg.timeoutMinutes),
       idleTimeoutSec: agg.idleTimeoutSec,
       waitingInput,
       version: agg.version,
@@ -64,3 +71,9 @@ export const SandboxMapper = {
     };
   },
 };
+
+function timeoutTier(value: number | null): SandboxDto['timeoutMinutes'] {
+  if (value === null || value === 30 || value === 60 || value === 120 || value === 240)
+    return value;
+  throw new Error('INVALID_SANDBOX_TIMEOUT_TIER');
+}

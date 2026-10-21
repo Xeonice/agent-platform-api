@@ -2692,6 +2692,1037 @@
           "system"
         ]
       }
+    },
+    "/api/system/upgrade/status": {
+      "get": {
+        "operationId": "UpgradeController_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/access": {
+      "post": {
+        "deprecated": true,
+        "operationId": "UpgradeController_access",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeAccessDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Compatibility endpoint; instance access already permits upgrades",
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/requests": {
+      "post": {
+        "operationId": "UpgradeController_request",
+        "parameters": [
+          {
+            "name": "Prefer",
+            "in": "header",
+            "description": "respond-async admits one durable final-target operation; omitted preserves the legacy technical-attempt response.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UpgradeAttemptDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpgradeOperationDto"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/requests/{requestId}": {
+      "get": {
+        "operationId": "UpgradeController_lookup",
+        "parameters": [
+          {
+            "name": "requestId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Prefer",
+            "in": "header",
+            "description": "respond-async looks up the original user operation. Existing legacy attempts remain readable.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UpgradeAttemptDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpgradeOperationDto"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/contracts/requests": {
+      "post": {
+        "operationId": "UpgradeController_contractRequest",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeContractRequestDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeContractAttemptDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/contracts/requests/{requestId}": {
+      "get": {
+        "operationId": "UpgradeController_contractLookup",
+        "parameters": [
+          {
+            "name": "requestId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeContractAttemptDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/system/upgrade/probe": {
+      "post": {
+        "operationId": "UpgradeController_probe",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeProbeDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      },
+      "get": {
+        "operationId": "UpgradeController_readProbe",
+        "parameters": [
+          {
+            "name": "requestId",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "upgrade"
+        ]
+      }
+    },
+    "/api/internal/upgrades/controller-capabilities": {
+      "get": {
+        "operationId": "UpgradeInternalController_controlCapabilities",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/pending": {
+      "get": {
+        "operationId": "UpgradeInternalController_pending",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/process-observe": {
+      "post": {
+        "operationId": "UpgradeInternalController_processObserve",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/continuity": {
+      "get": {
+        "operationId": "UpgradeInternalController_continuity",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fence",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/observation": {
+      "get": {
+        "operationId": "UpgradeInternalController_observation",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fence",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "weight",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/bootstrap": {
+      "post": {
+        "operationId": "UpgradeInternalController_bootstrap",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}": {
+      "get": {
+        "operationId": "UpgradeInternalController_snapshot",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/claim": {
+      "post": {
+        "operationId": "UpgradeInternalController_claim",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/authority-check": {
+      "post": {
+        "operationId": "UpgradeInternalController_authorityCheck",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/lease-renew": {
+      "post": {
+        "operationId": "UpgradeInternalController_leaseRenew",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/progress-checkpoint": {
+      "get": {
+        "operationId": "UpgradeInternalController_checkpoint",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/commit-receipt": {
+      "post": {
+        "operationId": "UpgradeInternalController_commitReceipt",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/renew": {
+      "post": {
+        "operationId": "UpgradeInternalController_renew",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/commit": {
+      "post": {
+        "operationId": "UpgradeInternalController_commit",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/steps/{stepId}": {
+      "get": {
+        "operationId": "UpgradeInternalController_step",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "stepId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/validate-switch": {
+      "post": {
+        "operationId": "UpgradeInternalController_validate",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/fallback-eligibility": {
+      "post": {
+        "operationId": "UpgradeInternalController_fallback",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/coordinator-handoff": {
+      "post": {
+        "operationId": "UpgradeInternalController_coordinatorHandoff",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/owner-candidate": {
+      "post": {
+        "operationId": "UpgradeInternalController_ownerCandidate",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/controller-handoff": {
+      "post": {
+        "operationId": "UpgradeInternalController_controllerHandoff",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/migration": {
+      "post": {
+        "operationId": "UpgradeInternalController_migration",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/coordinator-compatibility": {
+      "post": {
+        "operationId": "UpgradeInternalController_compatibility",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/recovery-admission": {
+      "post": {
+        "operationId": "UpgradeInternalController_recoveryAdmission",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/recovery-actions": {
+      "get": {
+        "operationId": "UpgradeInternalController_recoveryActions",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/stabilize-current-writer": {
+      "post": {
+        "operationId": "UpgradeInternalController_stabilizeCurrentWriter",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/coordinator-recovery": {
+      "post": {
+        "operationId": "UpgradeInternalController_recoverCoordinator",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/{attemptId}/coordinator-resume": {
+      "post": {
+        "operationId": "UpgradeInternalController_resumeCoordinator",
+        "parameters": [
+          {
+            "name": "attemptId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInternal"
+        ]
+      }
+    },
+    "/api/internal/contracts/{id}": {
+      "get": {
+        "operationId": "UpgradeContractInternalController_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeContractInternal"
+        ]
+      }
+    },
+    "/api/internal/contracts/{id}/check": {
+      "post": {
+        "operationId": "UpgradeContractInternalController_check",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeContractInternal"
+        ]
+      }
+    },
+    "/api/internal/upgrades/inspection": {
+      "post": {
+        "operationId": "UpgradeInspectionController_inspect",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeInspection"
+        ]
+      }
+    },
+    "/api/internal/upgrades/contract-business": {
+      "post": {
+        "operationId": "UpgradeContractBusinessController_execute",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "UpgradeContractBusiness"
+        ]
+      }
+    },
+    "/api/internal/application/catalog": {
+      "get": {
+        "operationId": "ControlRpcController_catalog",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "ControlRpc"
+        ]
+      }
+    },
+    "/api/internal/application/identity": {
+      "get": {
+        "operationId": "ControlRpcController_identity",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "ControlRpc"
+        ]
+      }
+    },
+    "/api/internal/application/authenticate": {
+      "post": {
+        "operationId": "ControlRpcController_authenticate",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "ControlRpc"
+        ]
+      }
+    },
+    "/api/internal/application/invoke": {
+      "post": {
+        "operationId": "ControlRpcController_invoke",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "tags": [
+          "ControlRpc"
+        ]
+      }
+    },
+    "/api/operations/{operationId}": {
+      "get": {
+        "operationId": "ApplicationOperationController_lookup",
+        "parameters": [
+          {
+            "name": "operationId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationOperationResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "ApplicationOperation"
+        ]
+      }
     }
   },
   "info": {
@@ -2801,7 +3832,8 @@
         "properties": {
           "passcode": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 1024
           }
         },
         "required": [
@@ -3155,6 +4187,77 @@
               "failed",
               "destroying",
               "destroyed"
+            ]
+          },
+          "startupObservation": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "inflight",
+                  "unknown",
+                  "succeeded",
+                  "failed"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "workspace-preparation",
+                  "instance-create",
+                  "instance-start",
+                  "runtime-tools",
+                  "environment-initialization",
+                  "agent-bootstrap",
+                  "completed"
+                ]
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "stageEnteredAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "lastProgressAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "heartbeatAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            },
+            "required": [
+              "operationId",
+              "sequence",
+              "state",
+              "stage",
+              "startedAt",
+              "stageEnteredAt",
+              "lastProgressAt",
+              "heartbeatAt",
+              "observedAt"
             ]
           },
           "headless": {
@@ -4174,6 +5277,12 @@
               "type": "string"
             }
           },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "providerCompatibility": {
             "type": "object",
             "additionalProperties": {
@@ -4400,6 +5509,12 @@
                   "type": "string"
                 }
               },
+              "runtimeVersions": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
               "providerCompatibility": {
                 "type": "object",
                 "additionalProperties": {
@@ -4547,6 +5662,12 @@
               "digest": {
                 "type": "string"
               },
+              "runtimeVersions": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -4616,6 +5737,12 @@
         "properties": {
           "digest": {
             "type": "string"
+          },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "status": {
             "type": "string",
@@ -4774,6 +5901,12 @@
           "digest": {
             "type": "string"
           },
+          "runtimeVersions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -4921,6 +6054,12 @@
                 "properties": {
                   "digest": {
                     "type": "string"
+                  },
+                  "runtimeVersions": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "status": {
                     "type": "string",
@@ -5900,6 +7039,27 @@
       "SystemResourcesResponseDto": {
         "type": "object",
         "properties": {
+          "capacityAvailability": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unavailable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "OWNER_CAPACITY_UNAVAILABLE"
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ]
+          },
           "capacity": {
             "type": "object",
             "properties": {
@@ -6410,6 +7570,2171 @@
           "activeWS",
           "credentialAuth",
           "blockers"
+        ]
+      },
+      "UpgradeAttemptDto": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetReleaseId": {
+            "type": "string",
+            "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+          },
+          "targetDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "downloading",
+              "package-verified",
+              "migrating",
+              "prepared",
+              "candidate-ready",
+              "routing-switched",
+              "observing",
+              "api-activated",
+              "activation-confirmed",
+              "deferred",
+              "candidate-rejected",
+              "failed",
+              "reverted"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "percent": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "maximum": 100,
+            "exclusiveMaximum": false,
+            "nullable": true
+          },
+          "completedWork": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "totalWork": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "nullable": true
+          },
+          "planDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "acceptedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "instanceId",
+          "attemptId",
+          "requestId",
+          "targetReleaseId",
+          "targetDigest",
+          "generation",
+          "sequence",
+          "state",
+          "stage",
+          "percent",
+          "completedWork",
+          "totalWork",
+          "planDigest",
+          "acceptedAt",
+          "observedAt",
+          "reason"
+        ]
+      },
+      "UpgradeOperationDto": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "finalTargetReleaseId": {
+            "type": "string",
+            "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+          },
+          "finalTargetDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "preparing",
+              "running",
+              "completed",
+              "failed",
+              "deferred"
+            ]
+          },
+          "acceptedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "currentStageIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "stages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "releaseId": {
+                  "type": "string",
+                  "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+                },
+                "targetDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}$"
+                },
+                "attemptId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "nullable": true
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "running",
+                    "confirmed",
+                    "failed",
+                    "deferred"
+                  ]
+                }
+              },
+              "required": [
+                "releaseId",
+                "targetDigest",
+                "attemptId",
+                "state"
+              ]
+            }
+          },
+          "percent": {
+            "type": "number",
+            "minimum": 100,
+            "maximum": 100,
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "defaultImageUpdate": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "managed-default"
+                ]
+              },
+              "images": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+                    },
+                    "previousRef": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "previousDigest": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}$"
+                    },
+                    "ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}$"
+                    },
+                    "runtimeVersions": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "previousRef",
+                    "previousDigest",
+                    "ref",
+                    "digest",
+                    "runtimeVersions"
+                  ]
+                }
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "scope",
+              "images",
+              "observedAt"
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "instanceId",
+          "operationId",
+          "requestId",
+          "finalTargetReleaseId",
+          "finalTargetDigest",
+          "sequence",
+          "state",
+          "acceptedAt",
+          "observedAt",
+          "currentStageIndex",
+          "stages",
+          "percent",
+          "reason"
+        ]
+      },
+      "UpgradeStatusDto": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+          },
+          "userScope": {
+            "type": "string",
+            "minLength": 1
+          },
+          "activationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "confirmedServiceRelease": {
+            "type": "object",
+            "properties": {
+              "releaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "activationGeneration": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "activatedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "channel": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+              },
+              "components": {
+                "type": "object",
+                "properties": {
+                  "api": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "web": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      },
+                      "webRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol",
+                      "webRevision"
+                    ]
+                  },
+                  "installer": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "coordinator": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  }
+                },
+                "required": [
+                  "api",
+                  "web",
+                  "installer"
+                ]
+              },
+              "commits": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "api": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "web": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  }
+                },
+                "required": [
+                  "project",
+                  "api",
+                  "web"
+                ]
+              },
+              "productionWebBinding": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "releaseId",
+              "activationGeneration",
+              "activatedAt",
+              "schema",
+              "channel",
+              "components",
+              "commits",
+              "productionWebBinding"
+            ],
+            "nullable": true
+          },
+          "lastConfirmedServiceRelease": {
+            "type": "object",
+            "properties": {
+              "releaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "activationGeneration": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "activatedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "channel": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+              },
+              "components": {
+                "type": "object",
+                "properties": {
+                  "api": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "web": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      },
+                      "webRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol",
+                      "webRevision"
+                    ]
+                  },
+                  "installer": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "coordinator": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object",
+                    "properties": {
+                      "artifactDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "inputFingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sourceRevision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "protocol": {
+                        "type": "object",
+                        "properties": {
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "max": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          }
+                        },
+                        "required": [
+                          "min",
+                          "max"
+                        ]
+                      },
+                      "dataFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "project-name-v2-authority"
+                          ]
+                        }
+                      },
+                      "upgradeOperationFormats": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "upgrade-plan-v1"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "artifactDigest",
+                      "inputFingerprint",
+                      "sourceRevision",
+                      "protocol"
+                    ]
+                  }
+                },
+                "required": [
+                  "api",
+                  "web",
+                  "installer"
+                ]
+              },
+              "commits": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "api": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "web": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  }
+                },
+                "required": [
+                  "project",
+                  "api",
+                  "web"
+                ]
+              },
+              "productionWebBinding": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "releaseId",
+              "activationGeneration",
+              "activatedAt",
+              "schema",
+              "channel",
+              "components",
+              "commits",
+              "productionWebBinding"
+            ],
+            "nullable": true
+          },
+          "serviceState": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "transitioning",
+              "unknown"
+            ]
+          },
+          "controlSystem": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "protocolVersion": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": true
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "passive",
+                  "reconciling",
+                  "unavailable"
+                ]
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "version",
+              "protocolVersion",
+              "state",
+              "observedAt"
+            ]
+          },
+          "diagnostics": {
+            "type": "object",
+            "properties": {
+              "correlationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "phase": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "recordedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "correlationId",
+              "phase",
+              "code",
+              "recordedAt"
+            ]
+          },
+          "catalog": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "verified",
+                  "unknown",
+                  "unavailable",
+                  "no-update"
+                ]
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "availableRelease": {
+                "type": "object",
+                "properties": {
+                  "releaseId": {
+                    "type": "string",
+                    "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+                  },
+                  "targetDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "webRevision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "webArtifactDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "installable": {
+                    "type": "boolean"
+                  },
+                  "supportsAsync": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "releaseId",
+                  "targetDigest",
+                  "webRevision",
+                  "webArtifactDigest",
+                  "installable"
+                ],
+                "nullable": true
+              }
+            },
+            "required": [
+              "state",
+              "observedAt",
+              "reason",
+              "availableRelease"
+            ]
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "canUpgradeInstance": {
+                "type": "boolean"
+              },
+              "canAuthenticate": {
+                "type": "boolean"
+              },
+              "canContract": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "canUpgradeInstance",
+              "canAuthenticate"
+            ]
+          },
+          "csrfToken": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "object",
+            "properties": {
+              "instanceId": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+              },
+              "attemptId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "requestId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "targetReleaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "targetDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "downloading",
+                  "package-verified",
+                  "migrating",
+                  "prepared",
+                  "candidate-ready",
+                  "routing-switched",
+                  "observing",
+                  "api-activated",
+                  "activation-confirmed",
+                  "deferred",
+                  "candidate-rejected",
+                  "failed",
+                  "reverted"
+                ]
+              },
+              "stage": {
+                "type": "string"
+              },
+              "percent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "maximum": 100,
+                "exclusiveMaximum": false,
+                "nullable": true
+              },
+              "completedWork": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "totalWork": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "nullable": true
+              },
+              "planDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "acceptedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "instanceId",
+              "attemptId",
+              "requestId",
+              "targetReleaseId",
+              "targetDigest",
+              "generation",
+              "sequence",
+              "state",
+              "stage",
+              "percent",
+              "completedWork",
+              "totalWork",
+              "planDigest",
+              "acceptedAt",
+              "observedAt",
+              "reason"
+            ],
+            "nullable": true
+          },
+          "recovery": {
+            "type": "object",
+            "properties": {
+              "recoveryAttemptId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "triggeringAttemptId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "recovering",
+                  "recovery-confirmed",
+                  "unknown",
+                  "failed"
+                ]
+              },
+              "planDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "created",
+                  "reconciling",
+                  "restoring",
+                  "verifying",
+                  "recovered",
+                  "blocked"
+                ]
+              },
+              "confirmedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "triggeringOperationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "diagnosticId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "recoveryAttemptId",
+              "triggeringAttemptId",
+              "generation",
+              "sequence",
+              "state",
+              "planDigest",
+              "reason",
+              "observedAt"
+            ],
+            "nullable": true
+          },
+          "availableWeb": {
+            "type": "object",
+            "properties": {
+              "releaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "webReleaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$",
+                "nullable": true
+              },
+              "webRevision": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              "artifactDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "instanceId": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+              },
+              "activationGeneration": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "productionBinding": {
+                "type": "string"
+              },
+              "ready": {
+                "type": "boolean"
+              },
+              "compatible": {
+                "type": "boolean"
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "releaseId",
+              "webReleaseId",
+              "webRevision",
+              "artifactDigest",
+              "instanceId",
+              "activationGeneration",
+              "productionBinding",
+              "ready",
+              "compatible",
+              "observedAt"
+            ],
+            "nullable": true
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "repairableCurrent": {
+            "type": "object",
+            "properties": {
+              "baseConfirmedReleaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "activationGeneration": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "baseConfirmedReleaseId",
+              "activationGeneration",
+              "observedAt"
+            ],
+            "nullable": true
+          },
+          "contract": {
+            "type": "object",
+            "properties": {
+              "authority": {
+                "type": "string",
+                "enum": [
+                  "legacy",
+                  "new",
+                  "unknown"
+                ]
+              },
+              "availablePlan": {
+                "type": "object",
+                "properties": {
+                  "planDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "releaseId": {
+                    "type": "string",
+                    "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+                  },
+                  "expandPlanDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "rollbackWindowClosesAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "eligible": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "legacyReaderCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "irreversible": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "planDigest",
+                  "releaseId",
+                  "expandPlanDigest",
+                  "rollbackWindowClosesAt",
+                  "eligible",
+                  "reason",
+                  "legacyReaderCount",
+                  "irreversible"
+                ],
+                "nullable": true
+              },
+              "attempt": {
+                "type": "object",
+                "properties": {
+                  "instanceId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+                  },
+                  "contractAttemptId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "requestId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "targetPlanDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "activationGeneration": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "accepted",
+                      "retiring-readers",
+                      "authority-active",
+                      "clearing",
+                      "completed",
+                      "deferred",
+                      "failed",
+                      "unknown"
+                    ]
+                  },
+                  "stage": {
+                    "type": "string"
+                  },
+                  "completedRows": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false
+                  },
+                  "totalRows": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": false,
+                    "nullable": true
+                  },
+                  "acceptedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "observedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "instanceId",
+                  "contractAttemptId",
+                  "requestId",
+                  "targetPlanDigest",
+                  "activationGeneration",
+                  "sequence",
+                  "state",
+                  "stage",
+                  "completedRows",
+                  "totalRows",
+                  "acceptedAt",
+                  "observedAt",
+                  "reason"
+                ],
+                "nullable": true
+              }
+            },
+            "required": [
+              "authority",
+              "availablePlan",
+              "attempt"
+            ],
+            "nullable": true
+          },
+          "operation": {
+            "type": "object",
+            "properties": {
+              "instanceId": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+              },
+              "operationId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "requestId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "finalTargetReleaseId": {
+                "type": "string",
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+              },
+              "finalTargetDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "preparing",
+                  "running",
+                  "completed",
+                  "failed",
+                  "deferred"
+                ]
+              },
+              "acceptedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "currentStageIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "stages": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "releaseId": {
+                      "type": "string",
+                      "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+                    },
+                    "targetDigest": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}$"
+                    },
+                    "attemptId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "nullable": true
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "running",
+                        "confirmed",
+                        "failed",
+                        "deferred"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "releaseId",
+                    "targetDigest",
+                    "attemptId",
+                    "state"
+                  ]
+                }
+              },
+              "percent": {
+                "type": "number",
+                "minimum": 100,
+                "maximum": 100,
+                "nullable": true
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "defaultImageUpdate": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "managed-default"
+                    ]
+                  },
+                  "images": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+                        },
+                        "previousRef": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "previousDigest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "digest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "runtimeVersions": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "provider",
+                        "previousRef",
+                        "previousDigest",
+                        "ref",
+                        "digest",
+                        "runtimeVersions"
+                      ]
+                    }
+                  },
+                  "observedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "scope",
+                  "images",
+                  "observedAt"
+                ],
+                "nullable": true
+              }
+            },
+            "required": [
+              "instanceId",
+              "operationId",
+              "requestId",
+              "finalTargetReleaseId",
+              "finalTargetDigest",
+              "sequence",
+              "state",
+              "acceptedAt",
+              "observedAt",
+              "currentStageIndex",
+              "stages",
+              "percent",
+              "reason"
+            ],
+            "nullable": true
+          },
+          "currentStageProgress": {
+            "type": "object",
+            "properties": {
+              "stage": {
+                "type": "string"
+              },
+              "completedWork": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false
+              },
+              "totalWork": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "nullable": true
+              },
+              "percent": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMinimum": false,
+                "maximum": 100,
+                "exclusiveMaximum": false,
+                "nullable": true
+              },
+              "enteredAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "lastProgressAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            },
+            "required": [
+              "stage",
+              "completedWork",
+              "totalWork",
+              "percent",
+              "enteredAt",
+              "lastProgressAt"
+            ],
+            "nullable": true
+          },
+          "serviceAvailability": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "available",
+                  "unavailable",
+                  "unknown"
+                ]
+              },
+              "observedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "state",
+              "observedAt",
+              "reason"
+            ]
+          },
+          "observation": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "fresh",
+                  "stale",
+                  "checking"
+                ]
+              },
+              "confirmedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "checkedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "state",
+              "confirmedAt",
+              "checkedAt",
+              "reason"
+            ]
+          }
+        },
+        "required": [
+          "instanceId",
+          "userScope",
+          "activationGeneration",
+          "confirmedServiceRelease",
+          "lastConfirmedServiceRelease",
+          "serviceState",
+          "catalog",
+          "capabilities",
+          "csrfToken",
+          "attempt",
+          "recovery",
+          "availableWeb",
+          "observedAt"
+        ]
+      },
+      "UpgradeAccessDto": {
+        "type": "object",
+        "properties": {
+          "upgradeKey": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      },
+      "UpgradeRequestDto": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetReleaseId": {
+            "type": "string",
+            "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-[a-z0-9.-]+)?$"
+          },
+          "targetDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "expectedActivationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          }
+        },
+        "required": [
+          "requestId",
+          "targetReleaseId",
+          "targetDigest",
+          "expectedActivationGeneration"
+        ]
+      },
+      "UpgradeContractRequestDto": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetPlanDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "expectedActivationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "acknowledgeRollbackClosure": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "requestId",
+          "targetPlanDigest",
+          "expectedActivationGeneration",
+          "acknowledgeRollbackClosure"
+        ]
+      },
+      "UpgradeContractAttemptDto": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$"
+          },
+          "contractAttemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetPlanDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "activationGeneration": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "retiring-readers",
+              "authority-active",
+              "clearing",
+              "completed",
+              "deferred",
+              "failed",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "completedRows": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false
+          },
+          "totalRows": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": false,
+            "nullable": true
+          },
+          "acceptedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "instanceId",
+          "contractAttemptId",
+          "requestId",
+          "targetPlanDigest",
+          "activationGeneration",
+          "sequence",
+          "state",
+          "stage",
+          "completedRows",
+          "totalRows",
+          "acceptedAt",
+          "observedAt",
+          "reason"
+        ]
+      },
+      "UpgradeProbeDto": {
+        "type": "object",
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fence": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "attemptId",
+          "fence",
+          "requestId",
+          "value"
+        ]
+      },
+      "ApplicationOperationResponseDto": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "absent",
+              "pending",
+              "complete",
+              "unknown"
+            ]
+          },
+          "resultAvailable": {
+            "type": "boolean"
+          },
+          "result": {},
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "operationId",
+          "state",
+          "resultAvailable",
+          "observedAt"
         ]
       },
       "ErrorEnvelope": {

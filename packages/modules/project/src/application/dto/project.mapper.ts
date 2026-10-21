@@ -18,7 +18,7 @@ import type { Project } from '../../domain/entities/project.entity';
 export const ProjectMapper = {
   toDto(project: Project, taskCount: number): ProjectDto {
     return {
-      id: project.id as string,
+      id: project.id,
       name: project.name,
       sourceType: project.sourceType,
       cloneStatus: project.cloneStatus,

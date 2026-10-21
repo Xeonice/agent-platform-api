@@ -1,3 +1,4 @@
+import { TASK_STATUSES } from '../../../domain/value-objects/agent-task-status.vo';
 import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, index, check } from 'drizzle-orm/sqlite-core';
 import { sandboxes } from './sandbox.sqlite';
@@ -46,7 +47,7 @@ export const agentTasks = sqliteTable(
      * off" and exposing it as a number invites arithmetic that breaks on the next one.
      */
     cursor: text('cursor'),
-    status: text('status').notNull().default('running'),
+    status: text('status', { enum: TASK_STATUSES }).notNull().default('running'),
     /** Only meaningful in a terminal state, and MAY still be NULL — a signal-killed process has none. */
     exitCode: integer('exit_code'),
     /** The CLI's own conversation id (04 §3 ★4); NULL until its first event arrives. */

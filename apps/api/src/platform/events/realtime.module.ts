@@ -11,6 +11,6 @@ import { EventsGateway } from './events.gateway';
 @Global()
 @Module({
   providers: [EventsGateway, { provide: SANDBOX_EVENT_BROADCASTER, useExisting: EventsGateway }],
-  exports: [SANDBOX_EVENT_BROADCASTER],
+  exports: [SANDBOX_EVENT_BROADCASTER, EventsGateway],
 })
 export class RealtimeModule {}

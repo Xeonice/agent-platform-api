@@ -1,5 +1,5 @@
-import { parseGitRemote } from '@platform/shared-kernel';
-import type { GitRemoteScheme } from '@platform/shared-kernel';
+import { parseGitRemote } from '@platform/shared-kernel/pure';
+import type { GitRemoteScheme } from '@platform/shared-kernel/pure';
 import type { GitObtainedVia } from '../value-objects/obtained-via.vo';
 
 /**

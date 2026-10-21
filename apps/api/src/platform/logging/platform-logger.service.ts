@@ -82,8 +82,9 @@ export class PlatformLoggerService implements LoggerService {
 
 /** Nest 的惯例:最后一个 string 参数是 context。 */
 function splitContext(params: unknown[]): { context?: string; rest: unknown[] } {
-  if (params.length > 0 && typeof params[params.length - 1] === 'string') {
-    return { context: params[params.length - 1] as string, rest: params.slice(0, -1) };
+  const context = params.at(-1);
+  if (typeof context === 'string') {
+    return { context, rest: params.slice(0, -1) };
   }
   return { rest: params };
 }
@@ -100,5 +101,13 @@ function format(value: unknown): string {
       return '[unserializable]';
     }
   }
-  return String(value);
+  if (typeof value === 'function') return value.toString();
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint' ||
+    typeof value === 'symbol'
+  )
+    return String(value);
+  return '[unserializable]';
 }

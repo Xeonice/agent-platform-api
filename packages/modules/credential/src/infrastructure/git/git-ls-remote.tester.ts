@@ -21,9 +21,8 @@ const LS_REMOTE_TIMEOUT_MS = 15_000; // 03 §7.4
 export class GitLsRemoteTester implements GitRemoteTester {
   async lsRemote(input: GitLsRemoteInput): Promise<GitLsRemoteResult> {
     const controller = new AbortController();
-    let timedOut = false;
+
     const timer = setTimeout(() => {
-      timedOut = true;
       controller.abort();
     }, LS_REMOTE_TIMEOUT_MS);
     const git = simpleGit({
@@ -36,7 +35,7 @@ export class GitLsRemoteTester implements GitRemoteTester {
       await git.env(buildChildEnv(input)).raw(['ls-remote', '--exit-code', input.url]);
       return { ok: true };
     } catch (e) {
-      if (timedOut)
+      if (controller.signal.aborted)
         return { ok: false, errorCode: 'TIMEOUT', message: 'connection timed out (15s)' };
       const raw = e instanceof Error ? e.message : String(e);
       return { ok: false, errorCode: classify(raw), message: sanitize(raw) };

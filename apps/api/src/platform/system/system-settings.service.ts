@@ -9,7 +9,7 @@ import type {
   SystemSettingsDto,
   UpdateSystemSettingsRequest,
 } from '@platform/contracts';
-import { ConnectivityResultSchema } from '@platform/contracts';
+import { ConnectivityResultSchema, ProxyConfigSchema } from '@platform/contracts';
 import { PasscodeService } from '../access-passcode/passcode.service';
 import {
   SYSTEM_SETTINGS_ROW_ID,
@@ -17,7 +17,7 @@ import {
   type SystemSettingsRow,
 } from './system-settings.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * 平台版本。**没有发布流程时说 `dev`，不编一个版本号。**
@@ -56,18 +56,20 @@ export class SystemSettingsService {
       .select()
       .from(systemSettings)
       .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
-      .all();
-    if (found.length > 0) return found[0]!;
+      .get();
+    if (found) return found;
     this.db
       .insert(systemSettings)
       .values({ id: SYSTEM_SETTINGS_ROW_ID, initialized: false })
       .onConflictDoNothing()
       .run();
-    return this.db
+    const created = this.db
       .select()
       .from(systemSettings)
       .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
-      .all()[0]!;
+      .get();
+    if (!created) throw new Error('System settings row is missing after initialization');
+    return created;
   }
 
   initialized(): boolean {
@@ -75,9 +77,7 @@ export class SystemSettingsService {
   }
 
   proxyConfig(): ProxyConfig | undefined {
-    const raw = this.row().proxyConfig;
-    if (raw === null || raw === undefined) return undefined;
-    return raw as ProxyConfig;
+    return parseProxy(this.row().proxyConfig);
   }
 
   /**
@@ -102,17 +102,26 @@ export class SystemSettingsService {
 
   /** `GET /api/system/settings`。⛔ 不出 hash，只出「启没启用」（见类注释纪律 2）。 */
   settings(): SystemSettingsDto {
+    return this.settingsView(this.passcode.enabled, this.passcode.updatedAt?.toISOString() ?? null);
+  }
+
+  /** The stable authority is the sole current access-policy source. */
+  async currentSettings(): Promise<SystemSettingsDto> {
+    const access = await this.passcode.accessStatus();
+    return this.settingsView(access.enabled, access.updatedAt);
+  }
+
+  private settingsView(enabled: boolean, updatedAt: string | null): SystemSettingsDto {
     const row = this.row();
+    const proxyConfig = parseProxy(row.proxyConfig);
     return {
       initialized: row.initialized,
-      ...(row.proxyConfig ? { proxyConfig: row.proxyConfig as ProxyConfig } : {}),
+      ...(proxyConfig ? { proxyConfig } : {}),
       ...(row.publicBaseUrl ? { publicBaseUrl: row.publicBaseUrl } : {}),
-      accessPasscodeEnabled: this.passcode.enabled,
+      accessPasscodeEnabled: enabled,
       // ⚠️ 只在口令**来自库**时才有「上次生成时刻」——env 形态下这一列恒 NULL，而
       // `PasscodeService.updatedAt` 已经把这条判据收在一处，这里不再重复判断。
-      ...(this.passcode.updatedAt
-        ? { accessPasscodeUpdatedAt: this.passcode.updatedAt.toISOString() }
-        : {}),
+      ...(updatedAt ? { accessPasscodeUpdatedAt: updatedAt } : {}),
       version: { platform: platformVersion(), node: process.version },
     };
   }
@@ -128,6 +137,18 @@ export class SystemSettingsService {
    * ⚠️ **`null` 是清空，缺席是不改。** 少了前者，一个配错的代理就删不掉。
    */
   update(patch: UpdateSystemSettingsRequest): SystemSettingsDto {
+    this.writeSettings(patch);
+    return this.settings();
+  }
+
+  async updateCurrent(patch: UpdateSystemSettingsRequest): Promise<SystemSettingsDto> {
+    // Refuse an unavailable authority before applying a public settings action.
+    await this.passcode.accessStatus();
+    this.writeSettings(patch);
+    return this.currentSettings();
+  }
+
+  private writeSettings(patch: UpdateSystemSettingsRequest): void {
     this.row();
     const values: Partial<typeof systemSettings.$inferInsert> = {};
     if (patch.proxyConfig !== undefined) {
@@ -143,7 +164,6 @@ export class SystemSettingsService {
         .where(eq(systemSettings.id, SYSTEM_SETTINGS_ROW_ID))
         .run();
     }
-    return this.settings();
   }
 
   /** `POST /api/system/init` 的落库那一步（放行 + 存代理 + 存这一轮的检测结果）。 */
@@ -202,4 +222,10 @@ function parseConnectivity(raw: unknown): ConnectivityResult[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
   const parsed = ConnectivityResultSchema.array().safeParse(raw);
   return parsed.success ? parsed.data : undefined;
+}
+
+/** JSON columns may contain a previous version or malformed external data. */
+function parseProxy(raw: unknown): ProxyConfig | undefined {
+  const result = ProxyConfigSchema.safeParse(raw);
+  return result.success ? result.data : undefined;
 }

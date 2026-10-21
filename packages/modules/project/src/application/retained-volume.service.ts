@@ -23,6 +23,7 @@ import type {
   RetainedVolumeArchive,
   RetainedVolumeStore,
 } from '../domain/ports/retained-volume-store.port';
+import { errorMessage } from '@platform/shared-kernel';
 
 /** 默认保留期（P20 §6）。自动化产物由调用方传规则的 `artifactRetentionDays`。 */
 export const DEFAULT_RETENTION_DAYS: RetentionDays = 30;
@@ -196,7 +197,7 @@ export class RetainedVolumeService {
         });
       } catch (e) {
         // 一条清不掉不该带走整批：下一轮还会扫到它（deleted_at 仍是 NULL）。
-        this.logger.warn(`failed to reap retained volume ${volume.id}: ${(e as Error).message}`);
+        this.logger.warn(`failed to reap retained volume ${volume.id}: ${errorMessage(e)}`);
       }
     }
     return reaped;

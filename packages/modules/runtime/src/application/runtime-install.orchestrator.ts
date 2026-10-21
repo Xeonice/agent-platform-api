@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { CLOCK, EVENT_BUS, ID_GENERATOR, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, EventBus, IdGenerator, UnitOfWork } from '@platform/shared-kernel';
@@ -131,11 +132,13 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
       throw new RuntimeInstallFailedError(reason);
     }
 
-    await this.transition(installation, (i, now) => i.markInstalling(now));
+    await this.transition(installation, (i, now) => {
+      i.markInstalling(now);
+    });
     try {
       await adapter.install(this.withTimeout(input.exec, INSTALL_TIMEOUT_MS));
     } catch (e) {
-      const reason = `installing '${input.runtimeId}' failed: ${(e as Error).message}`;
+      const reason = `installing '${input.runtimeId}' failed: ${errorMessage(e)}`;
       await this.recordFailure(installation, reason);
       throw new RuntimeInstallFailedError(reason);
     }
@@ -148,7 +151,9 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
       throw new RuntimeInstallFailedError(reason);
     }
     const version = await this.detectVersion(plan, probeExec);
-    await this.transition(installation, (i, now) => i.markInstalled(version, now));
+    await this.transition(installation, (i, now) => {
+      i.markInstalled(version, now);
+    });
   }
 
   /**
@@ -172,7 +177,7 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     try {
       return await adapter.isInstalled(this.withTimeout(exec, PROBE_TIMEOUT_MS));
     } catch (e) {
-      this.logger.warn(`isInstalled probe for '${runtimeId}' threw: ${(e as Error).message}`);
+      this.logger.warn(`isInstalled probe for '${runtimeId}' threw: ${errorMessage(e)}`);
       return false;
     }
   }
@@ -182,7 +187,7 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
    * the PLAN names — so the platform never hard-codes a per-runtime executable.
    */
   private async detectVersion(plan: RuntimeInstallPlan, exec: SandboxExecFn): Promise<string> {
-    const binary = plan.requiredBinaries[0];
+    const binary = plan.requiredBinaries.at(0);
     if (binary === undefined) return 'unknown';
     try {
       const r = await exec([binary, '--version'], { timeoutMs: PROBE_TIMEOUT_MS });
@@ -228,16 +233,21 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
     return opened;
   }
 
-  private async transition(
+  private transition(
     installation: RuntimeInstallation,
     move: (i: RuntimeInstallation, now: Date) => void,
   ): Promise<void> {
-    move(installation, this.clock.now());
-    this.persist(installation);
+    return new Promise<void>((resolve) => {
+      move(installation, this.clock.now());
+      this.persist(installation);
+      resolve();
+    });
   }
 
   private async recordFailure(installation: RuntimeInstallation, reason: string): Promise<void> {
-    await this.transition(installation, (i, now) => i.markFailed(reason, now));
+    await this.transition(installation, (i, now) => {
+      i.markFailed(reason, now);
+    });
   }
 
   /** One SHORT transaction per state change — deliberately never joined to T1. */
@@ -293,7 +303,7 @@ export class RuntimeInstallOrchestratorService implements RuntimeInstallOrchestr
           subjectType: 'sandbox',
           subjectId: sandboxId,
           actor: 'scheduler',
-          summary: `探测 ${runtimeId} 抛错：${(e as Error).message}`,
+          summary: `探测 ${runtimeId} 抛错：${errorMessage(e)}`,
           detail: { runtimeId, argv: cmd, threw: true },
           durationMs: Math.max(0, this.clock.now().getTime() - startedAt),
           outcome: 'failed',

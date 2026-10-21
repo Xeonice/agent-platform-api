@@ -58,13 +58,16 @@ export function imagePreinstalls(image: ResolvedImageSpec, runtimeId: string): b
 /** Assemble the npm-global install plan for one CLI. */
 export function npmInstallPlan(input: {
   packageName: string;
+  version: string;
   binary: string;
   preinstalled: boolean;
   estimatedInstallSec: number;
 }): RuntimeInstallPlan {
   return {
     strategy: input.preinstalled ? 'preinstalled' : 'install-on-start',
-    packageManagerCmds: input.preinstalled ? [] : [`npm install -g ${input.packageName}`],
+    packageManagerCmds: input.preinstalled
+      ? []
+      : [`npm install -g ${input.packageName}@${input.version}`],
     requiredBinaries: [input.binary],
     envRequirements: [],
     estimatedInstallSec: input.preinstalled ? 0 : input.estimatedInstallSec,
@@ -90,7 +93,7 @@ export async function runInstallCommands(exec: SandboxExecFn, cmds: string[]): P
     if (r.exitCode !== 0) {
       throw new AdapterAuthError(
         'INSTALL_FAILED',
-        `'${cmd}' exited ${r.exitCode}: ${tail(r.stdout)}`,
+        `'${cmd}' exited ${String(r.exitCode)}: ${tail(r.stdout)}`,
       );
     }
   }

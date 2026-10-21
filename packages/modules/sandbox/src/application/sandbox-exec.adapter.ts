@@ -36,7 +36,7 @@ export class SandboxExecAdapter implements SandboxExecPort {
     const provider = this.registry.get(sandbox.provider);
     return toExecFn(provider, {
       provider: sandbox.provider,
-      providerSandboxId: sandbox.providerSandboxId as string,
+      providerSandboxId: sandbox.providerSandboxId ?? missingHandle(),
       providerState: sandbox.providerState ?? undefined,
     });
   }
@@ -57,7 +57,7 @@ export class SandboxExecAdapter implements SandboxExecPort {
 
   private async requireRunning(sandboxId: string): Promise<Sandbox> {
     const sandbox = await this.repo.findById(asSandboxId(sandboxId));
-    if (!sandbox || !sandbox.providerSandboxId) {
+    if (!sandbox?.providerSandboxId) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
         `sandbox ${sandboxId} has no running instance to exec into`,
@@ -65,4 +65,8 @@ export class SandboxExecAdapter implements SandboxExecPort {
     }
     return sandbox;
   }
+}
+
+function missingHandle(): never {
+  throw new Error('Sandbox handle is unconfirmed');
 }

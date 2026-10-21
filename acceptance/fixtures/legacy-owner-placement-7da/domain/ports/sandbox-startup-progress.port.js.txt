@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SANDBOX_STARTUP_PROGRESS = void 0;
+exports.SANDBOX_STARTUP_PROGRESS = Symbol('SandboxStartupProgressStore');
+//# sourceMappingURL=sandbox-startup-progress.port.js.map

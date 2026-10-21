@@ -116,7 +116,7 @@ export class DeploymentController {
   }
 
   private count(query: ReturnType<typeof sql>): number {
-    const row = this.db.get<{ count: number }>(query);
+    const row = this.db.get<{ count: number } | undefined>(query);
     if (!row || !Number.isSafeInteger(row.count) || row.count < 0)
       throw new Error('Deployment state unavailable');
     return row.count;

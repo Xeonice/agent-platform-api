@@ -1,4 +1,4 @@
-import type { AutomationId, Tx } from '@platform/shared-kernel';
+import type { AutomationId, Tx } from '@platform/shared-kernel/pure';
 import type { AutomationRun } from '../entities/automation-run.entity';
 
 /**

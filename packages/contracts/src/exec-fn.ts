@@ -28,15 +28,15 @@ export function toExecFn(provider: SandboxProvider, handle: SandboxHandle): Sand
     const chunks: Buffer[] = [];
     return new Promise((resolve) => {
       stream.onData((chunk) => chunks.push(chunk));
-      stream.onExit((code) =>
+      stream.onExit((code) => {
         resolve({
           stdout: Buffer.concat(chunks).toString('utf8'),
           stderr: '',
           // a stream killed by a signal reports `null`; surface it as a non-zero
           // exit rather than silently passing for "no exit code" (SP-09).
           exitCode: code ?? -1,
-        }),
-      );
+        });
+      });
     });
   };
 }

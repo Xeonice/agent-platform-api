@@ -1,4 +1,4 @@
-import type { DomainEvent, ProjectId } from '@platform/shared-kernel';
+import type { DomainEvent, ProjectId } from '@platform/shared-kernel/pure';
 
 /**
  * Project domain events (23 §12 / §6.4). Clone PROGRESS is a transient projection

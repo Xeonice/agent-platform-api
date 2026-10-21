@@ -1,7 +1,7 @@
+import { requireGitObtainedVia } from '../../domain/value-objects/obtained-via.vo';
 import type { MaskedGitCredential } from '@platform/contracts';
 import type { Credential } from '../../domain/entities/credential.entity';
 import { typeFromObtainedVia } from '../../domain/value-objects/obtained-via.vo';
-import type { GitObtainedVia } from '../../domain/value-objects/obtained-via.vo';
 
 /**
  * Mapper — the ONLY place domain ↔ masked wire DTO conversion happens for git
@@ -11,9 +11,9 @@ import type { GitObtainedVia } from '../../domain/value-objects/obtained-via.vo'
 export const CredentialMapper = {
   toMaskedGit(cred: Credential): MaskedGitCredential {
     return {
-      id: cred.id as string,
+      id: cred.id,
       kind: 'git',
-      type: typeFromObtainedVia(cred.obtainedVia as GitObtainedVia),
+      type: typeFromObtainedVia(requireGitObtainedVia(cred.obtainedVia)),
       maskedIdentifier: cred.masked.toString(),
       platform: cred.metadata?.provider,
       allowedHosts: cred.allowedHosts,

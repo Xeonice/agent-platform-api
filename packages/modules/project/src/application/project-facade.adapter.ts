@@ -14,6 +14,7 @@ import type { BaselineGit } from '../domain/ports/baseline-git.port';
 import { ProjectStateError } from '../domain/errors/project-errors';
 import { listBaselineBranches } from './baseline-branches';
 import { RetainedVolumeService } from './retained-volume.service';
+import { errorMessage } from '@platform/shared-kernel';
 
 /**
  * Implements the cross-context `ProjectFacade` (contracts) so the `sandbox`
@@ -60,7 +61,7 @@ export class ProjectFacadeAdapter implements ProjectFacade {
     } catch (e) {
       this.logger.error(
         `failed to register retained volume for sandbox ${command.sandboxId ?? '(unknown)'}: ` +
-          `${(e as Error).message}. The directory is kept; startup reconciliation will pick it up.`,
+          `${errorMessage(e)}. The directory is kept; startup reconciliation will pick it up.`,
       );
       // Automation owns a durable retry loop. It must not mark an outcome as
       // cleaned up while the artifact is still missing from the project ledger.

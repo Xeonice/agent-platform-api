@@ -1,0 +1,3 @@
+# Immutable compiled artifact bytes; the legacy-reader spec verifies every file's SHA.
+# Preserve original line endings and trailing spaces without exempting implementation files.
+acceptance/fixtures/legacy-owner-placement-7da/**/*.js.txt -text whitespace=-blank-at-eol

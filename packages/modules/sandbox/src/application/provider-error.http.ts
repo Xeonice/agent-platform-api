@@ -62,6 +62,6 @@ export function mapProviderErrorToHttp(e: unknown): unknown {
     );
   }
   if (!(e instanceof SandboxProviderError)) return e;
-  const status = PROVIDER_HTTP[e.code] ?? HttpStatus.INTERNAL_SERVER_ERROR;
+  const status = PROVIDER_HTTP[e.code];
   return new HttpException({ code: e.code, message: e.message, retryable: e.retryable }, status);
 }

@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
@@ -16,7 +17,16 @@ describe('AC-IMG-060.4/060.5/060.6 · real additive migration and persistence', 
     const sqlite = new Database(':memory:');
     databases.push(sqlite);
     const migrations = readMigrationFiles({ migrationsFolder: resolve(process.cwd(), 'drizzle') });
-    for (const migration of migrations.slice(0, -1)) {
+    const journal = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'drizzle/meta/_journal.json'), 'utf8'),
+    ) as { entries: { tag: string }[] };
+    // The historical pre-alias boundary is fixed; later UPG migrations must not
+    // turn this into a test of whichever migration happens to be last today.
+    const aliasIndex = journal.entries.findIndex(
+      (entry) => entry.tag === '0024_equal_rocket_raccoon',
+    );
+    expect(aliasIndex).toBeGreaterThan(0);
+    for (const migration of migrations.slice(0, aliasIndex)) {
       for (const statement of migration.sql) sqlite.exec(statement);
     }
     sqlite
@@ -25,7 +35,8 @@ describe('AC-IMG-060.4/060.5/060.6 · real additive migration and persistence', 
     expect(sqlite.prepare('PRAGMA table_info(images)').all()).not.toContainEqual(
       expect.objectContaining({ name: 'alias' }),
     );
-    for (const statement of migrations.at(-1)!.sql) sqlite.exec(statement);
+    for (const migration of migrations.slice(aliasIndex))
+      for (const statement of migration.sql) sqlite.exec(statement);
     expect(sqlite.prepare('SELECT id,name,alias FROM images WHERE id=?').get('old')).toEqual({
       id: 'old',
       name: 'registry.test/old',

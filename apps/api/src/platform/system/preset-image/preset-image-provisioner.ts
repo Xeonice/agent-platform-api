@@ -1,3 +1,5 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { Injectable, Logger } from '@nestjs/common';
 import { builtinImageRefFor } from '@platform/shared-kernel';
 import { pickAsset, planProvision, type ProvisionPlan, type ReleaseAsset } from './provision-plan';
@@ -142,6 +144,8 @@ export class ProvisionInFlightError extends Error {}
 
 @Injectable()
 export class PresetImageProvisioner {
+  private readonly worker = coordinatorWorker('platform.image-provision');
+
   private readonly log = new Logger(PresetImageProvisioner.name);
   /** ⚠️ 并发闸：两条流同时往 registry 写同一个 tag 是竞态（10 §6 那条 409）。 */
   private inFlight = false;
@@ -164,13 +168,15 @@ export class PresetImageProvisioner {
    * 可降级的问题升级成不可用。
    */
   async plan(): Promise<ProvisionPlan> {
-    const ref = this.targetRef();
-    const inLocalDocker = await this.safeHasLocalImage(ref);
-    const asset = await this.safePickAsset();
-    const upstream = this.assets.upstreamRef() ?? null;
-    // ⚠️ 这一条是**能力探测**，不触网、不读盘 —— 与另外三个 `safe*` 不同，它不会失败。
-    const providerCanStage = this.safeCanStage();
-    return planProvision({ ref, inLocalDocker, asset, upstream, providerCanStage });
+    return this.worker.run(async () => {
+      const ref = this.targetRef();
+      const inLocalDocker = await this.safeHasLocalImage(ref);
+      const asset = await this.safePickAsset();
+      const upstream = this.assets.upstreamRef() ?? null;
+      // ⚠️ 这一条是**能力探测**，不触网、不读盘 —— 与另外三个 `safe*` 不同，它不会失败。
+      const providerCanStage = this.safeCanStage();
+      return planProvision({ ref, inLocalDocker, asset, upstream, providerCanStage });
+    });
   }
 
   /**
@@ -198,31 +204,35 @@ export class PresetImageProvisioner {
     try {
       return this.providerStage.canStage();
     } catch (e) {
-      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${(e as Error).message}`);
+      this.log.debug(`探 provider 铺开能力失败，按「没有」处理：${errorMessage(e)}`);
       return false;
     }
   }
 
   private async safeHasLocalImage(ref: string): Promise<boolean> {
-    try {
-      if (!(await this.docker.available())) return false;
-      return await this.docker.hasImage(ref);
-    } catch (e) {
-      this.log.debug(`探本机 docker 镜像库失败，按「没有」处理：${(e as Error).message}`);
-      return false;
-    }
+    return this.worker.run(async () => {
+      try {
+        if (!(await this.docker.available())) return false;
+        return await this.docker.hasImage(ref);
+      } catch (e) {
+        this.log.debug(`探本机 docker 镜像库失败，按「没有」处理：${errorMessage(e)}`);
+        return false;
+      }
+    });
   }
 
   private async safePickAsset(): Promise<ReleaseAsset | null> {
-    const dir = this.assets.assetsDir();
-    if (dir === undefined || dir.trim() === '') return null;
-    try {
-      const all = await readAssetManifest(dir);
-      return pickAsset(all, this.host.defaultProvider(), this.host.platform());
-    } catch (e) {
-      this.log.debug(`读资产清单失败，按「没有」处理：${(e as Error).message}`);
-      return null;
-    }
+    return this.worker.run(async () => {
+      const dir = this.assets.assetsDir();
+      if (dir === undefined || dir.trim() === '') return null;
+      try {
+        const all = await readAssetManifest(dir);
+        return pickAsset(all, this.host.defaultProvider(), this.host.platform());
+      } catch (e) {
+        this.log.debug(`读资产清单失败，按「没有」处理：${errorMessage(e)}`);
+        return null;
+      }
+    });
   }
 
   /**
@@ -232,109 +242,126 @@ export class PresetImageProvisioner {
    * 试也只会在几分钟后以一个更难懂的错误失败。
    */
   async *provision(): AsyncGenerator<ProvisionEvent> {
-    if (this.inFlight) {
-      throw new ProvisionInFlightError(
-        '已经有一次搬运在进行中。⚠️ 这一步不是幂等的：两条流同时往 registry 写同一个 tag 是竞态',
-      );
-    }
-    this.inFlight = true;
-    try {
-      yield* this.run();
-    } finally {
-      // ⚠️ `finally` 而不是末尾——中途抛出（校验失败）也必须放闸，否则一次失败会把
-      //    这个端点**永久**锁死，而用户看到的是「已经有一次搬运在进行中」这种假话。
-      this.inFlight = false;
-    }
+    yield* this.worker.iterate(
+      async function* (this: PresetImageProvisioner) {
+        if (this.inFlight) {
+          throw new ProvisionInFlightError(
+            '已经有一次搬运在进行中。⚠️ 这一步不是幂等的：两条流同时往 registry 写同一个 tag 是竞态',
+          );
+        }
+        this.inFlight = true;
+        try {
+          yield* this.run();
+        } finally {
+          // ⚠️ `finally` 而不是末尾——中途抛出（校验失败）也必须放闸，否则一次失败会把
+          //    这个端点**永久**锁死，而用户看到的是「已经有一次搬运在进行中」这种假话。
+          this.inFlight = false;
+        }
+      }.bind(this),
+    );
   }
 
   private async *run(): AsyncGenerator<ProvisionEvent> {
-    const ref = this.targetRef();
-    yield ev('plan', 'running', '正在判断这张镜像的字节够不够得着…');
-    const plan = await this.plan();
-    if (!plan.provisionable) {
-      yield ev('plan', 'failed', plan.why);
-      throw new ProvisionNotPossibleError(plan.why);
-    }
-    yield ev('plan', 'ok', `${plan.why}（${plan.from} → ${plan.to}）`);
+    yield* this.worker.iterate(
+      async function* (this: PresetImageProvisioner) {
+        const ref = this.targetRef();
+        yield ev('plan', 'running', '正在判断这张镜像的字节够不够得着…');
+        const plan = await this.plan();
+        if (!plan.provisionable) {
+          yield ev('plan', 'failed', plan.why);
+          throw new ProvisionNotPossibleError(plan.why);
+        }
+        yield ev('plan', 'ok', `${plan.why}（${plan.from} → ${plan.to}）`);
 
-    if (plan.source === 'provider-stage') {
-      // ⚠️ **这条路一步到位**：终点是 provider 自己的库，不经过 registry，
-      //    所以 fetch/verify/load/register 四步一个都不发生 —— ⛔ 如实报 skipped。
-      yield ev('fetch', 'skipped', '这条路由 provider 自己去拉，平台不经手字节');
-      yield ev('verify', 'skipped', 'provider 自己按 digest 校验（平台不重复一遍）');
-      yield ev('load', 'skipped', '无需装载');
-      // ── 进度：分母读 manifest（不拉层），分子由 provider 报「本次新落盘字节」──────
-      //
-      // ⚠️ **基线由 provider 自己减**：它本来就要读自己的库才能测，入口多读一次是零成本；
-      //    而库里早就存在的别的镜像的层，因此不会一上来就冒充成进度。
-      // ⚠️ 两个数**各自允许缺席**：分母读不到就不给百分比、只报「已下载 X」；
-      //    分子读不到就连 X 都没有，退回「期间没有输出，不是卡死」。⛔ 任何一个都不许猜。
-      const total = await this.imageSize.compressedBytes(ref);
-      const sizeNote = total === null ? '' : `，共约 ${mib(total)}`;
-      yield ev(
-        'register',
-        'running',
-        `正在把镜像 '${ref}' 下载到${plan.to}${sizeNote}（期间没有输出，不是卡死）…`,
-      );
-      // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
-      yield* streamed<ProvisionEvent>((emit) =>
-        this.providerStage.stage(ref, (done) => {
-          // ⚠️ **clamp 到 1**：分母是 manifest 的压缩总量，而落盘的字节可能略多
-          //    （元数据、并发写的临时文件）。一个 103% 会让人以为读数是坏的。
-          const pct = total === null || total <= 0 ? null : Math.min(1, done / total);
-          const of = total === null ? '' : ` / 约 ${mib(total)}`;
-          emit(ev('register', 'running', `已下载 ${mib(done)}${of}`, pct));
-        }),
-      );
-      yield ev('register', 'ok', `已下载到${plan.to}`);
-      // ⚠️ **不再播种**：这条路一个字节都没进 registry，镜像的注册信息（第 4 步的判据）
-      //    原样没动。跑一次 `seed()` 只会白白多一次 registry 往返。
-      return;
-    }
+        if (plan.source === 'provider-stage') {
+          // ⚠️ **这条路一步到位**：终点是 provider 自己的库，不经过 registry，
+          //    所以 fetch/verify/load/register 四步一个都不发生 —— ⛔ 如实报 skipped。
+          yield ev('fetch', 'skipped', '这条路由 provider 自己去拉，平台不经手字节');
+          yield ev('verify', 'skipped', 'provider 自己按 digest 校验（平台不重复一遍）');
+          yield ev('load', 'skipped', '无需装载');
+          // ── 进度：分母读 manifest（不拉层），分子由 provider 报「本次新落盘字节」──────
+          //
+          // ⚠️ **基线由 provider 自己减**：它本来就要读自己的库才能测，入口多读一次是零成本；
+          //    而库里早就存在的别的镜像的层，因此不会一上来就冒充成进度。
+          // ⚠️ 两个数**各自允许缺席**：分母读不到就不给百分比、只报「已下载 X」；
+          //    分子读不到就连 X 都没有，退回「期间没有输出，不是卡死」。⛔ 任何一个都不许猜。
+          const total = await this.imageSize.compressedBytes(ref);
+          const sizeNote = total === null ? '' : `，共约 ${mib(total)}`;
+          yield ev(
+            'register',
+            'running',
+            `正在把镜像 '${ref}' 下载到${plan.to}${sizeNote}（期间没有输出，不是卡死）…`,
+          );
+          // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
+          yield* streamed<ProvisionEvent>((emit) =>
+            this.worker.run(() =>
+              this.providerStage.stage(ref, (done) => {
+                // ⚠️ **clamp 到 1**：分母是 manifest 的压缩总量，而落盘的字节可能略多
+                //    （元数据、并发写的临时文件）。一个 103% 会让人以为读数是坏的。
+                const pct = total === null || total <= 0 ? null : Math.min(1, done / total);
+                const of = total === null ? '' : ` / 约 ${mib(total)}`;
+                emit(ev('register', 'running', `已下载 ${mib(done)}${of}`, pct));
+              }),
+            ),
+          );
+          yield ev('register', 'ok', `已下载到${plan.to}`);
+          // ⚠️ **不再播种**：这条路一个字节都没进 registry，镜像的注册信息（第 4 步的判据）
+          //    原样没动。跑一次 `seed()` 只会白白多一次 registry 往返。
+          return;
+        }
 
-    if (plan.source === 'upstream-copy') {
-      yield* this.copyFromUpstream(plan.from, ref);
-    } else if (plan.source === 'local-docker') {
-      // 字节已经在本机，`fetch`/`verify`/`load` 三步都不发生 —— ⛔ 如实报 skipped，
-      // 不把它们画成"瞬间完成的 ✅"：那会让用户以为下载校验都做过了。
-      yield ev('fetch', 'skipped', '字节已在本机 docker 镜像库，无需下载');
-      yield ev('verify', 'skipped', '本机镜像不经过资产校验（它不是从清单来的）');
-      yield ev('load', 'skipped', '无需装载');
-    } else {
-      const asset = plan.asset!;
-      const dir = this.assets.assetsDir()!;
-      // ⛔ **真的查，不是宣称。** 此前这里直接报 ok，文件缺失会在下一阶段以 ENOENT 冒出来
-      //    —— 把「资产没下载」归到了「校验失败」头上，而两者的下一步完全不同。
-      yield ev('fetch', 'running', `正在确认资产在本机：${asset.asset}…`);
-      await assetPresent(dir, asset);
-      yield ev('fetch', 'ok', `资产已在本机：${asset.asset}（${mib(asset.sizeBytes)}）`);
+        if (plan.source === 'upstream-copy') {
+          yield* this.copyFromUpstream(plan.from, ref);
+        } else if (plan.source === 'local-docker') {
+          // 字节已经在本机，`fetch`/`verify`/`load` 三步都不发生 —— ⛔ 如实报 skipped，
+          // 不把它们画成"瞬间完成的 ✅"：那会让用户以为下载校验都做过了。
+          yield ev('fetch', 'skipped', '字节已在本机 docker 镜像库，无需下载');
+          yield ev('verify', 'skipped', '本机镜像不经过资产校验（它不是从清单来的）');
+          yield ev('load', 'skipped', '无需装载');
+        } else {
+          const asset = plan.asset;
+          const dir = this.assets.assetsDir();
+          if (!asset || !dir) throw new Error('Release asset location is unavailable');
+          // ⛔ **真的查，不是宣称。** 此前这里直接报 ok，文件缺失会在下一阶段以 ENOENT 冒出来
+          //    —— 把「资产没下载」归到了「校验失败」头上，而两者的下一步完全不同。
+          yield ev('fetch', 'running', `正在确认资产在本机：${asset.asset}…`);
+          await assetPresent(dir, asset);
+          yield ev('fetch', 'ok', `资产已在本机：${asset.asset}（${mib(asset.sizeBytes)}）`);
 
-      yield ev('verify', 'running', `正在校验 sha256（${mib(asset.sizeBytes)}）…`);
-      await verifyAsset(dir, asset);
-      yield ev('verify', 'ok', `sha256 对得上：${asset.sha256.slice(0, 12)}…`);
+          yield ev('verify', 'running', `正在校验 sha256（${mib(asset.sizeBytes)}）…`);
+          await verifyAsset(dir, asset);
+          yield ev('verify', 'ok', `sha256 对得上：${asset.sha256.slice(0, 12)}…`);
 
-      yield* this.loadAsset(dir, asset, ref);
-    }
+          yield* this.loadAsset(dir, asset, ref);
+        }
 
-    // ⛔ **`upstream-copy` 不能再 push 一次**：它的字节是**直接**落进目标 registry 的，
-    //    本机 docker 库里压根没有这张镜像 —— 再 push 会以一个「本地没有该镜像」的错误
-    //    结束一次**其实已经成功**的搬运。三个分支之后无条件 push 是第一版的写法，
-    //    被「这条路不经过 docker push」那条用例当场逮住（2026-09-05）。
-    if (plan.source !== 'upstream-copy') {
-      yield ev('register', 'running', `正在推送到 ${plan.to}…`);
-      // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
-      yield* streamed<ProvisionEvent>((emit) =>
-        this.docker.push(ref, (p, msg) => {
-          emit(ev('register', 'running', msg, p));
-        }),
-      );
-    }
+        // ⛔ **`upstream-copy` 不能再 push 一次**：它的字节是**直接**落进目标 registry 的，
+        //    本机 docker 库里压根没有这张镜像 —— 再 push 会以一个「本地没有该镜像」的错误
+        //    结束一次**其实已经成功**的搬运。三个分支之后无条件 push 是第一版的写法，
+        //    被「这条路不经过 docker push」那条用例当场逮住（2026-09-05）。
+        if (plan.source !== 'upstream-copy') {
+          yield ev('register', 'running', `正在推送到 ${plan.to}…`);
+          // ⛔ 边跑边发。收进数组等结束再喷是**回放不是进度**（见 `callback-stream.ts` 顶部）。
+          yield* streamed<ProvisionEvent>((emit) =>
+            this.worker.run(() =>
+              this.docker.push(ref, (p, msg) => {
+                emit(ev('register', 'running', msg, p));
+              }),
+            ),
+          );
+        }
 
-    // ⛔ **推完/搬完都还要注册**，否则链条只是从第 2 步挪到第 4 步（见 `ImageSeedPort`）。
-    //    这一步三条源共享 —— 「已就绪」的判据只有一个。
-    yield ev('register', 'running', '已就位，正在注册进平台（解析 digest + 血统）…');
-    await this.seeder.seed();
-    yield ev('register', 'ok', `已就位于 ${plan.to} 并注册进平台 —— 重新诊断即可看到第 ⑧ 项转 ✅`);
+        // ⛔ **推完/搬完都还要注册**，否则链条只是从第 2 步挪到第 4 步（见 `ImageSeedPort`）。
+        //    这一步三条源共享 —— 「已就绪」的判据只有一个。
+        yield ev('register', 'running', '已就位，正在注册进平台（解析 digest + 血统）…');
+        await this.seeder.seed();
+        yield ev(
+          'register',
+          'ok',
+          `已就位于 ${plan.to} 并注册进平台 —— 重新诊断即可看到第 ⑧ 项转 ✅`,
+        );
+      }.bind(this),
+    );
   }
 
   /**
@@ -348,26 +375,32 @@ export class PresetImageProvisioner {
     upstream: string,
     targetRef: string,
   ): AsyncGenerator<ProvisionEvent> {
-    yield ev('fetch', 'skipped', '纯 HTTP 拷贝：字节直接在两个 registry 之间搬，不落本机');
-    yield ev('verify', 'skipped', '每个 blob 取回时逐个验 sha256（在拷贝里做，不是单独一步）');
-    yield ev('load', 'skipped', '不经过 docker，无需装载');
+    yield* this.worker.iterate(
+      async function* (this: PresetImageProvisioner) {
+        yield ev('fetch', 'skipped', '纯 HTTP 拷贝：字节直接在两个 registry 之间搬，不落本机');
+        yield ev('verify', 'skipped', '每个 blob 取回时逐个验 sha256（在拷贝里做，不是单独一步）');
+        yield ev('load', 'skipped', '不经过 docker，无需装载');
 
-    const from = splitRef(upstream);
-    const to = splitRef(targetRef);
-    yield ev('register', 'running', `正在从 ${from.name}:${from.reference} 纯 HTTP 拷贝…`);
-    yield* streamed<ProvisionEvent>((emit) =>
-      this.copier
-        .copy(from, to, (done, total, what) => {
-          emit(
-            ev(
-              'register',
-              'running',
-              `${what}（第 ${String(done)} / 共 ${String(total)} 层）`,
-              total === 0 ? null : done / total,
-            ),
-          );
-        })
-        .then(() => undefined),
+        const from = splitRef(upstream);
+        const to = splitRef(targetRef);
+        yield ev('register', 'running', `正在从 ${from.name}:${from.reference} 纯 HTTP 拷贝…`);
+        yield* streamed<ProvisionEvent>((emit) =>
+          this.worker.run(() =>
+            this.copier
+              .copy(from, to, (done, total, what) => {
+                emit(
+                  ev(
+                    'register',
+                    'running',
+                    `${what}（第 ${String(done)} / 共 ${String(total)} 层）`,
+                    total === 0 ? null : done / total,
+                  ),
+                );
+              })
+              .then(() => undefined),
+          ),
+        );
+      }.bind(this),
     );
   }
 
@@ -376,29 +409,35 @@ export class PresetImageProvisioner {
     asset: ReleaseAsset,
     targetRef: string,
   ): AsyncGenerator<ProvisionEvent> {
-    if (asset.kind !== 'docker-archive') {
-      // ⚠️ `oci-layout` 的装载路径（boxlite 直接吃 OCI 目录，不经 docker）还没做。
-      //    ⛔ 如实说，不假装：见 `provision-plan.ts` 对 `upstream-copy` 的同一条纪律。
-      throw new ProvisionNotPossibleError(
-        `资产 kind='${asset.kind}' 的装载路径还没实现（当前只支持 docker-archive）。` +
-          '⛔ 平台如实说搬不了，而不是试一半留下半张镜像',
-      );
-    }
-    const path = `${dir}/${asset.asset}`;
-    yield ev('load', 'running', `正在装载 ${asset.asset}…`);
-    yield* streamed<ProvisionEvent>((emit) =>
-      this.docker.loadArchive(path, (p, msg) => {
-        emit(ev('load', 'running', msg, p));
-      }),
+    yield* this.worker.iterate(
+      async function* (this: PresetImageProvisioner) {
+        if (asset.kind !== 'docker-archive') {
+          // ⚠️ `oci-layout` 的装载路径（boxlite 直接吃 OCI 目录，不经 docker）还没做。
+          //    ⛔ 如实说，不假装：见 `provision-plan.ts` 对 `upstream-copy` 的同一条纪律。
+          throw new ProvisionNotPossibleError(
+            `资产 kind='${asset.kind}' 的装载路径还没实现（当前只支持 docker-archive）。` +
+              '⛔ 平台如实说搬不了，而不是试一半留下半张镜像',
+          );
+        }
+        const path = `${dir}/${asset.asset}`;
+        yield ev('load', 'running', `正在装载 ${asset.asset}…`);
+        yield* streamed<ProvisionEvent>((emit) =>
+          this.worker.run(() =>
+            this.docker.loadArchive(path, (p, msg) => {
+              emit(ev('load', 'running', msg, p));
+            }),
+          ),
+        );
+        // 装进来的名字是清单里的 `image`，而平台要用的是 `SANDBOX_DEFAULT_IMAGE`。
+        // ⚠️ 不打这个标签，push 会推一个平台根本不看的坐标 —— 搬完了诊断照样红。
+        if (asset.image !== targetRef) {
+          await this.docker.tag(asset.image, targetRef);
+          yield ev('load', 'ok', `已装载并打标签：${asset.image} → ${targetRef}`);
+        } else {
+          yield ev('load', 'ok', `已装载：${asset.image}`);
+        }
+      }.bind(this),
     );
-    // 装进来的名字是清单里的 `image`，而平台要用的是 `SANDBOX_DEFAULT_IMAGE`。
-    // ⚠️ 不打这个标签，push 会推一个平台根本不看的坐标 —— 搬完了诊断照样红。
-    if (asset.image !== targetRef) {
-      await this.docker.tag(asset.image, targetRef);
-      yield ev('load', 'ok', `已装载并打标签：${asset.image} → ${targetRef}`);
-    } else {
-      yield ev('load', 'ok', `已装载：${asset.image}`);
-    }
   }
 }
 

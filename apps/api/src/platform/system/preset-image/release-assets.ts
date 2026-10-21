@@ -1,3 +1,5 @@
+import { isRecord } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
@@ -39,17 +41,18 @@ export async function readAssetManifest(dir: string): Promise<readonly ReleaseAs
   try {
     raw = await readFile(path, 'utf8');
   } catch (e) {
-    throw new AssetManifestError(`读不到资产清单 ${path}：${(e as Error).message}`);
+    throw new AssetManifestError(`读不到资产清单 ${path}：${errorMessage(e)}`);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new AssetManifestError(`资产清单不是合法 JSON（${path}）：${(e as Error).message}`);
+    throw new AssetManifestError(`资产清单不是合法 JSON（${path}）：${errorMessage(e)}`);
   }
 
-  const doc = parsed as { schemaVersion?: unknown; assets?: unknown };
+  if (!isRecord(parsed)) throw new AssetManifestError('资产清单必须是 JSON 对象');
+  const doc = parsed;
   if (doc.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
     throw new AssetManifestError(
       `资产清单的 schemaVersion 是 ${String(doc.schemaVersion)}，平台只认识 ${String(SUPPORTED_SCHEMA_VERSION)} —— ` +
@@ -65,7 +68,8 @@ export async function readAssetManifest(dir: string): Promise<readonly ReleaseAs
 
 /** 一条资产要能用，这几个字段一个都不能少 —— 少了就跳过它，而不是整份拒。 */
 function isCompleteAsset(a: unknown): a is ReleaseAsset {
-  const o = a as Partial<ReleaseAsset>;
+  if (!isRecord(a)) return false;
+  const o = a;
   return (
     typeof o.id === 'string' &&
     typeof o.provider === 'string' &&
@@ -87,7 +91,11 @@ function isCompleteAsset(a: unknown): a is ReleaseAsset {
 export async function sha256Of(path: string): Promise<string> {
   const hash = createHash('sha256');
   const stream = createReadStream(path);
-  for await (const chunk of stream) hash.update(chunk as Buffer);
+  for await (const chunk of stream) {
+    if (!Buffer.isBuffer(chunk) && typeof chunk !== 'string')
+      throw new AssetManifestError('Unexpected asset stream chunk');
+    hash.update(chunk);
+  }
   return hash.digest('hex');
 }
 
@@ -110,7 +118,7 @@ export async function assetPresent(dir: string, asset: ReleaseAsset): Promise<vo
     size = (await stat(path)).size;
   } catch (e) {
     throw new AssetManifestError(
-      `资产文件不在：${path}（${(e as Error).message}）。` +
+      `资产文件不在：${path}（${errorMessage(e)}）。` +
         '⇒ 先把发布资产下载到 SANDBOX_IMAGE_ASSETS_DIR，或改用别的搬运源',
     );
   }

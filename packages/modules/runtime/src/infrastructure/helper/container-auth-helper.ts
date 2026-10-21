@@ -65,7 +65,10 @@ function msgOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-type Helper = { provider: SandboxProvider; handle: SandboxHandle };
+interface Helper {
+  provider: SandboxProvider;
+  handle: SandboxHandle;
+}
 
 /** 一次 `openSession` 的落脚点：哪个 helper、怎么在里面跑命令、建好的那个 HOME。 */
 interface OpenedHome extends Helper {
@@ -138,9 +141,9 @@ export class ContainerAuthHelper implements AuthHelper {
           } catch {
             /* already gone */
           }
-          await exec(['rm', '-rf', homeDir]).catch((e: unknown) =>
-            this.logger.warn(`failed to remove helper HOME ${homeDir}: ${msgOf(e)}`),
-          );
+          await exec(['rm', '-rf', homeDir]).catch((e: unknown) => {
+            this.logger.warn(`failed to remove helper HOME ${homeDir}: ${msgOf(e)}`);
+          });
         },
       };
     } catch (e) {

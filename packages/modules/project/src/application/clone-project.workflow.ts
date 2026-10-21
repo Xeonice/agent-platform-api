@@ -1,6 +1,12 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
-import { CLOCK, UNIT_OF_WORK, asProjectId } from '@platform/shared-kernel';
-import type { Clock, UnitOfWork } from '@platform/shared-kernel';
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
+import {
+  CLOCK,
+  UNIT_OF_WORK,
+  asProjectId,
+  BUSINESS_WRITER_AUTHORITY,
+} from '@platform/shared-kernel';
+import type { Clock, UnitOfWork, BusinessWriterAuthority } from '@platform/shared-kernel';
 import { CREDENTIAL_FACADE } from '@platform/contracts';
 import type {
   CredentialFacade,
@@ -17,6 +23,7 @@ import { BASELINE_MANAGER } from '../domain/ports/baseline-manager.port';
 import type { BaselineManager } from '../domain/ports/baseline-manager.port';
 import type { CloneErrorCode, Project } from '../domain/entities/project.entity';
 import { prepareGitAuth } from './git-auth';
+import { errorMessage } from '@platform/shared-kernel';
 
 const MAX_CONCURRENT_CLONES = 2;
 const CLONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard cap (03 §7.2)
@@ -54,10 +61,13 @@ const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
  */
 @Injectable()
 export class CloneProjectWorkflow implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('project.clone');
+
   private readonly logger = new Logger('CloneProjectWorkflow');
   private activeCount = 0;
   private readonly waiting: string[] = [];
   private readonly controllers = new Map<string, AbortController>();
+  private ownershipPaused = false;
 
   constructor(
     @Inject(PROJECT_REPOSITORY) private readonly repo: ProjectRepository,
@@ -67,24 +77,38 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     @Inject(BASELINE_MANAGER) private readonly baseline: BaselineManager,
     @Inject(SANDBOX_EVENT_BROADCASTER) private readonly broadcaster: SandboxEventBroadcaster,
     @Inject(CREDENTIAL_FACADE) private readonly credentials: CredentialFacade,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
-    try {
-      await this.reconcileInterrupted();
-    } catch (e) {
-      this.logger.warn(`interrupted-clone reconcile skipped: ${(e as Error).message}`);
-    }
+    return this.worker.run(async () => {
+      try {
+        await this.reconcileInterrupted();
+      } catch (e) {
+        this.logger.warn(`interrupted-clone reconcile skipped: ${errorMessage(e)}`);
+      }
+    });
   }
 
   /** Schedule a background clone for a project already persisted as `cloning`. */
   enqueue(projectId: string): void {
+    if (this.ownershipPaused) throw new Error('BACKGROUND_CLONE_WRITER_QUIESCED');
     if (this.activeCount < MAX_CONCURRENT_CLONES) {
       this.activeCount++;
       void this.runClone(projectId);
     } else {
       this.waiting.push(projectId);
     }
+  }
+  pauseOwnership(): boolean {
+    if (this.activeCount > 0 || this.waiting.length > 0) return false;
+    this.ownershipPaused = true;
+    return true;
+  }
+  resumeOwnership(): void {
+    this.ownershipPaused = false;
   }
 
   /** Abort an in-flight clone; returns true if one was running. */
@@ -98,7 +122,9 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
     const idx = this.waiting.indexOf(projectId);
     if (idx < 0) return false;
     this.waiting.splice(idx, 1);
-    this.mutate(projectId, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
+    void this.mutate(projectId, (p) => {
+      p.markCloneFailed('INTERRUPTED', this.clock.now());
+    });
     this.broadcaster.broadcast({
       event: 'project.clone_progress',
       projectId,
@@ -118,128 +144,134 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
   }
 
   private async runClone(projectId: string): Promise<void> {
-    const project = await this.repo.findById(asProjectId(projectId));
-    if (!project || project.cloneStatus !== 'cloning' || !project.repoUrl) {
-      this.startNext();
-      return;
-    }
-    const dest = project.baselinePath;
-    // Every frame carries this attempt's real start, including after a browser reload.
-    // Queue time is excluded: runClone is entered only once a slot becomes available.
-    const startedAt = this.clock.now().toISOString();
-    const controller = new AbortController();
-    this.controllers.set(projectId, controller);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, CLONE_TIMEOUT_MS);
-    let lastEmit = 0;
-    let auth: GitAuthContext | null = null;
-    /**
-     * ⚠️ STICKY. Once slow, every later progress frame stays `slow` until done/failed.
-     *
-     * Without it the warning is unreadable: the store REPLACES the whole clone state
-     * per event (`createProjectCloneSlice`), so the next throttled `cloning` frame —
-     * at most 1s later — erases it. The user would see a yellow line blink once,
-     * 10 minutes in, and never again.
-     */
-    let slow = false;
-    /**
-     * Last frame we sent, so the `slow` announcement can REPEAT it rather than send a
-     * bare `{phase:'slow'}`. Same reason: a bare frame would blank `stage`/`percent`/
-     * rate in the store and reset the bar to its indeterminate pulse — i.e. the moment
-     * we tell the user 「still going」 is the moment the UI stops showing how far.
-     */
-    let lastProgress: CloneProgress | null = null;
-    const slowTimer = setTimeout(() => {
-      if (slow) return;
-      slow = true;
-      // Emitted DIRECTLY, not via the throttle: a clone that is slow because it is
-      // WEDGED produces no further progress lines at all, and that is exactly the case
-      // where the user most needs to be told something. Waiting for the next frame
-      // would mean never.
-      this.broadcaster.broadcast({
-        event: 'project.clone_progress',
-        projectId,
-        phase: 'slow',
-        startedAt,
-        stage: lastProgress?.stage,
-        percent: lastProgress?.percent,
-        objectsDone: lastProgress?.objectsDone,
-        objectsTotal: lastProgress?.objectsTotal,
-        receivedBytes: lastProgress?.receivedBytes,
-        bytesPerSecond: lastProgress?.bytesPerSecond,
-      });
-      this.logger.warn(`clone for project ${projectId} still running after 10min → slow`);
-    }, CLONE_SLOW_AFTER_MS);
+    return this.worker.run(async () => {
+      const project = await this.repo.findById(asProjectId(projectId));
+      if (project?.cloneStatus !== 'cloning' || !project.repoUrl) {
+        this.startNext();
+        return;
+      }
+      const dest = project.baselinePath;
+      // Every frame carries this attempt's real start, including after a browser reload.
+      // Queue time is excluded: runClone is entered only once a slot becomes available.
+      const startedAt = this.clock.now().toISOString();
+      const controller = new AbortController();
+      this.controllers.set(projectId, controller);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, CLONE_TIMEOUT_MS);
+      let lastEmit = 0;
+      let auth: GitAuthContext | null = null;
+      /**
+       * ⚠️ STICKY. Once slow, every later progress frame stays `slow` until done/failed.
+       *
+       * Without it the warning is unreadable: the store REPLACES the whole clone state
+       * per event (`createProjectCloneSlice`), so the next throttled `cloning` frame —
+       * at most 1s later — erases it. The user would see a yellow line blink once,
+       * 10 minutes in, and never again.
+       */
+      let slow = false;
+      /**
+       * Last frame we sent, so the `slow` announcement can REPEAT it rather than send a
+       * bare `{phase:'slow'}`. Same reason: a bare frame would blank `stage`/`percent`/
+       * rate in the store and reset the bar to its indeterminate pulse — i.e. the moment
+       * we tell the user 「still going」 is the moment the UI stops showing how far.
+       */
+      let lastProgress: CloneProgress | null = null;
+      const slowTimer = setTimeout(() => {
+        if (slow) return;
+        slow = true;
+        // Emitted DIRECTLY, not via the throttle: a clone that is slow because it is
+        // WEDGED produces no further progress lines at all, and that is exactly the case
+        // where the user most needs to be told something. Waiting for the next frame
+        // would mean never.
+        this.broadcaster.broadcast({
+          event: 'project.clone_progress',
+          projectId,
+          phase: 'slow',
+          startedAt,
+          stage: lastProgress?.stage,
+          percent: lastProgress?.percent,
+          objectsDone: lastProgress?.objectsDone,
+          objectsTotal: lastProgress?.objectsTotal,
+          receivedBytes: lastProgress?.receivedBytes,
+          bytesPerSecond: lastProgress?.bytesPerSecond,
+        });
+        this.logger.warn(`clone for project ${projectId} still running after 10min → slow`);
+      }, CLONE_SLOW_AFTER_MS);
 
-    try {
-      // 磁盘预检 (03 §7.2★): refuse BEFORE writing anything, so a doomed clone leaves
-      // no half-written baseline dir to `rm -rf`. It runs FIRST — ahead of the
-      // credential materialisation — because it is the cheapest check and it must not
-      // decrypt a secret for a clone that cannot start.
-      await this.assertDiskSpace(dest);
-      // Private-repo support (03 §7.3): pick a credential by URL protocol/host via
-      // the cross-context facade. A hit whose host ∈ allowedHosts yields an opaque
-      // handle we inject; otherwise (no credential / host not allowed) we clone as a
-      // public repo. The workflow only ever holds the handle — never plaintext.
-      auth = await prepareGitAuth(this.credentials, project.repoUrl);
-      await this.baseline.removeDir(dest); // fresh dest (retry re-clones from scratch)
-      await this.cloner.clone({
-        repoUrl: project.repoUrl,
-        repoBranch: project.repoBranch,
-        destPath: dest,
-        timeoutMs: CLONE_TIMEOUT_MS,
-        signal: controller.signal,
-        env: auth?.env,
-        gitSshCommand: auth?.gitSshCommand,
-        recordSuccessfulClone: auth?.recordSuccessfulClone,
-        onProgress: (p: CloneProgress) => {
-          lastProgress = p;
-          const now = this.clock.now().getTime();
-          if (now - lastEmit < PROGRESS_THROTTLE_MS) return;
-          lastEmit = now;
-          this.broadcaster.broadcast({
-            event: 'project.clone_progress',
-            projectId,
-            phase: slow ? 'slow' : 'cloning',
-            startedAt,
-            stage: p.stage,
-            percent: p.percent,
-            objectsDone: p.objectsDone,
-            objectsTotal: p.objectsTotal,
-            receivedBytes: p.receivedBytes,
-            bytesPerSecond: p.bytesPerSecond,
-          });
-        },
-      });
-      const sizeBytes = await this.baseline.directorySizeBytes(dest);
-      this.mutate(projectId, (p) => p.markCloneReady(sizeBytes, this.clock.now()));
-      this.broadcaster.broadcast({
-        event: 'project.clone_progress',
-        projectId,
-        phase: 'done',
-        percent: 100,
-      });
-    } catch (e) {
-      const code = this.classifyFailure(e, timedOut, controller.signal.aborted);
-      await this.baseline.removeDir(dest).catch(() => undefined);
-      this.mutate(projectId, (p) => p.markCloneFailed(code, this.clock.now()));
-      this.broadcaster.broadcast({
-        event: 'project.clone_progress',
-        projectId,
-        phase: 'failed',
-        errorCode: code,
-      });
-      this.logger.warn(`clone failed for project ${projectId}: ${code}`);
-    } finally {
-      if (auth) await auth.dispose().catch(() => undefined); // delete temp keyfile dir (03 §7.3)
-      clearTimeout(timer);
-      clearTimeout(slowTimer);
-      this.controllers.delete(projectId);
-      this.startNext();
-    }
+      try {
+        // 磁盘预检 (03 §7.2★): refuse BEFORE writing anything, so a doomed clone leaves
+        // no half-written baseline dir to `rm -rf`. It runs FIRST — ahead of the
+        // credential materialisation — because it is the cheapest check and it must not
+        // decrypt a secret for a clone that cannot start.
+        await this.assertDiskSpace(dest);
+        // Private-repo support (03 §7.3): pick a credential by URL protocol/host via
+        // the cross-context facade. A hit whose host ∈ allowedHosts yields an opaque
+        // handle we inject; otherwise (no credential / host not allowed) we clone as a
+        // public repo. The workflow only ever holds the handle — never plaintext.
+        auth = await prepareGitAuth(this.credentials, project.repoUrl);
+        await this.baseline.removeDir(dest); // fresh dest (retry re-clones from scratch)
+        await this.cloner.clone({
+          repoUrl: project.repoUrl,
+          repoBranch: project.repoBranch,
+          destPath: dest,
+          timeoutMs: CLONE_TIMEOUT_MS,
+          signal: controller.signal,
+          env: auth?.env,
+          gitSshCommand: auth?.gitSshCommand,
+          recordSuccessfulClone: auth?.recordSuccessfulClone,
+          onProgress: (p: CloneProgress) => {
+            lastProgress = p;
+            const now = this.clock.now().getTime();
+            if (now - lastEmit < PROGRESS_THROTTLE_MS) return;
+            lastEmit = now;
+            this.broadcaster.broadcast({
+              event: 'project.clone_progress',
+              projectId,
+              phase: slow ? 'slow' : 'cloning',
+              startedAt,
+              stage: p.stage,
+              percent: p.percent,
+              objectsDone: p.objectsDone,
+              objectsTotal: p.objectsTotal,
+              receivedBytes: p.receivedBytes,
+              bytesPerSecond: p.bytesPerSecond,
+            });
+          },
+        });
+        const sizeBytes = await this.baseline.directorySizeBytes(dest);
+        await this.mutate(projectId, (p) => {
+          p.markCloneReady(sizeBytes, this.clock.now());
+        });
+        this.broadcaster.broadcast({
+          event: 'project.clone_progress',
+          projectId,
+          phase: 'done',
+          percent: 100,
+        });
+      } catch (e) {
+        const code = this.classifyFailure(e, timedOut, controller.signal.aborted);
+        await this.baseline.removeDir(dest).catch(() => undefined);
+        await this.mutate(projectId, (p) => {
+          p.markCloneFailed(code, this.clock.now());
+        });
+        this.broadcaster.broadcast({
+          event: 'project.clone_progress',
+          projectId,
+          phase: 'failed',
+          errorCode: code,
+        });
+        this.logger.warn(`clone failed for project ${projectId}: ${code}`);
+      } finally {
+        if (auth) await auth.dispose().catch(() => undefined); // delete temp keyfile dir (03 §7.3)
+        clearTimeout(timer);
+        clearTimeout(slowTimer);
+        this.controllers.delete(projectId);
+        this.startNext();
+      }
+    });
   }
 
   /**
@@ -253,14 +285,16 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
    * an ordinary failure deserves to be refused before it writes half a repository.
    */
   private async assertDiskSpace(destPath: string): Promise<void> {
-    const minFree = minFreeBytes();
-    const available = await this.baseline.availableBytes(destPath);
-    if (available >= minFree) return;
-    throw new CloneError(
-      'DISK_INSUFFICIENT',
-      `not enough free space to clone: ${String(available)} bytes available, ` +
-        `${String(minFree)} required (CLONE_MIN_FREE_BYTES)`,
-    );
+    return this.worker.run(async () => {
+      const minFree = minFreeBytes();
+      const available = await this.baseline.availableBytes(destPath);
+      if (available >= minFree) return;
+      throw new CloneError(
+        'DISK_INSUFFICIENT',
+        `not enough free space to clone: ${String(available)} bytes available, ` +
+          `${String(minFree)} required (CLONE_MIN_FREE_BYTES)`,
+      );
+    });
   }
 
   private classifyFailure(e: unknown, timedOut: boolean, aborted: boolean): CloneErrorCode {
@@ -271,36 +305,48 @@ export class CloneProjectWorkflow implements OnApplicationBootstrap {
   }
 
   /** Load → apply → persist in one sync UoW; skip silently on an illegal move (race). */
-  private mutate(projectId: string, apply: (p: Project) => void): void {
-    void this.repo
-      .findById(asProjectId(projectId))
-      .then((project) => {
-        if (!project) return;
-        try {
-          apply(project);
-        } catch {
-          return; // e.g. already cancelled/failed — nothing to persist
-        }
-        this.uow.run((tx) => this.repo.saveSync(tx, project));
-      })
-      .catch((e: unknown) => {
-        this.logger.warn(`clone-status persist failed for ${projectId}: ${(e as Error).message}`);
-      });
+  private mutate(projectId: string, apply: (p: Project) => void): Promise<void> {
+    return this.worker.run(async () => {
+      const epoch = this.writer?.epoch?.() ?? 0;
+      return this.repo
+        .findById(asProjectId(projectId))
+        .then((project) => {
+          if (!project) return;
+          this.writer?.assert();
+          if (epoch !== (this.writer?.epoch?.() ?? 0))
+            throw new Error('BACKGROUND_CLONE_WRITER_SUPERSEDED');
+          try {
+            apply(project);
+          } catch {
+            return; // e.g. already cancelled/failed — nothing to persist
+          }
+          this.uow.run((tx) => {
+            this.repo.saveSync(tx, project);
+          });
+        })
+        .catch((e: unknown) => {
+          this.logger.warn(`clone-status persist failed for ${projectId}: ${errorMessage(e)}`);
+        });
+    });
   }
 
   private async reconcileInterrupted(): Promise<void> {
-    const all = await this.repo.findAll();
-    for (const project of all) {
-      if (project.cloneStatus !== 'cloning') continue;
-      this.mutate(project.id, (p) => p.markCloneFailed('INTERRUPTED', this.clock.now()));
-      this.broadcaster.broadcast({
-        event: 'project.clone_progress',
-        projectId: project.id,
-        phase: 'failed',
-        errorCode: 'INTERRUPTED',
-      });
-      this.logger.warn(`reaped interrupted clone: project ${project.id} → failed/INTERRUPTED`);
-    }
+    return this.worker.run(async () => {
+      const all = await this.repo.findAll();
+      for (const project of all) {
+        if (project.cloneStatus !== 'cloning') continue;
+        await this.mutate(project.id, (p) => {
+          p.markCloneFailed('INTERRUPTED', this.clock.now());
+        });
+        this.broadcaster.broadcast({
+          event: 'project.clone_progress',
+          projectId: project.id,
+          phase: 'failed',
+          errorCode: 'INTERRUPTED',
+        });
+        this.logger.warn(`reaped interrupted clone: project ${project.id} → failed/INTERRUPTED`);
+      }
+    });
   }
 }
 

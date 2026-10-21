@@ -10,6 +10,7 @@ import type {
   WebhookSender,
   WebhookTestOutcome,
 } from '../../domain/ports/webhook-sender.port';
+import { errorMessage } from '@platform/shared-kernel';
 
 /** 03 §8.5「投递纪律」：10s 超时；失败重试 2 次（指数退避 5s / 25s）后放弃。 */
 /** 手动跟随的跳数上限。⛔ 每一跳都要重新过 SSRF 判定，见 `post()`。 */
@@ -46,7 +47,7 @@ export class HttpWebhookSender implements WebhookSender {
     try {
       await this.assertSendable(url);
     } catch (e) {
-      this.logger.warn(`webhook refused before sending: ${(e as Error).message}`);
+      this.logger.warn(`webhook refused before sending: ${errorMessage(e)}`);
       // `skipped` 而不是 `failed`：没有发出去过的东西不算投递失败，而这个区分正是
       // 用户排障时第一件要知道的事（「是我地址填错了」还是「对面没回」）。
       return 'skipped';
@@ -70,7 +71,7 @@ export class HttpWebhookSender implements WebhookSender {
       await this.assertSendable(url);
     } catch (e) {
       const code = e instanceof SsrfRefusal ? 'HOST_NOT_ALLOWED' : 'VALIDATION_FAILED';
-      return { ok: false, errorCode: code, message: (e as Error).message };
+      return { ok: false, errorCode: code, message: errorMessage(e) };
     }
     // ⚠️ **测试连接只发一次，不走 deliver 的两次退避重试**：那是 40 秒，而这里的
     // 调用方是一个在等 [测试连接] 转圈的人。
@@ -92,7 +93,7 @@ export class HttpWebhookSender implements WebhookSender {
     const opts = {
       allowPrivateNetwork: allowPrivateNetwork(),
       // 缺席按「没启用」读 —— 保守的那一边（见 ACCESS_GATE_READER 的端口注释）。
-      accessGateEnabled: this.gate?.isEnabled() ?? false,
+      accessGateEnabled: (await this.gate?.isEnabled()) ?? false,
     };
     let addresses: { address: string }[];
     try {
@@ -167,7 +168,7 @@ export class HttpWebhookSender implements WebhookSender {
       return {
         ok: false,
         timedOut,
-        message: timedOut ? `投递超时（${String(TIMEOUT_MS / 1000)}s）` : (e as Error).message,
+        message: timedOut ? `投递超时（${String(TIMEOUT_MS / 1000)}s）` : errorMessage(e),
       };
     } finally {
       clearTimeout(timer);
@@ -209,6 +210,6 @@ function redact(url: string): string {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const t = setTimeout(resolve, ms);
-    t.unref?.();
+    t.unref();
   });
 }

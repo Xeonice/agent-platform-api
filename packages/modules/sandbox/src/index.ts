@@ -1,7 +1,33 @@
 // Public surface of the sandbox context consumed by the app assembly.
 export { SandboxModule } from './interface/sandbox.module';
+export { RuntimeOwnerModule } from './interface/runtime-owner.module';
+export {
+  SANDBOX_CREATE_INTENTS,
+  type SandboxCreateIntents,
+  type SandboxCreateIntent,
+} from './domain/ports/sandbox-create-intents.port';
+export { SqliteSandboxCreateIntents } from './infrastructure/persistence/sqlite/sandbox-create-intents.impl';
 export { SandboxApplicationService } from './application/sandbox-application.service';
+export { SandboxFacadeAdapter } from './application/sandbox-facade.adapter';
+export {
+  SANDBOX_ADMISSION_INTENTS,
+  type SandboxAdmissionIntents,
+} from './domain/ports/sandbox-admission-intents.port';
+export { SqliteSandboxAdmissionIntents } from './infrastructure/persistence/sqlite/sandbox-admission-intents.impl';
+export {
+  JOB_COMPLETION_RECEIPTS,
+  type JobCompletionReceipt,
+  type JobCompletionReceipts,
+} from './domain/ports/job-completion-receipts.port';
+export {
+  SqliteJobCompletionReceipts,
+  completedJobHandleDigest,
+  jobCompletionEvidenceDigest,
+} from './infrastructure/persistence/sqlite/job-completion-receipts.impl';
 export { AgentTaskApplicationService } from './application/agent-task.service';
+export { RunAgentTaskWorkflow } from './application/workflows/run-agent-task.workflow';
+export { ProvisionSandboxWorkflow } from './application/workflows/provision-sandbox.workflow';
+export { TasksGateway } from './interface/gateway/tasks.gateway';
 export { SandboxMcpTools } from './interface/mcp/sandbox.mcp-tools';
 export {
   sandboxes,
@@ -34,3 +60,16 @@ export { AgentTaskStarted, AgentTaskFinished } from './domain/events/agent-task-
 //    而不是自己再 new 一个 —— 两个客户端 = 两份 env 解读，迟早出现「沙箱连得上 docker、
 //    搬运连不上」这种谁都没错的组合。
 export { DOCKER_CLIENT } from './infrastructure/providers/docker/docker.token';
+export { RuntimeOwnerServer } from './infrastructure/runtime-rpc/owner-server';
+export {
+  RuntimeOwnerProviderRegistry,
+  RuntimeOwnerConnection,
+  RuntimeOwnerProcessStream,
+} from './infrastructure/runtime-rpc/owner-client';
+export {
+  startRuntimeOwnerFromEnvironment,
+  assertRuntimeOwnerEnvironment,
+  acquireRuntimeOwnerHomeLock,
+  createRuntimeOwnerProviderRegistry,
+} from './infrastructure/runtime-rpc/owner-factory';
+export { withRuntimeBusinessAuthority } from './infrastructure/runtime-rpc/authority-context';

@@ -11,11 +11,16 @@ import type {
   KnownHostEntry,
 } from '../../../domain/value-objects/credential-metadata.vo';
 import type { ObtainedVia, RuntimeMode } from '../../../domain/value-objects/obtained-via.vo';
+import {
+  isGitObtainedVia,
+  isRuntimeAuthMethod,
+} from '../../../domain/value-objects/obtained-via.vo';
 import { isEncrypted } from '../../../domain/value-objects/encrypted-blob.vo';
 import type { CredentialRepository } from '../../../domain/repositories/credential.repository';
 import { credentials, type CredentialRow } from '../schema/credential.sqlite';
+import { asCredentialId } from '@platform/shared-kernel';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * SQLite (better-sqlite3 + Drizzle) CredentialRepository. Writes run inside the
@@ -28,30 +33,34 @@ export class SqliteCredentialRepository implements CredentialRepository {
 
   async findById(id: CredentialId): Promise<Credential | null> {
     const row = this.db.select().from(credentials).where(eq(credentials.id, id)).get();
-    return row ? this.toDomain(row) : null;
+    return Promise.resolve(row ? this.toDomain(row) : null);
   }
 
   async listGitCredentials(includeRevoked = false): Promise<Credential[]> {
     const where = includeRevoked
       ? eq(credentials.kind, 'git')
       : and(eq(credentials.kind, 'git'), isNull(credentials.revokedAt));
-    return this.db
-      .select()
-      .from(credentials)
-      .where(where)
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentials)
+        .where(where)
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
   async listByRuntime(runtimeId: string, includeRevoked = false): Promise<Credential[]> {
     const base = and(eq(credentials.kind, 'runtime'), eq(credentials.runtimeId, runtimeId));
     const where = includeRevoked ? base : and(base, isNull(credentials.revokedAt));
-    return this.db
-      .select()
-      .from(credentials)
-      .where(where)
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentials)
+        .where(where)
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
   /**
@@ -83,35 +92,39 @@ export class SqliteCredentialRepository implements CredentialRepository {
    * retry budget, not a vendor fact, so it does belong here).
    */
   async listRefreshDue(at: Date): Promise<Credential[]> {
-    return this.db
-      .select()
-      .from(credentials)
-      .where(
-        and(
-          eq(credentials.kind, 'runtime'),
-          isNull(credentials.revokedAt),
-          isNotNull(credentials.expiresAt),
-          lt(credentials.expiresAt, at),
-        ),
-      )
-      .all()
-      .map((r) => this.toDomain(r))
-      .filter((c) => c.refreshFailures < 3);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentials)
+        .where(
+          and(
+            eq(credentials.kind, 'runtime'),
+            isNull(credentials.revokedAt),
+            isNotNull(credentials.expiresAt),
+            lt(credentials.expiresAt, at),
+          ),
+        )
+        .all()
+        .map((r) => this.toDomain(r))
+        .filter((c) => c.refreshFailures < 3),
+    );
   }
 
   async listExpiringBefore(at: Date): Promise<Credential[]> {
-    return this.db
-      .select()
-      .from(credentials)
-      .where(
-        and(
-          isNull(credentials.revokedAt),
-          isNotNull(credentials.expiresAt),
-          lt(credentials.expiresAt, at),
-        ),
-      )
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentials)
+        .where(
+          and(
+            isNull(credentials.revokedAt),
+            isNotNull(credentials.expiresAt),
+            lt(credentials.expiresAt, at),
+          ),
+        )
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
   saveSync(_tx: Tx, cred: Credential): void {
@@ -166,7 +179,7 @@ export class SqliteCredentialRepository implements CredentialRepository {
     at: Date,
   ): void {
     const row = this.db.select().from(credentials).where(eq(credentials.id, id)).get();
-    if (!row || row.obtainedVia !== 'git-ssh-key' || row.revokedAt !== null) return;
+    if (row?.obtainedVia !== 'git-ssh-key' || row.revokedAt !== null) return;
     const metadata = row.metadata ?? {};
     const knownHosts = [...(metadata.knownHosts ?? [])];
     for (const entry of entries) {
@@ -235,12 +248,12 @@ export class SqliteCredentialRepository implements CredentialRepository {
       ? { provider: row.metadata.provider, knownHosts: row.metadata.knownHosts }
       : null;
     return Credential.rehydrate({
-      id: row.id as CredentialId,
+      id: asCredentialId(row.id),
       kind: row.kind === 'git' ? 'git' : 'runtime',
       runtimeId: row.runtimeId,
-      obtainedVia: row.obtainedVia as ObtainedVia,
+      obtainedVia: decodeObtainedVia(row.obtainedVia),
       masked: MaskedIdentifier.rehydrate(row.maskedIdentifier),
-      mode: (row.mode as RuntimeMode | null) ?? null,
+      mode: decodeRuntimeMode(row.mode),
       allowedHosts: row.allowedHosts ?? [],
       metadata,
       secret,
@@ -257,3 +270,14 @@ export class SqliteCredentialRepository implements CredentialRepository {
 
 /** Placeholder key id for a revoked (erased) row where no ciphertext remains. */
 const UNKNOWN_KEY_ID = 'erased';
+
+function decodeObtainedVia(value: string): ObtainedVia {
+  if (!isGitObtainedVia(value) && !isRuntimeAuthMethod(value))
+    throw new Error('Invalid persisted credential method');
+  return value;
+}
+
+function decodeRuntimeMode(value: string | null): RuntimeMode | null {
+  if (value === null || value === 'account' || value === 'api-key') return value;
+  throw new Error('Invalid persisted credential mode');
+}

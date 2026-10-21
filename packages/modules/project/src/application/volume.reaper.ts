@@ -1,5 +1,7 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { RetainedVolumeService } from './retained-volume.service';
+import { errorMessage } from '@platform/shared-kernel';
 
 /**
  * 扫描周期。保留期以**天**计（3/7/30），所以小时级的分辨率绰绰有余 —— 每分钟扫一遍
@@ -21,6 +23,8 @@ const SWEEP_INTERVAL_MS = 60 * 60_000;
  */
 @Injectable()
 export class VolumeReaper implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('project.volume-reaper');
+
   private readonly logger = new Logger('VolumeReaper');
   private running = false;
   private timer: NodeJS.Timeout | null = null;
@@ -29,24 +33,26 @@ export class VolumeReaper implements OnApplicationBootstrap {
 
   onApplicationBootstrap(): void {
     if (process.env.DISABLE_VOLUME_REAPER === '1') return;
-    this.timer = setInterval(() => void this.runOnce(), SWEEP_INTERVAL_MS);
+    this.timer = this.worker.ownInterval(setInterval(() => void this.runOnce(), SWEEP_INTERVAL_MS));
     // 不为了 reaper 把事件循环吊着（与 CredentialRefreshScanner 同款）
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /** 一轮清理。幂等，可以直接被测试调用。 */
   async runOnce(): Promise<number> {
-    if (this.running) return 0;
-    this.running = true;
-    try {
-      const reaped = await this.volumes.reapExpired();
-      if (reaped > 0) this.logger.log(`reaped ${String(reaped)} expired retained volume(s)`);
-      return reaped;
-    } catch (e) {
-      this.logger.warn(`volume sweep failed: ${(e as Error).message}`);
-      return 0;
-    } finally {
-      this.running = false;
-    }
+    return this.worker.run(async () => {
+      if (this.running) return 0;
+      this.running = true;
+      try {
+        const reaped = await this.volumes.reapExpired();
+        if (reaped > 0) this.logger.log(`reaped ${String(reaped)} expired retained volume(s)`);
+        return reaped;
+      } catch (e) {
+        this.logger.warn(`volume sweep failed: ${errorMessage(e)}`);
+        return 0;
+      } finally {
+        this.running = false;
+      }
+    });
   }
 }

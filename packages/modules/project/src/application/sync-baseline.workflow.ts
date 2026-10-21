@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -40,6 +41,8 @@ const SYNC_TIMEOUT_MS = 5 * 60 * 1000;
  */
 @Injectable()
 export class SyncBaselineWorkflow {
+  private readonly worker = coordinatorWorker('project.baseline');
+
   constructor(
     @Inject(BASELINE_GIT) private readonly git: BaselineGit,
     @Inject(BASELINE_MANAGER) private readonly baseline: BaselineManager,
@@ -54,29 +57,33 @@ export class SyncBaselineWorkflow {
    * write a nonsense row).
    */
   async run(project: Project): Promise<void> {
-    project.assertCanSync(); // refuse BEFORE the fetch — see `Project.assertCanSync`
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
-    let auth: GitAuthContext | null = null;
-    try {
-      // `assertCanSync` above already established `sourceType === 'git'`, and I-PRJ-1
-      // makes that imply a `repoUrl` — the `??` is a defensive floor, not a case: an
-      // empty string simply resolves to "no credential", i.e. a public-repo fetch.
-      auth = await prepareGitAuth(this.credentials, project.repoUrl ?? '');
-      await this.git.fetchAll({
-        repoPath: project.baselinePath,
-        timeoutMs: SYNC_TIMEOUT_MS,
-        signal: controller.signal,
-        env: auth?.env,
-        gitSshCommand: auth?.gitSshCommand,
-      });
-    } catch (e) {
-      throw controller.signal.aborted ? new CloneError('TIMEOUT', 'baseline sync timed out') : e;
-    } finally {
-      if (auth) await auth.dispose().catch(() => undefined); // temp keyfile dir (03 §7.3)
-      clearTimeout(timer);
-    }
-    const sizeBytes = await this.baseline.directorySizeBytes(project.baselinePath);
-    project.syncBaseline(sizeBytes, this.clock.now());
+    return this.worker.run(async () => {
+      project.assertCanSync(); // refuse BEFORE the fetch — see `Project.assertCanSync`
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort();
+      }, SYNC_TIMEOUT_MS);
+      let auth: GitAuthContext | null = null;
+      try {
+        // `assertCanSync` above already established `sourceType === 'git'`, and I-PRJ-1
+        // makes that imply a `repoUrl` — the `??` is a defensive floor, not a case: an
+        // empty string simply resolves to "no credential", i.e. a public-repo fetch.
+        auth = await prepareGitAuth(this.credentials, project.repoUrl ?? '');
+        await this.git.fetchAll({
+          repoPath: project.baselinePath,
+          timeoutMs: SYNC_TIMEOUT_MS,
+          signal: controller.signal,
+          env: auth?.env,
+          gitSshCommand: auth?.gitSshCommand,
+        });
+      } catch (e) {
+        throw controller.signal.aborted ? new CloneError('TIMEOUT', 'baseline sync timed out') : e;
+      } finally {
+        if (auth) await auth.dispose().catch(() => undefined); // temp keyfile dir (03 §7.3)
+        clearTimeout(timer);
+      }
+      const sizeBytes = await this.baseline.directorySizeBytes(project.baselinePath);
+      project.syncBaseline(sizeBytes, this.clock.now());
+    });
   }
 }

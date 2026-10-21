@@ -334,5 +334,163 @@
     "acs": ["AC-IMG-060.2", "AC-IMG-060.3", "AC-IMG-060.4", "AC-IMG-060.5", "AC-IMG-060.6"],
     "purpose": "Complete Nest application returns required nullable imageAlias in actual POST/PATCH/GET contracts and list variants, normalizes saves, preserves omitted values, refuses registration rename and invalid mixed writes with field errors and zero changes, and reports missing manifests as 404.",
     "relation": "complete-api"
+  },
+  {
+    "file": "acceptance/upg/sqlite/upgrade-store.spec.ts",
+    "acs": [
+      "AC-UPG-005.3",
+      "AC-UPG-007.2",
+      "AC-UPG-007.4",
+      "AC-UPG-009.2",
+      "AC-UPG-009.4",
+      "AC-UPG-009.5",
+      "AC-UPG-009.7"
+    ],
+    "purpose": "Actual migrated SQLite validates immutable request/CAS/frozen plans, global controller fencing, recovery and retained success history; state-layer receipts are not installer or native qualification.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/online-migration.spec.ts",
+    "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-006.5", "AC-UPG-008.3", "AC-UPG-008.4"],
+    "purpose": "Actual SQLite and fixed migration file execute bounded backfill, concurrent writes/tombstones, reconciliation, outbox/shadow isolation and controller fence checks; no native SLO claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/automation-exactly-once.spec.ts",
+    "acs": ["AC-UPG-001.3", "AC-UPG-006.5", "AC-UPG-007.2"],
+    "purpose": "Actual scheduler/application/SQLite writer transitions retain accepted occurrence and launch identities, including retained old-writer late ACK; runtime provider here is an external fixture.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/job-completion-receipts.spec.ts",
+    "acs": ["AC-UPG-001.6", "AC-UPG-007.2"],
+    "purpose": "Actual finalization transaction binds observed read-job-exited facts to immutable receipt and original task cursor; receipt failure rolls back terminal event and release.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/runtime-owner.spec.ts",
+    "acs": ["AC-UPG-001.5", "AC-UPG-006.5", "AC-UPG-007.3"],
+    "purpose": "Actual Owner HTTP/private SQLite journal/child-process protocol tests exercise single authority and unknown SDK receipt; child fixture does not establish BoxLite VM preservation.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/provision-owner-timeout.spec.ts",
+    "acs": ["AC-UPG-007.3", "AC-CRD-003.6"],
+    "purpose": "Actual Owner HTTP/private SQLite and business SQLite retain the original provision intent, runtime handle and filesystem workspace across start timeout or truncated response, then recover without duplicate start or destroy. Actual credential services and SQLite omit already expired credentials during recovery, inject valid credentials and reject revocation before or during injection; credential materialization and the external runtime are controlled and do not establish native VM or model continuity.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/automation-launch-recovery.spec.ts",
+    "acs": ["AC-UPG-001.3", "AC-UPG-006.5", "AC-UPG-007.2"],
+    "purpose": "Actual Owner HTTP journal plus real business services validate fixed job intent across lost acknowledgement and writer epochs; no native runtime claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/control-application-rpc.spec.ts",
+    "acs": ["AC-UPG-002.1", "AC-UPG-002.3", "AC-UPG-002.4", "AC-UPG-006.5"],
+    "purpose": "Actual separate Control API process to production Coordinator HTTP/MCP/WS/SSE with real SQLite/auth/usecases; upgrade swap and native continuity still require mapped shared/native tests.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/release-trust.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7", "AC-UPG-009.8"],
+    "purpose": "Real Ed25519 and exact canonical/frozen-plan validation against actual CD module. Synthetic signed unit-only report values exercise rejection paths; they are not real release/native qualifications.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/upgrade-security.spec.ts",
+    "acs": ["AC-UPG-005.3", "AC-UPG-009.6", "AC-UPG-009.7"],
+    "purpose": "Actual Nest HTTP cookie, independent upgrade capability, exact Origin/CSRF/internal instance key and restart/expiry/key-rotation authorization; fixed controller fixture is only the security boundary.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/background-handoff.spec.ts",
+    "acs": ["AC-UPG-001.4", "AC-UPG-006.5"],
+    "purpose": "Actual production clone workflow and migrated SQLite refuse handoff while accepted background operation is active; natural completion commits before ownership pause, no operation abort.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/writer-epoch.spec.ts",
+    "acs": ["AC-UPG-006.5", "AC-UPG-007.2", "AC-UPG-008.4"],
+    "purpose": "Actual file-backed SQLite two writer epochs and the same retained original writer reject late original async mutations; fresh epoch writes succeed and no lazy mutation capability crosses a handoff.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/project-projection-read.spec.ts",
+    "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-008.3"],
+    "purpose": "Actual production project repository and fenced SQLite consume renamed fields, execute independent semantic authority/old-slot cleanup and subsequent CRUD/tombstones, enforce unique new names, avoid marker collisions and reject authority failure. Prepared read-boundary fixtures do not qualify user admission, reader retirement or native continuity.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/installed-artifact.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7"],
+    "purpose": "Real physical dependency closure, contained pnpm links, Node DI token identity and rejection of escaping/broken/extra/changed files; no native upgrade claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/pure/upgrade-artifact.spec.ts",
+    "acs": ["AC-UPG-008.6", "AC-UPG-009.7"],
+    "purpose": "Whole physical API/Web/installer bundle, component digests and root declaration verification; unlisted executables and altered declaration bytes are rejected. Filesystem layer only.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/observer-concurrency.protocol.spec.ts",
+    "acs": ["AC-UPG-002.1", "AC-UPG-007.1", "AC-UPG-008.5"],
+    "purpose": "Actual Nest/compiled Control/production Entry/SQLite and OS SIGSTOP produce real concurrent HTTP probes above 10 Hz with per-request deadlines and fixed latency degradation; runtime fixture does not prove BoxLite continuity.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/upgrade-contract-store.spec.ts",
+    "acs": ["AC-UPG-006.4", "AC-UPG-006.5", "AC-UPG-007.4", "AC-UPG-009.7"],
+    "purpose": "Actual SQLite independent contract request/CAS/actor replay, interlock, global fencing and close/reopen checkpoints preserve original success history; state fixtures do not prove signed admission/reader retirement/native qualification.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/contract-authorization.spec.ts",
+    "acs": ["AC-UPG-006.4", "AC-UPG-009.7"],
+    "purpose": "Actual Nest public controllers/security/current SQLite reject shared-access-only, invalid Origin/CSRF, arbitrary payloads and unqualified independent contract commands; no positive native retirement claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/web-recovery-scope.spec.ts",
+    "acs": ["AC-UPG-007.1", "AC-UPG-007.4"],
+    "purpose": "Actual migrated SQLite fault-history reads and production fixed-target guard prevent expanding measured Web-only recovery into API/coordinator/owner actions. No positive native fallback qualification claim.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/auth-continuity-lookup.spec.ts",
+    "acs": ["AC-UPG-002.3", "AC-UPG-007.2"],
+    "purpose": "Actual Nest public request lookup, production ordinary-access guard and real SQLite verify original granted actor and independently issued fresh capability cookies without Catalog/Web/SDK dependencies; changed upgrade HMAC or ordinary access-key rotation rejects continuity. Authentication boundary support only, not native upgrade/fallback qualification.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/sqlite/storage-budget-path.spec.ts",
+    "acs": ["AC-UPG-006.3", "AC-UPG-006.4", "AC-UPG-007.2", "AC-UPG-007.3"],
+    "purpose": "Actual opened SQLite and filesystem measurements bind migration/recovery capacity to the physical main database and its WAL, resolve path aliases, and reject unknown or unsafe storage. Storage-boundary support only; no split-filesystem container, signed migration, complete fallback or native continuity qualification is inferred.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/upg/protocol/internal-upgrade-json.spec.ts",
+    "acs": ["AC-UPG-002.1", "AC-UPG-008.4", "AC-UPG-008.5"],
+    "purpose": "Real Nest production UpgradeInternalController, UpgradeService, authentication and file-backed migrated SQLite preserve complete private progress evidence above 100 KiB, verify durable event hashes and exact replay, reject requests above the finite 24 MiB limit and invalid instance/controller credentials without commits, and retain the separate public parser limit. Synthetic transport evidence does not qualify native continuity or release activation.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/pure/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.2"],
+    "purpose": "Optional untrusted build declarations accept only known runtime ids with exact bounded versions; malformed or unsafe values degrade independently to unknown without changing image admission.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/sqlite/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.1", "AC-IMG-062.2", "AC-IMG-062.3", "AC-IMG-062.4"],
+    "purpose": "Actual HTTP OCI metadata and SQLite registration, read-only preflight/update/list, same-digest backfill, tag-drift history and additive schema28-to29 preserve business rows, active pointers and unknown old metadata. No Guest/CLI execution or build-content qualification is inferred.",
+    "relation": "backend-support"
+  },
+  {
+    "file": "acceptance/img/protocol/runtime-versions.spec.ts",
+    "acs": ["AC-IMG-062.1", "AC-IMG-062.2", "AC-IMG-062.3"],
+    "purpose": "Actual Nest existing image routes serialize declaration maps through register, list, preflight, revalidation, update comparison and PATCH; omitted provider metadata and old API response shapes remain compatible. External registry fixture does not prove image CLI contents.",
+    "relation": "backend-support"
   }
 ]
