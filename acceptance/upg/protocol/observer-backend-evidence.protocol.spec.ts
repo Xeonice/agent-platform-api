@@ -373,6 +373,13 @@ async function fixture(
       },
       5000,
     );
+  const stopSamplingAndDrain = async () => {
+    observer.onModuleDestroy();
+    await vi.waitFor(
+      () => expect(observer['inFlight']).toEqual({ gateway: 0, source: 0, candidate: 0 }),
+      { timeout: 5000, interval: 10 },
+    );
+  };
   return {
     source,
     candidate,
@@ -380,6 +387,7 @@ async function fixture(
     read,
     evidence,
     observer,
+    stopSamplingAndDrain,
     durable,
     snapshot,
     db,
@@ -822,6 +830,9 @@ describe('UPG independent recovery HTTP observation namespace', () => {
         { timeout: 68000, interval: 250 },
       );
       const observed = await f.observeRecovery();
+      // Freeze the complete request set after measured coverage. The sampler can
+      // otherwise append a POST while its matching GET is still in flight.
+      await f.stopSamplingAndDrain();
       expect(observed.scope).toMatchObject({
         attemptId: 'attempt',
         businessAttemptId: 'previous-serving-attempt',
@@ -848,6 +859,48 @@ describe('UPG independent recovery HTTP observation namespace', () => {
       f.observer.onModuleDestroy();
     }
   }, 75000);
+
+  it.each([20, 80, 150])(
+    'drains real recovery read/write pairs already in flight when sampling stops (%ims backend delay)',
+    async (waitMs) => {
+      const f = await fixture({ recovery: true, earlyFailure: true });
+      f.change({ weight: 0 });
+      f.source.waitMs = waitMs;
+      f.observer.onApplicationBootstrap();
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              f.source.requests.some(
+                (write) =>
+                  write.method === 'POST' &&
+                  !f.source.requests.some(
+                    (read) => read.method === 'GET' && read.requestId === write.requestId,
+                  ),
+              ),
+            ).toBe(true);
+          },
+          { timeout: 5000, interval: 5 },
+        );
+        await f.stopSamplingAndDrain();
+        const requests = [...f.source.requests];
+        expect(requests.some((row) => row.method === 'POST')).toBe(true);
+        expect(
+          requests
+            .filter((row) => row.method === 'POST')
+            .every((write) =>
+              requests.some((read) => read.method === 'GET' && read.requestId === write.requestId),
+            ),
+        ).toBe(true);
+        await delay(150);
+        expect(f.source.requests).toEqual(requests);
+        expect(f.candidate.requests).toHaveLength(0);
+      } finally {
+        f.observer.onModuleDestroy();
+      }
+    },
+    10000,
+  );
 });
 
 describe('UPG recovery attachment evidence lifetime', () => {
