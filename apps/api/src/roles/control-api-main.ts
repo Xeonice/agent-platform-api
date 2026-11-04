@@ -30,8 +30,79 @@ import { installedApiIdentity } from '../platform/artifact-identity';
 import { RetirementWorkTracker } from '../platform/upgrade/retirement-census';
 import { UPGRADE_PROBE_IDENTITY_HEADERS } from '../platform/upgrade/upgrade-probe-identity';
 
+export type ControlApiStartupStage =
+  | 'installed-artifact'
+  | 'role-config'
+  | 'coordinator-binding'
+  | 'application-catalog'
+  | 'public-network'
+  | 'http-transport'
+  | 'listener'
+  | 'ready';
+
+const bootErrorCodes = new Set([
+  'CONTROL_ROLE_CONFIG_REQUIRED',
+  'CONTROL_ROLE_HAS_FORBIDDEN_AUTHORITY',
+  'CONTROL_COORDINATOR_ORIGIN_REQUIRED',
+  'APPLICATION_CATALOG_NOT_READY',
+  'APPLICATION_PROTOCOL_INCOMPATIBLE',
+  'INSTALLED_API_ARTIFACT_REQUIRED',
+  'INSTALLED_API_IDENTITY_UNKNOWN',
+  'INSTALLED_API_ARTIFACT_EMPTY',
+  'INSTALLED_API_DIGEST_MISMATCH',
+  'INSTALLED_ARTIFACT_PATH_INVALID',
+  'INSTALLED_ARTIFACT_LINK_ESCAPE',
+  'INSTALLED_ARTIFACT_SPECIAL_FILE',
+  'INSTALLED_ARTIFACT_INVALID_BYTES',
+  'INSTALLED_ARTIFACT_CHANGED',
+  'COORDINATOR_BINDING_PATH_MUST_BE_ABSOLUTE',
+  'UNTRUSTED_COORDINATOR_BINDING',
+  'INVALID_COORDINATOR_BINDING',
+  'COORDINATOR_HANDOFF_BUDGET_EXCEEDED',
+]);
+const bootSystemCodes = new Set([
+  'EADDRINUSE',
+  'EACCES',
+  'ENOENT',
+  'ECONNREFUSED',
+  'ERR_INVALID_URL',
+]);
+const bootInputFields = new Set([
+  'instanceId',
+  'state',
+  'origin',
+  'generation',
+  'artifactDigest',
+  'protocol',
+  'routes',
+  'tools',
+]);
+function bootFailure(error: unknown): { reason: string; fields?: string[] } {
+  // Never log raw errors: JSON/URL/schema errors can contain credentials or input.
+  if (error instanceof z.ZodError)
+    return {
+      reason: 'STARTUP_INPUT_INVALID',
+      fields: [
+        ...new Set(
+          error.issues.flatMap((issue) =>
+            typeof issue.path[0] === 'string' && bootInputFields.has(issue.path[0])
+              ? [issue.path[0]]
+              : [],
+          ),
+        ),
+      ].sort(),
+    };
+  if (error instanceof Error && bootErrorCodes.has(error.message)) return { reason: error.message };
+  if (isRecord(error) && typeof error.code === 'string' && bootSystemCodes.has(error.code))
+    return { reason: error.code };
+  if (error instanceof Error && error.name === 'TimeoutError') return { reason: 'STARTUP_TIMEOUT' };
+  return { reason: 'STARTUP_ERROR' };
+}
+
 /** Public transport role: no database connection, migration, scheduler or SDK import. */
-export async function startControlApi(): Promise<ReturnType<typeof createServer>> {
+export async function startControlApi(
+  onStartupStage: (stage: ControlApiStartupStage) => void = () => undefined,
+): Promise<ReturnType<typeof createServer>> {
   process.env.PLATFORM_PROCESS_ROLE = 'control';
   const ids = new UuidIdGenerator();
   const clock = new SystemClock();
@@ -40,7 +111,9 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     return typeof deadline === 'number' ? deadline : undefined;
   }
 
+  onStartupStage('installed-artifact');
   const installedArtifact = await installedApiIdentity('api');
+  onStartupStage('role-config');
   const instanceId = process.env.PLATFORM_INSTANCE_ID,
     key = process.env.PLATFORM_CONTROL_RPC_KEY;
   if (!instanceId || !key || key.length < 32) throw new Error('CONTROL_ROLE_CONFIG_REQUIRED');
@@ -66,7 +139,9 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
     throw new Error('CONTROL_COORDINATOR_ORIGIN_REQUIRED');
   const internalHeaders = { 'x-platform-internal-key': key, 'x-platform-instance-id': instanceId };
   const coordinatorTarget = createCoordinatorResolver(coordinator, instanceId);
+  onStartupStage('coordinator-binding');
   const initialTarget = await coordinatorTarget();
+  onStartupStage('application-catalog');
   const catalogResponse = await fetch(initialTarget.origin + '/internal/application/catalog', {
     headers: internalHeaders,
     signal: AbortSignal.timeout(2000),
@@ -108,7 +183,9 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
   });
   app.disable('x-powered-by');
   app.use(express.json({ limit: '24mb' }));
+  onStartupStage('public-network');
   const network = readPublicNetworkConfig();
+  onStartupStage('http-transport');
   app.use((req, res, next) => {
     if (
       !isRequestOriginAllowed(req, network) ||
@@ -686,21 +763,47 @@ export async function startControlApi(): Promise<ReturnType<typeof createServer>
       socket.once('error', () => target.destroy());
     });
   }
+  onStartupStage('listener');
   await new Promise<void>((ok, fail) => {
     server.once('error', fail);
     server.listen(Number(process.env.PORT ?? 3001), process.env.HOST ?? '127.0.0.1', ok);
   });
+  onStartupStage('ready');
   return server;
 }
-if (require.main === module)
-  void startControlApi()
+if (require.main === module) {
+  const bootStartedAt = performance.now();
+  let stage: ControlApiStartupStage = 'installed-artifact';
+  let stageStartedAt = bootStartedAt;
+  void startControlApi((nextStage) => {
+    const now = performance.now();
+    console.error(
+      'CONTROL_API_BOOT_STAGE',
+      JSON.stringify({
+        stage: nextStage,
+        elapsedMs: Math.round(now - bootStartedAt),
+        previousStage: stage,
+        previousStageMs: Math.round(now - stageStartedAt),
+      }),
+    );
+    stage = nextStage;
+    stageStartedAt = now;
+  })
     .then((server) => {
       for (const signal of ['SIGINT', 'SIGTERM'])
         process.once(signal, () => {
           server.close(() => process.exit(0));
         });
     })
-    .catch(() => {
-      console.error('CONTROL_API_BOOT_FAILED');
+    .catch((error: unknown) => {
+      console.error(
+        'CONTROL_API_BOOT_FAILED',
+        JSON.stringify({
+          stage,
+          elapsedMs: Math.round(performance.now() - bootStartedAt),
+          ...bootFailure(error),
+        }),
+      );
       process.exitCode = 1;
     });
+}
