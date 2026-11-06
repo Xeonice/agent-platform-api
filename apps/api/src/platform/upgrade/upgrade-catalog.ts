@@ -69,9 +69,11 @@ export class UpgradeCatalog {
   ) {}
   async refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.read().finally(() => {
-      this.refreshing = null;
-    });
+    this.refreshing = this.store.runLedgerWork(() =>
+      this.read().finally(() => {
+        this.refreshing = null;
+      }),
+    );
     return this.refreshing;
   }
   status(): UpgradeStatus['catalog'] {

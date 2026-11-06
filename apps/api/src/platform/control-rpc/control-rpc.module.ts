@@ -42,6 +42,7 @@ import { TerminalGateway } from '@platform/terminal';
 import { EventsGateway } from '../events/events.gateway';
 import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
 import { supportedDataFormats } from '../data-format-capabilities';
+import { isCoordinatorHandoffRead } from './coordinator-routing';
 import { PLATFORM_SQLITE } from '../persistence/platform.module';
 import { PasscodeGuard } from '../access-passcode/passcode.guard';
 import { withCoordinatorBusinessEpoch } from '../persistence/coordinator-lease';
@@ -147,6 +148,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
   private readonly tools = new Map<string, ToolBinding>();
   private readonly publicTools: ApplicationCatalog['tools'] = [];
   private accepting = true;
+  private handoffQuiescing = false;
   private activeMutations = 0;
   private activeRequests = 0;
   private activeStreams = 0;
@@ -302,15 +304,18 @@ export class ControlApplicationRegistry implements OnModuleInit {
    * cancelling any accepted operation. The lifetime registry waits separately. */
   closeRetirementAdmission(): void {
     this.accepting = false;
+    this.handoffQuiescing = false;
   }
   async quiesce(budgetMs: number): Promise<{ quiesced: true; activeMutations: 0 }> {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0 || budgetMs > 1500)
       throw new BadRequestException('Invalid bounded quiesce budget');
     this.accepting = false;
+    this.handoffQuiescing = true;
     const deadline = this.clock.now().getTime() + budgetMs;
     while (this.activeMutations > 0) {
       if (this.clock.now().getTime() >= deadline) {
         this.accepting = true;
+        this.handoffQuiescing = false;
         throw new HttpException(
           {
             code: 'APPLICATION_QUIESCE_DEFERRED',
@@ -328,6 +333,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
     if (process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
       throw new Error('Cannot resume an expired writer');
     this.accepting = true;
+    this.handoffQuiescing = false;
   }
   private actor(req: Request): string {
     const cookie = req.headers.cookie ?? '';
@@ -415,8 +421,15 @@ export class ControlApplicationRegistry implements OnModuleInit {
     return { headers: output.headers };
   }
   async invoke(input: ApplicationRequest, response: Response): Promise<void> {
-    if (!this.accepting)
-      throw new HttpException(
+    const read =
+      this.handoffQuiescing &&
+      isCoordinatorHandoffRead({
+        operation: input.operation,
+        method: input.request.method,
+        path: input.request.path,
+      });
+    const quiesced = () =>
+      new HttpException(
         {
           code: 'APPLICATION_WRITER_QUIESCED',
           message: 'Business handoff is pending',
@@ -425,15 +438,33 @@ export class ControlApplicationRegistry implements OnModuleInit {
         },
         425,
       );
+    if (!this.accepting && !read) throw quiesced();
     this.activeRequests++;
     try {
-      await withCoordinatorBusinessEpoch(this.db, () => this.invokeWithinEpoch(input, response));
+      let result: Promise<void>;
+      try {
+        result = withCoordinatorBusinessEpoch(this.db, () =>
+          this.invokeWithinEpoch(input, response, read),
+        );
+      } catch (error) {
+        // This check is synchronous, before authentication or handler dispatch.
+        // Once the old epoch is released, even reviewed reads follow the same
+        // side-effect-free rerouting protocol instead of bypassing the fence.
+        if (read && error instanceof Error && error.message === 'COORDINATOR_WRITER_FENCE_EXPIRED')
+          throw quiesced();
+        throw error;
+      }
+      await result;
       return;
     } finally {
       this.activeRequests--;
     }
   }
-  private async invokeWithinEpoch(input: ApplicationRequest, response: Response): Promise<void> {
+  private async invokeWithinEpoch(
+    input: ApplicationRequest,
+    response: Response,
+    handoffRead = false,
+  ): Promise<void> {
     const binding = this.bindings.get(input.operation),
       tool = this.tools.get(input.operation);
     if (!binding && !tool)
@@ -441,7 +472,7 @@ export class ControlApplicationRegistry implements OnModuleInit {
         code: 'APPLICATION_OPERATION_NOT_ALLOWED',
         message: 'Unknown application operation',
       });
-    if (!this.accepting)
+    if (!this.accepting && !(handoffRead && this.handoffQuiescing && binding?.route.verb === 'GET'))
       throw new HttpException(
         {
           code: 'APPLICATION_WRITER_QUIESCED',

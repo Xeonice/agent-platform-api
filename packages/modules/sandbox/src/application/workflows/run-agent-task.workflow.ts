@@ -387,8 +387,18 @@ export class RunAgentTaskWorkflow {
     return this.worker.run(async () => {
       if (this.stopped) return 0;
       const epoch = this.ownershipEpoch;
+      // Attach already-known jobs before a pending accepted start can block on
+      // an unavailable Owner. The original start journal still decides replay.
+      const resumed = await this.resumeKnownJobs(epoch);
+      if (this.retired(epoch)) return resumed;
       await this.resumePendingStarts(epoch);
-      if (this.retired(epoch)) return 0;
+      if (this.retired(epoch)) return resumed;
+      return resumed + (await this.resumeKnownJobs(epoch));
+    });
+  }
+
+  private async resumeKnownJobs(epoch: number): Promise<number> {
+    return this.worker.run(async () => {
       const running = await this.tasks.findRunning();
       let resumed = 0;
       for (const task of running) {

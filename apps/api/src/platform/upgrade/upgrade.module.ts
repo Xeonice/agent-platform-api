@@ -1,3 +1,7 @@
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { UpgradeControlAttachment } from './upgrade-control-attachment';
+import { UpgradeControlAttachmentController } from './upgrade-control-attachment.controller';
+import { UpgradeLedgerAdmissionInterceptor } from './upgrade-ledger-admission.interceptor';
 import { UpgradeInspectionController } from './upgrade-inspection.controller';
 import { UpgradeLedgerConnection } from './upgrade-ledger-connection';
 import { UPGRADE_STORE_OPTIONS } from './upgrade-control-bridge';
@@ -36,6 +40,7 @@ import { UpgradeContractBusinessController } from './upgrade-contract-business.c
 @Module({
   imports: [ControlRpcModule],
   controllers: [
+    UpgradeControlAttachmentController,
     UpgradeController,
     UpgradeInternalController,
     UpgradeContractInternalController,
@@ -45,6 +50,8 @@ import { UpgradeContractBusinessController } from './upgrade-contract-business.c
   providers: [
     UpgradeStore,
     UpgradeLedgerConnection,
+    UpgradeControlAttachment,
+    { provide: APP_INTERCEPTOR, useClass: UpgradeLedgerAdmissionInterceptor },
     {
       provide: UPGRADE_STORE_OPTIONS,
       inject: [UpgradeLedgerConnection],

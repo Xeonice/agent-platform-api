@@ -13,6 +13,8 @@ export interface UpgradeStoreOptions {
   ledgerSqlite?: Database.Database;
   readonly?: boolean;
   independent?: boolean;
+  /** One live attachment descriptor. Business SQLite stays unchanged. */
+  ledgerAccess?: UpgradeLedgerAccess;
   /** Live business compatibility is supplied by the restricted semantic boundary. */
   dataFormatGuard?: (input: {
     targetDigest: string;
@@ -26,6 +28,17 @@ export interface UpgradeStoreOptions {
     leaseExpiresAt: number;
     now: number;
   }) => { stage: string } | null;
+}
+
+export interface UpgradeLedgerAccess {
+  bindBusiness(sqlite: Database.Database, instanceId: string): void;
+  ledger(sqlite: Database.Database): Database.Database;
+  business(sqlite: Database.Database): Database.Database;
+  readonly readonly: boolean;
+  readonly frozen: boolean;
+  run<T>(work: () => T): T;
+  capture<T>(work: () => T): () => T;
+  assertWritable(): void;
 }
 
 export interface UpgradeControlReceipt {

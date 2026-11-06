@@ -110,21 +110,33 @@ export class RuntimeOwnerConnection {
     }
     await this.activate(this.options.generation);
   }
-  async activate(generation: number): Promise<void> {
+  async activate(generation: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.assertBusinessWriter(true);
+    const metadata = RuntimeOwnerMetadataSchema.parse(
+      await this.json('/runtime/metadata', 'GET', undefined, signal),
+    );
+    signal?.throwIfAborted();
+    const lease = RuntimeOwnerLeaseSchema.parse(
+      await this.json(
+        '/runtime/lease',
+        'POST',
+        {
+          instanceId: this.options.instanceId,
+          holderId: 'state-coordinator',
+          sessionId: this.sessionId,
+          generation,
+          expectedFence: metadata.lease?.fence ?? 0,
+          ttlMs: 30000,
+        },
+        signal,
+      ),
+    );
+    signal?.throwIfAborted();
     this.options.generation = generation;
     this.options.deferClaim = false;
-    this.metadata = RuntimeOwnerMetadataSchema.parse(await this.json('/runtime/metadata'));
-    this.lease = RuntimeOwnerLeaseSchema.parse(
-      await this.json('/runtime/lease', 'POST', {
-        instanceId: this.options.instanceId,
-        holderId: 'state-coordinator',
-        sessionId: this.sessionId,
-        generation,
-        expectedFence: this.metadata.lease?.fence ?? 0,
-        ttlMs: 30000,
-      }),
-    );
+    this.metadata = metadata;
+    this.lease = lease;
     if (this.renewal) clearInterval(this.renewal);
     this.renewal = setInterval(() => {
       void this.renew().catch(() => {
@@ -133,14 +145,24 @@ export class RuntimeOwnerConnection {
     }, 10000);
     this.renewal.unref();
   }
-  async release(): Promise<void> {
-    await this.json('/runtime/lease/release', 'POST', {
-      instanceId: this.options.instanceId,
-      holderId: 'state-coordinator',
-      sessionId: this.sessionId,
-      generation: this.options.generation,
-      fence: this.lease.fence,
-    });
+  async release(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    // A bounded handoff may lose the release response after the Owner applied
+    // it. Do not renew old authority while that original outcome is unknown.
+    if (signal) this.close();
+    await this.json(
+      '/runtime/lease/release',
+      'POST',
+      {
+        instanceId: this.options.instanceId,
+        holderId: 'state-coordinator',
+        sessionId: this.sessionId,
+        generation: this.options.generation,
+        fence: this.lease.fence,
+      },
+      signal,
+    );
+    signal?.throwIfAborted();
     if (this.renewal) clearInterval(this.renewal);
     this.renewal = undefined;
   }
@@ -560,10 +582,19 @@ export class RuntimeOwnerConnection {
       throw error;
     });
   }
-  private async json(path: string, method = 'GET', data?: unknown): Promise<unknown> {
-    const response = await this.http(path, method, data);
+  private async json(
+    path: string,
+    method = 'GET',
+    data?: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
+    const response = await this.http(path, method, data, signal);
+    signal?.throwIfAborted();
     if (response.statusCode !== 200) await this.raise(response);
-    return JSON.parse(await this.text(response)) as unknown;
+    const text = await this.text(response);
+    signal?.throwIfAborted();
+    return JSON.parse(text) as unknown;
   }
   private async text(response: IncomingMessage, limit = 32 * 1024 * 1024): Promise<string> {
     const chunks: Buffer[] = [];
@@ -999,11 +1030,21 @@ export class RuntimeOwnerProviderRegistry implements ProviderRegistry, RuntimeOw
     this.connection(ownerId);
     this.activeId = ownerId;
   }
-  async activateBusinessAuthority(generation: number): Promise<void> {
-    for (const owner of this.owners.values()) await owner.activate(generation);
+  async activateBusinessAuthority(generation: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const results = await Promise.allSettled(
+      [...this.owners.values()].map((owner) => owner.activate(generation, signal)),
+    );
+    signal?.throwIfAborted();
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
   }
-  async releaseBusinessAuthority(): Promise<void> {
-    for (const owner of this.owners.values()) await owner.release();
+  async releaseBusinessAuthority(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const results = await Promise.allSettled(
+      [...this.owners.values()].map((owner) => owner.release(signal)),
+    );
+    signal?.throwIfAborted();
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
   }
   connection(ownerId: string): RuntimeOwnerConnection {
     const owner = this.owners.get(ownerId);

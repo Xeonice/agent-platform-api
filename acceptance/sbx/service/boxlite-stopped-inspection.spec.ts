@@ -278,6 +278,11 @@ describe('BoxLite inspection preserves stopped VMs and their retained task slots
         h.resources,
       );
       await reconciler.onApplicationBootstrap();
+      await vi.waitFor(async () => {
+        expect(await allocations.findActiveBySandbox(sandbox.id)).toMatchObject({
+          reconciliationStatus: 'confirmed',
+        });
+      });
       const recovered = await repo.findById(sandbox.id);
       expect(recovered).toMatchObject({
         id: sandbox.id,
@@ -305,7 +310,7 @@ describe('BoxLite inspection preserves stopped VMs and their retained task slots
         false,
       );
     } finally {
-      reconciler?.onModuleDestroy();
+      await reconciler?.onModuleDestroy();
       rmSync(directory, { recursive: true, force: true });
     }
   });

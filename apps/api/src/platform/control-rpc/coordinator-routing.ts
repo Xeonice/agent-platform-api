@@ -9,6 +9,24 @@ export interface CoordinatorBinding {
   generation: number;
   artifactDigest: string;
 }
+export interface HandoffReadRequest {
+  operation: string;
+  method: string;
+  path: string;
+}
+/** Reviewed handlers perform only liveness/SQLite reads. A GET, a tool name or
+ * an unrecognized operation is not itself a read capability. */
+export function coordinatorHandoffReadOperation(method: string, path: string): string | undefined {
+  if (method !== 'GET') return undefined;
+  if (path === '/api/health') return 'HealthController.health';
+  if (path === '/api/projects') return 'ProjectController.list';
+  if (/^\/api\/projects\/[^/]+$/.test(path)) return 'ProjectController.get';
+  return undefined;
+}
+export function isCoordinatorHandoffRead(request: HandoffReadRequest): boolean {
+  const operation = coordinatorHandoffReadOperation(request.method, request.path);
+  return operation !== undefined && operation === request.operation;
+}
 const CoordinatorBindingSchema = z.object({
   instanceId: z.string(),
   state: z.enum(['ready', 'quiescing']),
@@ -20,10 +38,10 @@ export function createCoordinatorResolver(
   initial: URL,
   instanceId: string,
   path = process.env.PLATFORM_COORDINATOR_BINDING_PATH,
-): (logicalDeadline?: number) => Promise<URL> {
+): (logicalDeadline?: number, request?: HandoffReadRequest) => Promise<URL> {
   const clock = new SystemClock();
   if (path && !isAbsolute(path)) throw new Error('COORDINATOR_BINDING_PATH_MUST_BE_ABSOLUTE');
-  return async (logicalDeadline) => {
+  return async (logicalDeadline, request) => {
     if (!path) return initial;
     const deadline = Math.min(clock.now().getTime() + 1750, logicalDeadline ?? Infinity);
     for (;;) {
@@ -48,7 +66,8 @@ export function createCoordinatorResolver(
         !/^sha256:[a-f0-9]{64}$/.test(binding.artifactDigest)
       )
         throw new Error('INVALID_COORDINATOR_BINDING');
-      if (binding.state === 'ready') return target;
+      if (binding.state === 'ready' || (request && isCoordinatorHandoffRead(request)))
+        return target;
       if (clock.now().getTime() >= deadline) throw new Error('COORDINATOR_HANDOFF_BUDGET_EXCEEDED');
       // No application command has been dispatched while waiting here.
       await new Promise<void>((resolve) => setTimeout(resolve, 5));

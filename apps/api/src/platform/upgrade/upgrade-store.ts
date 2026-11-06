@@ -128,30 +128,36 @@ const ACTIVE =
 @Injectable()
 export class UpgradeStore {
   readonly instanceId: string;
-  readonly ledgerSqlite: Database.Database;
+  private readonly initialLedgerSqlite: Database.Database;
+  private readonly businessSqlite: Database.Database;
   private readonly options: UpgradeStoreOptions;
-  private readonly fastMetadata: boolean;
+  private readonly metadataCaches = new WeakMap<Database.Database, boolean>();
   constructor(
-    @Inject(PLATFORM_SQLITE) readonly sqlite: Database.Database,
+    @Inject(PLATFORM_SQLITE) sqlite: Database.Database,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ID_GENERATOR) private readonly ids: IdGenerator,
     @Optional() @Inject(UPGRADE_STORE_OPTIONS) options?: UpgradeStoreOptions,
   ) {
     this.options = options ?? {};
+    this.businessSqlite = sqlite;
     this.instanceId = options?.instanceId ?? platformInstanceId();
     requireUpgrade(
       /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(this.instanceId),
       'INVALID_INSTANCE_ID',
     );
-    this.ledgerSqlite = options?.ledgerSqlite ?? sqlite;
-    this.fastMetadata = ['upgrade_attempts', 'upgrade_steps'].every((table, index) =>
-      this.ledgerSqlite
-        .prepare<unknown[], { name: string }>(`PRAGMA table_info(${table})`)
-        .all()
-        .some((column) => column.name === ['plan_digest', 'evidence_digest'][index]),
+    this.initialLedgerSqlite = options?.ledgerSqlite ?? sqlite;
+    this.options.ledgerAccess?.bindBusiness(sqlite, this.instanceId);
+    this.metadataCaches.set(
+      this.ledgerSqlite,
+      ['upgrade_attempts', 'upgrade_steps'].every((table, index) =>
+        this.ledgerSqlite
+          .prepare<unknown[], { name: string }>(`PRAGMA table_info(${table})`)
+          .all()
+          .some((column) => column.name === ['plan_digest', 'evidence_digest'][index]),
+      ),
     );
     if (
-      !options?.readonly &&
+      !this.ledgerReadonly &&
       !this.ledgerSqlite
         .prepare('SELECT 1 FROM upgrade_instances WHERE instance_id=?')
         .get(this.instanceId)
@@ -160,8 +166,38 @@ export class UpgradeStore {
         .prepare('INSERT INTO upgrade_instances(instance_id,updated_at) VALUES(?,?)')
         .run(this.instanceId, this.now());
   }
+  get sqlite(): Database.Database {
+    return this.options.ledgerAccess?.business(this.businessSqlite) ?? this.businessSqlite;
+  }
+  get ledgerSqlite(): Database.Database {
+    return this.options.ledgerAccess?.ledger(this.businessSqlite) ?? this.initialLedgerSqlite;
+  }
   get ledgerReadonly(): boolean {
-    return this.options.readonly === true;
+    return this.options.ledgerAccess?.readonly ?? this.options.readonly === true;
+  }
+  get legacyAdmissionFrozen(): boolean {
+    return this.options.ledgerAccess?.frozen ?? false;
+  }
+  runLedgerWork<T>(work: () => T): T {
+    if (this.options.ledgerAccess) return this.options.ledgerAccess.run(work);
+    return work();
+  }
+  captureLedgerWork<T>(work: () => T): () => T {
+    return this.options.ledgerAccess?.capture(work) ?? work;
+  }
+  private get fastMetadata(): boolean {
+    const ledger = this.ledgerSqlite;
+    let cached = this.metadataCaches.get(ledger);
+    if (cached === undefined) {
+      cached = ['upgrade_attempts', 'upgrade_steps'].every((table, index) =>
+        ledger
+          .prepare<unknown[], { name: string }>(`PRAGMA table_info(${table})`)
+          .all()
+          .some((column) => column.name === ['plan_digest', 'evidence_digest'][index]),
+      );
+      this.metadataCaches.set(ledger, cached);
+    }
+    return cached;
   }
   controlCapabilities() {
     return this.fastMetadata
@@ -563,7 +599,8 @@ export class UpgradeStore {
     }
   }
   private assertLedgerWritable(): void {
-    requireUpgrade(!this.options.readonly, 'CONTROL_LEDGER_READONLY');
+    this.options.ledgerAccess?.assertWritable();
+    requireUpgrade(!this.ledgerReadonly, 'CONTROL_LEDGER_READONLY');
   }
   private assertGlobalUpgrade(id: string, fence: number): void {
     if (!this.ledgerReadonly) return;
@@ -608,6 +645,10 @@ export class UpgradeStore {
     );
   }
   assertControlAdmissionAvailable(): void {
+    requireUpgrade(
+      !this.legacyAdmissionFrozen || this.ledgerReadonly,
+      'LEGACY_CONTROL_ADMISSION_FROZEN',
+    );
     if (!this.options.independent) return;
     if (
       this.ledgerSqlite
@@ -949,9 +990,9 @@ export class UpgradeStore {
           requireUpgrade(prior.request_digest === digest, 'UPGRADE_REQUEST_PAYLOAD_CONFLICT');
           return this.attempt(prior.attempt_id);
         }
+        this.assertControlAdmissionAvailable();
         const installed = this.instance();
         if (this.options.independent) {
-          this.assertControlAdmissionAvailable();
           requireUpgrade(this.options.dataFormatGuard, 'CONTROL_DATA_FORMAT_GUARD_REQUIRED');
           this.options.dataFormatGuard({
             targetDigest: envelope.manifestDigest,

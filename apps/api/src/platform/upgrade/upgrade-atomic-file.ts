@@ -5,7 +5,11 @@ import { canonicalUpgrade, requireUpgrade } from './upgrade-trust';
 import { assertRecoverySideEffect } from '../persistence/upgrade-recovery-context';
 import { assertCurrentBusinessAction } from './upgrade-business-action';
 
-export async function writeInstalledBinding(path: string, value: unknown): Promise<void> {
+export async function writeInstalledBinding(
+  path: string,
+  value: unknown,
+  beforeCommit?: () => void,
+): Promise<void> {
   assertRecoverySideEffect();
   assertCurrentBusinessAction();
   requireUpgrade(isAbsolute(path), 'INSTALLED_BINDING_PATH_REQUIRED');
@@ -25,6 +29,7 @@ export async function writeInstalledBinding(path: string, value: unknown): Promi
   }
   assertRecoverySideEffect();
   assertCurrentBusinessAction();
+  beforeCommit?.();
   await rename(temp, path);
   const dir = await open(parent, 'r');
   try {

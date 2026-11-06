@@ -61,6 +61,8 @@ SystemModule|class:PresetImageProvisioner|factory|useFactory
 SystemModule|symbol:DiagnoseChecks|factory|useFactory
 UpgradeModule|class:UpgradeStore|class|UpgradeStore
 UpgradeModule|class:UpgradeLedgerConnection|class|UpgradeLedgerConnection
+UpgradeModule|class:UpgradeControlAttachment|class|UpgradeControlAttachment
+UpgradeModule|app-interceptor|class|UpgradeLedgerAdmissionInterceptor
 UpgradeModule|symbol:UpgradeStoreOptions|factory|useFactory
 UpgradeModule|class:UpgradeCatalog|class|UpgradeCatalog
 UpgradeModule|class:UpgradeInspector|class|UpgradeInspector
@@ -202,6 +204,7 @@ DeploymentModule|class:DeploymentController|class|DeploymentController
 SystemModule|class:HealthController|class|HealthController
 SystemModule|class:SystemController|class|SystemController
 UpgradeModule|class:UpgradeController|class|UpgradeController
+UpgradeModule|class:UpgradeControlAttachmentController|class|UpgradeControlAttachmentController
 UpgradeModule|class:UpgradeInternalController|class|UpgradeInternalController
 UpgradeModule|class:UpgradeContractInternalController|class|UpgradeContractInternalController
 UpgradeModule|class:UpgradeInspectionController|class|UpgradeInspectionController
@@ -338,6 +341,7 @@ function tokenName(token: unknown): string {
   if (typeof token === 'function') return 'class:' + token.name;
   if (typeof token === 'symbol') return 'symbol:' + (token.description ?? '');
   if (typeof token === 'string') {
+    if (/^APP_INTERCEPTOR \(UUID: [a-zA-Z0-9-]+\)$/.test(token)) return 'app-interceptor';
     if (/^APP_GUARD \(UUID: [a-zA-Z0-9-]+\)$/.test(token)) return 'app-guard';
     return 'string:' + token;
   }

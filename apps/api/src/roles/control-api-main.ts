@@ -24,7 +24,11 @@ import {
 } from '../platform/control-rpc/control-rpc.contract';
 import { readPublicNetworkConfig } from '../platform/config/public-network';
 import { isRequestOriginAllowed } from '../bootstrap/public-origin-policy';
-import { createCoordinatorResolver } from '../platform/control-rpc/coordinator-routing';
+import {
+  createCoordinatorResolver,
+  coordinatorHandoffReadOperation,
+  type HandoffReadRequest,
+} from '../platform/control-rpc/coordinator-routing';
 import { SystemClock } from '../platform/time/system-clock';
 import { installedApiIdentity } from '../platform/artifact-identity';
 import { RetirementWorkTracker } from '../platform/upgrade/retirement-census';
@@ -431,7 +435,11 @@ export async function startControlApi(
       // operation to the new writer. A lost response is never an instruction to
       // retry a business effect.
       for (;;) {
-        const target = await coordinatorTarget(deadline);
+        const target = await coordinatorTarget(deadline, {
+          operation: payload.operation,
+          method: payload.request.method,
+          path: payload.request.path,
+        });
         const response = await fetch(target.origin + '/internal/application/invoke', {
           method: 'POST',
           headers: { ...internalHeaders, 'content-type': 'application/json' },
@@ -457,9 +465,12 @@ export async function startControlApi(
   }
   let applicationRouter = buildApplicationRouter(catalog);
   let refreshing: Promise<void> | undefined;
-  async function refreshCatalog(deadline = clock.now().getTime() + 1900): Promise<void> {
+  async function refreshCatalog(
+    deadline = clock.now().getTime() + 1900,
+    read?: HandoffReadRequest,
+  ): Promise<void> {
     return retirement.run(async () => {
-      const target = await coordinatorTarget(deadline);
+      const target = await coordinatorTarget(deadline, read);
       if (catalogOrigin === target.origin) return;
       refreshing ??= (async () => {
         const response = await fetch(target.origin + '/internal/application/catalog', {
@@ -527,7 +538,11 @@ export async function startControlApi(
         return;
       }
       try {
-        await refreshCatalog(coordinatorDeadline(res));
+        const operation = coordinatorHandoffReadOperation(req.method, req.path);
+        await refreshCatalog(
+          coordinatorDeadline(res),
+          operation ? { operation, method: req.method, path: req.path } : undefined,
+        );
         applicationRouter(req, res, next);
       } catch {
         failure(res);

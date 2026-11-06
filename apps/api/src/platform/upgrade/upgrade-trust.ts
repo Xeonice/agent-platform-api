@@ -67,6 +67,7 @@ export function upgradeRunInputFingerprint(manifest: UpgradeManifest): string {
         ({ rehearsed: _rehearsed, ...identity }) => identity,
       ),
     },
+    ...(manifest.controlPackage === undefined ? {} : { controlPackage: manifest.controlPackage }),
   });
 }
 export async function readUpgradeTrustRoot(path: string): Promise<UpgradeTrustRoot> {
@@ -126,6 +127,25 @@ export function verifyUpgradeEnvelope(
   );
   const envelope = SignedUpgradeManifestSchema.parse(raw);
   const manifest = envelope.manifest;
+  if (manifest.controlPackage) {
+    const control = manifest.controlPackage,
+      body = control.manifest,
+      archive = control.package;
+    requireUpgrade(
+      control.manifestDigest === upgradeDigest(body) &&
+        body.apiRevision === manifest.commits.api &&
+        body.projectRevision === manifest.commits.project &&
+        body.executionEngineDigest === manifest.components.installer.artifactDigest &&
+        body.executionEngineDigest === manifest.components.installer.inputFingerprint,
+      'RELEASE_CONTROL_ENGINE_MISMATCH',
+    );
+    requireUpgrade(
+      manifest.packages.every(
+        (pkg) => pkg.platform === archive.platform && pkg.arch === archive.arch,
+      ),
+      'RELEASE_CONTROL_PACKAGE_INVALID',
+    );
+  }
   const qualification = (manifest.purpose ?? 'release') === 'qualification';
   requireUpgrade(
     (manifest.purpose ?? 'release') === (roots.purpose ?? 'release'),
@@ -152,7 +172,10 @@ export function verifyUpgradeEnvelope(
   );
   const names = new Set<string>();
   const platforms = new Set<string>();
-  for (const pkg of manifest.packages) {
+  for (const pkg of [
+    ...manifest.packages,
+    ...(manifest.controlPackage ? [manifest.controlPackage.package] : []),
+  ]) {
     const url = new URL(pkg.url);
     requireUpgrade(
       url.protocol === 'https:' &&
@@ -162,10 +185,14 @@ export function verifyUpgradeEnvelope(
         roots.distributionOrigins.includes(url.origin),
       'UNTRUSTED_DISTRIBUTION_ORIGIN',
     );
-    const platform = `${pkg.platform}:${pkg.arch}`;
-    requireUpgrade(!names.has(pkg.name) && !platforms.has(platform), 'DUPLICATE_PACKAGE');
-    names.add(pkg.name);
-    platforms.add(platform);
+    // The Control archive deliberately shares the business package platform.
+    // Only the business package list has the one-package-per-platform contract.
+    if (pkg !== manifest.controlPackage?.package) {
+      const platform = `${pkg.platform}:${pkg.arch}`;
+      requireUpgrade(!names.has(pkg.name) && !platforms.has(platform), 'DUPLICATE_PACKAGE');
+      names.add(pkg.name);
+      platforms.add(platform);
+    }
   }
   requireUpgrade(
     manifest.policy.migrationBatchMs < manifest.policy.requestDeadlineMs,
@@ -177,6 +204,21 @@ export function verifyUpgradeEnvelope(
     requireUpgrade(
       manifest.evidence.some((e) => e.kind === kind && e.result === 'passed'),
       'RELEASE_GATES_MISSING',
+    );
+  }
+  if (!qualification && manifest.controlPackage) {
+    const control = manifest.controlPackage;
+    requireUpgrade(
+      manifest.evidence.some(
+        (gate) =>
+          gate.kind === 'independent-control' &&
+          gate.result === 'passed' &&
+          gate.inputFingerprint === upgradeRunInputFingerprint(manifest) &&
+          gate.controlPackageDigest === control.manifestDigest &&
+          gate.executionEngineDigest === control.manifest.executionEngineDigest &&
+          gate.controlArchiveDigest === control.package.digest,
+      ),
+      'INDEPENDENT_CONTROL_GATES_MISSING',
     );
   }
   requireUpgrade(

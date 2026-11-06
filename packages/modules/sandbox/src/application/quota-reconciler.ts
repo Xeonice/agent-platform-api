@@ -4,11 +4,12 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { CLOCK, EVENT_BUS } from '@platform/shared-kernel';
-import type { Clock, EventBus } from '@platform/shared-kernel';
+import { BUSINESS_WRITER_AUTHORITY, CLOCK, EVENT_BUS } from '@platform/shared-kernel';
+import type { BusinessWriterAuthority, Clock, EventBus } from '@platform/shared-kernel';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
 import type { ProviderRegistry, SandboxHandle } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
@@ -49,7 +50,7 @@ export interface QuotaReconcileReport {
  * 与 13 §4 的三路对比。
  *
  * ── 两条路径，一段判据 ────────────────────────────────────────────────────────
- * - **开机全量**（`onApplicationBootstrap`）：账本是持久的、进程不是。被 kill 的那一刻
+ * - **ready 后后台全量**：账本是持久的、进程不是。被 kill 的那一刻
  *   留在库里的活跃登记，对应的容器可能早就不在了。没有这一步，资源池视图在每一次非
  *   正常退出后都会**永久**少一块 —— 而且是**只减不增**的那种，攒够十次就是一台谁也建
  *   不出 Task 的机器，日志里一句话都没有。
@@ -81,7 +82,9 @@ export interface QuotaReconcileReport {
  */
 @Injectable()
 export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy {
-  private readonly worker = coordinatorWorker('sandbox.quota');
+  private readonly worker = coordinatorWorker('sandbox.quota', () => {
+    this.closed = true;
+  });
 
   private readonly logger = new Logger('QuotaReconciler');
   /** allocationId → 上一次拿到确定判据（`alive`/`gone`）的时刻。见类注释。 */
@@ -89,6 +92,10 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
   private timer: NodeJS.Timeout | null = null;
   /** 上一轮还没跑完就不开下一轮 —— provider 慢的时候，重入只会把它压得更慢。 */
   private sweeping = false;
+  private startupDeferred = false;
+  private startupStarted = false;
+  private closed = false;
+  private readonly inFlight = new Set<Promise<unknown>>();
 
   constructor(
     @Inject(RESOURCE_ALLOCATION_REPOSITORY)
@@ -99,10 +106,53 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
     @Inject(CLOCK) private readonly clock: Clock,
     /** 写登记必须走队列（03 §3）—— 否则会与用户手动销毁撞上 I-RA-1。 */
     private readonly resources: ResourceAllocator,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
 
-  async onApplicationBootstrap(): Promise<void> {
-    return this.worker.run(async () => {
+  /** Role roots call this before Nest initialization, then start only after the
+   * actual listener/binding is ready. Other assemblies retain automatic startup. */
+  deferStartupUntilReady(): void {
+    if (this.startupStarted) throw new Error('QUOTA_RECONCILE_ALREADY_STARTED');
+    this.startupDeferred = true;
+  }
+
+  onApplicationBootstrap(): void {
+    if (!this.startupDeferred) this.startAfterReady();
+  }
+
+  /** Existing allocations stay fully charged while this owned background scan
+   * is queued or waiting on a provider. No readiness claim depends on its IO. */
+  startAfterReady(): void {
+    if (!this.admissionOpen() || this.startupStarted) return;
+    // Capture the actual ready-time epoch in the queued callback. A later
+    // A→B→A reacquisition must not let this old operation borrow the new epoch.
+    this.inWriterEpoch(() => {
+      this.worker.immediate(
+        () => this.startupScan(),
+        (error) => {
+          this.skipped(error);
+        },
+      );
+    });
+    this.startupStarted = true;
+    if (process.env.DISABLE_QUOTA_RECONCILE === '1') return;
+    // Each new tick captures its own admitted epoch; do not bind the lifetime
+    // interval to the generation of the first scan.
+    this.timer = this.worker.interval(
+      INCREMENTAL_INTERVAL_MS,
+      () => this.sweep(),
+      (error) => {
+        this.skipped(error);
+      },
+    );
+    this.timer.unref();
+  }
+
+  private async startupScan(): Promise<void> {
+    return this.run(async () => {
+      this.sweeping = true;
       try {
         const report = await this.reconcile();
         if (report.orphaned > 0) {
@@ -113,14 +163,10 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
         }
       } catch (e) {
         // 对账失败绝不拦启动 —— 一个起不来的平台比一份略旧的账本坏得多。
-        this.logger.warn(`quota reconcile skipped: ${errorMessage(e)}`);
+        this.skipped(e);
+      } finally {
+        this.sweeping = false;
       }
-      if (process.env.DISABLE_QUOTA_RECONCILE === '1') return;
-      this.timer = this.worker.ownInterval(
-        setInterval(() => void this.sweep(), INCREMENTAL_INTERVAL_MS),
-      );
-      // 不为了对账把事件循环吊着（与 `SandboxHealthMonitor` / `AutomationScheduler` 同款）
-      this.timer.unref();
     });
   }
 
@@ -129,18 +175,24 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
    * 记的是同一个坑）：e2e 是 singleFork，几十个 spec 各起一次 AppModule，不清理就会有
    * 几十个指向**已关闭 DB** 的对账器同时醒来。
    */
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
+    this.closed = true;
     if (this.timer !== null) {
       this.worker.cancel(this.timer);
       this.timer = null;
     }
+    // stopAdmission never awaits this hook (or its own original Promise).
+    // Pending callbacks cancel; genuinely active provider work stays accounted
+    // for until it settles, before the enclosing module may close SQLite.
+    await this.worker.stop();
+    await Promise.allSettled([...this.inFlight]);
   }
 
   /** 定时器的入口：永不抛、不重入。**幂等，可以直接被测试调用**。 */
   async sweep(): Promise<QuotaReconcileReport> {
-    return this.worker.run(async () => {
+    return this.run(async () => {
       const idle: QuotaReconcileReport = { scanned: 0, confirmed: 0, orphaned: 0 };
-      if (this.sweeping) return idle;
+      if (!this.admissionOpen() || this.sweeping) return idle;
       this.sweeping = true;
       try {
         return await this.reconcileIncremental();
@@ -155,7 +207,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
 
   /** 开机那次：全部活跃登记，一条不落。Public so an operator/test can trigger it. */
   async reconcile(): Promise<QuotaReconcileReport> {
-    return this.worker.run(async () => {
+    return this.run(async () => {
       return this.check(await this.allocations.listActiveAll());
     });
   }
@@ -167,7 +219,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
    * 「最旧的先来」不是装饰 —— 按库序取会让排在后面的登记在一台繁忙的机器上永远轮不到。
    */
   async reconcileIncremental(): Promise<QuotaReconcileReport> {
-    return this.worker.run(async () => {
+    return this.run(async () => {
       const now = this.clock.now().getTime();
       const stale = staleMs();
       const due = (await this.allocations.listActiveAll())
@@ -181,15 +233,20 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
   }
 
   private async check(allocations: readonly ResourceAllocation[]): Promise<QuotaReconcileReport> {
-    return this.worker.run(async () => {
+    return this.run(async () => {
       const report: QuotaReconcileReport = {
         scanned: allocations.length,
         confirmed: 0,
         orphaned: 0,
       };
       for (const allocation of allocations) {
+        if (!this.admissionOpen()) break;
+        this.writer?.assert();
         const sandbox = await this.sandboxes.findById(allocation.sandboxId);
+        if (!this.admissionOpen()) break;
         const verdict = await this.verdictFor(sandbox);
+        if (!this.admissionOpen()) break;
+        this.writer?.assert();
         // ⚠️ **`unknown` 不记时刻。** 记了的话，一个 provider 一直不可达的沙箱会被这条
         // 「已核对」推到 30 分钟之后，于是 daemon 恢复后还要再等半小时才有人去看它。
         if (verdict === 'unknown') continue;
@@ -220,7 +277,7 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
   }
 
   private async verdictFor(sandbox: Sandbox | null): Promise<'alive' | 'gone' | 'unknown'> {
-    return this.worker.run(async () => {
+    return this.run(async () => {
       // 沙箱行本身没了（FK CASCADE 之外的路径，或库被手动清过）⇒ 这条登记再也没有主人。
       if (sandbox === null) return 'gone';
       // 已终态：`destroy`/`compensate` 那一步的释放没跑成（崩在中间）。账本补上。
@@ -242,6 +299,31 @@ export class QuotaReconciler implements OnApplicationBootstrap, OnModuleDestroy 
         return 'unknown';
       }
     });
+  }
+
+  private inWriterEpoch<T>(work: () => T): T {
+    if (this.writer?.run) return this.writer.run(work);
+    this.writer?.assert();
+    return work();
+  }
+
+  private admissionOpen(): boolean {
+    // worker.stop closes admission synchronously, before its async stop hook.
+    return !this.closed && !this.worker.snapshot().stopped;
+  }
+
+  private run<T>(work: () => Promise<T>): Promise<T> {
+    const original = this.worker.run(() => this.inWriterEpoch(work));
+    this.inFlight.add(original);
+    void original.then(
+      () => this.inFlight.delete(original),
+      () => this.inFlight.delete(original),
+    );
+    return original;
+  }
+
+  private skipped(error: unknown): void {
+    this.logger.warn(`quota reconcile skipped: ${errorMessage(error)}`);
   }
 }
 

@@ -222,12 +222,19 @@ export class UpgradeInternalController {
     this.upgrades.security.internal(req, this.upgrades.store.instanceId);
     if (!recovery) rejectRecoveryHeaders(req);
   }
+  /** The independent Control ledger is authoritative after adoption. Historical
+   * controller RPCs must not keep driving an old operation through this reader.
+   * Business participation routes below retain their command-envelope checks. */
+  private legacyControl(req: Request): void {
+    this.auth(req);
+    requireUpgrade(!this.upgrades.store.ledgerReadonly, 'LEGACY_CONTROL_PROTOCOL_RETIRED');
+  }
   @Get('controller-capabilities') controlCapabilities(@Req() req: Request) {
     this.auth(req);
     return this.upgrades.store.controlCapabilities();
   }
   @Get('pending') pending(@Req() req: Request) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.upgrades.store.pending();
   }
   @Post('process-observe') @HttpCode(200) processObserve(
@@ -259,12 +266,12 @@ export class UpgradeInternalController {
     );
   }
   @Post('bootstrap') @HttpCode(200) async bootstrap(@Req() req: Request) {
-    this.auth(req);
+    this.legacyControl(req);
     await this.upgrades.registerInstalled();
     return this.upgrades.store.confirmed();
   }
   @Get(':attemptId') snapshot(@Req() req: Request, @Param('attemptId') id: string) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.upgrades.store.snapshot(id);
   }
   @Post(':attemptId/claim') @HttpCode(200) claim(
@@ -272,7 +279,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     const input = ClaimSchema.parse(raw);
     return this.upgrades.claim(id, input.controllerId, input.leaseMs);
   }
@@ -281,7 +288,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     const input = AuthorityCheckSchema.parse(raw);
     return this.upgrades.store.authorityCheck(id, input.fence, input.generation);
   }
@@ -290,7 +297,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     const input = LeaseRenewSchema.parse(raw);
     return this.upgrades.store.leaseRenew(id, input.fence, input.generation, input.controllerId);
   }
@@ -299,7 +306,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Query() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     const input = CheckpointQuerySchema.parse(raw);
     return this.upgrades.store.progressCheckpoint(id, input.fence, input.generation);
   }
@@ -308,7 +315,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.upgrades.commitReceipt(id, CommitSchema.parse(raw));
   }
   @Post(':attemptId/renew') @HttpCode(200) renew(
@@ -316,7 +323,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     const input = RenewSchema.parse(raw);
     return this.upgrades.store.renew(id, input.fence, input.controllerId, input.checkOnly);
   }
@@ -325,7 +332,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() raw: unknown,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.upgrades.commit(id, CommitSchema.parse(raw));
   }
   @Get(':attemptId/steps/:stepId') step(
@@ -333,7 +340,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Param('stepId') step: string,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.upgrades.store.step(id, step);
   }
   @Post(':attemptId/validate-switch') @HttpCode(200) validate(
@@ -379,7 +386,7 @@ export class UpgradeInternalController {
     @Param('attemptId') id: string,
     @Body() input: Record<string, unknown>,
   ) {
-    this.auth(req);
+    this.legacyControl(req);
     return this.roles.execute(id, 'installer', input);
   }
   @Post(':attemptId/migration') @HttpCode(200) migration(
@@ -473,6 +480,7 @@ export class UpgradeContractInternalController {
   ) {}
   @Get(':id') snapshot(@Req() req: Request, @Param('id') id: string) {
     this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    requireUpgrade(!this.upgrades.store.ledgerReadonly, 'LEGACY_CONTROL_PROTOCOL_RETIRED');
     return this.contracts.store.snapshot(id);
   }
   @Post(':id/check') @HttpCode(200) check(
@@ -481,6 +489,7 @@ export class UpgradeContractInternalController {
     @Body() raw: unknown,
   ) {
     this.upgrades.security.internal(req, this.upgrades.store.instanceId);
+    requireUpgrade(!this.upgrades.store.ledgerReadonly, 'LEGACY_CONTROL_PROTOCOL_RETIRED');
     const body = z.object({ fence: z.number().int().positive() }).strict().parse(raw);
     return this.contracts.check(id, body.fence);
   }

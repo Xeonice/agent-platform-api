@@ -39,6 +39,29 @@ export const UpgradePackageSchema = z
     format: z.enum(['native-tar', 'oci-tar']),
   })
   .passthrough();
+/** Complete independently signed Control body and its delivered archive. */
+export const UpgradeControlPackageManifestSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    kind: z.literal('upgrade-control'),
+    version: Release,
+    protocolVersion: z.literal(1),
+    apiRevision: Revision,
+    projectRevision: Revision,
+    treeDigest: Digest,
+    executionEngineDigest: Digest,
+  })
+  .strict();
+export const UpgradeControlPackageSchema = z
+  .object({
+    manifest: UpgradeControlPackageManifestSchema,
+    manifestDigest: Digest,
+    package: UpgradePackageSchema.extend({
+      format: z.literal('native-tar'),
+      bytes: z.number().int().positive().safe(),
+    }),
+  })
+  .strict();
 export const UpgradePathSchema = z
   .object({
     fromRelease: Release,
@@ -165,6 +188,7 @@ export const UpgradeManifestSchema = z
     commits: z.object({ project: Revision, api: Revision, web: Revision }).passthrough(),
     components: UpgradeComponentsSchema.extend({ coordinator: UpgradeArtifactSchema }),
     packages: z.array(UpgradePackageSchema).min(1).max(16),
+    controlPackage: UpgradeControlPackageSchema.optional(),
     upgradePaths: z.array(UpgradePathSchema).min(1),
     policy: UpgradePolicySchema,
     evidence: z.array(

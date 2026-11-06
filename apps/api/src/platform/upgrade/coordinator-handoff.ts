@@ -1,3 +1,4 @@
+import { CoordinatorHandoffBudget } from './coordinator-handoff-budget';
 import { preserveUpgradeCriticalAuthority } from './upgrade-control-authority-client';
 import { assertCurrentBusinessAction, withoutBusinessAction } from './upgrade-business-action';
 import { upgradeRecord } from './upgrade-values';
@@ -73,7 +74,12 @@ export class CoordinatorHandoff {
       ...extra,
     });
   }
-  private async candidateRpc(candidate: Json, action: string, body?: Json): Promise<Json> {
+  private async candidateRpc(
+    candidate: Json,
+    action: string,
+    body?: Json,
+    budget?: CoordinatorHandoffBudget,
+  ): Promise<Json> {
     const origin = loopbackOrigin(candidate.managementOrigin ?? candidate.origin);
     const r = await fetch(origin + '/internal/coordinator/' + action, {
       method: body ? 'POST' : 'GET',
@@ -83,10 +89,12 @@ export class CoordinatorHandoff {
         'x-platform-instance-id': this.store.instanceId,
       },
       body: body ? canonicalUpgrade(body) : undefined,
-      signal: AbortSignal.timeout(action === 'adopt' ? 2000 : 1500),
+      signal: budget?.signal ?? AbortSignal.timeout(action === 'adopt' ? 2000 : 1500),
     });
     requireUpgrade(r.ok, 'COORDINATOR_CANDIDATE_UNCONFIRMED');
-    return upgradeRecord(await r.json());
+    const value = upgradeRecord(await r.json());
+    budget?.assert();
+    return value;
   }
   async execute(id: string, input: Json): Promise<Json> {
     const fence = Number(input.fence);
@@ -162,6 +170,7 @@ export class CoordinatorHandoff {
           identity.artifactDigest === candidate.artifactDigest &&
           identity.role === 'coordinator-prepared' &&
           identity.prepared === true &&
+          identity.businessTransportPrepared === true &&
           identity.writerFenceValid === false &&
           identity.workersStarted === false,
         'READ_ONLY_COORDINATOR_NOT_PREPARED',
@@ -196,13 +205,41 @@ export class CoordinatorHandoff {
       requireUpgrade(existing.stage === 'prepared', 'HANDOFF_STAGE_CONFLICT');
       const identity = await this.candidateRpc(candidate, 'identity');
       requireUpgrade(
-        identity.prepared === true && identity.writerFenceValid === false,
+        identity.instanceId === this.store.instanceId &&
+          identity.startIdentity === candidate.startIdentity &&
+          identity.artifactDigest === candidate.artifactDigest &&
+          identity.role === 'coordinator-prepared' &&
+          identity.prepared === true &&
+          identity.businessTransportPrepared === true &&
+          identity.writerFenceValid === false &&
+          identity.workersStarted === false,
         'READ_ONLY_COORDINATOR_NOT_PREPARED',
       );
+      // The full external/SQLite continuity proof runs while the source still
+      // serves. It is not reused as a substitute for the post-release live proof.
+      const sourceContinuity = await this.inspector.continuity(id, fence);
+      assertCurrentBusinessAction();
+      requireUpgrade(sourceContinuity.qualified === true, 'SOURCE_CONTINUITY_UNCONFIRMED');
       const source = coordinatorWriterControl(this.store.sqlite);
       source.assert();
       const quiescedAt = this.clock.now().getTime();
-      await preserveUpgradeCriticalAuthority(this.store, this.clock, id, fence, 'quiesce');
+      const budget = new CoordinatorHandoffBudget(
+        quiescedAt + plan.policy.requestDeadlineMs,
+        this.clock,
+        (work) => work(),
+      );
+      // These source-side operations already own bounded waits. Await their
+      // original work, then check the shared deadline; racing their Promise
+      // would detach work from the source HTTP/retirement owner.
+      await preserveUpgradeCriticalAuthority(
+        this.store,
+        this.clock,
+        id,
+        fence,
+        'quiesce',
+        budget.remaining(),
+      );
+      budget.assert();
       this.store.sqlite
         .prepare(
           "UPDATE coordinator_handoffs SET stage='quiesced',quiesced_at=? WHERE attempt_id=?",
@@ -215,7 +252,8 @@ export class CoordinatorHandoff {
           nextOrigin: candidate.businessOrigin,
         });
         assertCurrentBusinessAction();
-        await this.applications.quiesce(Math.min(1000, plan.policy.requestDeadlineMs / 2));
+        await this.applications.quiesce(Math.min(1000, budget.remaining()));
+        budget.assert();
         assertCurrentBusinessAction();
         requireUpgrade(
           this.provisions.pauseOwnership() &&
@@ -228,6 +266,7 @@ export class CoordinatorHandoff {
         this.terminals.prepareHandoff();
         this.events.prepareHandoff();
         this.tasks.prepareHandoff();
+        budget.assert();
       } catch (error) {
         await this.binding('ready');
         withoutBusinessAction(() => {
@@ -247,10 +286,15 @@ export class CoordinatorHandoff {
           .run(id);
         throw error;
       }
-      return { commitKnown: true, stage: 'quiesced', quiescedAt };
+      return { commitKnown: true, stage: 'quiesced', quiescedAt, sourceContinuity };
     }
     if (input.action === 'release') {
       requireUpgrade(existing.stage === 'quiesced', 'HANDOFF_STAGE_CONFLICT');
+      const budget = new CoordinatorHandoffBudget(
+        Number(existing.quiesced_at) + plan.policy.requestDeadlineMs,
+        this.clock,
+        (work) => work(),
+      );
       await preserveUpgradeCriticalAuthority(
         this.store,
         this.clock,
@@ -269,30 +313,13 @@ export class CoordinatorHandoff {
         .run(id);
       try {
         assertCurrentBusinessAction();
-        await this.owners.releaseBusinessAuthority();
+        await this.owners.releaseBusinessAuthority(budget.signal);
+        budget.assert();
         assertCurrentBusinessAction();
         coordinatorWriterControl(this.store.sqlite).release();
       } catch (error) {
-        // If the old writer still holds its valid epoch, no replacement owns it.
-        // Recover its owner lease and resume A; never stop the in-flight guest.
-        coordinatorWriterControl(this.store.sqlite).assert();
-        await this.owners.activateBusinessAuthority(Number(process.env.COORDINATOR_GENERATION));
-        this.store.sqlite
-          .prepare(
-            "UPDATE coordinator_handoffs SET stage='prepared',quiesced_at=NULL WHERE attempt_id=?",
-          )
-          .run(id);
-        await this.binding('ready');
-        withoutBusinessAction(() => {
-          this.applications.resume();
-          this.pump.resumeOwnership();
-          this.automations.resumeOwnership();
-          this.provisions.resumeOwnership();
-          this.clones.resumeOwnership();
-          this.cleanup.resumeOwnership();
-          this.events.resumeAfterHandoff();
-          this.tasks.resumeAfterHandoff();
-        });
+        // A partial/unknown Owner release cannot be compensated by re-claiming
+        // every Owner. Preserve the original intent for independent recovery.
         throw error;
       }
       // Stable control owns adoption as a separately journaled fixed command.
@@ -308,14 +335,19 @@ export class CoordinatorHandoff {
         'adopt',
         plan.policy.requestDeadlineMs - (this.clock.now().getTime() - Number(existing.quiesced_at)),
       );
-      return this.candidateRpc(candidate, 'adopt', {
-        instanceId: this.store.instanceId,
-        attemptId: id,
-        fence,
-        operationId: input.operationId,
-        planDigest: plan.planDigest,
-        startIdentity: candidate.startIdentity,
-      });
+      return this.candidateRpc(
+        candidate,
+        'adopt',
+        {
+          instanceId: this.store.instanceId,
+          attemptId: id,
+          fence,
+          operationId: input.operationId,
+          planDigest: plan.planDigest,
+          startIdentity: candidate.startIdentity,
+        },
+        budget,
+      );
     }
     // Release/adopt outcomes are queried against their durable epoch/record; a
     // timeout does not authorize a second writer or a replayed release.
@@ -329,13 +361,26 @@ export class CoordinatorHandoff {
         'adopt',
         plan.policy.requestDeadlineMs - (this.clock.now().getTime() - Number(existing.quiesced_at)),
       );
-    return this.candidateRpc(candidate, 'adopt', {
-      instanceId: this.store.instanceId,
-      attemptId: id,
-      fence,
-      operationId: input.operationId,
-      planDigest: plan.planDigest,
-      startIdentity: candidate.startIdentity,
-    });
+    const budget =
+      existing.stage === 'adopted'
+        ? undefined
+        : new CoordinatorHandoffBudget(
+            Number(existing.quiesced_at) + plan.policy.requestDeadlineMs,
+            this.clock,
+            (work) => work(),
+          );
+    return this.candidateRpc(
+      candidate,
+      'adopt',
+      {
+        instanceId: this.store.instanceId,
+        attemptId: id,
+        fence,
+        operationId: input.operationId,
+        planDigest: plan.planDigest,
+        startIdentity: candidate.startIdentity,
+      },
+      budget,
+    );
   }
 }

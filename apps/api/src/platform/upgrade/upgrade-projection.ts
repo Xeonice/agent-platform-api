@@ -81,7 +81,7 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
     private readonly contracts?: UpgradeContractService,
   ) {}
   onApplicationBootstrap(): void {
-    if (this.store.ledgerReadonly) return;
+    if (this.store.ledgerReadonly || this.store.legacyAdmissionFrozen) return;
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
     this.timer = this.worker.ownInterval(
       setInterval(() => {
@@ -100,59 +100,63 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
   schedule(): void {
     if (
       this.stopped ||
+      this.store.legacyAdmissionFrozen ||
       this.store.ledgerReadonly ||
       (process.env.PLATFORM_PROCESS_ROLE === 'coordinator' &&
         process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true')
     )
       return;
     // Defer all synchronous setup/JSON/tree work until after the read response.
-    this.worker.immediate(() => {
-      if (this.stopped) return;
-      try {
-        void this.writer(() =>
-          withUpgradeObservation(() => {
-            this.physical ??= this.refreshPhysical()
-              .catch(() => undefined)
-              .finally(() => {
-                this.physical = null;
-              });
-            this.metadata ??= this.catalog
-              .refresh()
-              .catch(() => undefined)
-              .finally(() => {
-                this.metadata = null;
-              });
-            if (this.contracts && !this.contractRead)
-              this.contractRead = (async () => {
-                const before = this.store.instance();
-                const value = await requiredUpgradeValue(this.contracts).status();
-                const after = this.store.instance();
-                this.contract =
-                  before.activation_generation === after.activation_generation &&
-                  before.service_state === after.service_state &&
-                  before.ready === after.ready
-                    ? {
-                        value,
-                        confirmedAt: this.clock.now().toISOString(),
-                        activationGeneration: before.activation_generation,
-                        durableState: before.service_state,
-                        durableReady: before.ready,
-                      }
-                    : null;
-              })()
-                .catch(() => {
-                  this.contract = null;
-                })
+    this.worker.immediate(
+      this.store.captureLedgerWork(() => {
+        if (this.stopped) return;
+        try {
+          void this.writer(() =>
+            withUpgradeObservation(() => {
+              this.physical ??= this.refreshPhysical()
+                .catch(() => undefined)
                 .finally(() => {
-                  this.contractRead = null;
+                  this.physical = null;
                 });
-            return Promise.resolve();
-          }),
-        ).catch(() => undefined);
-      } catch {
-        // A retained/retired Coordinator must not launch or persist observations.
-      }
-    });
+              this.metadata ??= this.catalog
+                .refresh()
+                .catch(() => undefined)
+                .finally(() => {
+                  this.metadata = null;
+                });
+              if (this.contracts && !this.contractRead)
+                this.contractRead = this.store
+                  .runLedgerWork(async () => {
+                    const before = this.store.instance();
+                    const value = await requiredUpgradeValue(this.contracts).status();
+                    const after = this.store.instance();
+                    this.contract =
+                      before.activation_generation === after.activation_generation &&
+                      before.service_state === after.service_state &&
+                      before.ready === after.ready
+                        ? {
+                            value,
+                            confirmedAt: this.clock.now().toISOString(),
+                            activationGeneration: before.activation_generation,
+                            durableState: before.service_state,
+                            durableReady: before.ready,
+                          }
+                        : null;
+                  })
+                  .catch(() => {
+                    this.contract = null;
+                  })
+                  .finally(() => {
+                    this.contractRead = null;
+                  });
+              return Promise.resolve();
+            }),
+          ).catch(() => undefined);
+        } catch {
+          // A retained/retired Coordinator must not launch or persist observations.
+        }
+      }),
+    );
   }
   private saved(): PhysicalObservation | null {
     try {
@@ -221,116 +225,118 @@ export class UpgradeProjection implements OnApplicationBootstrap, OnModuleDestro
     };
   }
   async refreshPhysical(): Promise<void> {
-    return this.worker.run(async () => {
-      const row = this.store.instance(),
-        last = this.store.confirmed();
-      const started = this.clock.now().toISOString();
-      this.checkedAt = started;
-      let serviceState = row.service_state;
-      let availableWeb: UpgradeStatus['availableWeb'] = null;
-      let repairableCurrent: UpgradeStatus['repairableCurrent'] = null;
-      let availability: PhysicalObservation['serviceAvailability'] = {
-        state: 'unknown',
-        observedAt: null,
-        reason: 'ENTRY_OBSERVATION_UNKNOWN',
-      };
-      if (row.service_state === 'confirmed' && last) {
-        try {
-          const binding = await this.inspector.entryBinding(),
-            proof = await this.inspector.installedProof(last, binding),
-            actual = await this.inspector.webBuild(binding);
-          requireUpgrade(
-            proof.qualified === true &&
-              actual.webRevision === last.components.web.webRevision &&
-              upgradeRecord(binding.web).digest === last.components.web.artifactDigest,
-            'CURRENT_SERVICE_UNCONFIRMED',
-          );
-          if (row.ready === 1)
-            availableWeb = {
-              releaseId: last.releaseId,
-              webReleaseId: actual.releaseId,
-              webRevision: actual.webRevision,
-              artifactDigest: last.components.web.artifactDigest,
-              instanceId: this.store.instanceId,
-              activationGeneration: last.activationGeneration,
-              productionBinding: last.productionWebBinding,
-              ready: true,
-              compatible: true,
-              observedAt: started,
-            };
-        } catch {
-          serviceState = 'unknown';
-        }
-      }
-      if (serviceState !== 'confirmed') {
-        try {
-          const actual = await this.inspector.sourceActual();
-          if (actual)
-            repairableCurrent = {
-              baseConfirmedReleaseId: actual.baseConfirmedReleaseId,
-              activationGeneration: actual.activationGeneration,
-              observedAt: actual.observedAt,
-            };
-        } catch {
-          /* Unknown repair proof grants no mutation capability. */
-        }
-      }
-      try {
-        const response = await fetch(
-          loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) + '/api/health',
-          { signal: AbortSignal.timeout(2000) },
-        );
-        const health: unknown = await response.json();
-        availability = {
-          state:
-            response.ok &&
-            health !== null &&
-            typeof health === 'object' &&
-            'status' in health &&
-            health.status === 'ok'
-              ? 'available'
-              : 'unavailable',
-          observedAt: this.clock.now().toISOString(),
-          reason: response.ok ? null : 'ENTRY_HEALTH_FAILED',
+    return this.store.runLedgerWork(() =>
+      this.worker.run(async () => {
+        const row = this.store.instance(),
+          last = this.store.confirmed();
+        const started = this.clock.now().toISOString();
+        this.checkedAt = started;
+        let serviceState = row.service_state;
+        let availableWeb: UpgradeStatus['availableWeb'] = null;
+        let repairableCurrent: UpgradeStatus['repairableCurrent'] = null;
+        let availability: PhysicalObservation['serviceAvailability'] = {
+          state: 'unknown',
+          observedAt: null,
+          reason: 'ENTRY_OBSERVATION_UNKNOWN',
         };
-      } catch {
-        /* Unreachable observation is unknown, not proof the platform stopped. */
-      }
-      const current = this.store.instance();
-      if (
-        current.activation_generation !== row.activation_generation ||
-        current.service_state !== row.service_state ||
-        current.ready !== row.ready
-      )
-        return;
-      const snapshot: PhysicalObservation = {
-        activationGeneration: row.activation_generation,
-        durableState: row.service_state,
-        durableReady: row.ready,
-        serviceState,
-        availableWeb,
-        repairableCurrent,
-        serviceAvailability: availability,
-        confirmedAt: repairableCurrent?.observedAt ?? started,
-      };
-      const now = this.clock.now().getTime();
-      this.store.ledgerSqlite
-        .prepare(
-          'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET request_digest=excluded.request_digest,state=excluded.state,result=excluded.result,updated_at=excluded.updated_at',
+        if (row.service_state === 'confirmed' && last) {
+          try {
+            const binding = await this.inspector.entryBinding(),
+              proof = await this.inspector.installedProof(last, binding),
+              actual = await this.inspector.webBuild(binding);
+            requireUpgrade(
+              proof.qualified === true &&
+                actual.webRevision === last.components.web.webRevision &&
+                upgradeRecord(binding.web).digest === last.components.web.artifactDigest,
+              'CURRENT_SERVICE_UNCONFIRMED',
+            );
+            if (row.ready === 1)
+              availableWeb = {
+                releaseId: last.releaseId,
+                webReleaseId: actual.releaseId,
+                webRevision: actual.webRevision,
+                artifactDigest: last.components.web.artifactDigest,
+                instanceId: this.store.instanceId,
+                activationGeneration: last.activationGeneration,
+                productionBinding: last.productionWebBinding,
+                ready: true,
+                compatible: true,
+                observedAt: started,
+              };
+          } catch {
+            serviceState = 'unknown';
+          }
+        }
+        if (serviceState !== 'confirmed') {
+          try {
+            const actual = await this.inspector.sourceActual();
+            if (actual)
+              repairableCurrent = {
+                baseConfirmedReleaseId: actual.baseConfirmedReleaseId,
+                activationGeneration: actual.activationGeneration,
+                observedAt: actual.observedAt,
+              };
+          } catch {
+            /* Unknown repair proof grants no mutation capability. */
+          }
+        }
+        try {
+          const response = await fetch(
+            loopbackOrigin(process.env.PLATFORM_ENTRY_ORIGIN) + '/api/health',
+            { signal: AbortSignal.timeout(2000) },
+          );
+          const health: unknown = await response.json();
+          availability = {
+            state:
+              response.ok &&
+              health !== null &&
+              typeof health === 'object' &&
+              'status' in health &&
+              health.status === 'ok'
+                ? 'available'
+                : 'unavailable',
+            observedAt: this.clock.now().toISOString(),
+            reason: response.ok ? null : 'ENTRY_HEALTH_FAILED',
+          };
+        } catch {
+          /* Unreachable observation is unknown, not proof the platform stopped. */
+        }
+        const current = this.store.instance();
+        if (
+          current.activation_generation !== row.activation_generation ||
+          current.service_state !== row.service_state ||
+          current.ready !== row.ready
         )
-        .run(
-          `${ROLE}:${this.store.instanceId}`,
-          this.store.instanceId,
-          'system',
-          ROLE,
-          0,
-          upgradeDigest(snapshot),
-          'observed',
-          JSON.stringify(snapshot),
-          now,
-          now,
-        );
-      this.reason = null;
-    });
+          return;
+        const snapshot: PhysicalObservation = {
+          activationGeneration: row.activation_generation,
+          durableState: row.service_state,
+          durableReady: row.ready,
+          serviceState,
+          availableWeb,
+          repairableCurrent,
+          serviceAvailability: availability,
+          confirmedAt: repairableCurrent?.observedAt ?? started,
+        };
+        const now = this.clock.now().getTime();
+        this.store.ledgerSqlite
+          .prepare(
+            'INSERT INTO platform_operations(operation_id,instance_id,actor_id,role,fence,request_digest,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET request_digest=excluded.request_digest,state=excluded.state,result=excluded.result,updated_at=excluded.updated_at',
+          )
+          .run(
+            `${ROLE}:${this.store.instanceId}`,
+            this.store.instanceId,
+            'system',
+            ROLE,
+            0,
+            upgradeDigest(snapshot),
+            'observed',
+            JSON.stringify(snapshot),
+            now,
+            now,
+          );
+        this.reason = null;
+      }),
+    );
   }
 }

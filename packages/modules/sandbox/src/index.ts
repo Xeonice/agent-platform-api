@@ -8,6 +8,7 @@ export {
 } from './domain/ports/sandbox-create-intents.port';
 export { SqliteSandboxCreateIntents } from './infrastructure/persistence/sqlite/sandbox-create-intents.impl';
 export { SandboxApplicationService } from './application/sandbox-application.service';
+export { QuotaReconciler } from './application/quota-reconciler';
 export { SandboxFacadeAdapter } from './application/sandbox-facade.adapter';
 export {
   SANDBOX_ADMISSION_INTENTS,

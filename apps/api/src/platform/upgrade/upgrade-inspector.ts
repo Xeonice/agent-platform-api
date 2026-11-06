@@ -1,3 +1,4 @@
+import { CoordinatorHandoffBudget } from './coordinator-handoff-budget';
 import { loopbackOrigin, persistedBinding } from './upgrade-inspection-boundary';
 export { loopbackOrigin, persistedBinding } from './upgrade-inspection-boundary';
 import { z } from 'zod';
@@ -758,7 +759,7 @@ export class UpgradeInspector {
       .prepare('INSERT OR IGNORE INTO upgrade_continuity_baselines VALUES(?,?,?,?)')
       .run(id, canonicalUpgrade(snapshot), upgradeDigest(snapshot), this.clock.now().getTime());
   }
-  async ownerEvidence(): Promise<Json> {
+  async ownerEvidence(budget?: CoordinatorHandoffBudget): Promise<Json> {
     requireUpgrade(
       this.providers instanceof RuntimeOwnerProviderRegistry,
       'OWNER_REGISTRY_REQUIRED',
@@ -772,7 +773,9 @@ export class UpgradeInspector {
             'x-platform-internal-key': process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
             'x-platform-instance-id': this.store.instanceId,
           },
-          signal: AbortSignal.timeout(2000),
+          signal: budget
+            ? AbortSignal.any([budget.signal, AbortSignal.timeout(2000)])
+            : AbortSignal.timeout(2000),
         });
         requireUpgrade(r.ok, 'OWNER_AUDIT_UNKNOWN');
         const value = upgradeRecord(await r.json());
@@ -788,7 +791,9 @@ export class UpgradeInspector {
             'x-platform-internal-key': process.env.PLATFORM_COORDINATOR_RPC_KEY ?? '',
             'x-platform-instance-id': this.store.instanceId,
           },
-          signal: AbortSignal.timeout(1500),
+          signal: budget
+            ? AbortSignal.any([budget.signal, AbortSignal.timeout(1500)])
+            : AbortSignal.timeout(1500),
         });
         requireUpgrade(metadataResponse.ok, 'OWNER_PROTOCOL_UNKNOWN');
         const metadata = upgradeRecord(await metadataResponse.json());
@@ -820,7 +825,7 @@ export class UpgradeInspector {
       observedAt: this.observedAt,
     };
   }
-  async continuity(id: string, fence?: number): Promise<Json> {
+  async continuity(id: string, fence?: number, budget?: CoordinatorHandoffBudget): Promise<Json> {
     if (fence !== undefined) this.store.assertFence(id, fence);
     else
       requireUpgrade(
@@ -838,199 +843,224 @@ export class UpgradeInspector {
     requireUpgrade(record, 'CONTINUITY_BASELINE_MISSING');
     const baseline = upgradeRecord(JSON.parse(record.snapshot));
     requireUpgrade(upgradeDigest(baseline) === record.digest, 'CONTINUITY_BASELINE_CORRUPT');
-    const current = await this.resources(),
-      reasons: string[] = [];
-    for (const original of z
-      .array(
-        z.object({
-          sandboxId: z.string(),
-          provider: z.string(),
-          handleDigest: z.string(),
-          runtimeIdentity: z.string().nullable(),
-          status: z.string(),
-          lifecycleState: z.string(),
-          headless: z.boolean(),
-        }),
-      )
-      .parse(baseline.resources)) {
-      const row = current.find((v) => v.sandboxId === original.sandboxId);
-      const intentional = this.store.sqlite
-        .prepare(
-          "SELECT 1 FROM sandbox_state_transitions WHERE sandbox_id=? AND rowid>? AND triggered_by='user' AND to_status IN ('stopping','destroying','destroyed')",
-        )
-        .get(original.sandboxId, baseline.transitionsAfter);
-      if (intentional) continue;
-      if (
-        !original.runtimeIdentity ||
-        !row?.runtimeIdentity ||
-        original.runtimeIdentity !== row.runtimeIdentity ||
-        original.handleDigest !== row.handleDigest ||
-        row.lifecycleState !== 'instance_running'
-      )
-        reasons.push('ORIGINAL_RUNTIME_UNCONFIRMED');
-    }
-    for (const original of upgradeRecords(baseline.tasks)) {
-      const currentTask = this.store.sqlite
-        .prepare<unknown[], Json>(
-          'SELECT job_handle,cursor,exit_code,last_seq,stdout_bytes,status,cancel_requested_at FROM agent_tasks WHERE id=?',
-        )
-        .get(original.id);
-      if (
-        !currentTask ||
-        currentTask.job_handle !== original.job_handle ||
-        Number(currentTask.last_seq) < Number(original.last_seq) ||
-        Number(currentTask.stdout_bytes) < Number(original.stdout_bytes)
-      )
-        reasons.push('ORIGINAL_TASK_IDENTITY_OR_CURSOR_CHANGED');
-      // A real business cancel or genuine completed job is separately auditable;
-      // database status alone never establishes the original process continuity.
-      if (currentTask && currentTask.status !== 'running' && !currentTask.cancel_requested_at) {
-        const completion = await this.jobCompletions.find(String(original.id));
-        let originalHandle: { provider: string; jobId: string } | null = null;
-        try {
-          originalHandle = z
-            .object({ provider: z.string(), jobId: z.string() })
-            .parse(JSON.parse(String(original.job_handle)));
-        } catch {
-          /* Unknown original handles cannot prove an exit. */
-        }
-        const kindMatches =
-          completion &&
-          (completion.exitKind === 'timeout'
-            ? currentTask.status === 'timed_out'
-            : completion.exitKind === 'cancelled'
-              ? currentTask.status === 'killed' && Boolean(currentTask.cancel_requested_at)
-              : ['succeeded', 'failed'].includes(String(currentTask.status)));
-        if (
-          !completion ||
-          !kindMatches ||
-          !originalHandle ||
-          completion.sandboxId !== original.sandbox_id ||
-          completion.jobHandleDigest !== completedJobHandleDigest(originalHandle) ||
-          completion.lastSeq < Number(original.last_seq) ||
-          completion.lastSeq !== currentTask.last_seq ||
-          completion.cursor !== currentTask.cursor ||
-          completion.exitCode !== currentTask.exit_code ||
-          completion.observedAt.getTime() < Date.parse(String(baseline.observedAt)) ||
-          completion.observedAt.getTime() > this.clock.now().getTime()
-        )
-          reasons.push('NATURAL_JOB_EXIT_NEEDS_OWNER_RECEIPT');
-      }
-    }
-    for (const original of upgradeRecords(baseline.automations)) {
-      const row = this.store.sqlite
-        .prepare<unknown[], Json>(
-          'SELECT enabled,schedule_kind,schedule_config,timezone FROM automations WHERE id=?',
-        )
-        .get(original.id);
-      const audits = this.store.sqlite
-        .prepare<unknown[], Json>(
-          "SELECT seq,type,at,detail FROM audit_events WHERE seq>? AND subject_type='automation' AND subject_id=? AND actor='user' AND outcome='ok' AND type IN ('automation.updated','automation.deleted','automation.enabled','automation.disabled') ORDER BY seq",
-        )
-        .all(baseline.auditAfter ?? 0, original.id);
-      const changedFields = ['schedule_kind', 'schedule_config', 'timezone'].filter(
-        (key) => row?.[key] !== original[key],
-      );
-      const userFields = new Set<string>();
-      for (const audit of audits)
-        if (audit.type === 'automation.updated') {
-          try {
-            const detail = upgradeRecord(JSON.parse(String(audit.detail)));
-            if (Array.isArray(detail.fieldNames))
-              for (const field of detail.fieldNames) userFields.add(String(field));
-          } catch {
-            /* Unknown audit is not a business authorization. */
-          }
-        }
-      const mapped: Record<string, string> = {
-        schedule_kind: 'scheduleKind',
-        schedule_config: 'scheduleConfig',
-        timezone: 'timezone',
-      };
-      const userChange = !row
-        ? audits.some((a) => a.type === 'automation.deleted')
-        : changedFields.every((f) => userFields.has(mapped[f])) &&
-          (row.enabled === original.enabled ||
-            audits.some(
-              (a) => a.type === (row.enabled === 1 ? 'automation.enabled' : 'automation.disabled'),
-            ));
-      if (
-        !userChange &&
-        (!row ||
-          row.enabled !== original.enabled ||
-          row.schedule_kind !== original.schedule_kind ||
-          row.schedule_config !== original.schedule_config ||
-          row.timezone !== original.timezone)
-      )
-        reasons.push('AUTOMATION_CHANGED_DURING_UPGRADE');
-    }
-    for (const terminal of upgradeRecords(
-      Array.isArray(baseline.terminals) ? baseline.terminals : [],
-    )) {
-      const bookmark = this.store.sqlite
-        .prepare<unknown[], { close_requested_at: number | null }>(
-          'SELECT close_requested_at FROM terminal_bookmarks WHERE terminal_identity=? AND sandbox_id=?',
-        )
-        .get(terminal.terminal_identity, terminal.sandbox_id);
-      if (bookmark?.close_requested_at != null) continue;
-      const intentionalStop = this.store.sqlite
-        .prepare(
-          "SELECT 1 FROM sandbox_state_transitions WHERE sandbox_id=? AND rowid>? AND triggered_by='user' AND to_status IN ('stopping','destroying','destroyed')",
-        )
-        .get(terminal.sandbox_id, baseline.transitionsAfter);
-      if (intentionalStop) continue;
-      const resource = current.find((r) => r.sandboxId === terminal.sandbox_id);
-      if (!resource?.runtimeIdentity) {
-        reasons.push('ORIGINAL_TERMINAL_UNCONFIRMED');
-        continue;
-      }
-      try {
-        const execute = await this.exec.execFor(String(terminal.sandbox_id));
-        const session =
-          terminal.kind === 'agent'
-            ? PLATFORM_AGENT_TMUX_SESSION
-            : 'platform-shell-' + String(terminal.private_session_id);
-        const proof = await execute(
-          [
-            'tmux',
-            '-u',
-            'display-message',
-            '-p',
-            '-t',
-            session,
-            '#{pid}:#{session_id}:#{session_created}',
-          ],
-          { timeoutMs: 2000 },
-        );
-        if (
-          proof.exitCode !== 0 ||
-          !/^\d+:\$\d+:\d+\s*$/.test(proof.stdout) ||
-          String(terminal.runtime_identity) !==
-            resource.runtimeIdentity + '/tmux:' + proof.stdout.trim()
-        )
-          reasons.push('ORIGINAL_TERMINAL_IDENTITY_CHANGED');
-      } catch {
-        reasons.push('ORIGINAL_TERMINAL_UNCONFIRMED');
-      }
-    }
-    let owner: Json | null = null;
+    // Owner audit runs alongside resource reads. All original qualification
+    // predicates remain; one slow independent read must not serialize every PTY.
+    const ownerAudit = (
+      budget ? budget.step(() => this.ownerEvidence(budget)) : this.ownerEvidence()
+    ).then(
+      (value) => ({ value, unknown: false }),
+      () => ({ value: null, unknown: true }),
+    );
     try {
-      owner = await this.ownerEvidence();
-    } catch {
-      reasons.push('OWNER_AUDIT_UNKNOWN');
+      const current = await (budget ? budget.step(() => this.resources()) : this.resources()),
+        reasons: string[] = [];
+      for (const original of z
+        .array(
+          z.object({
+            sandboxId: z.string(),
+            provider: z.string(),
+            handleDigest: z.string(),
+            runtimeIdentity: z.string().nullable(),
+            status: z.string(),
+            lifecycleState: z.string(),
+            headless: z.boolean(),
+          }),
+        )
+        .parse(baseline.resources)) {
+        const row = current.find((v) => v.sandboxId === original.sandboxId);
+        const intentional = this.store.sqlite
+          .prepare(
+            "SELECT 1 FROM sandbox_state_transitions WHERE sandbox_id=? AND rowid>? AND triggered_by='user' AND to_status IN ('stopping','destroying','destroyed')",
+          )
+          .get(original.sandboxId, baseline.transitionsAfter);
+        if (intentional) continue;
+        if (
+          !original.runtimeIdentity ||
+          !row?.runtimeIdentity ||
+          original.runtimeIdentity !== row.runtimeIdentity ||
+          original.handleDigest !== row.handleDigest ||
+          row.lifecycleState !== 'instance_running'
+        )
+          reasons.push('ORIGINAL_RUNTIME_UNCONFIRMED');
+      }
+      for (const original of upgradeRecords(baseline.tasks)) {
+        const currentTask = this.store.sqlite
+          .prepare<unknown[], Json>(
+            'SELECT job_handle,cursor,exit_code,last_seq,stdout_bytes,status,cancel_requested_at FROM agent_tasks WHERE id=?',
+          )
+          .get(original.id);
+        if (
+          !currentTask ||
+          currentTask.job_handle !== original.job_handle ||
+          Number(currentTask.last_seq) < Number(original.last_seq) ||
+          Number(currentTask.stdout_bytes) < Number(original.stdout_bytes)
+        )
+          reasons.push('ORIGINAL_TASK_IDENTITY_OR_CURSOR_CHANGED');
+        // A real business cancel or genuine completed job is separately auditable;
+        // database status alone never establishes the original process continuity.
+        if (currentTask && currentTask.status !== 'running' && !currentTask.cancel_requested_at) {
+          const completion = await this.jobCompletions.find(String(original.id));
+          let originalHandle: { provider: string; jobId: string } | null = null;
+          try {
+            originalHandle = z
+              .object({ provider: z.string(), jobId: z.string() })
+              .parse(JSON.parse(String(original.job_handle)));
+          } catch {
+            /* Unknown original handles cannot prove an exit. */
+          }
+          const kindMatches =
+            completion &&
+            (completion.exitKind === 'timeout'
+              ? currentTask.status === 'timed_out'
+              : completion.exitKind === 'cancelled'
+                ? currentTask.status === 'killed' && Boolean(currentTask.cancel_requested_at)
+                : ['succeeded', 'failed'].includes(String(currentTask.status)));
+          if (
+            !completion ||
+            !kindMatches ||
+            !originalHandle ||
+            completion.sandboxId !== original.sandbox_id ||
+            completion.jobHandleDigest !== completedJobHandleDigest(originalHandle) ||
+            completion.lastSeq < Number(original.last_seq) ||
+            completion.lastSeq !== currentTask.last_seq ||
+            completion.cursor !== currentTask.cursor ||
+            completion.exitCode !== currentTask.exit_code ||
+            completion.observedAt.getTime() < Date.parse(String(baseline.observedAt)) ||
+            completion.observedAt.getTime() > this.clock.now().getTime()
+          )
+            reasons.push('NATURAL_JOB_EXIT_NEEDS_OWNER_RECEIPT');
+        }
+      }
+      for (const original of upgradeRecords(baseline.automations)) {
+        const row = this.store.sqlite
+          .prepare<unknown[], Json>(
+            'SELECT enabled,schedule_kind,schedule_config,timezone FROM automations WHERE id=?',
+          )
+          .get(original.id);
+        const audits = this.store.sqlite
+          .prepare<unknown[], Json>(
+            "SELECT seq,type,at,detail FROM audit_events WHERE seq>? AND subject_type='automation' AND subject_id=? AND actor='user' AND outcome='ok' AND type IN ('automation.updated','automation.deleted','automation.enabled','automation.disabled') ORDER BY seq",
+          )
+          .all(baseline.auditAfter ?? 0, original.id);
+        const changedFields = ['schedule_kind', 'schedule_config', 'timezone'].filter(
+          (key) => row?.[key] !== original[key],
+        );
+        const userFields = new Set<string>();
+        for (const audit of audits)
+          if (audit.type === 'automation.updated') {
+            try {
+              const detail = upgradeRecord(JSON.parse(String(audit.detail)));
+              if (Array.isArray(detail.fieldNames))
+                for (const field of detail.fieldNames) userFields.add(String(field));
+            } catch {
+              /* Unknown audit is not a business authorization. */
+            }
+          }
+        const mapped: Record<string, string> = {
+          schedule_kind: 'scheduleKind',
+          schedule_config: 'scheduleConfig',
+          timezone: 'timezone',
+        };
+        const userChange = !row
+          ? audits.some((a) => a.type === 'automation.deleted')
+          : changedFields.every((f) => userFields.has(mapped[f])) &&
+            (row.enabled === original.enabled ||
+              audits.some(
+                (a) =>
+                  a.type === (row.enabled === 1 ? 'automation.enabled' : 'automation.disabled'),
+              ));
+        if (
+          !userChange &&
+          (!row ||
+            row.enabled !== original.enabled ||
+            row.schedule_kind !== original.schedule_kind ||
+            row.schedule_config !== original.schedule_config ||
+            row.timezone !== original.timezone)
+        )
+          reasons.push('AUTOMATION_CHANGED_DURING_UPGRADE');
+      }
+      const terminals = upgradeRecords(Array.isArray(baseline.terminals) ? baseline.terminals : []);
+      let nextTerminal = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(4, terminals.length) }, async () => {
+          while (nextTerminal < terminals.length) {
+            budget?.assert();
+            const terminal = terminals[nextTerminal++];
+            const bookmark = this.store.sqlite
+              .prepare<unknown[], { close_requested_at: number | null }>(
+                'SELECT close_requested_at FROM terminal_bookmarks WHERE terminal_identity=? AND sandbox_id=?',
+              )
+              .get(terminal.terminal_identity, terminal.sandbox_id);
+            if (bookmark?.close_requested_at != null) continue;
+            const intentionalStop = this.store.sqlite
+              .prepare(
+                "SELECT 1 FROM sandbox_state_transitions WHERE sandbox_id=? AND rowid>? AND triggered_by='user' AND to_status IN ('stopping','destroying','destroyed')",
+              )
+              .get(terminal.sandbox_id, baseline.transitionsAfter);
+            if (intentionalStop) continue;
+            const resource = current.find((r) => r.sandboxId === terminal.sandbox_id);
+            if (!resource?.runtimeIdentity) {
+              reasons.push('ORIGINAL_TERMINAL_UNCONFIRMED');
+              continue;
+            }
+            const runtimeIdentity = resource.runtimeIdentity;
+            try {
+              const prove = async () => {
+                const execute = await this.exec.execFor(String(terminal.sandbox_id));
+                const session =
+                  terminal.kind === 'agent'
+                    ? PLATFORM_AGENT_TMUX_SESSION
+                    : 'platform-shell-' + String(terminal.private_session_id);
+                const proof = await execute(
+                  [
+                    'tmux',
+                    '-u',
+                    'display-message',
+                    '-p',
+                    '-t',
+                    session,
+                    '#{pid}:#{session_id}:#{session_created}',
+                  ],
+                  { timeoutMs: budget ? Math.min(2000, budget.remaining()) : 2000 },
+                );
+                if (
+                  proof.exitCode !== 0 ||
+                  !/^\d+:\$\d+:\d+\s*$/.test(proof.stdout) ||
+                  String(terminal.runtime_identity) !==
+                    runtimeIdentity + '/tmux:' + proof.stdout.trim()
+                )
+                  reasons.push('ORIGINAL_TERMINAL_IDENTITY_CHANGED');
+              };
+              if (budget) await budget.step(prove);
+              else await prove();
+            } catch {
+              reasons.push('ORIGINAL_TERMINAL_UNCONFIRMED');
+            }
+          }
+        }),
+      );
+      const audit = await ownerAudit;
+      if (audit.unknown) reasons.push('OWNER_AUDIT_UNKNOWN');
+      const owner = audit.value;
+      budget?.assert();
+      if (fence !== undefined) this.store.assertFence(id, fence);
+      return {
+        qualified: reasons.length === 0,
+        instanceId: this.store.instanceId,
+        attemptId: id,
+        fence,
+        baselineDigest: record.digest,
+        resources: current,
+        owner,
+        reasons: [...new Set(reasons)],
+        observedAt: this.observedAt,
+      };
+    } finally {
+      // The independent audit must remain owned even when an earlier SQLite or
+      // resource read rejects. With a budget, its original HTTP Promise is also
+      // retained separately by the management worker.
+      await ownerAudit;
     }
-    if (fence !== undefined) this.store.assertFence(id, fence);
-    return {
-      qualified: reasons.length === 0,
-      instanceId: this.store.instanceId,
-      attemptId: id,
-      fence,
-      baselineDigest: record.digest,
-      resources: current,
-      owner,
-      reasons: [...new Set(reasons)],
-      observedAt: this.observedAt,
-    };
   }
   async validateSwitch(id: string, fence: number, input: Json): Promise<Json> {
     this.store.assertFence(id, fence);

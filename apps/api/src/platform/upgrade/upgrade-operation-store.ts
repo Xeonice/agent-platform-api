@@ -146,6 +146,7 @@ export class UpgradeOperationStore {
       .transaction(() => {
         const replay = this.replay(actorId, command);
         if (replay) return replay;
+        this.upgrades.assertControlAdmissionAvailable();
         const instance = this.upgrades.instance();
         requireUpgrade(
           instance.activation_generation === command.expectedActivationGeneration,

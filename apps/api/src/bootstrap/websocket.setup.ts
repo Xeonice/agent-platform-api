@@ -13,6 +13,7 @@ class OriginCheckedIoAdapter extends IoAdapter {
   constructor(
     app: INestApplication,
     private readonly network: PublicNetworkConfig,
+    private readonly ready: () => boolean,
   ) {
     super(app);
     this.deployment = app.get(DeploymentState);
@@ -23,7 +24,7 @@ class OriginCheckedIoAdapter extends IoAdapter {
     const server: unknown = super.createIOServer(port, {
       ...options,
       allowRequest: (req, done) => {
-        if (this.deployment.draining) {
+        if (!this.ready() || this.deployment.draining) {
           done('Service is preparing an update', false);
           return;
         }
@@ -50,8 +51,9 @@ class OriginCheckedIoAdapter extends IoAdapter {
 export function setupWebsockets(
   app: INestApplication,
   network: PublicNetworkConfig = readPublicNetworkConfig(),
+  ready: () => boolean = () => true,
 ): void {
-  app.useWebSocketAdapter(new OriginCheckedIoAdapter(app, network));
+  app.useWebSocketAdapter(new OriginCheckedIoAdapter(app, network, ready));
 }
 
 function isSocketIOServer(value: unknown): value is Server {

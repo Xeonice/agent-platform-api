@@ -9,7 +9,8 @@ import {
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { asAgentTaskId, asSandboxId } from '@platform/shared-kernel';
+import { asAgentTaskId, asSandboxId, BUSINESS_WRITER_AUTHORITY } from '@platform/shared-kernel';
+import type { BusinessWriterAuthority } from '@platform/shared-kernel';
 import {
   RUNTIME_ADAPTER_REGISTRY,
   SANDBOX_PROVIDER_REGISTRY,
@@ -70,9 +71,17 @@ export interface OpenedArtifact {
  */
 @Injectable()
 export class AgentTaskApplicationService implements OnApplicationBootstrap, OnModuleDestroy {
-  private readonly worker = coordinatorWorker('sandbox.task-recovery');
+  private readonly worker = coordinatorWorker('sandbox.task-recovery', () => {
+    this.closed = true;
+    this.workflow.shutdown();
+  });
 
   private recoveryTimer?: ReturnType<typeof setInterval>;
+  private startupDeferred = false;
+  private started = false;
+  private closed = false;
+  private recovering = false;
+  private readonly inFlight = new Set<Promise<unknown>>();
   constructor(
     @Inject(AGENT_TASK_REPOSITORY) private readonly tasks: AgentTaskRepository,
     @Inject(SANDBOX_REPOSITORY) private readonly sandboxes: SandboxRepository,
@@ -82,6 +91,9 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
     @Optional()
     @Inject(WORKSPACE_ARTIFACT_READER)
     private readonly retainedArtifacts?: WorkspaceArtifactReader,
+    @Optional()
+    @Inject(BUSINESS_WRITER_AUTHORITY)
+    private readonly writer?: BusinessWriterAuthority,
   ) {}
 
   /**
@@ -90,34 +102,71 @@ export class AgentTaskApplicationService implements OnApplicationBootstrap, OnMo
    * the many throwaway apps a test suite boots against fresh `:memory:` databases —
    * where every row would look like an orphan.
    */
-  async onApplicationBootstrap(): Promise<void> {
-    return this.worker.run(async () => {
-      if (
-        process.env.PLATFORM_PROCESS_ROLE !== 'coordinator' &&
-        process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true'
-      )
-        return;
-      await this.resumeRunning().catch(() => undefined);
-      if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
-        this.recoveryTimer = this.worker.ownInterval(
-          setInterval(() => {
-            void this.resumeRunning().catch(() => undefined);
-          }, 15_000),
-        );
-        this.recoveryTimer.unref();
-      }
-    });
+  onApplicationBootstrap(): void {
+    if (!this.startupDeferred) this.startAfterReady();
   }
-  onModuleDestroy(): void {
+  deferStartupUntilReady(): void {
+    if (this.started) throw new Error('TASK_RECOVERY_ALREADY_STARTED');
+    this.startupDeferred = true;
+  }
+  startAfterReady(): void {
+    if (this.started || this.closed || this.worker.snapshot().stopped) return;
+    if (
+      process.env.PLATFORM_PROCESS_ROLE !== 'coordinator' &&
+      process.env.SANDBOX_RECONCILE_ON_BOOT !== 'true'
+    )
+      return;
+    // The queued original recovery keeps the actual admitted writer epoch.
+    this.inWriterEpoch(() => {
+      this.worker.immediate(
+        () => this.resumeRunning(),
+        () => undefined,
+      );
+    });
+    this.started = true;
+    if (process.env.PLATFORM_PROCESS_ROLE === 'coordinator') {
+      // A new periodic scan captures its own current epoch. The original queued
+      // startup above retains its old epoch across a retained A→B→A lifecycle.
+      this.recoveryTimer = this.worker.interval(
+        15_000,
+        () => this.resumeRunning(),
+        () => undefined,
+      );
+      this.recoveryTimer.unref();
+    }
+  }
+  async onModuleDestroy(): Promise<void> {
+    this.closed = true;
     if (this.recoveryTimer) this.worker.cancel(this.recoveryTimer);
     this.workflow.shutdown();
+    await this.worker.stop();
+    await Promise.allSettled([...this.inFlight]);
   }
 
   /** Public so an operator — or a restart test — can trigger recovery explicitly. */
   resumeRunning(): Promise<number> {
-    return this.worker.run(async () => {
-      return this.workflow.resumeRunning();
-    });
+    const original = this.worker.run(() =>
+      this.inWriterEpoch(async () => {
+        if (this.closed || this.worker.snapshot().stopped || this.recovering) return 0;
+        this.recovering = true;
+        try {
+          return await this.workflow.resumeRunning();
+        } finally {
+          this.recovering = false;
+        }
+      }),
+    );
+    this.inFlight.add(original);
+    void original.then(
+      () => this.inFlight.delete(original),
+      () => this.inFlight.delete(original),
+    );
+    return original;
+  }
+  private inWriterEpoch<T>(work: () => T): T {
+    if (this.writer?.run) return this.writer.run(work);
+    this.writer?.assert();
+    return work();
   }
 
   /**

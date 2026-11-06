@@ -1,17 +1,17 @@
 import { RetirementWorkTracker } from '../platform/upgrade/retirement-census';
-import { HttpException } from '@nestjs/common';
+import { HttpException, type INestApplication } from '@nestjs/common';
 import { upgradeRecord, requiredUpgradeValue } from '../platform/upgrade/upgrade-values';
 import type { HandoffRow } from '../platform/upgrade/coordinator-handoff';
 import 'reflect-metadata';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { NestFactory } from '@nestjs/core';
 import { SANDBOX_PROVIDER_REGISTRY } from '@platform/contracts';
 import type { RuntimeOwnerProviderRegistry } from '@platform/sandbox';
+import { AgentTaskApplicationService, QuotaReconciler } from '@platform/sandbox';
 import { ImageSeeder } from '@platform/image';
 import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/project';
 import { supportedDataFormats } from '../platform/data-format-capabilities';
-import { fromEpochMs } from '@platform/shared-kernel';
 import { SystemClock } from '../platform/time/system-clock';
 import { env } from '../platform/config/env';
 import {
@@ -20,9 +20,13 @@ import {
 } from '../platform/persistence/platform.module';
 import { configurePlatformApp } from '../bootstrap/configure-app';
 import { setupWebsockets } from '../bootstrap/websocket.setup';
-import { readPublicNetworkConfig } from '../platform/config/public-network';
+import {
+  readPublicNetworkConfig,
+  type PublicNetworkConfig,
+} from '../platform/config/public-network';
 import { UpgradeStore } from '../platform/upgrade/upgrade-store';
-import { writeInstalledBinding } from '../platform/upgrade/upgrade-atomic-file';
+import { CoordinatorHandoffBudget } from '../platform/upgrade/coordinator-handoff-budget';
+import { completePreparedCoordinatorAdoption } from '../platform/upgrade/prepared-coordinator-adoption';
 import { requireUpgrade, UpgradeError } from '../platform/upgrade/upgrade-trust';
 import { coordinatorArtifactIdentity } from '../platform/upgrade/coordinator-artifact-identity';
 import { CoordinatorWorkRegistry, installCoordinatorWorkRegistry } from '@platform/shared-kernel';
@@ -32,10 +36,64 @@ import {
   withoutBusinessAction,
 } from '../platform/upgrade/upgrade-business-action';
 
+export function preparedCoordinatorBusinessTransportReady(app: INestApplication): boolean {
+  const server: unknown = app.getHttpServer();
+  return server instanceof Server && server.listening;
+}
+
+/** Reserve the actual business socket and assemble its transport before the
+ * old writer quiesces. Nest init hooks are deliberately NOT run here: they may
+ * reconcile/write state or start workers. The gate remains closed until the
+ * caller has acquired the writer, initialized hooks and published continuity. */
+export async function prepareCoordinatorHttpTransport(
+  app: INestApplication,
+  network: PublicNetworkConfig,
+  address: { host: string; port: number },
+  ready: () => boolean,
+): Promise<() => Promise<void>> {
+  app.use((_req: IncomingMessage, res: ServerResponse, next: () => void) => {
+    if (ready()) {
+      next();
+      return;
+    }
+    res.statusCode = 425;
+    res.setHeader('content-type', 'application/json');
+    res.end(
+      JSON.stringify({
+        code: 'APPLICATION_WRITER_QUIESCED',
+        sideEffectFree: true,
+        retryable: true,
+      }),
+    );
+  });
+  configurePlatformApp(app, network);
+  setupWebsockets(app, network, ready);
+  const server: unknown = app.getHttpServer();
+  requireUpgrade(server instanceof Server, 'PREPARED_HTTP_SERVER_REQUIRED');
+  await new Promise<void>((ok, fail) => {
+    const failed = (error: Error) => {
+      server.off('listening', listening);
+      fail(error);
+    };
+    const listening = () => {
+      server.off('error', failed);
+      ok();
+    };
+    server.once('error', failed);
+    server.once('listening', listening);
+    server.listen(address.port, address.host);
+  });
+  return async () => {
+    await app.init();
+  };
+}
+
 /** Preconstruct real B providers with read-only DB; no module/startup hook runs. */
 export async function startPreparedCoordinator(): Promise<void> {
   const clock = new SystemClock();
   process.env.PLATFORM_PROCESS_ROLE = 'coordinator-prepared';
+  // Role handoff preserves existing Guests; never inherit legacy orphan cleanup.
+  process.env.SANDBOX_RECONCILE_ON_BOOT = 'false';
   const workers = new CoordinatorWorkRegistry();
   installCoordinatorWorkRegistry(workers);
   const managementWorker = workers.register('platform.prepared-management');
@@ -59,6 +117,10 @@ export async function startPreparedCoordinator(): Promise<void> {
     ]);
   platformConnection();
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
+  const quota = app.get(QuotaReconciler);
+  const taskRecovery = app.get(AgentTaskApplicationService);
+  quota.deferStartupUntilReady();
+  taskRecovery.deferStartupUntilReady();
   // Resolve and validate future builtin metadata before exposing prepared identity;
   // app.listen during adoption consumes only these process-local prepared results.
   await app.get(ImageSeeder).prepare();
@@ -74,6 +136,13 @@ export async function startPreparedCoordinator(): Promise<void> {
   let adopting: Promise<Record<string, unknown>> | null = null;
   let adoptedIntent: string | null = null;
   let moduleInitializationStarted = false;
+  const initializeBusinessTransport = await prepareCoordinatorHttpTransport(
+    app,
+    readPublicNetworkConfig(),
+    { host: env.host, port: env.port },
+    () => state === 'ready',
+  );
+  app.enableShutdownHooks();
   let recoveryWatch: NodeJS.Timeout | undefined = undefined;
   const retirement = new RetirementWorkTracker();
   const normalRetirement = installNormalCoordinatorRetirement(app, workers, {
@@ -102,6 +171,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     prepared: state === 'prepared',
     writerFenceValid: process.env.COORDINATOR_WRITER_FENCE_VALID === 'true',
     workersStarted: state === 'ready',
+    businessTransportPrepared: preparedCoordinatorBusinessTransportReady(app),
     state,
     generation: Number(process.env.COORDINATOR_GENERATION ?? 0),
   });
@@ -156,60 +226,73 @@ export async function startPreparedCoordinator(): Promise<void> {
       state = 'adopting';
       workers.beginLifecycleTransition();
       assertCurrentBusinessAction();
+      const budget = new CoordinatorHandoffBudget(
+        Number(row.quiesced_at) + snapshot.plan.policy.requestDeadlineMs,
+        clock,
+        (work) => managementWorker.run(work),
+      );
       const generation = activatePreparedPlatform();
+      const adoptedWriter = coordinatorWriterControl(store.sqlite);
+      const adoptedWriterFence = adoptedWriter.fence;
       process.env.PLATFORM_PROCESS_ROLE = 'coordinator';
       store.sqlite
         .prepare(
           "UPDATE coordinator_handoffs SET stage='adopting',target_generation=? WHERE attempt_id=?",
         )
         .run(generation, id);
-      assertCurrentBusinessAction();
-      await withoutBusinessAction(() => owners.activateBusinessAuthority(generation));
-      assertCurrentBusinessAction();
-      const network = readPublicNetworkConfig();
-      configurePlatformApp(app, network);
-      setupWebsockets(app, network);
-      app.enableShutdownHooks();
-      moduleInitializationStarted = true;
-      await withoutBusinessAction(() => app.listen(env.port, env.host));
-      sealCoordinatorWorkerManifest(app, workers, { prepared: true });
-      assertCurrentBusinessAction();
-      const continuity = await app
-        .get((await import('../platform/upgrade/upgrade-inspector')).UpgradeInspector)
-        .continuity(id, fence);
-      assertCurrentBusinessAction();
-      await writeInstalledBinding(
-        requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
-        {
-          state: 'ready',
-          instanceId,
+      const evidence = await completePreparedCoordinatorAdoption({
+        store,
+        row,
+        fence,
+        generation,
+        clock,
+        budget,
+        owners,
+        initialize: () => {
+          moduleInitializationStarted = true;
+          return withoutBusinessAction(() => initializeBusinessTransport());
+        },
+        seal: () => {
+          requireUpgrade(
+            sealCoordinatorWorkerManifest(app, workers, { prepared: true }).qualified,
+            'COORDINATOR_WORKER_COVERAGE_UNKNOWN',
+          );
+        },
+        continuity: async () =>
+          app
+            .get((await import('../platform/upgrade/upgrade-inspector')).UpgradeInspector)
+            .continuity(id, fence, budget),
+        assertAuthority: () => {
+          assertCurrentBusinessAction();
+          store.assertFence(id, fence);
+          adoptedWriter.assert();
+          requireUpgrade(
+            adoptedWriter.generation === generation && adoptedWriter.fence === adoptedWriterFence,
+            'HANDOFF_WRITER_EPOCH_CHANGED',
+          );
+        },
+        transportReady: () => preparedCoordinatorBusinessTransportReady(app),
+        binding: {
+          path: requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
           origin: `http://${env.host}:${String(env.port)}`,
-          generation,
           artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST ?? null,
         },
+      });
+      budget.assert();
+      assertCurrentBusinessAction();
+      store.assertFence(id, fence);
+      adoptedWriter.assert();
+      requireUpgrade(
+        adoptedWriter.generation === generation &&
+          adoptedWriter.fence === adoptedWriterFence &&
+          preparedCoordinatorBusinessTransportReady(app),
+        'HANDOFF_WRITER_EPOCH_OR_LISTENER_CHANGED',
       );
-      const activatedAt = clock.now().getTime(),
-        maxControlPauseMs = activatedAt - Number(row.quiesced_at);
-      const evidence = {
-        qualified:
-          maxControlPauseMs <= snapshot.plan.policy.requestDeadlineMs &&
-          continuity.qualified === true,
-        commitKnown: true,
-        singleWriter: true,
-        maxControlPauseMs,
-        originalResourcesPreserved: continuity.qualified === true,
-        instanceId,
-        attemptId: id,
-        artifactDigest: process.env.PLATFORM_ARTIFACT_DIGEST,
-        generation,
-        observedAt: fromEpochMs(activatedAt).toISOString(),
-      };
-      store.sqlite
-        .prepare(
-          "UPDATE coordinator_handoffs SET stage='adopted',activated_at=?,evidence=? WHERE attempt_id=?",
-        )
-        .run(activatedAt, JSON.stringify(evidence), id);
       state = 'ready';
+      withoutBusinessAction(() => {
+        quota.startAfterReady();
+        taskRecovery.startAfterReady();
+      });
       return { commitKnown: true, stage: 'adopted', evidence };
     })().catch((error: unknown) => {
       state = 'unknown';

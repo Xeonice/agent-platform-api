@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { asAgentTaskId, asAutomationId, asProjectId, fromEpochMs } from '@platform/shared-kernel';
+import { DurableAgentTaskStartSchema } from '@platform/contracts';
 import type {
   JobChunk,
   JobHandle,
@@ -275,6 +276,93 @@ async function fixture() {
 }
 
 describe('REQ-UPG-001/006/008 — actual RuntimeOwner HTTP/journal and automation start recovery', () => {
+  it('defers recovery until ready, attaches the original job before a slow accepted start, and awaits original work on close', async () => {
+    const f = await fixture();
+    const unknownStart = deferred<void>();
+    let restoredEnv = () => {};
+    let fresh: AgentTaskApplicationService | undefined;
+    try {
+      const originalRead = f.h.provider.jobs.readJob.bind(f.h.provider.jobs);
+      const order: string[] = [];
+      f.h.provider.jobs.readJob = async (...args) => {
+        order.push('known-read');
+        return originalRead(...args);
+      };
+      await f.scheduler().runOnce();
+      const run = assertDefined(await f.runs.findLatest(f.rule.id));
+      const intent = assertDefined(await f.intents.find(run.id, 0));
+      await waitForStatus(f.h.service, intent.sandboxId, 'running');
+      await f.scheduler().runOnce();
+      await vi.waitFor(() => expect(order).toEqual(['known-read']));
+      fresh = await f.replacement(2);
+      const original = assertDefined(await f.starts.find(intent.taskId));
+      const payload = DurableAgentTaskStartSchema.parse(JSON.parse(original.payload));
+      const pendingId = 'synthetic-second-accepted-task';
+      payload.operation.operationId = `agent-task-${pendingId}`;
+      // This explicit accepted-intent fixture uses the real durable repository.
+      // Only the external Guest acknowledgement is withheld, not Owner authority.
+      f.h.uow.run((tx) =>
+        f.starts.createSync(tx, {
+          ...original,
+          taskId: pendingId,
+          payload: JSON.stringify(payload),
+        }),
+      );
+      f.h.provider.jobs.startJob = async () => {
+        order.push('pending-start');
+        await unknownStart.promise;
+        throw new Error('external original start remains unknown');
+      };
+      restoredEnv = useEnv({ SANDBOX_RECONCILE_ON_BOOT: 'true' });
+      fresh.deferStartupUntilReady();
+      fresh.onApplicationBootstrap();
+      await new Promise<void>((ok) => setImmediate(ok));
+      expect(order).toEqual(['known-read']);
+      fresh.startAfterReady();
+      await vi.waitFor(() => expect(order).toEqual(['known-read', 'known-read', 'pending-start']));
+      expect(f.h.provider.jobs.jobs.size).toBe(1);
+      let destroyed = false;
+      const closing = fresh.onModuleDestroy().then(() => {
+        destroyed = true;
+      });
+      await new Promise<void>((ok) => setImmediate(ok));
+      expect(destroyed).toBe(false);
+      unknownStart.resolve();
+      await closing;
+      expect(await f.h.taskRepo.findById(asAgentTaskId(pendingId))).toBeNull();
+      expect((await f.starts.pending()).map((row) => row.taskId)).toContain(pendingId);
+      expect(f.h.provider.jobs.jobs.size).toBe(1);
+      expect(f.h.provider.calls).not.toContain('stop');
+      expect(f.h.provider.calls).not.toContain('destroy');
+    } finally {
+      unknownStart.resolve();
+      if (fresh) await fresh.onModuleDestroy();
+      restoredEnv();
+      await f.close();
+    }
+  });
+  it('cancels a ready-queued recovery before it starts when the service closes', async () => {
+    const f = await fixture();
+    const fresh = await f.replacement(2);
+    const restore = useEnv({ SANDBOX_RECONCILE_ON_BOOT: 'true' });
+    try {
+      const resume = vi.spyOn(fresh, 'resumeRunning');
+      fresh.deferStartupUntilReady();
+      fresh.onApplicationBootstrap();
+      fresh.startAfterReady();
+      await fresh.onModuleDestroy();
+      await new Promise<void>((ok) => setImmediate(ok));
+      expect(resume).not.toHaveBeenCalled();
+      fresh.startAfterReady();
+      await new Promise<void>((ok) => setImmediate(ok));
+      expect(resume).not.toHaveBeenCalled();
+      expect(f.ownerRequests.filter((row) => row.path === '/runtime/call')).toEqual([]);
+    } finally {
+      await fresh.onModuleDestroy();
+      restore();
+      await f.close();
+    }
+  });
   it('retained A starts a fresh pump at B’s persisted cursor and drops its original late read after A→B→A', async () => {
     const f = await fixture();
     const oldRead = deferred<JobChunk>();

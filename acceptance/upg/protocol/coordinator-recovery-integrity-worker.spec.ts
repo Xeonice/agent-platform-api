@@ -25,9 +25,16 @@ import * as integrity from '../../../apps/api/src/platform/upgrade/migration-dat
 import { deferred, stub, unused, useEnv } from '../../support/strict-ports';
 import { planFixtureEnvelope, planFixtureSource } from '../../support/upgrade-plan-fixture';
 
+const hostMemory = vi.hoisted(() => ({ freeBytes: undefined as number | undefined }));
+vi.mock('node:os', async (original) => {
+  const actual = await original<typeof import('node:os')>();
+  return { ...actual, freemem: () => hostMemory.freeBytes ?? actual.freemem() };
+});
+
 type Dependencies = ConstructorParameters<typeof CoordinatorRecovery>;
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
+  hostMemory.freeBytes = undefined;
   vi.restoreAllMocks();
   for (const close of cleanup.splice(0).reverse()) await close();
 });
@@ -243,14 +250,36 @@ describe('retained Coordinator compatibility integrity worker', () => {
   });
   it('qualifies a retained read-only Coordinator without pretending it owns the current writer', async () => {
     const f = await fixture();
+    // This case qualifies the retained identity, not the development host's
+    // instantaneous free memory. The SQLite scan and writer checks remain real.
+    hostMemory.freeBytes = 4 * 1024 ** 3;
     expect(process.env.COORDINATOR_WRITER_FENCE_VALID).toBe('false');
-    expect(await f.prove()).toMatchObject({ qualified: true, retainedBinary: true });
+    const proof = await f.prove();
+    expect(proof, JSON.stringify(proof)).toMatchObject({ qualified: true, retainedBinary: true });
     expect(
       f.connection.sqlite
         .prepare("SELECT generation FROM platform_role_leases WHERE role='state-coordinator'")
         .get(),
     ).toMatchObject({ generation: 5 });
     expect(process.env.COORDINATOR_GENERATION).toBe('4');
+  });
+  it('keeps a compatible retained identity unqualified when host free memory is insufficient', async () => {
+    const f = await fixture();
+    hostMemory.freeBytes = 0;
+    const proof = await f.prove();
+    expect(proof, JSON.stringify(proof)).toMatchObject({
+      qualified: false,
+      retainedBinary: true,
+      sharedStateHealthy: true,
+      latestDatabaseCompatible: true,
+      capacitySufficient: false,
+    });
+    expect(process.env.COORDINATOR_WRITER_FENCE_VALID).toBe('false');
+    expect(
+      f.connection.sqlite
+        .prepare("SELECT generation FROM platform_role_leases WHERE role='state-coordinator'")
+        .get(),
+    ).toMatchObject({ generation: 5 });
   });
   it('keeps a real foreign-key violation unqualified', async () => {
     const f = await fixture();

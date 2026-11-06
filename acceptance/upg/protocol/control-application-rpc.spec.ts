@@ -1,7 +1,7 @@
 import { assertDefined } from '../../support/assert-defined';
 import 'reflect-metadata';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -31,10 +31,16 @@ import { ApplicationOperationSchema } from '../../../apps/api/src/platform/contr
 import { UpgradeCatalog } from '../../../apps/api/src/platform/upgrade/upgrade-catalog';
 import { UpgradeService } from '../../../apps/api/src/platform/upgrade/upgrade-service';
 import { UpgradeStore } from '../../../apps/api/src/platform/upgrade/upgrade-store';
-import { ControlRpcModule } from '../../../apps/api/src/platform/control-rpc/control-rpc.module';
+import {
+  ControlApplicationRegistry,
+  ControlRpcModule,
+} from '../../../apps/api/src/platform/control-rpc/control-rpc.module';
 import { PasscodeGuard } from '../../../apps/api/src/platform/access-passcode/passcode.guard';
 import { freezeUpgradeChain } from '../../../apps/api/src/platform/upgrade/upgrade-chain';
-import { withCoordinatorBusinessEpoch } from '../../../apps/api/src/platform/persistence/coordinator-lease';
+import {
+  coordinatorWriterControl,
+  withCoordinatorBusinessEpoch,
+} from '../../../apps/api/src/platform/persistence/coordinator-lease';
 import { planFixtureEnvelope, planFixtureSource } from '../../support/upgrade-plan-fixture';
 import type {
   ApplicationRequest,
@@ -57,6 +63,7 @@ let cookie = '';
 let db: Database.Database;
 let directory = '';
 let restore: () => void = () => undefined;
+let businessTransportReady = true;
 function cookies(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((part): part is string => typeof part === 'string');
   return typeof value === 'string' ? [value] : [];
@@ -98,6 +105,7 @@ function startRole(coordinatorUrl: string): Promise<string> {
     PLATFORM_INSTANCE_ID: INSTANCE,
     PLATFORM_CONTROL_RPC_KEY: INTERNAL_KEY,
     COORDINATOR_RPC_URL: coordinatorUrl,
+    PLATFORM_COORDINATOR_BINDING_PATH: join(directory, 'coordinator-binding.json'),
     PORT: '0',
     HOST: '127.0.0.1',
   };
@@ -188,11 +196,12 @@ beforeAll(async () => {
     .compile();
   const app = module.createNestApplication();
   configurePlatformApp(app);
-  setupWebsockets(app);
+  setupWebsockets(app, undefined, () => businessTransportReady);
   await app.init();
   await app.listen(0, '127.0.0.1');
   coordinator = { app, provider, url: await app.getUrl() };
   db = app.get(PLATFORM_SQLITE, { strict: false });
+  writeCoordinatorBinding('ready');
   await vi.waitFor(
     () =>
       expect(app.get(HelperContainerSession, { strict: false }).status()).toMatchObject({
@@ -211,6 +220,19 @@ beforeAll(async () => {
   expect(issued).toHaveLength(1);
   cookie = assertDefined(assertDefined(issued[0]).split(';')[0]);
 });
+function writeCoordinatorBinding(state: 'ready' | 'quiescing'): void {
+  writeFileSync(
+    join(directory, 'coordinator-binding.json'),
+    JSON.stringify({
+      state,
+      instanceId: INSTANCE,
+      origin: coordinator.url,
+      generation: Number(process.env.COORDINATOR_GENERATION),
+      artifactDigest: 'sha256:' + 'a'.repeat(64),
+    }),
+    { mode: 0o600 },
+  );
+}
 afterAll(async () => {
   role?.kill('SIGTERM');
   if (coordinator) {
@@ -222,6 +244,99 @@ afterAll(async () => {
 });
 
 describe('UPG C/I · actual Coordinator usecases through an independent ControlAPI process', () => {
+  it('serves reviewed reads during writer quiescence, while mutations wait without being dispatched twice', async () => {
+    const registry = coordinator.app.get(ControlApplicationRegistry);
+    const name = `quiescing-${randomUUID().slice(0, 20)}`;
+    const operation = randomUUID();
+    const readable = await publicWrite('/api/projects')
+      .send({ name: `read-${randomUUID().slice(0, 20)}`, sourceType: 'empty' })
+      .expect(202);
+    await registry.quiesce(1000);
+    writeCoordinatorBinding('quiescing');
+    try {
+      const began = performance.now();
+      await publicRead('/api/health').expect(200);
+      await publicRead('/api/projects').expect(200);
+      await publicRead('/api/projects/' + readable.body.id).expect(200);
+      expect(performance.now() - began).toBeLessThan(1000);
+      await request(url).get('/api/projects').set('Origin', ORIGIN).expect(401);
+      // This ordinary GET is deliberately not in the reviewed handoff allowlist.
+      const forbidden = original('SystemController.info', []);
+      forbidden.request.method = 'GET';
+      forbidden.request.path = '/api/system/info';
+      await request(coordinator.url)
+        .post('/internal/application/invoke')
+        .set(internal())
+        .send(forbidden)
+        .expect(425);
+      // Operation name alone never lends a read exception to a POST.
+      await request(coordinator.url)
+        .post('/internal/application/invoke')
+        .set(internal())
+        .send(original('ProjectController.list', []))
+        .expect(425);
+      const pending = publicWrite('/api/projects', operation).send({ name, sourceType: 'empty' });
+      const response = pending.then((result) => result);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        db.prepare('SELECT id FROM application_operations WHERE id=?').get(operation),
+      ).toBeUndefined();
+      registry.resume();
+      writeCoordinatorBinding('ready');
+      expect((await response).status).toBe(202);
+      expect(db.prepare('SELECT count(*) n FROM projects WHERE name=?').get(name)).toEqual({
+        n: 1,
+      });
+      expect(
+        db.prepare('SELECT state FROM application_operations WHERE id=?').get(operation),
+      ).toEqual({ state: 'complete' });
+    } finally {
+      registry.resume();
+      writeCoordinatorBinding('ready');
+    }
+  });
+  it('does not lend the handoff read exception to retirement admission', async () => {
+    const registry = coordinator.app.get(ControlApplicationRegistry);
+    registry.closeRetirementAdmission();
+    try {
+      const input = original('HealthController.health', []);
+      input.request.method = 'GET';
+      input.request.path = '/api/health';
+      await request(coordinator.url)
+        .post('/internal/application/invoke')
+        .set(internal())
+        .send(input)
+        .expect(425);
+    } finally {
+      registry.resume();
+    }
+  });
+  it('keeps the actual Socket.IO upgrade gate closed until prepared transport is ready', async () => {
+    const connect = async () => {
+      const socket = io(`${url}/events`, {
+        transports: ['websocket'],
+        reconnection: false,
+        forceNew: true,
+        timeout: 2000,
+        extraHeaders: { Origin: ORIGIN, Cookie: cookie },
+      });
+      try {
+        return await new Promise<boolean>((ok) => {
+          socket.once('connect', () => ok(true));
+          socket.once('connect_error', () => ok(false));
+        });
+      } finally {
+        socket.disconnect();
+      }
+    };
+    businessTransportReady = false;
+    try {
+      expect(await connect()).toBe(false);
+    } finally {
+      businessTransportReady = true;
+    }
+    expect(await connect()).toBe(true);
+  });
   it('private authentication and invocation await an authority decision before replying or touching business state', async () => {
     const auth = coordinator.app.select(ControlRpcModule).get(PasscodeGuard, { strict: true });
     for (const path of ['authenticate', 'invoke']) {
@@ -809,6 +924,32 @@ describe('UPG C/I · actual Coordinator usecases through an independent ControlA
     } finally {
       target.mockRestore();
       advance.mockRestore();
+    }
+  });
+  it('returns only an undispatched 425 for an old quiescing reader after the real SQLite writer epoch is released', async () => {
+    const registry = coordinator.app.get(ControlApplicationRegistry);
+    const control = coordinatorWriterControl(db);
+    await registry.quiesce(1000);
+    control.release();
+    try {
+      const input = original('HealthController.health', []);
+      input.request.method = 'GET';
+      input.request.path = '/api/health';
+      const response = await request(coordinator.url)
+        .post('/internal/application/invoke')
+        .set(internal())
+        .send(input)
+        .expect(425);
+      expect(response.body).toMatchObject({
+        code: 'APPLICATION_WRITER_QUIESCED',
+        sideEffectFree: true,
+      });
+      expect(
+        db.prepare('SELECT id FROM application_operations WHERE id=?').get(input.operationId),
+      ).toBeUndefined();
+    } finally {
+      control.reacquire();
+      registry.resume();
     }
   });
 });

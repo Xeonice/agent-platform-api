@@ -8,6 +8,7 @@ import { PlatformLoggerService } from '../platform/logging';
 import { env } from '../platform/config/env';
 import { coordinatorArtifactIdentity } from '../platform/upgrade/coordinator-artifact-identity';
 import { CoordinatorWorkRegistry, installCoordinatorWorkRegistry } from '@platform/shared-kernel';
+import { AgentTaskApplicationService, QuotaReconciler } from '@platform/sandbox';
 
 async function main(): Promise<void> {
   process.env.PLATFORM_PROCESS_ROLE = 'coordinator';
@@ -35,6 +36,10 @@ async function main(): Promise<void> {
   platformConnection();
   process.env.SANDBOX_RECONCILE_ON_BOOT = 'false';
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
+  const quota = app.get(QuotaReconciler);
+  const taskRecovery = app.get(AgentTaskApplicationService);
+  quota.deferStartupUntilReady();
+  taskRecovery.deferStartupUntilReady();
   installNormalCoordinatorRetirement(app, workers);
   app.useLogger(app.get(PlatformLoggerService));
   configurePlatformApp(app, network);
@@ -42,6 +47,8 @@ async function main(): Promise<void> {
   app.enableShutdownHooks();
   await app.listen(env.port, env.host);
   sealCoordinatorWorkerManifest(app, workers, { prepared: false });
+  quota.startAfterReady();
+  taskRecovery.startAfterReady();
 }
 void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : 'COORDINATOR_BOOT_FAILED');

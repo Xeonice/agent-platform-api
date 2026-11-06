@@ -236,6 +236,9 @@ describe('retained source proof copies never replace the executing installation 
     // it deliberately grants no live-health, repair or runtime qualification.
     const store = stub<ConstructorParameters<typeof UpgradeInspector>[0]>({
       instanceId: 'status-tree-proof',
+      // Explicit orchestration-only ledger port: this fixture has no DB or
+      // attachment authority and still fails every undeclared store access.
+      runLedgerWork: <T>(work: () => T): T => work(),
       confirmed: () => last,
       instance: () => ({
         instance_id: 'status-tree-proof',

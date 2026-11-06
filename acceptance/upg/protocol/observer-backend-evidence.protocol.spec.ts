@@ -255,6 +255,9 @@ async function fixture(
   });
   const store = {
     instanceId,
+    // This HTTP/real-integrity-worker fixture intentionally supplies a partial
+    // ledger. Epoch attachment is tested by the dedicated real SQLite suite.
+    runLedgerWork: <T>(work: () => T): T => work(),
     latest: () => ({ attemptId: 'attempt' }),
     snapshot: () => snapshot,
     latestProbeSnapshot: () => ({ attempt: { attemptId: 'attempt' }, ...snapshot }),
