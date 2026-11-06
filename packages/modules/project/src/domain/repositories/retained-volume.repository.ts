@@ -1,4 +1,4 @@
-import type { ProjectId, RetainedVolumeId, Tx } from '@platform/shared-kernel';
+import type { ProjectId, RetainedVolumeId, Tx } from '@platform/shared-kernel/pure';
 import type { RetainedVolume } from '../entities/retained-volume.entity';
 
 /**

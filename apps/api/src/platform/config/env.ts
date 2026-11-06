@@ -37,7 +37,8 @@ export const env = {
 /** `undefined` / `''` / 纯空白 ⇒ `null`；否则原样（**不 trim 成别的东西**，只判空）。 */
 function nonEmpty(raw: string | undefined): string | null {
   const v = raw?.trim();
-  return v ? v : null;
+  if (!v) return null;
+  return v;
 }
 
 /** True when the bind address is not the loopback interface (triggers a warning). */

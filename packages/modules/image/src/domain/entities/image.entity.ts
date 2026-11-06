@@ -1,4 +1,4 @@
-import { AggregateRoot, normalizeImageAlias } from '@platform/shared-kernel';
+import { AggregateRoot, normalizeImageAlias } from '@platform/shared-kernel/pure';
 import { ImageNotDeletableError } from '../errors/image-errors';
 import { ImageAliasUpdated } from '../events/image-events';
 

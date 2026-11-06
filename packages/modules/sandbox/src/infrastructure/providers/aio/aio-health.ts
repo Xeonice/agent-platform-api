@@ -43,7 +43,9 @@ export function readAioHealth(input: AioHealthInputs): HealthStatus {
     input.dockerHealth === undefined
       ? ''
       : ` (docker State.Health=${input.dockerHealth}` +
-        `${input.dockerFailingStreak === undefined ? '' : `, failingStreak=${String(input.dockerFailingStreak)}`}` +
+        (input.dockerFailingStreak === undefined
+          ? ''
+          : `, failingStreak=${String(input.dockerFailingStreak)}`) +
         '; auxiliary only — it watches 8091+9222, the platform uses 8080)';
 
   if (!input.running) {

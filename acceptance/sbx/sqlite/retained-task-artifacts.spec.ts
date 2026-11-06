@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +38,7 @@ describe('retained task artifacts', () => {
       ...(await prepare(...args)),
       hostPath: workspacePath,
     });
-    h.provider.files!.files.set(
+    assertDefined(h.provider.files).files.set(
       '/workspace/.agent-artifacts/report.txt',
       Buffer.from('retained report'),
     );
@@ -52,6 +53,11 @@ describe('retained task artifacts', () => {
       h.projectFacade,
     );
     const { sandboxId } = await adapter.createSandbox({
+      runId: 'retention-run',
+      retryCount: 0,
+      acceptedSandboxId: 'sbx-1',
+      acceptedTaskId: 'retention-task',
+      actorId: 'retention-run',
       projectId: 'prj-1',
       runtimeId: 'claude-code',
       prompt: 'write report',
@@ -65,7 +71,7 @@ describe('retained task artifacts', () => {
       prompt: 'report',
       timeoutMinutes: 30,
     });
-    [...h.provider.jobs!.jobs.values()][0].finish(0);
+    [...assertDefined(h.provider.jobs).jobs.values()][0].finish(0);
     for (
       let count = 0;
       count < 200 && (await h.taskService.get(sandboxId, task.id)).status !== 'succeeded';
@@ -73,7 +79,7 @@ describe('retained task artifacts', () => {
     )
       await new Promise((resolve) => setTimeout(resolve, 5));
     await adapter.reconcileFinished();
-    h.provider.files!.openFileStream = async () => {
+    assertDefined(h.provider.files).openFileStream = async () => {
       throw new Error('provider no longer exists');
     };
     const service = new AgentTaskApplicationService(

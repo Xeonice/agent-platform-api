@@ -1,5 +1,5 @@
-import { AggregateRoot, fromEpochMs, shiftMs } from '@platform/shared-kernel';
-import type { ProjectId, RetainedVolumeId } from '@platform/shared-kernel';
+import { AggregateRoot, fromEpochMs, shiftMs } from '@platform/shared-kernel/pure';
+import type { ProjectId, RetainedVolumeId } from '@platform/shared-kernel/pure';
 import { RetainedVolumeStateError } from '../errors/project-errors';
 import { VolumeRetained } from '../events/project-events';
 
@@ -193,10 +193,11 @@ export class RetainedVolume extends AggregateRoot<RetainedVolumeId> {
   }
 
   private assertMutable(action: string): void {
-    if (this.isDeleted) {
+    const deletedAt = this._deletedAt;
+    if (deletedAt !== null) {
       throw new RetainedVolumeStateError(
         `cannot ${action} retained volume ${this.id}: it was already cleaned up at ` +
-          `${(this._deletedAt as Date).toISOString()} and is read-only (I-RV-2)`,
+          `${deletedAt.toISOString()} and is read-only (I-RV-2)`,
       );
     }
   }

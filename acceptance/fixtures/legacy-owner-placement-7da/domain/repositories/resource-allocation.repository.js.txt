@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.RESOURCE_ALLOCATION_REPOSITORY = void 0;
+exports.RESOURCE_ALLOCATION_REPOSITORY = Symbol('ResourceAllocationRepository');
+//# sourceMappingURL=resource-allocation.repository.js.map

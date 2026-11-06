@@ -132,7 +132,7 @@ export function expectOk(what: string, r: GuestResult): GuestResult {
   if (r.code !== 0) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `boxlite guest step failed (${what}): exit=${r.code} ${r.stderr.trim() || r.stdout.trim()}`.trim(),
+      `boxlite guest step failed (${what}): exit=${String(r.code)} ${r.stderr.trim() || r.stdout.trim()}`.trim(),
     );
   }
   return r;

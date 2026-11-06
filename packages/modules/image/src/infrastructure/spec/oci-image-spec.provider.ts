@@ -1,8 +1,10 @@
+import { isRecord } from '@platform/shared-kernel';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   IMAGE_ENTRYPOINT_INVALID,
   IMAGE_LABEL_RESOURCE_DEFAULTS,
   IMAGE_LABEL_SUPPORTED_RUNTIMES,
+  IMAGE_LABEL_RUNTIME_VERSIONS,
   IMAGE_LABEL_TMUX,
   RUNTIME_ADAPTER_REGISTRY,
   RUNTIME_NOT_PREINSTALLED,
@@ -19,6 +21,7 @@ import type {
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
 import { OciRegistryClient } from './oci-registry.client';
+import { parseRuntimeVersionsLabel } from '../../domain/value-objects/runtime-versions.vo';
 
 /**
  * Built-in `ImageSpecProvider` over the OCI Distribution API (docs/backend/04 §7).
@@ -104,6 +107,7 @@ export class OciImageSpecProvider implements ImageSpecProvider {
         healthcheckCmd: cfg.Healthcheck?.Test,
       },
       supportedRuntimes: parseRuntimes(labels[IMAGE_LABEL_SUPPORTED_RUNTIMES]),
+      runtimeVersions: parseRuntimeVersionsLabel(labels[IMAGE_LABEL_RUNTIME_VERSIONS]),
       resourceDefaults: parseResourceDefaults(labels[IMAGE_LABEL_RESOURCE_DEFAULTS]),
       /**
        * ⚠️ READ THIS FIELD AS 「the platform-contract labels this image DECLARES」ONLY.
@@ -158,7 +162,7 @@ export class OciImageSpecProvider implements ImageSpecProvider {
    */
   validate(manifest: ImageSpecManifest): ValidationResult {
     const errors: ValidationIssue[] = [];
-    const warnings: Array<{ code: string; message: string }> = [];
+    const warnings: { code: string; message: string }[] = [];
 
     // Entry-point contract (IS-03). Every error carries a `path` — a bare
     // `valid:false` cannot be rendered next to the field it is about, and 三级反馈 is
@@ -221,8 +225,8 @@ function parseResourceDefaults(label: string | undefined): {
   if (label === undefined) return { ...DEFAULT_RESOURCE_DEFAULTS };
   try {
     const parsed: unknown = JSON.parse(label);
-    if (typeof parsed !== 'object' || parsed === null) return { ...DEFAULT_RESOURCE_DEFAULTS };
-    const rec = parsed as Record<string, unknown>;
+    if (!isRecord(parsed)) return { ...DEFAULT_RESOURCE_DEFAULTS };
+    const rec = parsed;
     return {
       cores: num(rec.cores, DEFAULT_RESOURCE_DEFAULTS.cores),
       ramMb: num(rec.ramMb, DEFAULT_RESOURCE_DEFAULTS.ramMb),

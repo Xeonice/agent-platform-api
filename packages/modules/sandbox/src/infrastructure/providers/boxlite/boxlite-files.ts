@@ -46,7 +46,7 @@ import type { BoxFor } from './boxlite-box-ref';
 const EXIT_NO_SUCH_FILE = 66;
 
 /** 读整文件：不存在 ⇒ 66，存在 ⇒ base64 到 stdout。 */
-const READ_SCRIPT = `[ -f "$1" ] || exit ${EXIT_NO_SUCH_FILE}; exec base64 -w0 -- "$1"`;
+const READ_SCRIPT = `[ -f "$1" ] || exit ${String(EXIT_NO_SUCH_FILE)}; exec base64 -w0 -- "$1"`;
 
 /**
  * 写整文件：先补齐父目录，再从 stdin 收 base64。
@@ -87,7 +87,7 @@ export class BoxliteSandboxFiles implements SandboxFiles {
     if (r.code !== 0) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INTERNAL,
-        `boxlite file read failed for ${path}: exit=${r.code} ${r.stderr.trim()}`.trim(),
+        `boxlite file read failed for ${path}: exit=${String(r.code)} ${r.stderr.trim()}`.trim(),
       );
     }
     return Buffer.from(r.stdout, 'base64');
@@ -117,7 +117,7 @@ export class BoxliteSandboxFiles implements SandboxFiles {
     if (r.code !== 0) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INTERNAL,
-        `boxlite file write failed for ${path}: exit=${r.code} ${r.stderr.trim()}`.trim(),
+        `boxlite file write failed for ${path}: exit=${String(r.code)} ${r.stderr.trim()}`.trim(),
       );
     }
   }

@@ -1,4 +1,4 @@
-import type { DomainEvent } from '@platform/shared-kernel';
+import type { DomainEvent } from '@platform/shared-kernel/pure';
 
 /** A repository-wide display-name change, independent of version/config events. */
 export class ImageAliasUpdated implements DomainEvent {

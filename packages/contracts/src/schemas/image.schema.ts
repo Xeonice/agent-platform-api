@@ -52,6 +52,8 @@ export type ValidationIssueDto = z.infer<typeof ValidationIssueSchema>;
  */
 export const ValidationOutcomeSchema = z.object({
   digest: z.string().optional(),
+  /** Build declarations for the resolved digest; absent on older API versions. */
+  runtimeVersions: z.record(z.string()).optional(),
   status: ImageValidationStatusSchema,
   errors: z.array(ValidationIssueSchema),
   warnings: z.array(ValidationIssueSchema),
@@ -151,6 +153,8 @@ export const ImageManifestSchema = z.object({
   digest: z.string(),
   entrypointContract: EntrypointContractSchema,
   supportedRuntimes: z.array(z.string()),
+  /** Exact CLI versions declared at build time. Empty/missing means not reported. */
+  runtimeVersions: z.record(z.string()).optional(),
   /** Present when the list is queried with a provider; uses the create-door lineage rule. */
   providerCompatibility: z.record(z.boolean()).optional(),
   /** This row has the coordinate configured as the queried provider's default image. */

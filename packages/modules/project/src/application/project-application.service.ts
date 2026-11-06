@@ -130,7 +130,7 @@ export class ProjectApplicationService {
     if ((await this.repo.count()) >= MAX_PROJECTS) {
       throw new BadRequestException({
         code: 'PROJECT_LIMIT_REACHED',
-        message: `project limit reached (max ${MAX_PROJECTS})`,
+        message: `project limit reached (max ${String(MAX_PROJECTS)})`,
         retryable: false,
         sideEffectFree: true,
       });
@@ -371,7 +371,9 @@ export class ProjectApplicationService {
 
   /** 只投递事件、不写行 —— 给「聚合状态没变但确实发生了一件事」的路径用（cancel-clone）。 */
   private publish(project: Project): void {
-    this.uow.run((tx) => this.events.publishInTx(tx, project.pullEvents()));
+    this.uow.run((tx) => {
+      this.events.publishInTx(tx, project.pullEvents());
+    });
   }
 
   /**

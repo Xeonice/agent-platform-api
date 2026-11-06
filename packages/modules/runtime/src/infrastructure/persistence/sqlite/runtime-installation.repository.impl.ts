@@ -4,38 +4,44 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { Tx } from '@platform/shared-kernel';
 import { RuntimeInstallation } from '../../../domain/entities/runtime-installation.entity';
-import type { RuntimeInstallState } from '../../../domain/entities/runtime-installation.entity';
+import { RuntimeInstallStatusSchema } from '@platform/contracts';
 import type { RuntimeInstallationRepository } from '../../../domain/repositories/runtime-installation.repository';
 import { runtimeInstallations, type RuntimeInstallationRow } from '../schema/runtime.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** SQLite RuntimeInstallationRepository (13 §2.3.2). Upsert on the PK. */
 @Injectable()
 export class SqliteRuntimeInstallationRepository implements RuntimeInstallationRepository {
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
-  async find(sandboxId: string, runtimeId: string): Promise<RuntimeInstallation | null> {
-    const row = this.db
-      .select()
-      .from(runtimeInstallations)
-      .where(
-        and(
-          eq(runtimeInstallations.sandboxId, sandboxId),
-          eq(runtimeInstallations.runtimeId, runtimeId),
-        ),
-      )
-      .get();
-    return row ? this.toDomain(row) : null;
+  find(sandboxId: string, runtimeId: string): Promise<RuntimeInstallation | null> {
+    return new Promise<RuntimeInstallation | null>((resolve) => {
+      const row = this.db
+        .select()
+        .from(runtimeInstallations)
+        .where(
+          and(
+            eq(runtimeInstallations.sandboxId, sandboxId),
+            eq(runtimeInstallations.runtimeId, runtimeId),
+          ),
+        )
+        .get();
+      resolve(row ? this.toDomain(row) : null);
+    });
   }
 
-  async listBySandbox(sandboxId: string): Promise<RuntimeInstallation[]> {
-    return this.db
-      .select()
-      .from(runtimeInstallations)
-      .where(eq(runtimeInstallations.sandboxId, sandboxId))
-      .all()
-      .map((r) => this.toDomain(r));
+  listBySandbox(sandboxId: string): Promise<RuntimeInstallation[]> {
+    return new Promise<RuntimeInstallation[]>((resolve) => {
+      resolve(
+        this.db
+          .select()
+          .from(runtimeInstallations)
+          .where(eq(runtimeInstallations.sandboxId, sandboxId))
+          .all()
+          .map((r) => this.toDomain(r)),
+      );
+    });
   }
 
   saveSync(_tx: Tx, installation: RuntimeInstallation): void {
@@ -69,7 +75,7 @@ export class SqliteRuntimeInstallationRepository implements RuntimeInstallationR
       id: row.id,
       sandboxId: row.sandboxId,
       runtimeId: row.runtimeId,
-      status: row.status as RuntimeInstallState,
+      status: RuntimeInstallStatusSchema.parse(row.status),
       versionDetected: row.versionDetected,
       installedAt: row.installedAt,
       lastCheckedAt: row.lastCheckedAt,

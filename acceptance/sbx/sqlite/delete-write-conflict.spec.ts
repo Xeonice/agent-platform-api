@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { describe, expect, it } from 'vitest';
 import { asProjectId, asSandboxId } from '@platform/shared-kernel';
 import { Sandbox } from '../../../packages/modules/sandbox/src/domain/entities/sandbox.entity';
@@ -22,20 +23,20 @@ describe('delete intent wins over stale persisted task writers', () => {
         now: new Date(0),
       });
       h.uow.run((tx) => repo.saveSync(tx, sandbox));
-      const provisioner = (await repo.findById(sandbox.id))!;
-      const deleter = (await repo.findById(sandbox.id))!;
+      const provisioner = assertDefined(await repo.findById(sandbox.id));
+      const deleter = assertDefined(await repo.findById(sandbox.id));
       deleter.transitionTo('destroying', 'user', new Date(1));
       h.uow.run((tx) => repo.saveSync(tx, deleter));
       provisioner.transitionTo('scheduling', 'scheduler', new Date(2));
       expect(() => h.uow.run((tx) => repo.saveSync(tx, provisioner))).toThrow(
         SandboxWriteConflictError,
       );
-      const persisted = (await repo.findById(sandbox.id))!;
+      const persisted = assertDefined(await repo.findById(sandbox.id));
       expect(persisted.status).toBe('destroying');
       expect(persisted.transitions.map((event) => event.to)).toEqual(['pending', 'destroying']);
       deleter.transitionTo('destroyed', 'user', new Date(3));
       h.uow.run((tx) => repo.saveSync(tx, deleter));
-      const late = (await repo.findById(sandbox.id))!;
+      const late = assertDefined(await repo.findById(sandbox.id));
       h.uow.run((tx) => repo.deleteByProjectSync(tx, sandbox.projectId));
       expect(() => h.uow.run((tx) => repo.saveSync(tx, late))).toThrow(SandboxWriteConflictError);
       expect(await repo.findAll()).toEqual([]);

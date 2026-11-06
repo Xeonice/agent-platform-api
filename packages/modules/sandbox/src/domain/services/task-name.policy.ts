@@ -36,7 +36,7 @@ function nameFromPrompt(prompt?: string): string | undefined {
   const index = lines.findIndex((l) => l.trim() !== '');
   if (index < 0) return undefined; // blank-only instruction ⇒ fall back to the label
   const line = lines[index].trim();
-  const points = [...line];
+  const points = Array.from(line);
   const truncated = points.length > TASK_NAME_MAX_CODE_POINTS;
   // more content was dropped when either the line itself was cut OR further non-blank
   // lines follow it — both mean the name does not show the whole instruction.

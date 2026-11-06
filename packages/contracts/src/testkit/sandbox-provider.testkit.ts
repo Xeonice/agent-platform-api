@@ -22,7 +22,10 @@ const CAPABILITY_MANIFEST: Record<keyof SandboxProviderCapabilities, true> = {
   watchEvents: true,
   headlessTask: true,
 };
-const CAPABILITY_KEYS = Object.keys(CAPABILITY_MANIFEST) as (keyof SandboxProviderCapabilities)[];
+function isCapabilityKey(key: string): key is keyof SandboxProviderCapabilities {
+  return Object.hasOwn(CAPABILITY_MANIFEST, key);
+}
+const CAPABILITY_KEYS = Object.keys(CAPABILITY_MANIFEST).filter(isCapabilityKey);
 
 /**
  * ★ CAP-03 的判据表：**每一位怎么被兑现**。
@@ -151,9 +154,8 @@ export function runSandboxProviderContractTests(
       }
       if (opts.expectedCapabilities) {
         for (const [key, value] of Object.entries(opts.expectedCapabilities)) {
-          expect(caps[key as keyof SandboxProviderCapabilities], `capability bit '${key}'`).toBe(
-            value,
-          );
+          if (!isCapabilityKey(key)) throw new Error(`Unknown expected capability '${key}'`);
+          expect(caps[key], `capability bit '${key}'`).toBe(value);
         }
       }
     });
@@ -175,8 +177,9 @@ export function runSandboxProviderContractTests(
       }
 
       for (const [key, rule] of Object.entries(CAPABILITY_EXERCISE)) {
-        const bit = caps[key as keyof SandboxProviderCapabilities];
-        if (CAPABILITY_NO_BIT_RULE.has(key as keyof SandboxProviderCapabilities)) continue;
+        if (!isCapabilityKey(key)) throw new Error(`Unknown capability rule '${key}'`);
+        const bit = caps[key];
+        if (CAPABILITY_NO_BIT_RULE.has(key)) continue;
         if (rule.method === null) {
           // 契约里**根本没有**兑现它的方法 ⇒ `true` 是一张无法兑付的支票。
           // 平台的创建门 (`assertCapabilities`) 会照着它放行 `require: { <bit>: true }`
@@ -275,15 +278,17 @@ function runDataPlaneClauses(
   describe('data-plane clauses (a real sandbox is created, started and driven)', () => {
     let provider: SandboxProvider;
     let handle: SandboxHandle;
+    const created: SandboxHandle[] = [];
 
     beforeAll(async () => {
       provider = factory();
       handle = await provider.create(context);
+      created.push(handle);
       await provider.start(handle);
     }, DATA_PLANE_SETUP_TIMEOUT_MS);
 
     afterAll(async () => {
-      if (handle) await provider.destroy(handle).catch(() => undefined);
+      for (const opened of created) await provider.destroy(opened).catch(() => undefined);
     }, DATA_PLANE_SETUP_TIMEOUT_MS);
 
     it(
@@ -323,10 +328,12 @@ function runDataPlaneClauses(
         // ⚠️ 这里换一个**全新的 provider 实例**,等价于「后端重启了」:进程内的任何
         // 连接、session、缓存都不在了,只剩下能过一趟数据库的那两个字符串。
         const revived = factory();
-        let chunk = await revived.jobs!.readJob(handle, job, early.cursor, { waitMs: 10_000 });
+        const jobs = revived.jobs;
+        if (jobs === undefined) throw new Error('Revived provider lost its declared job plane');
+        let chunk = await jobs.readJob(handle, job, early.cursor, { waitMs: 10_000 });
         let out = early.stdout + chunk.stdout;
         for (let i = 0; i < 20 && chunk.status === 'running'; i++) {
-          chunk = await revived.jobs!.readJob(handle, job, chunk.cursor, { waitMs: 5_000 });
+          chunk = await jobs.readJob(handle, job, chunk.cursor, { waitMs: 5_000 });
           out += chunk.stdout;
         }
         expect(chunk.status).toBe('exited');
@@ -336,7 +343,7 @@ function runDataPlaneClauses(
         expect(out).toContain('dp-line-6');
         expect(chunk.exitCode).toBe(3);
 
-        await revived.jobs!.releaseJob(handle, job);
+        await jobs.releaseJob(handle, job);
       },
       DATA_PLANE_JOB_TIMEOUT_MS,
     );
@@ -388,7 +395,7 @@ function runDataPlaneClauses(
         // 0x00 / 0xa3 / 0xff:文本通道会在这三个字节上出事(实测 aio 的 text read
         // 端点直接抛 `'utf-8' codec can't decode byte 0xa3`)。逐字节比对,不比字符串。
         const payload = Buffer.from([0x00, 0x01, 0xa3, 0xff, 0x0a, 0x41, 0xc3, 0x28, 0x7f]);
-        const path = `/var/tmp/dp-binary-${Math.floor(Math.random() * 1e9)}/nested/blob.bin`;
+        const path = `/var/tmp/dp-binary-${String(Math.floor(Math.random() * 1e9))}/nested/blob.bin`;
         await provider.files.writeFile(handle, path, payload);
         const read = await provider.files.readFile(handle, path);
         expect(read?.equals(payload)).toBe(true);
@@ -402,7 +409,7 @@ function runDataPlaneClauses(
         // 两边形状不一致的话,同一段应用代码会在两个 provider 上看到不同的 JSON。
         const parents = await provider.files.listFiles(handle, dir.slice(0, dir.lastIndexOf('/')));
         const dirRow = parents.find((e) => e.kind === 'dir');
-        expect(dirRow === undefined || dirRow.size === undefined).toBe(true);
+        expect(dirRow?.size === undefined).toBe(true);
       },
       DATA_PLANE_STEP_TIMEOUT_MS,
     );
@@ -425,6 +432,8 @@ function collect(stream: ProcessStream): Promise<{ output: string; code: number 
     stream.onData((chunk) => {
       output += chunk.toString('utf8');
     });
-    stream.onExit((code) => resolve({ output, code }));
+    stream.onExit((code) => {
+      resolve({ output, code });
+    });
   });
 }

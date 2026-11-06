@@ -7,6 +7,7 @@ import type {
   AuditRecorder,
 } from '@platform/contracts';
 import { PasscodeService } from './passcode.service';
+import type { Request } from 'express';
 import { passcodeChangedRecord } from './access-audit';
 
 /**
@@ -28,7 +29,14 @@ export class AccessPasscodeService {
     @Inject(AUDIT_RECORDER) private readonly audit: AuditRecorder,
   ) {}
 
-  apply(input: AccessPasscodeAction): AccessPasscodeResult {
+  apply(
+    input: AccessPasscodeAction,
+    req?: Request,
+  ): AccessPasscodeResult | Promise<AccessPasscodeResult> {
+    if (this.passcodes.authorityEnabled) {
+      if (!req) throw this.conflict('缺少本次请求的访问验证上下文。');
+      return this.applyAtAuthority(input, req);
+    }
     // ⚠️ FIRST, BEFORE ANY BRANCH. A deployment that pins `ACCESS_PASSCODE` cannot be
     // edited from in here — the platform does not own that file — so every action is
     // refused with the reason rather than half-applied (see `PasscodeService`'s note
@@ -86,6 +94,16 @@ export class AccessPasscodeService {
    * `sideEffectFree: true` is earned structurally: every throw above happens before
    * `setStoredPasscode`, so nothing has been written when one fires.
    */
+  private async applyAtAuthority(
+    input: AccessPasscodeAction,
+    req: Request,
+  ): Promise<AccessPasscodeResult> {
+    const change = await this.passcodes.changeAtAuthority(req, input);
+    if (change.changed)
+      this.audit.record(passcodeChangedRecord(input.action, input.invalidateSessions === true));
+    return change.result;
+  }
+
   private conflict(message: string): HttpException {
     return new HttpException(
       { code: 'INVALID_STATE', message, retryable: false, sideEffectFree: true },

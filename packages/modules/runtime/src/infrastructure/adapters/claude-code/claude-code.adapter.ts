@@ -35,6 +35,7 @@ import {
 } from './claude-code.output-parser';
 import { assertSessionRef } from '../session-ref.util';
 import { probeSandboxHome, SEED_WRITE_TIMEOUT_MS } from '../home-probe.util';
+import { AGENT_CLI_VERSIONS } from '../agent-cli-versions';
 
 /**
  * ⚠️ **60s → 120s（2026-08-26，同 `PROBE_TIMEOUT_MS` 的依据）。** 这一步要在 PTY 里
@@ -304,7 +305,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // never silently stored.
     const verdict = validateClaudeOauthToken(token);
     if (!verdict.ok) {
-      throw new AdapterAuthError('AUTH_REJECTED', `invalid setup-token: ${verdict.reason}`);
+      throw new AdapterAuthError('AUTH_REJECTED', `invalid setup-token: ${String(verdict.reason)}`);
     }
     const clean = token.trim();
     const cred: RuntimeCredential = {
@@ -321,29 +322,31 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return cred;
   }
 
-  async createCredentialFromSecret(
+  createCredentialFromSecret(
     method: 'api-key' | 'access-token-paste',
     secret: string,
   ): Promise<RuntimeCredential> {
-    if (method !== 'api-key') {
-      throw new AdapterAuthError(
-        'UNSUPPORTED_METHOD',
-        `claude createCredentialFromSecret: ${method}`,
-      );
-    }
-    const key = secret.trim();
-    const cred: RuntimeCredential = {
-      runtimeId: 'claude-code',
-      obtainedVia: 'api-key',
-      maskedIdentifier: `sk-…${key.slice(-4)}`,
-      issuedAt: '',
-      env: { ANTHROPIC_API_KEY: key },
-      credentialFiles: [],
-      zeroize(): void {
-        cred.env = undefined;
-      },
-    };
-    return cred;
+    return new Promise<RuntimeCredential>((resolve) => {
+      if (method !== 'api-key') {
+        throw new AdapterAuthError(
+          'UNSUPPORTED_METHOD',
+          `claude createCredentialFromSecret: ${method}`,
+        );
+      }
+      const key = secret.trim();
+      const cred: RuntimeCredential = {
+        runtimeId: 'claude-code',
+        obtainedVia: 'api-key',
+        maskedIdentifier: `sk-…${key.slice(-4)}`,
+        issuedAt: '',
+        env: { ANTHROPIC_API_KEY: key },
+        credentialFiles: [],
+        zeroize(): void {
+          cred.env = undefined;
+        },
+      };
+      resolve(cred);
+    });
   }
 
   // ── run half (04 §3) ───────────────────────────────────────────────────────
@@ -357,6 +360,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   getInstallPlan(imageSpec: ResolvedImageSpec): RuntimeInstallPlan {
     return npmInstallPlan({
       packageName: '@anthropic-ai/claude-code',
+      version: AGENT_CLI_VERSIONS['claude-code'],
       binary: CLAUDE_BINARY,
       preinstalled: imagePreinstalls(imageSpec, 'claude-code'),
       estimatedInstallSec: 753,
@@ -436,15 +440,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       timeoutMs: SEED_WRITE_TIMEOUT_MS,
     });
     if (r.exitCode !== 0) {
-      throw new Error(`seeding claude .claude.json failed (exit ${r.exitCode})`);
+      throw new Error(`seeding claude .claude.json failed (exit ${String(r.exitCode)})`);
     }
   }
 
-  async injectCredential(cred: InjectableRuntimeCredential, _exec: SandboxExecFn): Promise<void> {
-    if (!cred.env || Object.keys(cred.env).length === 0) {
-      throw new AdapterAuthError('AUTH_REJECTED', 'no injectable claude credential material');
-    }
-    // env is applied at sandbox START by the orchestration; nothing to exec.
-    return;
+  injectCredential(cred: InjectableRuntimeCredential, _exec: SandboxExecFn): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!cred.env || Object.keys(cred.env).length === 0) {
+        throw new AdapterAuthError('AUTH_REJECTED', 'no injectable claude credential material');
+      }
+      // env is applied at sandbox START by the orchestration; nothing to exec.
+      resolve();
+    });
   }
 }

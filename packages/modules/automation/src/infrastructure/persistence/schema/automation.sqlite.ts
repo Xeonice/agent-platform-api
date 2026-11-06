@@ -1,5 +1,13 @@
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer, check, index } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  text,
+  integer,
+  check,
+  index,
+  primaryKey,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
 import { projects } from '@platform/project';
 
 /**
@@ -149,7 +157,47 @@ export const automationRuns = sqliteTable(
   }),
 );
 
-export const automationSchema = { automations, automationRuns };
+export const automationCronOccurrences = sqliteTable(
+  'automation_cron_occurrences',
+  {
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    dueAt: integer('due_at', { mode: 'timestamp_ms' }).notNull(),
+    runId: text('run_id').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.automationId, t.dueAt] }),
+    run: uniqueIndex('automation_cron_occurrences_run_idx').on(t.runId),
+  }),
+);
+export const automationLaunchIntents = sqliteTable(
+  'automation_launch_intents',
+  {
+    runId: text('run_id')
+      .notNull()
+      .references(() => automationRuns.id, { onDelete: 'cascade' }),
+    retryCount: integer('retry_count').notNull(),
+    sandboxId: text('sandbox_id').notNull(),
+    taskId: text('task_id').notNull(),
+    actorId: text('actor_id').notNull(),
+    input: text('input').notNull(),
+    inputDigest: text('input_digest').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.runId, t.retryCount] }),
+    sandbox: uniqueIndex('automation_launch_intents_sandbox_idx').on(t.sandboxId),
+    task: uniqueIndex('automation_launch_intents_task_idx').on(t.taskId),
+    retry: check('automation_launch_intents_retry_ck', sql`${t.retryCount} BETWEEN 0 AND 5`),
+  }),
+);
+export const automationSchema = {
+  automations,
+  automationRuns,
+  automationCronOccurrences,
+  automationLaunchIntents,
+};
 export type AutomationRow = typeof automations.$inferSelect;
 export type AutomationInsert = typeof automations.$inferInsert;
 export type AutomationRunRow = typeof automationRuns.$inferSelect;

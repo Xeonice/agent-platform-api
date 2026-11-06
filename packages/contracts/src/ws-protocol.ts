@@ -1,6 +1,7 @@
 import type { RuntimeInstallStatus, SandboxStatus } from './schemas/enums';
 import type { TaskStatus } from './schemas/task.schema';
 import type { RuntimeEvent } from './runtime-adapter.contract';
+import type { StartupObservation } from './schemas/sandbox.schema';
 
 /**
  * WS frame contract — SYNC WITH shared/10 §7.4 (the single canonical definition).
@@ -58,7 +59,31 @@ export type TerminalServerFrame =
    * ⚠️ agent 标签**没有**这个字段（缺席 = 「这条连接连的是 `platform-agent`」），
    * 而不是给一个空串 —— 「没有」和「有一个空的」在前端会走进不同分支。
    */
-  | { type: 'session'; socketSessionKey: string; shellId?: string }
+  | {
+      type: 'session';
+      socketSessionKey: string;
+      shellId?: string;
+      sandboxId?: string;
+      terminalIdentity?: string;
+      attachmentId?: string;
+      protocolRevision?: number;
+    }
+  /** Original guest session confirmed; a transport/session frame alone is not this ack. */
+  | {
+      type: 'ready';
+      sandboxId: string;
+      terminalIdentity: string;
+      runtimeIdentity: string | null;
+      attachmentId: string;
+      protocolRevision: number;
+      existingSession: boolean;
+    }
+  | { type: 'connection_state'; state: 'restoring' | 'unconfirmed'; sandboxId: string }
+  | {
+      type: 'error';
+      code: 'AUTH_EXPIRED' | 'PROTOCOL_INCOMPATIBLE' | 'RUNTIME_UNKNOWN' | 'TERMINAL_GONE';
+      sandboxId?: string;
+    }
   /**
    * 这个 sandbox 下**已经存在**的用户终端会话清单（06 §5.5）。刷新页面之后，前端凭它
    * 把标签栏重建回来 —— 否则那些 tmux 会话还活着、界面上却没有了，成了只能等沙箱回收
@@ -109,8 +134,11 @@ export type TerminalSessionKind = 'agent' | 'shell' | 'runtime';
  */
 export interface TerminalShellSummary {
   shellId: string;
+  /** Independent non-authorizing public bookmark. Legacy servers can omit it. */
+  terminalIdentity?: string;
   runtimeId?: string;
 }
+export const TERMINAL_PROTOCOL_RANGE = { min: 1, max: 2 } as const;
 
 /**
  * 用户终端标签的 tmux 会话 id 形状：**32 位小写十六进制**（= 128-bit，`randomBytes(16)`）。
@@ -222,26 +250,21 @@ export type SandboxWsEvent =
    *    callback to read, so any number here would be invented. This repo has already
    *    deleted one invented denominator for exactly that reason (see
    *    `project.clone_progress`: `totalBytes` was a 「幽灵字段，已删」).
-   * ② **No elapsed milliseconds.** The frontend knows the instant it received
-   *    `status_changed → starting`; counting up from there costs it one `setInterval`
-   *    and needs no field, no frame and no clock-skew handling. An `elapsedMs` here
-   *    would be a field whose only reader can already compute it alone.
+   * ② **No elapsed milliseconds.** Additive `startupObservation` supplies durable
+   *    server timestamps for the original provision cycle. Counting from the page's
+   *    receipt loses history on reload; query/heartbeat time is not work progress.
    *
-   * ⇒ what IS here is only what the platform knows and the browser CANNOT: whether
-   * this machine already holds the image's bits (`SandboxProvider.imageStaged`).
-   * `imageStaged:false` is the whole difference between 「几秒」 and 「几分钟」, and it is
-   * the one fact that turns 「卡住了」 into 「首次用这个镜像，正在准备」.
+   * Cache presence (`imageStaged`) is only a cache observation, not evidence that
+   * an image download is currently running. Optional `startupObservation` records
+   * actual workflow boundaries and durable times, with no invented sub-progress.
    *
    * ⚠️ IT IS **ABSENT**, NOT `false`, WHEN THE PROVIDER CANNOT SAY. 「不知道」 and
    * 「本机没有这份镜像」 are different claims, and only one of them may be put in
    * front of a waiting user as a reason for a multi-minute wait.
    *
-   * NOT Outbox-backed, deliberately — the opposite call from `runtime.install_progress`
-   * one variant up, for a reason specific to this frame: a dropped `starting` only
-   * degrades the copy to the generic wording for the rest of THIS wait, and a dropped
-   * `ready` is overwritten by the `status_changed` that always follows. Install
-   * progress rides the Outbox because nothing follows it — a dropped frame there pins
-   * the card on stale copy forever.
+   * NOT Outbox-backed: missed progress is restored from the persisted observation
+   * on GET, retaining its cycle/sequence and original work times. A read/heartbeat
+   * never manufactures progress; absent legacy facts remain unknown.
    */
   | {
       event: 'sandbox.instance_progress';
@@ -250,6 +273,8 @@ export type SandboxWsEvent =
       phase: 'starting' | 'ready';
       /** 只在 `phase:'starting'` 且 provider 答得上时出现；缺席 = 「不知道」。 */
       imageStaged?: boolean;
+      /** Optional durable facts; operationId identifies the provision cycle, not an RPC. */
+      startupObservation?: StartupObservation;
     };
 
 // ── /tasks channel (S6 无头 Task 输出流;discriminator: type) ────────────────
@@ -323,15 +348,16 @@ export type TaskServerFrame =
  */
 export const WS_PROTOCOL_CANONICAL =
   'terminal.client:input{data},resize{cols,rows},ping,close_shell{shellId}|' +
-  'terminal.server:data{data},exit{code},pong,session{socketSessionKey,shellId?},' +
-  'shells{shells[shellId,runtimeId?]}|' +
+  'terminal.server:data{data},exit{code},pong,session{socketSessionKey,shellId?,sandboxId?,terminalIdentity?,attachmentId?,protocolRevision?},' +
+  'ready{sandboxId,terminalIdentity,runtimeIdentity,attachmentId,protocolRevision,existingSession},' +
+  'connection_state{state,sandboxId},error{code,sandboxId?},shells{shells[shellId,terminalIdentity?,runtimeId?]}|' +
   'events:sandbox.created{sandboxId,projectId},sandbox.status_changed{sandboxId,status,phase?,errorCode?},' +
   'sandbox.removed{sandboxId},sandbox.waiting_input{sandboxId,waiting,sessionId?},' +
   'project.clone_progress{projectId,phase,startedAt?,stage?,percent?,objectsDone?,objectsTotal?,' +
   'receivedBytes?,bytesPerSecond?,errorCode?},' +
   'runtime-auth.status_changed{runtime},' +
   'runtime.install_progress{sandboxId,runtime,status,versionDetected?,errorCode?},' +
-  'sandbox.instance_progress{sandboxId,phase,imageStaged?}|' +
+  'sandbox.instance_progress{sandboxId,phase,imageStaged?,startupObservation?}|' +
   'tasks.client:subscribe{taskId,fromSeq?},unsubscribe{taskId},ping|' +
   'tasks.server:event{taskId,seq,event},caught_up{taskId,firstSeq,seq},' +
   'exit{taskId,status,exitCode?},error{taskId,code},pong';
@@ -426,7 +452,12 @@ export const X_SCHEMA_HASH_HEADER = 'x-schema-hash';
  * JSDoc 里，成员列表保持干净。
  */
 export type WsHandshakeRejection =
-  'UNAUTHORIZED' | 'SCHEMA_MISMATCH' | 'SANDBOX_REQUIRED' | 'TERMINAL_TARGET_INVALID';
+  | 'UNAUTHORIZED'
+  | 'SCHEMA_MISMATCH'
+  | 'SANDBOX_REQUIRED'
+  | 'TERMINAL_TARGET_INVALID'
+  | 'PROTOCOL_INCOMPATIBLE'
+  | 'APPLICATION_WRITER_QUIESCED';
 
 /**
  * Build the `Error` a gateway hands to socket.io's `next(err)`.
@@ -439,9 +470,5 @@ export function wsHandshakeError(
   code: WsHandshakeRejection,
   detail: string,
 ): Error & { data: { code: WsHandshakeRejection } } {
-  const err = new Error(`${code}: ${detail}`) as Error & {
-    data: { code: WsHandshakeRejection };
-  };
-  err.data = { code };
-  return err;
+  return Object.assign(new Error(`${code}: ${detail}`), { data: { code } });
 }

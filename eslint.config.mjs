@@ -1,6 +1,36 @@
 import tseslint from 'typescript-eslint';
 import boundaries from 'eslint-plugin-boundaries';
 
+const PRODUCTION_TYPESCRIPT = [
+  'apps/*/src/**/*.ts',
+  'packages/*/src/**/*.ts',
+  'packages/modules/*/src/**/*.ts',
+];
+
+// Closed, reviewed dependency graph for the domain entry. Unlisted kernel files
+// are infrastructure by default, including index.ts and env-backed defaults.
+const PURE_KERNEL_MODULES = [
+  'pure',
+  'types/branded',
+  'types/value-guards',
+  'ports/clock.port',
+  'ports/business-writer-authority.port',
+  'ports/time.util',
+  'ports/id-generator.port',
+  'ports/unit-of-work.port',
+  'ports/event-bus.port',
+  'domain/domain-event',
+  'domain/aggregate-root',
+  'domain/runtime-secret',
+  'domain/reserved-env',
+  'domain/image-alias',
+  'net/git-remote',
+  'net/git-platform-registry',
+];
+const PURE_KERNEL_FILES = PURE_KERNEL_MODULES.map(
+  (name) => `packages/shared-kernel/src/${name}.ts`,
+);
+
 /**
  * Flat ESLint config. Harness pillars enforced here (docs/backend/01 §3, shared/09 §2.2):
  *   1. eslint-plugin-boundaries — DDD four-layer dependency rules (error level).
@@ -15,8 +45,7 @@ import boundaries from 'eslint-plugin-boundaries';
 
 // `x as unknown as Y` — banned everywhere, tests included (parity with frontend).
 const NO_AS_UNKNOWN_AS = {
-  selector:
-    "TSAsExpression[expression.type='TSAsExpression'][expression.typeAnnotation.type='TSUnknownKeyword']",
+  selector: 'TSAsExpression > TSAsExpression',
   message: '禁止 as unknown as 双重断言 —— 用正当类型收窄替代（与前端仓库一致）。',
 };
 
@@ -153,7 +182,7 @@ const NO_NONDETERMINISTIC_RANDOM = [
  *
  * ★ 豁免边界画在「这个 import 会不会带来 IO / 不确定性」，不画在「是不是三方包」：
  *   · `./ ../`                 —— 同上下文 domain 内部，boundaries 已管住层。
- *   · `@platform/shared-kernel` —— 唯一允许的仓内包（与 boundaries 的 domain 规则一致）。
+ *   · `@platform/shared-kernel/pure` —— 唯一允许的仓内包（与 boundaries 的 domain 规则一致）。
  *     `@platform/contracts` 与别的 module 一律不放行。
  *   · `node:crypto`            —— **纯计算**，不碰 fd/socket/子进程。现役用法：
  *     `credential/domain/value-objects/masked-identifier.vo.ts` 的 `createHash`
@@ -174,9 +203,9 @@ const NO_NONDETERMINISTIC_RANDOM = [
 const DOMAIN_PURE_IMPORTS = {
   patterns: [
     {
-      regex: '^(?!\\.)(?!@platform/shared-kernel(/|$))(?!node:crypto$)(?!node:stream$)',
+      regex: '^(?!\\.)(?!@platform/shared-kernel/pure$)(?!node:crypto$)(?!node:stream$)',
       message:
-        'domain 只能 import 相对路径 / @platform/shared-kernel / node:crypto / node:stream(type-only)。三方 IO 库（provider SDK、drizzle、socket.io、better-sqlite3…）与框架代码属于 infrastructure（01 §3）。',
+        'domain 只能 import 相对路径 / @platform/shared-kernel/pure / node:crypto / node:stream(type-only)。三方 IO 库（provider SDK、drizzle、socket.io、better-sqlite3…）与框架代码属于 infrastructure（01 §3）。',
     },
     {
       group: ['node:stream'],
@@ -210,10 +239,20 @@ export default tseslint.config(
     ],
   },
   ...tseslint.configs.recommended,
+  ...tseslint.configs.strictTypeChecked.map((config) => ({
+    ...config,
+    files: PRODUCTION_TYPESCRIPT,
+  })),
+  ...tseslint.configs.stylisticTypeChecked.map((config) => ({
+    ...config,
+    files: PRODUCTION_TYPESCRIPT,
+  })),
   {
     files: ['**/*.ts'],
     plugins: { boundaries },
     settings: {
+      // The plugin defaults omit reexports; a pure barrel must be checked too.
+      'boundaries/dependency-nodes': ['import', 'require', 'dynamic-import', 'export'],
       'import/resolver': {
         typescript: {
           project: [
@@ -254,7 +293,12 @@ export default tseslint.config(
           capture: ['module'],
         },
         { type: 'interface', pattern: 'packages/modules/*/src/interface/**', capture: ['module'] },
-        { type: 'shared-kernel', pattern: 'packages/shared-kernel/**' },
+        ...PURE_KERNEL_MODULES.map((name) => ({
+          type: 'shared-kernel-pure',
+          mode: 'file',
+          pattern: `packages/shared-kernel/{src,dist}/${name}.{ts,js,d.ts}`,
+        })),
+        { type: 'shared-kernel', mode: 'file', pattern: 'packages/shared-kernel/**' },
         { type: 'contracts', pattern: 'packages/contracts/**' },
       ],
       'boundaries/ignore': ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/test/**'],
@@ -279,9 +323,13 @@ export default tseslint.config(
                 ['interface', { module: '${from.module}' }],
                 'contracts',
                 'shared-kernel',
+                'shared-kernel-pure',
               ],
             },
-            { from: 'domain', allow: [['domain', { module: '${from.module}' }], 'shared-kernel'] },
+            {
+              from: 'domain',
+              allow: [['domain', { module: '${from.module}' }], 'shared-kernel-pure'],
+            },
             {
               from: 'application',
               allow: [
@@ -289,6 +337,7 @@ export default tseslint.config(
                 ['application', { module: '${from.module}' }],
                 'contracts',
                 'shared-kernel',
+                'shared-kernel-pure',
               ],
             },
             {
@@ -298,6 +347,7 @@ export default tseslint.config(
                 ['infrastructure', { module: '${from.module}' }],
                 'contracts',
                 'shared-kernel',
+                'shared-kernel-pure',
               ],
             },
             {
@@ -311,8 +361,9 @@ export default tseslint.config(
             // contracts may lean on the shared kernel (pure primitives / catalogs like
             // the git-platform registry). shared-kernel never imports contracts, so this
             // introduces no cycle.
-            { from: 'contracts', allow: ['contracts', 'shared-kernel'] },
-            { from: 'shared-kernel', allow: ['shared-kernel'] },
+            { from: 'contracts', allow: ['contracts', 'shared-kernel', 'shared-kernel-pure'] },
+            { from: 'shared-kernel', allow: ['shared-kernel', 'shared-kernel-pure'] },
+            { from: 'shared-kernel-pure', allow: ['shared-kernel-pure'] },
           ],
         },
       ],
@@ -330,10 +381,9 @@ export default tseslint.config(
     },
   },
   // ── ① domain 的 import 白名单（见 DOMAIN_PURE_IMPORTS 的注释）───────────────
-  // 只作用于 `packages/modules/*/src/domain/**`。shared-kernel 不在其内：它自己就是
-  // domain 允许依赖的那一格，且 `src/crypto`、`src/fs` 明摆着是给别人用的 IO 工具。
+  // 同时约束领域与闭集纯内核；FS/环境/主密钥等基础设施仍留在根入口。
   {
-    files: ['packages/modules/*/src/domain/**/*.ts'],
+    files: ['packages/modules/*/src/domain/**/*.ts', ...PURE_KERNEL_FILES],
     rules: {
       'no-restricted-imports': 'off', // 基础规则不认 allowTypeImports，统一用 TS 版
       '@typescript-eslint/no-restricted-imports': ['error', DOMAIN_PURE_IMPORTS],
@@ -418,7 +468,6 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS],
       'boundaries/element-types': 'off',
       '@typescript-eslint/no-restricted-imports': 'off',
-      '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
   // e2e 另加一条：app 装配必须走共用函数（见 NO_HANDROLLED_APP_SETUP 的注释）。
@@ -426,6 +475,48 @@ export default tseslint.config(
     files: ['acceptance/support/platform-app.ts', 'acceptance/*/protocol/**/*.ts'],
     rules: {
       'no-restricted-syntax': ['error', NO_AS_UNKNOWN_AS, ...NO_HANDROLLED_APP_SETUP],
+    },
+  },
+  {
+    files: ['**/*.ts'],
+    rules: {
+      '@typescript-eslint/consistent-type-assertions': [
+        'error',
+        {
+          assertionStyle: 'as',
+          objectLiteralTypeAssertions: 'never',
+        },
+      ],
+      '@typescript-eslint/ban-ts-comment': [
+        'error',
+        {
+          'ts-expect-error': 'allow-with-description',
+          'ts-ignore': true,
+          'ts-nocheck': true,
+          minimumDescriptionLength: 10,
+        },
+      ],
+      '@typescript-eslint/no-non-null-assertion': 'error',
+    },
+  },
+  {
+    files: PRODUCTION_TYPESCRIPT,
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unsafe-assignment': 'error',
+      '@typescript-eslint/no-unsafe-call': 'error',
+      '@typescript-eslint/no-unsafe-member-access': 'error',
+      '@typescript-eslint/no-unsafe-return': 'error',
+      '@typescript-eslint/no-unsafe-argument': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/no-unsafe-type-assertion': 'error',
+      '@typescript-eslint/consistent-type-imports': 'error',
+      // Nest modules are declarative classes: the decorator supplies their role.
+      // Undecorated empty utility classes remain errors under the strict preset.
+      '@typescript-eslint/no-extraneous-class': ['error', { allowWithDecorator: true }],
     },
   },
 );

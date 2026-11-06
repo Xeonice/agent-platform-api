@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SANDBOX_CREATE_INTENTS = void 0;
+exports.SANDBOX_CREATE_INTENTS = Symbol('SandboxCreateIntents');
+//# sourceMappingURL=sandbox-create-intents.port.js.map

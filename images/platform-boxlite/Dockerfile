@@ -83,8 +83,8 @@ RUN set -eux; \
 # `@latest` 会让**同一份源码在不同的日子产出不同的镜像**，于是再也无法从仓库回答
 # 「这个 digest 里装的是哪个版本」，而上游一个坏版本会在无人改动任何东西的情况下，
 # 静悄悄地进到每一个 Task 里。升级 = 改这两行 + 重新构建 + 重新推。
-ARG CLAUDE_CODE_VERSION=2.1.251
-ARG CODEX_VERSION=0.150.1
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG CODEX_VERSION=0.163.0
 
 # ⚠️ 这里可以老老实实用默认 prefix（`/usr/local`）—— 官方 node 镜像里 root 就是运行
 # 用户、`NPM_CONFIG_PREFIX` 没被改过、也没有会遮住它的旧 shim。
@@ -94,8 +94,10 @@ RUN set -eux; \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}"; \
     # 构建期自证，而不是等第一个 Task 去发现。
-    claude --version | grep -F "${CLAUDE_CODE_VERSION}"; \
-    codex --version | grep -F "${CODEX_VERSION}"; \
+    CLAUDE_VERSION_ACTUAL="$(claude --version)"; \
+    CODEX_VERSION_ACTUAL="$(codex --version)"; \
+    test "$CLAUDE_VERSION_ACTUAL" = "${CLAUDE_CODE_VERSION} (Claude Code)"; \
+    test "$CODEX_VERSION_ACTUAL" = "codex-cli ${CODEX_VERSION}"; \
     command -v tmux; \
     tmux -V; \
     npm cache clean --force
@@ -107,4 +109,5 @@ CMD ["sleep", "infinity"]
 
 # 与 aio 档同义：只驱动 warning 与默认配额，**不是**合规判定，且会被派生镜像继承。
 LABEL platform.supportedRuntimes="codex,claude-code" \
+      platform.runtimeVersions="{\"codex\":\"${CODEX_VERSION}\",\"claude-code\":\"${CLAUDE_CODE_VERSION}\"}" \
       platform.resourceDefaults="{\"cores\":2,\"ramMb\":2048,\"diskMb\":10240}"

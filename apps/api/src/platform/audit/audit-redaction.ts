@@ -1,4 +1,5 @@
 import { redactLogLine } from '../logging';
+import { isRecord } from '@platform/shared-kernel';
 
 /**
  * 审计 `detail` / `summary` 的**写入口**脱敏（13 §2.8.2「脱敏在写入口」/ 05 §4 /
@@ -67,7 +68,7 @@ function isSensitiveKey(key: string): boolean {
     .filter((w) => w !== '');
   if (words.some((w) => SENSITIVE_WORDS.has(w))) return true;
   for (let i = 0; i + 1 < words.length; i++) {
-    if (SENSITIVE_WORDS.has(`${words[i]!}${words[i + 1]!}`)) return true;
+    if (SENSITIVE_WORDS.has(`${words[i]}${words[i + 1]}`)) return true;
   }
   return false;
 }
@@ -100,9 +101,7 @@ export function redactAuditDetail(
   if (detail === undefined) return undefined;
   const out = redactValue(detail, 0, false);
   // redactValue 对 plain object 一定回 object；这个分支只为收窄类型。
-  return typeof out === 'object' && out !== null && !Array.isArray(out)
-    ? (out as Record<string, unknown>)
-    : undefined;
+  return isRecord(out) ? out : undefined;
 }
 
 /**

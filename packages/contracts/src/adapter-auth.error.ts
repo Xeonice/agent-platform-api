@@ -78,6 +78,6 @@ export class AdapterAuthError extends Error {
  */
 export function adapterAuthErrorCodeOf(e: unknown): AdapterAuthErrorCode | undefined {
   if (typeof e !== 'object' || e === null || !('code' in e)) return undefined;
-  const code: unknown = (e as { code: unknown }).code;
+  const code: unknown = e.code;
   return isAdapterAuthErrorCode(code) ? code : undefined;
 }

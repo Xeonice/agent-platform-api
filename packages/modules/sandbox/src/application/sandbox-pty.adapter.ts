@@ -28,7 +28,7 @@ export class SandboxPtyAdapter implements SandboxPtyPort {
 
   async openPty(sandboxId: string, opts: OpenPtyOptions): Promise<ProcessStream> {
     const sandbox = await this.repo.findById(asSandboxId(sandboxId));
-    if (!sandbox || !sandbox.providerSandboxId) {
+    if (!sandbox?.providerSandboxId) {
       throw new SandboxProviderError(
         SandboxProviderErrorCode.INVALID_STATE,
         `sandbox ${sandboxId} has no running instance to attach a terminal to`,

@@ -1,4 +1,4 @@
-import { fromEpochMs } from '@platform/shared-kernel';
+import { fromEpochMs } from '@platform/shared-kernel/pure';
 import { AutomationInvariantError } from '../errors/automation-errors';
 
 /**

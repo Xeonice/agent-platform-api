@@ -47,6 +47,6 @@ import { ProjectMcpTools } from './mcp/project.mcp-tools';
     { provide: BASELINE_MANAGER, useClass: FsBaselineDirManager },
     { provide: PROJECT_FACADE, useClass: ProjectFacadeAdapter },
   ],
-  exports: [ProjectApplicationService, RetainedVolumeService, PROJECT_FACADE],
+  exports: [ProjectApplicationService, RetainedVolumeService, CloneProjectWorkflow, PROJECT_FACADE],
 })
 export class ProjectModule {}

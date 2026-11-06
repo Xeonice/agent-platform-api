@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createPlatform } from '../../support/platform-app';
@@ -15,7 +16,7 @@ async function storedPlatform(extra: Record<string, string | undefined> = {}) {
 function cookie(response: { headers: Record<string, unknown> }): string {
   const headers = response.headers['set-cookie'];
   expect(Array.isArray(headers)).toBe(true);
-  return String((headers as string[])[0]).split(';')[0]!;
+  return assertDefined(String((headers as string[])[0]).split(';')[0]);
 }
 const unlock = (server: Parameters<typeof request>[0], passcode: string) =>
   request(server).post('/api/access/unlock').send({ passcode });

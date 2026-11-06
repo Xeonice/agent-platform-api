@@ -1,19 +1,18 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { eq, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { ProjectId, Tx } from '@platform/shared-kernel';
 import { Project } from '../../../domain/entities/project.entity';
-import type {
-  CloneErrorCode,
-  ProjectSourceType,
-  WorkspaceMode,
-} from '../../../domain/entities/project.entity';
-import type { CloneStatus } from '../../../domain/value-objects/project-status.vo';
 import type { ProjectRepository } from '../../../domain/repositories/project.repository';
 import { projects, type ProjectRow } from '../schema/project.sqlite';
+import {
+  PROJECT_READ_PROJECTION,
+  type ProjectReadProjection,
+} from '../../../domain/ports/project-read-projection.port';
+import { asProjectId } from '@platform/shared-kernel';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * SQLite (better-sqlite3 + Drizzle) implementation of ProjectRepository (28 §4/§7.3).
@@ -21,11 +20,16 @@ type Db = BetterSQLite3Database<Record<string, never>>;
  */
 @Injectable()
 export class SqliteProjectRepository implements ProjectRepository {
-  constructor(@Inject(DATABASE) private readonly db: Db) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Db,
+    @Optional()
+    @Inject(PROJECT_READ_PROJECTION)
+    private readonly projection?: ProjectReadProjection,
+  ) {}
 
   async findById(id: ProjectId): Promise<Project | null> {
     const row = this.db.select().from(projects).where(eq(projects.id, id)).get();
-    return row ? this.toDomain(row) : null;
+    return Promise.resolve(row ? this.toDomain(row) : null);
   }
 
   findByIdSync(_tx: Tx, id: ProjectId): Project | null {
@@ -34,16 +38,22 @@ export class SqliteProjectRepository implements ProjectRepository {
   }
 
   async findByName(name: string): Promise<Project | null> {
+    if (this.projection?.authoritative?.()) {
+      const id = this.projection.findIdByName?.(name);
+      return id ? this.findById(asProjectId(id)) : null;
+    }
     const row = this.db.select().from(projects).where(eq(projects.name, name)).get();
     return row ? this.toDomain(row) : null;
   }
 
   async findAll(): Promise<Project[]> {
-    return this.db
-      .select()
-      .from(projects)
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(projects)
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
   async count(): Promise<number> {
@@ -51,13 +61,18 @@ export class SqliteProjectRepository implements ProjectRepository {
       .select({ n: sql<number>`count(*)` })
       .from(projects)
       .get();
-    return row?.n ?? 0;
+    return Promise.resolve(row?.n ?? 0);
   }
 
   saveSync(_tx: Tx, project: Project): void {
+    const authoritative = this.projection?.authoritative?.() ?? false;
+    const name = authoritative
+      ? this.projection?.saveNameSync?.(_tx, project.id, project.name)
+      : project.name;
+    if (typeof name !== 'string') throw new Error('PROJECT_NAME_AUTHORITY_UNAVAILABLE');
     const values = {
       id: project.id as string,
-      name: project.name,
+      name,
       sourceType: project.sourceType,
       repoUrl: project.repoUrl,
       repoBranch: project.repoBranch,
@@ -98,16 +113,16 @@ export class SqliteProjectRepository implements ProjectRepository {
 
   private toDomain(row: ProjectRow): Project {
     return Project.rehydrate({
-      id: row.id as ProjectId,
-      name: row.name,
-      sourceType: row.sourceType as ProjectSourceType,
+      id: asProjectId(row.id),
+      name: this.projection?.name(row.id, row.name) ?? row.name,
+      sourceType: row.sourceType,
       repoUrl: row.repoUrl,
       repoBranch: row.repoBranch,
-      cloneStatus: row.cloneStatus as CloneStatus,
-      cloneErrorCode: row.cloneErrorCode as CloneErrorCode | null,
+      cloneStatus: row.cloneStatus,
+      cloneErrorCode: row.cloneErrorCode,
       baselinePath: row.baselinePath,
       baselineSizeBytes: row.baselineSizeBytes,
-      workspaceMode: row.workspaceMode as WorkspaceMode,
+      workspaceMode: row.workspaceMode,
       version: row.version,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,

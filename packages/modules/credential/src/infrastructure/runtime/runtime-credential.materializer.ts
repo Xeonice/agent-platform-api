@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { isRecord } from '@platform/shared-kernel';
 import { CRYPTO_SERVICE } from '../../domain/ports/crypto.port';
 import type { CryptoService } from '../../domain/ports/crypto.port';
 import { MissingPlatformAuthFileError } from '../../domain/ports/runtime-credential-materializer.port';
@@ -8,6 +9,7 @@ import type {
   MaterializedRuntimeCredential,
   RuntimeCredentialMaterializer,
   RuntimeSecretPayload,
+  RuntimeCredentialFileMaterial,
 } from '../../domain/ports/runtime-credential-materializer.port';
 
 /**
@@ -63,7 +65,7 @@ export class DefaultRuntimeCredentialMaterializer implements RuntimeCredentialMa
   private async decryptPayload(input: MaterializeRuntimeInput): Promise<RuntimeSecretPayload> {
     const secret = await this.crypto.decrypt(input.secret); // throws DecryptionError
     try {
-      return secret.use((buf) => JSON.parse(buf.toString('utf8')) as RuntimeSecretPayload);
+      return secret.use((buf) => decodePayload(JSON.parse(buf.toString('utf8'))));
     } finally {
       secret.zeroize();
     }
@@ -97,4 +99,48 @@ export class DefaultRuntimeCredentialMaterializer implements RuntimeCredentialMa
     };
     return out;
   }
+}
+
+function decodePayload(value: unknown): RuntimeSecretPayload {
+  if (!isRecord(value)) throw new Error('Invalid runtime credential payload');
+  return {
+    credentialFiles: decodeFiles(value.credentialFiles),
+    env: decodeEnvironment(value.env),
+    accessToken: optionalString(value.accessToken),
+    authFile: optionalString(value.authFile),
+  };
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === undefined || typeof value === 'string') return value;
+  throw new Error('Invalid runtime credential string field');
+}
+
+function decodeFiles(value: unknown): RuntimeCredentialFileMaterial[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('Invalid runtime credential files');
+  return value.map((file: unknown) => {
+    if (
+      !isRecord(file) ||
+      typeof file.containerPath !== 'string' ||
+      typeof file.content !== 'string'
+    )
+      throw new Error('Invalid runtime credential file');
+    return {
+      containerPath: file.containerPath,
+      content: file.content,
+      mode: optionalString(file.mode),
+    };
+  });
+}
+
+function decodeEnvironment(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error('Invalid runtime credential environment');
+  const entries: [string, string][] = [];
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== 'string') throw new Error('Invalid runtime credential environment value');
+    entries.push([key, item]);
+  }
+  return Object.fromEntries(entries);
 }

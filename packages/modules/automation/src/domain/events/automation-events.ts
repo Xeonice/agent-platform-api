@@ -1,4 +1,4 @@
-import type { AutomationId, DomainEvent, ProjectId } from '@platform/shared-kernel';
+import type { AutomationId, DomainEvent, ProjectId } from '@platform/shared-kernel/pure';
 
 /**
  * automation 领域事件（23 §11.5）。

@@ -1,3 +1,5 @@
+import { platformInstanceId } from '@platform/shared-kernel';
+import { assertControlMetadataBusinessCompatibility } from './control-metadata-schema-bridge';
 import { resolve } from 'node:path';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -5,7 +7,7 @@ import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 
-export type Db = BetterSQLite3Database<Record<string, never>>;
+export type Db = BetterSQLite3Database;
 
 export interface Connection {
   sqlite: Database.Database;
@@ -82,6 +84,11 @@ export function createConnection(filename: string): Connection {
  * migration that leaves dangling references must not boot the app.
  */
 export function runMigrations(db: Db, sqlite?: Database.Database): void {
+  if (process.env.UPGRADE_CONTROL_DATABASE_PATH) {
+    if (!sqlite) throw new Error('CONTROL_BRIDGE_BUSINESS_HANDLE_REQUIRED');
+    assertControlMetadataBusinessCompatibility(sqlite, migrationsDir(), platformInstanceId());
+    return; // Only the reviewed control metadata migration is externalized.
+  }
   sqlite?.pragma('foreign_keys = OFF');
   try {
     migrate(db, { migrationsFolder: migrationsDir() });
@@ -89,11 +96,13 @@ export function runMigrations(db: Db, sqlite?: Database.Database): void {
     sqlite?.pragma('foreign_keys = ON');
   }
   if (!sqlite) return;
-  const violations = sqlite.pragma('foreign_key_check') as unknown[];
+  const violations: unknown = sqlite.pragma('foreign_key_check');
+  if (!Array.isArray(violations))
+    throw new Error('SQLite returned an invalid foreign-key check result');
   if (violations.length > 0) {
     throw new Error(
       `migrations left ${String(violations.length)} dangling foreign key reference(s): ` +
-        `${JSON.stringify(violations.slice(0, 5))}`,
+        JSON.stringify(violations.slice(0, 5)),
     );
   }
 }

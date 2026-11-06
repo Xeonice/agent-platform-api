@@ -1,4 +1,4 @@
-import type { AutomationId, ProjectId, Tx } from '@platform/shared-kernel';
+import type { AutomationId, ProjectId, Tx } from '@platform/shared-kernel/pure';
 import type { Automation } from '../entities/automation.entity';
 
 /** `AutomationRepository`（23 §11.6 逐条对齐）。 */

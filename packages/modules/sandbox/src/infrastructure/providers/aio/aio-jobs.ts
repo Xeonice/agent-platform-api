@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { randomBytes } from 'node:crypto';
 import {
   SandboxProviderError,
@@ -314,8 +315,8 @@ async function assertSurvivesTheJob(
   if (ttlSeconds * 1000 > timeoutMs) return;
   throw new SandboxProviderError(
     SandboxProviderErrorCode.INVALID_STATE,
-    `this sandbox's in-sandbox agent reaps idle sessions after ${ttlSeconds}s, which is not ` +
-      `longer than the ${Math.round(timeoutMs / 1000)}s this job asked for — the job would be ` +
+    `this sandbox's in-sandbox agent reaps idle sessions after ${String(ttlSeconds)}s, which is not ` +
+      `longer than the ${String(Math.round(timeoutMs / 1000))}s this job asked for — the job would be ` +
       'destroyed mid-run together with its output and exit code (04 §2.6 生存义务). The ' +
       'survival env is set at CREATE time, so recreate the sandbox rather than lowering the tier.',
   );
@@ -328,7 +329,7 @@ async function createBashSession(http: AioAgentHttp, sessionId: string): Promise
   if (!res.ok || parsed.success === false) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent could not create a bash session: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      `AIO agent could not create a bash session: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
     );
   }
 }
@@ -373,7 +374,7 @@ async function readBashOutput(
   if (!res.ok || parsed.success === false) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent job read failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      `AIO agent job read failed: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
     );
   }
   const data = parsed.data ?? {};
@@ -490,13 +491,13 @@ function decodeJobId(jobId: string): DecodedJobId {
   } catch {
     raw = null;
   }
-  if (typeof raw !== 'object' || raw === null) {
+  if (!isRecord(raw)) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INVALID_STATE,
       'job handle was not minted by this provider (unreadable jobId)',
     );
   }
-  const o = raw as Record<string, unknown>;
+  const o = raw;
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   const decoded = {
     sessionId: str(o.s),
@@ -532,8 +533,8 @@ function decodeCursor(cursor?: JobCursor): DecodedCursor {
   if (cursor === undefined || cursor === '') return { stdout: 0, stderr: 0 };
   try {
     const raw: unknown = JSON.parse(cursor);
-    if (typeof raw !== 'object' || raw === null) return { stdout: 0, stderr: 0 };
-    const o = raw as Record<string, unknown>;
+    if (!isRecord(raw)) return { stdout: 0, stderr: 0 };
+    const o = raw;
     const num = (v: unknown): number => (typeof v === 'number' && v >= 0 ? v : 0);
     return { stdout: num(o.o), stderr: num(o.e) };
   } catch {
@@ -576,19 +577,26 @@ class JobStream {
     private readonly ws: WebSocket,
     readonly key: string,
   ) {
-    ws.addEventListener('message', (ev: MessageEvent) => this.onMessage(ev));
-    ws.addEventListener('close', () => this.die());
-    ws.addEventListener('error', () => this.die());
+    ws.addEventListener('message', (ev: MessageEvent) => {
+      this.onMessage(ev);
+    });
+    ws.addEventListener('close', () => {
+      this.die();
+    });
+    ws.addEventListener('error', () => {
+      this.die();
+    });
   }
 
   private onMessage(ev: MessageEvent): void {
     const raw = typeof ev.data === 'string' ? ev.data : String(ev.data);
-    let frame: { type?: string };
+    let frame: unknown;
     try {
-      frame = JSON.parse(raw) as { type?: string };
+      frame = JSON.parse(raw);
     } catch {
       return;
     }
+    if (!isRecord(frame)) return;
     if (frame.type === 'command_done') this.done = true;
     if (frame.type === 'output' || frame.type === 'command_done') this.wake();
   }
@@ -602,7 +610,7 @@ class JobStream {
         if (i >= 0) this.waiters.splice(i, 1);
         resolve();
       }, ms);
-      timer.unref?.();
+      timer.unref();
       const onWake = (): void => {
         clearTimeout(timer);
         resolve();

@@ -1,15 +1,15 @@
+import { readSqlite } from './read-sqlite';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { DATABASE } from '@platform/shared-kernel';
+import { DATABASE, isRecord, asAgentTaskId, asSandboxId } from '@platform/shared-kernel';
 import type { AgentTaskId, SandboxId, Tx } from '@platform/shared-kernel';
 import { AgentTask } from '../../../domain/entities/agent-task.entity';
 import type { PersistedJobHandle, TaskArtifact } from '../../../domain/entities/agent-task.entity';
-import type { AgentTaskStatus } from '../../../domain/value-objects/agent-task-status.vo';
 import type { AgentTaskRepository } from '../../../domain/repositories/agent-task.repository';
 import { agentTasks, type AgentTaskRow } from '../schema/agent-task.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * SQLite (better-sqlite3 + Drizzle) implementation of `AgentTaskRepository`.
@@ -26,19 +26,29 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 export class SqliteAgentTaskRepository implements AgentTaskRepository {
   constructor(@Inject(DATABASE) private readonly db: Db) {}
 
-  async findById(id: AgentTaskId): Promise<AgentTask | null> {
-    const row = this.db.select().from(agentTasks).where(eq(agentTasks.id, id)).get();
-    return row ? this.toDomain(row) : null;
+  findById(id: AgentTaskId): Promise<AgentTask | null> {
+    return readSqlite(() => {
+      const row = this.db.select().from(agentTasks).where(eq(agentTasks.id, id)).get();
+      return row ? this.toDomain(row) : null;
+    });
   }
 
-  async findBySandbox(sandboxId: SandboxId): Promise<AgentTask[]> {
-    const rows = this.db.select().from(agentTasks).where(eq(agentTasks.sandboxId, sandboxId)).all();
-    return rows.map((row) => this.toDomain(row));
+  findBySandbox(sandboxId: SandboxId): Promise<AgentTask[]> {
+    return readSqlite(() => {
+      const rows = this.db
+        .select()
+        .from(agentTasks)
+        .where(eq(agentTasks.sandboxId, sandboxId))
+        .all();
+      return rows.map((row) => this.toDomain(row));
+    });
   }
 
-  async findRunning(): Promise<AgentTask[]> {
-    const rows = this.db.select().from(agentTasks).where(eq(agentTasks.status, 'running')).all();
-    return rows.map((row) => this.toDomain(row));
+  findRunning(): Promise<AgentTask[]> {
+    return readSqlite(() => {
+      const rows = this.db.select().from(agentTasks).where(eq(agentTasks.status, 'running')).all();
+      return rows.map((row) => this.toDomain(row));
+    });
   }
 
   saveSync(_tx: Tx, task: AgentTask): void {
@@ -122,12 +132,12 @@ export class SqliteAgentTaskRepository implements AgentTaskRepository {
 
   private toDomain(row: AgentTaskRow): AgentTask {
     return AgentTask.rehydrate({
-      id: row.id as AgentTaskId,
-      sandboxId: row.sandboxId as SandboxId,
+      id: asAgentTaskId(row.id),
+      sandboxId: asSandboxId(row.sandboxId),
       runtime: row.runtime,
       jobHandle: decodeJobHandle(row.jobHandle),
       cursor: row.cursor,
-      status: row.status as AgentTaskStatus,
+      status: row.status,
       exitCode: row.exitCode,
       sessionRef: row.sessionRef,
       lastSeq: row.lastSeq,
@@ -151,8 +161,8 @@ function epochSeconds(at: Date | null): number | null {
 function decodeJobHandle(raw: string): PersistedJobHandle {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed === 'object' && parsed !== null) {
-      const o = parsed as Record<string, unknown>;
+    if (isRecord(parsed)) {
+      const o = parsed;
       return {
         provider: typeof o.provider === 'string' ? o.provider : '',
         jobId: typeof o.jobId === 'string' ? o.jobId : '',
@@ -171,8 +181,8 @@ function decodeArtifacts(raw: string): TaskArtifact[] {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.flatMap((entry): TaskArtifact[] => {
-      if (typeof entry !== 'object' || entry === null) return [];
-      const o = entry as Record<string, unknown>;
+      if (!isRecord(entry)) return [];
+      const o = entry;
       if (typeof o.name !== 'string') return [];
       return [
         {

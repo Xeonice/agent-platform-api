@@ -63,5 +63,5 @@ export function humanBytes(bytes: number): string {
     v /= 1024;
     i++;
   }
-  return `${v >= 100 || i === 0 ? Math.round(v).toString() : v.toFixed(1)} ${units[i]!}`;
+  return `${v >= 100 || i === 0 ? Math.round(v).toString() : v.toFixed(1)} ${units[i]}`;
 }

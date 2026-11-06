@@ -52,7 +52,7 @@ export class ImageFacadeAdapter implements ImageFacade {
     const byId = await this.manifests.findById(wanted);
     if (byId)
       return this.assertRunnable(
-        await this.assertSelectable(byId, await this.imageOf(byId), wanted),
+        this.assertSelectable(byId, await this.imageOf(byId), wanted),
         byId,
         provider,
         wanted,

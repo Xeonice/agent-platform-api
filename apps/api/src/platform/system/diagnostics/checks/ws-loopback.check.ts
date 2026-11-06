@@ -1,5 +1,5 @@
+import { errorMessage } from '@platform/shared-kernel';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { Inject, Injectable } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -72,7 +72,7 @@ export class WsLoopbackCheck implements DiagnoseCheck {
         status: 'fail',
         headline: '连不上自己，实时推送会失灵',
         detailText:
-          `从本机连 127.0.0.1:${String(port)} 失败：${(e as Error).message}。` +
+          `从本机连 127.0.0.1:${String(port)} 失败：${errorMessage(e)}。` +
           '沙箱状态、终端、任务流都靠它推。',
         nextStep: '确认平台自己的端口能从本机访问。',
         command: `curl -sv http://127.0.0.1:${String(port)}/api/health`,
@@ -83,11 +83,8 @@ export class WsLoopbackCheck implements DiagnoseCheck {
 
   /** 实际监听端口；还没 listen 时回 `null`（而不是退回配置值去猜）。 */
   private listeningPort(): number | null {
-    const server: unknown = this.adapterHost.httpAdapter?.getHttpServer() as unknown;
-    const addr =
-      server !== null && typeof server === 'object' && 'address' in server
-        ? (server as { address(): AddressInfo | string | null }).address()
-        : null;
+    const server: unknown = this.adapterHost.httpAdapter.getHttpServer();
+    const addr = server instanceof http.Server ? server.address() : null;
     if (addr !== null && typeof addr === 'object' && typeof addr.port === 'number')
       return addr.port;
     return env.port > 0 ? env.port : null;
@@ -100,11 +97,10 @@ function get(port: number, path: string, ctx: DiagnoseContext): Promise<string> 
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c: string) => (body += c));
-      res.on('end', () =>
-        res.statusCode !== undefined && res.statusCode < 400
-          ? resolve(body)
-          : reject(new Error(`HTTP ${String(res.statusCode)}`)),
-      );
+      res.on('end', () => {
+        if (res.statusCode !== undefined && res.statusCode < 400) resolve(body);
+        else reject(new Error(`HTTP ${String(res.statusCode)}`));
+      });
     });
     req.setTimeout(ctx.timeoutMs, () =>
       req.destroy(new Error(`${String(ctx.timeoutMs)}ms 内无应答`)),

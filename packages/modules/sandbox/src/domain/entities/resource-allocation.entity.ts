@@ -1,5 +1,5 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { NodeId, SandboxId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { NodeId, SandboxId } from '@platform/shared-kernel/pure';
 import type { ResourceQuota } from '../value-objects/resource-quota.vo';
 import { SandboxInvariantViolationError } from '../errors/invariant-violation.error';
 

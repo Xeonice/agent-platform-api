@@ -62,6 +62,6 @@ export async function writeCredentialFile(
     timeoutMs: SEED_WRITE_TIMEOUT_MS,
   });
   if (r.exitCode !== 0) {
-    throw fail(`writing ${file.containerPath} failed (exit ${r.exitCode})`);
+    throw fail(`writing ${file.containerPath} failed (exit ${String(r.exitCode)})`);
   }
 }

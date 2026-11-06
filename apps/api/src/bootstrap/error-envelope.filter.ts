@@ -69,7 +69,7 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
       // 判据是「body 里有没有 code」，不是「信封完不完整」：给了名字就必须让它活着出线，
       // 缺的两位补齐即可。`...body` 在前，保住随行字段（`retryAfterSec`、`sideEffectFree`
       // 这些只有抛出点知道的东西）。
-      if (isPartialEnvelope(body) === false && hasCode(body)) {
+      if (!isPartialEnvelope(body) && hasCode(body)) {
         return {
           ...body,
           code: body.code,
@@ -149,7 +149,8 @@ function nestMessage(body: unknown): string | undefined {
  * 408/429 是例外：它们说的正是"稍后再来"。
  */
 function defaultRetryable(status: number): boolean {
-  if (status === HttpStatus.REQUEST_TIMEOUT || status === HttpStatus.TOO_MANY_REQUESTS) return true;
+  const known = knownHttpStatus(status);
+  if (known === HttpStatus.REQUEST_TIMEOUT || known === HttpStatus.TOO_MANY_REQUESTS) return true;
   return status >= 500;
 }
 
@@ -160,7 +161,7 @@ function defaultRetryable(status: number): boolean {
  * 变成"就地改配置"，用户的半成品沙箱就没人回收了。
  */
 function codeForStatus(status: number): string {
-  switch (status) {
+  switch (knownHttpStatus(status)) {
     case HttpStatus.BAD_REQUEST:
       return 'BAD_REQUEST';
     case HttpStatus.UNAUTHORIZED:
@@ -182,4 +183,12 @@ function codeForStatus(status: number): string {
     default:
       return status >= 500 ? 'INTERNAL' : 'BAD_REQUEST';
   }
+}
+
+function knownHttpStatus(status: number): HttpStatus | undefined {
+  return isHttpStatus(status) ? status : undefined;
+}
+
+function isHttpStatus(status: number): status is HttpStatus {
+  return Object.hasOwn(HttpStatus, status);
 }

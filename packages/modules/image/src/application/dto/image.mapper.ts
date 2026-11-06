@@ -25,6 +25,7 @@ export const ImageMapper = {
       digest: manifest.digest,
       entrypointContract: manifest.entrypointContract,
       supportedRuntimes: manifest.supportedRuntimes,
+      runtimeVersions: manifest.runtimeVersions,
       resourceDefaults: manifest.resourceDefaults,
       labelsRequired: manifest.labelsRequired,
       derivedFromDigest: manifest.derivedFromDigest,

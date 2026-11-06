@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import type { RuntimeEvent } from '@platform/contracts';
 import { RUNTIME_REFRESH_TOKEN_PLACEHOLDER } from '@platform/shared-kernel';
 import { stripAnsi } from '../ansi.util';
@@ -35,15 +36,15 @@ export function codexLoginSucceeded(raw: string): boolean {
 }
 
 export interface CodexAuthJson {
-  auth_mode?: string;
+  auth_mode?: string | null;
   OPENAI_API_KEY?: string | null;
   tokens?: {
-    id_token?: string;
-    access_token?: string;
-    refresh_token?: string;
-    account_id?: string;
-  };
-  last_refresh?: string;
+    id_token?: string | null;
+    access_token?: string | null;
+    refresh_token?: string | null;
+    account_id?: string | null;
+  } | null;
+  last_refresh?: string | null;
 }
 
 /**
@@ -51,7 +52,35 @@ export interface CodexAuthJson {
  * contains NEVER leaves the platform (P0-3) — see `sanitizeCodexAuthJson`.
  */
 export function parseCodexAuthJson(jsonText: string): CodexAuthJson {
-  return JSON.parse(jsonText) as CodexAuthJson;
+  const parsed: unknown = JSON.parse(jsonText);
+  if (!isRecord(parsed)) throw new Error('codex auth.json is not a JSON object');
+  const tokens = parsed.tokens;
+  if (tokens !== undefined && tokens !== null && !isRecord(tokens))
+    throw new Error('codex auth.json tokens is not a JSON object');
+  const apiKey = parsed.OPENAI_API_KEY;
+  return {
+    ...parsed,
+    auth_mode: optionalString(parsed.auth_mode),
+    OPENAI_API_KEY: apiKey === null ? null : optionalString(apiKey),
+    last_refresh: optionalString(parsed.last_refresh),
+    ...(tokens === undefined || tokens === null
+      ? {}
+      : {
+          tokens: {
+            ...tokens,
+            id_token: optionalString(tokens.id_token),
+            access_token: optionalString(tokens.access_token),
+            refresh_token: optionalString(tokens.refresh_token),
+            account_id: optionalString(tokens.account_id),
+          },
+        }),
+  };
+}
+
+function optionalString(value: unknown): string | null | undefined {
+  if (value !== undefined && value !== null && typeof value !== 'string')
+    throw new Error('codex auth.json contains an invalid string field');
+  return value;
 }
 
 /**
@@ -71,15 +100,12 @@ export function parseCodexAuthJson(jsonText: string): CodexAuthJson {
  */
 export function sanitizeCodexAuthJson(rawAuthJson: string): string {
   const parsed: unknown = JSON.parse(rawAuthJson);
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     throw new Error('codex auth.json is not a JSON object');
   }
-  const root = parsed as Record<string, unknown>;
+  const root = parsed;
   const tokens = root.tokens;
-  const sanitizedTokens: Record<string, unknown> =
-    typeof tokens === 'object' && tokens !== null && !Array.isArray(tokens)
-      ? { ...(tokens as Record<string, unknown>) }
-      : {};
+  const sanitizedTokens: Record<string, unknown> = isRecord(tokens) ? { ...tokens } : {};
   sanitizedTokens.refresh_token = RUNTIME_REFRESH_TOKEN_PLACEHOLDER;
   return JSON.stringify({ ...root, tokens: sanitizedTokens });
 }
@@ -178,8 +204,8 @@ function mapCodexEvent(e: Record<string, unknown>): RuntimeEvent[] | null {
  * command line in `name` would make the two runtimes disagree about what the field means.
  */
 function mapCodexItem(raw: unknown, status: 'started' | 'completed'): RuntimeEvent[] | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const item = raw as Record<string, unknown>;
+  if (!isRecord(raw)) return null;
+  const item = raw;
   const id = str(item.id);
   switch (item.type) {
     case 'agent_message':
@@ -243,8 +269,8 @@ function str(v: unknown): string {
 /** codex reports a failure as an object; flatten it to the one field the union has. */
 function errorMessage(raw: unknown): string {
   if (typeof raw === 'string') return raw;
-  if (typeof raw === 'object' && raw !== null) {
-    const o = raw as Record<string, unknown>;
+  if (isRecord(raw)) {
+    const o = raw;
     const message = str(o.message);
     const type = str(o.type);
     if (message !== '') return type === '' ? message : `${type}: ${message}`;
@@ -256,9 +282,7 @@ function errorMessage(raw: unknown): string {
 function safeJson(line: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(line);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }

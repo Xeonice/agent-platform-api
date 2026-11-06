@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull, isNotNull, sql, or, gt } from 'drizzle-orm';
+import { and, eq, isNull, isNotNull, sql, or, gt, exists } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { CredentialId, SandboxId, Tx } from '@platform/shared-kernel';
@@ -11,8 +11,9 @@ import {
 } from '../schema/credential-sandbox-binding.sqlite';
 
 import { credentials } from '../schema/credential.sqlite';
+import { asCredentialId, asSandboxId } from '@platform/shared-kernel';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** SQLite CredentialSandboxBindingRepository (docs/backend/13 §2.5.2). */
 @Injectable()
@@ -34,16 +35,18 @@ export class SqliteCredentialSandboxBindingRepository implements CredentialSandb
         ),
       )
       .get();
-    return row ? this.toDomain(row) : null;
+    return Promise.resolve(row ? this.toDomain(row) : null);
   }
 
   async listBySandbox(sandboxId: SandboxId): Promise<CredentialSandboxBinding[]> {
-    return this.db
-      .select()
-      .from(credentialSandboxBindings)
-      .where(eq(credentialSandboxBindings.sandboxId, sandboxId))
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentialSandboxBindings)
+        .where(eq(credentialSandboxBindings.sandboxId, sandboxId))
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
   async listByCredential(
@@ -52,22 +55,34 @@ export class SqliteCredentialSandboxBindingRepository implements CredentialSandb
   ): Promise<CredentialSandboxBinding[]> {
     const base = eq(credentialSandboxBindings.credentialId, credentialId);
     const where = includeCleared ? base : and(base, isNull(credentialSandboxBindings.revokedAt));
-    return this.db
-      .select()
-      .from(credentialSandboxBindings)
-      .where(where)
-      .all()
-      .map((r) => this.toDomain(r));
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(credentialSandboxBindings)
+        .where(where)
+        .all()
+        .map((r) => this.toDomain(r)),
+    );
   }
 
-  async listPendingRevocations(): Promise<CredentialSandboxBinding[]> {
-    return this.db
-      .select({ binding: credentialSandboxBindings })
-      .from(credentialSandboxBindings)
-      .innerJoin(credentials, eq(credentials.id, credentialSandboxBindings.credentialId))
-      .where(and(isNull(credentialSandboxBindings.revokedAt), isNotNull(credentials.revokedAt)))
-      .all()
-      .map((row) => this.toDomain(row.binding));
+  async listPendingRevocations(credentialId?: CredentialId): Promise<CredentialSandboxBinding[]> {
+    return Promise.resolve(
+      this.db
+        .select({ binding: credentialSandboxBindings })
+        .from(credentialSandboxBindings)
+        .innerJoin(credentials, eq(credentials.id, credentialSandboxBindings.credentialId))
+        .where(
+          and(
+            isNull(credentialSandboxBindings.revokedAt),
+            isNotNull(credentials.revokedAt),
+            credentialId === undefined
+              ? undefined
+              : eq(credentialSandboxBindings.credentialId, credentialId),
+          ),
+        )
+        .all()
+        .map((row) => this.toDomain(row.binding)),
+    );
   }
 
   migrateCredentialSync(_tx: Tx, previousId: CredentialId, nextId: CredentialId): void {
@@ -134,19 +149,39 @@ export class SqliteCredentialSandboxBindingRepository implements CredentialSandb
       .run();
   }
 
-  markClearedSync(_tx: Tx, id: string, at: Date): void {
-    this.db
+  markClearedSync(
+    _tx: Tx,
+    identity: Readonly<{ id: string; credentialId: CredentialId; sandboxId: SandboxId }>,
+    at: Date,
+  ): boolean {
+    const result = this.db
       .update(credentialSandboxBindings)
       .set({ revokedAt: at })
-      .where(eq(credentialSandboxBindings.id, id))
+      .where(
+        and(
+          eq(credentialSandboxBindings.id, identity.id),
+          eq(credentialSandboxBindings.credentialId, identity.credentialId),
+          eq(credentialSandboxBindings.sandboxId, identity.sandboxId),
+          isNull(credentialSandboxBindings.revokedAt),
+          exists(
+            this.db
+              .select({ id: credentials.id })
+              .from(credentials)
+              .where(
+                and(eq(credentials.id, identity.credentialId), isNotNull(credentials.revokedAt)),
+              ),
+          ),
+        ),
+      )
       .run();
+    return result.changes === 1;
   }
 
   private toDomain(row: CredentialSandboxBindingRow): CredentialSandboxBinding {
     return CredentialSandboxBinding.rehydrate({
       id: row.id,
-      credentialId: row.credentialId as CredentialId,
-      sandboxId: row.sandboxId as SandboxId,
+      credentialId: asCredentialId(row.credentialId),
+      sandboxId: asSandboxId(row.sandboxId),
       injectedAt: row.injectedAt,
       revokedAt: row.revokedAt,
     });

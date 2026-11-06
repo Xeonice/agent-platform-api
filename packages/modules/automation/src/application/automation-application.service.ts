@@ -236,6 +236,22 @@ export class AutomationApplicationService {
     this.uow.run((tx) => {
       this.repo.saveSync(tx, automation);
     });
+    this.audit.record({
+      category: 'project',
+      type: 'automation.updated',
+      actor: 'user',
+      subjectType: 'automation',
+      subjectId: automation.id,
+      summary: '更新了自动化规则',
+      // Only changed field names: prompts, webhook URLs and names are never evidence.
+      detail: {
+        fieldNames: Object.entries<unknown>(patch)
+          .filter(([, value]) => value !== undefined)
+          .map(([field]) => field)
+          .sort(),
+      },
+      outcome: 'ok',
+    });
     return AutomationMapper.toDto(automation);
   }
 

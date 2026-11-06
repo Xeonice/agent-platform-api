@@ -5,7 +5,7 @@ import {
   type FileEntry,
 } from '@platform/contracts';
 import { spreadModifiedAt } from '../shared/modified-at';
-import { epochSecondsToIso } from '@platform/shared-kernel';
+import { epochSecondsToIso, isRecord } from '@platform/shared-kernel';
 import {
   isJsonResponse,
   isNotFoundEnvelope,
@@ -50,7 +50,7 @@ export async function readFileBytes(http: AioAgentHttp, path: string): Promise<B
   if (!res.ok) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent file download failed: HTTP ${res.status} for ${path}`,
+      `AIO agent file download failed: HTTP ${String(res.status)} for ${path}`,
     );
   }
   const body = Buffer.from(await res.arrayBuffer());
@@ -68,7 +68,7 @@ export async function openFileStream(
     if (res.ok) return null;
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent file download failed: HTTP ${res.status} for ${path}`,
+      `AIO agent file download failed: HTTP ${String(res.status)} for ${path}`,
     );
   }
   // A JSON `not_found` envelope arrives with a 200, so it cannot be detected from
@@ -100,7 +100,7 @@ export async function writeFileContent(
   if (!res.ok || parsed.success === false) {
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent file write failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      `AIO agent file write failed: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
     );
   }
 }
@@ -128,7 +128,7 @@ export async function listFiles(
     if (isNotFoundMessage(parsed.message)) return [];
     throw new SandboxProviderError(
       SandboxProviderErrorCode.INTERNAL,
-      `AIO agent file list failed: HTTP ${res.status} ${parsed.message ?? ''}`.trim(),
+      `AIO agent file list failed: HTTP ${String(res.status)} ${parsed.message ?? ''}`.trim(),
     );
   }
   const rows = agentFileRows(parsed.data);
@@ -153,13 +153,13 @@ export async function listFiles(
 /** Locate the row array whichever key this agent build puts it under. */
 function agentFileRows(data: unknown): Record<string, unknown>[] {
   const candidates: unknown[] = [data];
-  if (typeof data === 'object' && data !== null) {
-    const o = data as Record<string, unknown>;
+  if (isRecord(data)) {
+    const o = data;
     candidates.push(o.files, o.entries, o.items);
   }
   for (const c of candidates) {
     if (Array.isArray(c)) {
-      return c.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null);
+      return c.filter(isRecord);
     }
   }
   return [];
@@ -169,7 +169,7 @@ function toFileEntry(row: Record<string, unknown>): FileEntry {
   const isDir = row.is_directory === true;
   const size = typeof row.size === 'number' ? row.size : undefined;
   return {
-    path: typeof row.path === 'string' ? row.path : String(row.name ?? ''),
+    path: typeof row.path === 'string' ? row.path : typeof row.name === 'string' ? row.name : '',
     kind: isDir ? 'dir' : 'file',
     // measured: the agent reports `size: null` for a directory ⇒ ABSENT, not 0.
     ...(isDir || size === undefined ? {} : { size }),

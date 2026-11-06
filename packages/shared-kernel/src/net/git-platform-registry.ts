@@ -19,12 +19,12 @@
  * `credential/.../infrastructure/git/known-hosts.ts` under its `defaultHost`; without a
  * pin the host simply falls back to `accept-new` TOFU. No switch/case anywhere changes.
  */
-export const GIT_PLATFORM_REGISTRY = {
+export const GIT_PLATFORM_REGISTRY = Object.freeze({
   github: { label: 'GitHub', defaultHost: 'github.com' },
   gitlab: { label: 'GitLab', defaultHost: 'gitlab.com' },
   gitee: { label: 'Gitee', defaultHost: 'gitee.com' },
   gitea: { label: 'Gitea', defaultHost: 'gitea.com' },
-} as const;
+} as const);
 
 /** The registry keys — the "first-class citizen" platform ids (excludes 'other'). */
 export type GitPlatformId = keyof typeof GIT_PLATFORM_REGISTRY;
@@ -36,7 +36,9 @@ export type GitPlatformId = keyof typeof GIT_PLATFORM_REGISTRY;
 export type GitPlatform = GitPlatformId | 'other';
 
 /** Ordered registry ids (insertion order: github, gitlab, gitee) — drives the zod/OpenAPI enum. */
-export const GIT_PLATFORM_IDS = Object.keys(GIT_PLATFORM_REGISTRY) as GitPlatformId[];
+export const GIT_PLATFORM_IDS = Object.keys(GIT_PLATFORM_REGISTRY).filter(
+  (key): key is GitPlatformId => Object.hasOwn(GIT_PLATFORM_REGISTRY, key),
+);
 
 /**
  * Map a platform hint to its default probe host, or null when there is none to derive

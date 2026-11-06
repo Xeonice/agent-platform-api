@@ -3,9 +3,15 @@ import type { Request, Response } from 'express';
 import { PasscodeService } from './passcode.service';
 import { PasscodeAttemptLimiter } from './passcode-attempt-limiter';
 import { passcodeInvalid, passcodeLocked, passcodeRequired } from './passcode-errors';
-import { SESSION_COOKIE, readCookie, setSessionCookie } from './session-cookie';
+import {
+  SESSION_COOKIE,
+  readCookie,
+  setSessionCookie,
+  presentedAccessPasscode,
+} from './session-cookie';
 import { readPublicNetworkConfig } from '../config/public-network';
 import { requestClientIp } from './client-ip';
+import { requireAuthorityDecision } from './access-authority-client';
 
 /**
  * Access passcode Guard — the FIRST real APP_GUARD (docs/shared/11 §3.1, MVP;
@@ -26,13 +32,16 @@ export class PasscodeGuard implements CanActivate {
     private readonly limiter: PasscodeAttemptLimiter,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
-    if (context.getType() !== 'http' || !this.passcodes.enabled) {
+  canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+    if (context.getType() !== 'http') {
       return true; // non-HTTP (STDIO MCP) or passcode disabled ⇒ allow
     }
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
-    if (this.isExempt(req) || this.passcodes.allowsLoopback(req.socket.remoteAddress)) return true;
+    if (this.isExempt(req)) return true;
+    if (this.passcodes.authorityEnabled) return this.authorizeAtAuthority(req, res);
+    if (!this.passcodes.enabled || this.passcodes.allowsLoopback(req.socket.remoteAddress))
+      return true;
 
     const now = Date.now();
     const ip = requestClientIp(req, this.network);
@@ -61,7 +70,7 @@ export class PasscodeGuard implements CanActivate {
       throw passcodeLocked(lockedFor);
     }
 
-    const presented = this.presentedPasscode(req);
+    const presented = presentedAccessPasscode(req);
     if (presented !== undefined && this.passcodes.matches(presented)) {
       this.limiter.reset(ip);
       setSessionCookie(res, this.passcodes.issueSessionToken(now));
@@ -76,19 +85,23 @@ export class PasscodeGuard implements CanActivate {
     throw passcodeRequired();
   }
 
+  private async authorizeAtAuthority(req: Request, res: Response): Promise<boolean> {
+    const decision = await this.passcodes.authorizeRequest(req);
+    requireAuthorityDecision(decision);
+    if (decision.sessionToken) setSessionCookie(res, decision.sessionToken);
+    return true;
+  }
+
   private isExempt(req: Request): boolean {
+    // Internal controllers enforce separate exact role keys and loopback scope.
+    // Ordinary browser access cookies are not internal RPC credentials.
+    if (req.path.startsWith('/internal/')) return true;
+    // Dedicated isolation probe requires the controller role key inside its
+    // handler. Access-passcode never authorizes this private evidence capability.
+    if (req.path === '/api/system/upgrade/probe') return true;
     if (req.method === 'GET' && req.path === '/api/health') return true;
     // the passcode-submission endpoint must itself be reachable without a passcode.
     if (req.method === 'POST' && req.path === '/api/access/unlock') return true;
     return false;
-  }
-
-  private presentedPasscode(req: Request): string | undefined {
-    const auth = req.headers.authorization;
-    if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length);
-    const header = req.headers['x-access-passcode'];
-    if (header) return Array.isArray(header) ? header[0] : header;
-    const q = req.query?.['passcode'];
-    return typeof q === 'string' ? q : undefined;
   }
 }

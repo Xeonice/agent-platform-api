@@ -1,4 +1,4 @@
-import type { SandboxId, ProjectId, Tx } from '@platform/shared-kernel';
+import type { SandboxId, ProjectId, Tx } from '@platform/shared-kernel/pure';
 import type { Sandbox } from '../entities/sandbox.entity';
 
 /**

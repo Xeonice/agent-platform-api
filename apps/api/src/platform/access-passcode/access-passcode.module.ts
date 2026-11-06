@@ -29,7 +29,7 @@ import { AccessPasscodeService } from './access-passcode.service';
     {
       provide: ACCESS_GATE_READER,
       useFactory: (passcode: PasscodeService): AccessGateReader => ({
-        isEnabled: () => passcode.enabled,
+        isEnabled: () => passcode.isEnabledAsync(),
       }),
       inject: [PasscodeService],
     },

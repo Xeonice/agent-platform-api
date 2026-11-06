@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SandboxProviderError, SandboxProviderErrorCode } from '@platform/contracts';
@@ -300,7 +301,8 @@ describe('the platform auth helper heals itself instead of failing until the API
   it.each([
     [
       'stopped',
-      (r: ReturnType<typeof rig>, id: string) => (r.provider.boxes.get(id)!.status = 'stopped'),
+      (r: ReturnType<typeof rig>, id: string) =>
+        (assertDefined(r.provider.boxes.get(id)).status = 'stopped'),
     ],
     ['removed', (r: ReturnType<typeof rig>, id: string) => r.provider.boxes.delete(id)],
     [
@@ -325,13 +327,13 @@ describe('the platform auth helper heals itself instead of failing until the API
   it('concurrent callers that find the same dead helper share one rebuild', async () => {
     const r = rig();
     const first = await r.session.require();
-    r.provider.boxes.get(first.handle.providerSandboxId)!.status = 'stopped';
+    assertDefined(r.provider.boxes.get(first.handle.providerSandboxId)).status = 'stopped';
     r.calls.length = 0;
     const all = await Promise.all([r.session.require(), r.session.require(), r.session.require()]);
     expect(new Set(all.map((h) => h.handle.providerSandboxId)).size).toBe(1);
-    expect(all[0]!.handle.providerSandboxId).not.toBe(first.handle.providerSandboxId);
+    expect(assertDefined(all[0]).handle.providerSandboxId).not.toBe(first.handle.providerSandboxId);
     expect([r.count('inspect'), r.count('create'), r.count('start')]).toEqual([3, 1, 1]);
-    expect(r.provider.helpers()).toEqual([all[0]!.handle.providerSandboxId]);
+    expect(r.provider.helpers()).toEqual([assertDefined(all[0]).handle.providerSandboxId]);
   });
 
   it('bootstrap only fires the preheat; a login racing it joins the same creation', async () => {
@@ -458,7 +460,7 @@ describe('the platform auth helper heals itself instead of failing until the API
       instanceState: 'instance_running',
       stale: false,
     });
-    r.provider.boxes.get(first.handle.providerSandboxId)!.status = 'stopped';
+    assertDefined(r.provider.boxes.get(first.handle.providerSandboxId)).status = 'stopped';
     expect(await r.session.observe()).toMatchObject({
       ready: true,
       instanceState: 'instance_exited',
@@ -611,12 +613,12 @@ describe('the container auth helper rebuilds once when the helper cannot run its
     // The isolated HOME lives under the helper's own $HOME (codex refuses /tmp), never in /tmp
     // unless the image has no HOME at all.
     expect(mint).toMatchObject({ tty: false });
-    expect(mint!.cmd.join(' ')).toContain('d="${HOME:-/tmp}"');
-    expect(mint!.cmd.join(' ')).toContain('mktemp -d "$d/auth-helper.XXXXXXXX"');
+    expect(assertDefined(mint).cmd.join(' ')).toContain('d="${HOME:-/tmp}"');
+    expect(assertDefined(mint).cmd.join(' ')).toContain('mktemp -d "$d/auth-helper.XXXXXXXX"');
     // Seeds go through stdin only: the credential never reaches argv.
     expect(written).toMatchObject({ tty: false, stdin: seed });
-    expect(written!.cmd.slice(-2)).toEqual([`${home}/.codex/auth.json`, '600']);
-    expect(written!.cmd.join(' ')).not.toContain('rt-secret');
+    expect(assertDefined(written).cmd.slice(-2)).toEqual([`${home}/.codex/auth.json`, '600']);
+    expect(assertDefined(written).cmd.join(' ')).not.toContain('rt-secret');
     expect(pty).toMatchObject({
       cmd: ['codex', 'login'],
       tty: true,
@@ -624,7 +626,7 @@ describe('the container auth helper rebuilds once when the helper cannot run its
       env: { TERM: 'xterm-256color', HOME: home, CODEX_HOME: home, ACME_CONFIG_DIR: home },
     });
     expect(await opened.readFile('auth.json')).toBe('{"tokens":{}}');
-    expect(r.provider.specs.at(-1)!.cmd).toEqual([
+    expect(assertDefined(r.provider.specs.at(-1)).cmd).toEqual([
       'sh',
       '-c',
       'cat "$1"',
@@ -632,7 +634,7 @@ describe('the container auth helper rebuilds once when the helper cannot run its
       `${home}/auth.json`,
     ]);
     await opened.dispose();
-    expect(r.provider.specs.at(-1)!.cmd).toEqual(['rm', '-rf', home]);
+    expect(assertDefined(r.provider.specs.at(-1)).cmd).toEqual(['rm', '-rf', home]);
   });
 
   it('dispose never throws, even when the helper vanished mid-session', async () => {

@@ -3,7 +3,7 @@
 # ⚠️ 这条纪律是踩出来的：同一个「本地没跑、推上去才被 CI 拦」的坑吃过多次。
 #    2026-09-04 又中一次 —— 一个 agent 中断时没来得及跑 `pnpm format`，
 #    `format:check` 在 CI 前的全量复核里才红。三道检查加起来 ~7 秒，
-#    而下面那个 `pnpm build` 本来就更慢，成本可以忽略。
+#    契约检查本身还会构建，快检成本可以忽略。
 set -e
 
 # ── 快检三连：格式 / lint / 类型 ──────────────────────────────────────────
@@ -27,13 +27,11 @@ if ! pnpm typecheck; then
 fi
 
 # ── 契约漂移门禁 ────────────────────────────────────────────────────────
-# ⚠️ api 的 openapi:emit 读的是 dist，所以必须【先 build】：dist 旧一轮，emit 出来的
-#    就是旧契约，门禁会静默变绿——那正是它要防的那种失败。
-pnpm build
+# check:openapi 自己先检查 HEAD 跟踪，再构建新 dist 并生成；本地和 CI 共用入口。
 if ! pnpm check:openapi; then
   echo ""
-  echo "⛔ openapi.json 与源不同步，推送已拦下。"
-  echo "   check:openapi 已经把它重新生成好了 —— 工作区里现在就是正确的那份。"
+  echo "⛔ OpenAPI 契约门禁未通过，推送已拦下。"
+  echo "   先检查 openapi.json 是否存在且已提交到 HEAD，再检查构建、生成输出及工作区/暂存区差异。"
   echo "   下一步：git add openapi.json && git commit --amend --no-edit（或新起一个 commit），然后重推。"
   echo "   ⚠️ 同时别忘了同步到 web：cp openapi.json ../web/openapi.json && (cd ../web && pnpm generate:api)"
   echo "      —— 只更一边会让 docs 仓的 B3【两份 openapi 逐字节相同】红（09 §2.4）。"

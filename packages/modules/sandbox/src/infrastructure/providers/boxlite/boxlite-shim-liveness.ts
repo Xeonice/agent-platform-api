@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { boxliteHome } from './boxlite-runtime';
@@ -113,13 +114,14 @@ function parseStat(stat: string): { state: string; startTime: string } | null {
     .slice(close + 1)
     .trim()
     .split(/\s+/);
-  const state = fields[0];
-  const startTime = fields[19];
-  if (state === undefined || startTime === undefined || !/^\d+$/.test(startTime)) return null;
+  const state: unknown = fields[0];
+  const startTime: unknown = fields[19];
+  if (typeof state !== 'string' || typeof startTime !== 'string' || !/^\d+$/.test(startTime))
+    return null;
   return { state, startTime };
 }
 
 function isMissing(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code;
+  const code = isRecord(e) ? e.code : undefined;
   return code === 'ENOENT' || code === 'ESRCH';
 }

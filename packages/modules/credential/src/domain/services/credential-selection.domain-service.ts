@@ -1,4 +1,4 @@
-import type { CredentialId } from '@platform/shared-kernel';
+import type { CredentialId } from '@platform/shared-kernel/pure';
 import type { Credential } from '../entities/credential.entity';
 import type { GitObtainedVia, RuntimeMode } from '../value-objects/obtained-via.vo';
 

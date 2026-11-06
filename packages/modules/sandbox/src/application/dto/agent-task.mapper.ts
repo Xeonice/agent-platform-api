@@ -22,7 +22,9 @@ function toTier(timeoutMs: number): (typeof TIERS)[number] {
   const minutes = Math.round(timeoutMs / 60_000);
   const exact = TaskTimeoutMinutesSchema.safeParse(minutes);
   if (exact.success) return exact.data;
-  logger.error(`agent task has a non-tier timeout of ${minutes}min; reporting the nearest tier`);
+  logger.error(
+    `agent task has a non-tier timeout of ${String(minutes)}min; reporting the nearest tier`,
+  );
   return TIERS.find((t) => t >= minutes) ?? 240;
 }
 

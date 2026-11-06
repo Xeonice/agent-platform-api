@@ -89,6 +89,34 @@ function harness() {
 }
 
 describe('automation application preconditions and deletion preview', () => {
+  it('successful user edits emit only field names so upgrade observers can distinguish intentional changes without storing prompts or webhook credentials', async () => {
+    const h = harness();
+    await h.service.update(h.rule.id, {
+      prompt: 'do not copy this sensitive prompt into upgrade evidence',
+      timezone: 'Asia/Shanghai',
+      webhookUrl: 'https://example.test/hooks?token=not-for-audit',
+    });
+    expect(h.audit.records).toEqual([
+      {
+        category: 'project',
+        type: 'automation.updated',
+        actor: 'user',
+        subjectType: 'automation',
+        subjectId: h.rule.id,
+        summary: '更新了自动化规则',
+        outcome: 'ok',
+        detail: { fieldNames: ['prompt', 'timezone', 'webhookUrl'] },
+      },
+    ]);
+    expect((await h.rules.findById(h.rule.id))?.schedule.timezone).toBe('Asia/Shanghai');
+  });
+
+  it('a rejected edit supplies no successful user-change audit exemption', async () => {
+    const h = harness();
+    await expect(h.service.update(h.rule.id, { timezone: 'invalid/timezone' })).rejects.toThrow();
+    expect(h.audit.records).toEqual([]);
+    expect(h.rules.saveLog).toEqual([]);
+  });
   it.each(['cloning', 'failed'] as const)(
     'cannot create a rule for a %s project and performs no writes',
     async (cloneStatus) => {

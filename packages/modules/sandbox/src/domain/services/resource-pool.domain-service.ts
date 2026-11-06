@@ -238,7 +238,7 @@ export function capacityOf(
   const exhausted = dimensions.find(
     (dimension) => dimension.used + dimension.need > dimension.total,
   );
-  const limiting = dimensions[remaining.indexOf(Math.min(...remaining))]!;
+  const limiting = dimensions[remaining.indexOf(Math.min(...remaining))];
   const prefix = `按默认镜像与空项目配额（${fmt(quota.cores)} 核 CPU、${fmt(quota.ramMb)} MB 内存、${fmt(quota.diskMb)} MB 磁盘）`;
   let reason: string;
   if (exhausted) {

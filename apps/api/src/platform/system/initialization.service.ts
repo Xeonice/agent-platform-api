@@ -21,7 +21,7 @@ import { redactProxyConfig } from './proxy-redaction';
  * （13 §2.8.2 对 `system.initialized` 的原话）。
  *
  * ── ★ 两种 409 是**两个码**，不是一个 ─────────────────────────────────────
- * 这条路上有两种 409：**已经初始化过了**（`ALREADY_INITIALIZED`）与**模型 API 全挂且没带
+ * 这条路上有两种 409：**已经初始化过了**（`ALREADY_INITIALIZED`）与**本次模型探测目标全部确定失败且没带
  * `acknowledgeOffline`**（`OFFLINE_NOT_ACKNOWLEDGED`）。
  *
  * ⛔ 它们**曾经共用 `INVALID_STATE`**，而调用方要做的事恰好相反：前者「目标状态已达成 ⇒
@@ -77,14 +77,10 @@ export class InitializationService {
   }
 
   /**
-   * 模型 API 全挂时必须**显式确认**才放行（P21-8 §1 的物理约束）。
-   *
-   * ⚠️ 不设这道门的话，一个离线部署会一路走完向导，直到用户建完项目、配完凭证、点下
-   * [发起] 才发现 Agent 从一开始就不可用 —— 与第 ⑧ 项要修的是同一种「最晚最挫败的
-   * 时机」。而**镜像仓库不可达不在这道门里**：那只是拉不到新镜像，不是 Agent 不可用。
-   *
-   * ⚠️ 这不是「拒绝离线部署」：带上 `acknowledgeOffline: true` 就照常放行（P21-8 §2：
-   * 「仍可[继续]」）。门的作用是保证那句话**被说出来过**。
+   * 声明的模型探测目标全部确定失败时，初始化仍要求显式确认本次检测结果。
+   * 目标元数据不代表每个任务实际使用的模型地址／代理配置；这里不产生全局任务禁用状态。
+   * 超时仅说明预算内未完成，镜像仓库失败也不属于这道确认条件。
+   * `acknowledgeOffline`保留既有wire语义：确认后完成初始化，后续任务仍走正常业务准入。
    */
   private assertOfflineAcknowledged(
     connectivity: readonly ConnectivityResult[],
@@ -96,8 +92,8 @@ export class InitializationService {
     throw new ConflictException({
       code: 'OFFLINE_NOT_ACKNOWLEDGED',
       message:
-        `模型 API 全部不可达（${modelApis.map((r) => r.target).join('、')}）—— 当前为离线环境，Agent 将不可用。` +
-        '配置代理后重新检测，或带 acknowledgeOffline: true 明确以离线模式继续（平台其余功能可用）。',
+        `本次模型 API 探测目标未连通（${modelApis.map((r) => r.target).join('、')}）。任务实际连通性以其配置为准。` +
+        '检查网络或代理后重新检测，或确认本次检测结果后继续初始化。',
       retryable: false,
       sideEffectFree: true,
       details: modelApis.map((r) => ({
@@ -128,9 +124,7 @@ export class InitializationService {
       severity: offlineAck ? 'warn' : 'info',
       actor: 'user',
       outcome: 'ok',
-      summary: offlineAck
-        ? '完成平台初始化（以离线模式继续：模型 API 不可达，Agent 不可用）'
-        : '完成平台初始化',
+      summary: offlineAck ? '完成平台初始化（已确认本次联网检测结果）' : '完成平台初始化',
       detail: {
         ...redactProxyConfig(req.proxyConfig),
         acknowledgeOffline: offlineAck,

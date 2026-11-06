@@ -27,7 +27,7 @@ export const retainedVolumes = sqliteTable(
     sourceAutomationId: text('source_automation_id'),
     sourceAutomationName: text('source_automation_name'),
     workspacePath: text('workspace_path').notNull().unique(), // I-RV-3
-    source: text('source').notNull(),
+    source: text('source', { enum: ['manual-destroy', 'automation-artifact'] }).notNull(),
     diskBytes: integer('disk_bytes'),
     downloadBytes: integer('download_bytes'),
     retainUntil: integer('retain_until', { mode: 'timestamp' }).notNull(),

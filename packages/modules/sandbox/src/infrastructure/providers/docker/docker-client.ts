@@ -7,11 +7,11 @@ import Docker from 'dockerode';
  */
 export function createDockerClient(): Docker {
   const host = process.env.DOCKER_HOST;
-  if (host && host.startsWith('tcp://')) {
+  if (host?.startsWith('tcp://')) {
     const url = new URL(host);
     return new Docker({ host: url.hostname, port: Number(url.port || 2375) });
   }
-  if (host && host.startsWith('unix://')) {
+  if (host?.startsWith('unix://')) {
     return new Docker({ socketPath: host.replace('unix://', '') });
   }
   return new Docker({ socketPath: process.env.DOCKER_SOCKET ?? '/var/run/docker.sock' });

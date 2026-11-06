@@ -1,4 +1,4 @@
-import type { AgentTaskId, SandboxId, Tx } from '@platform/shared-kernel';
+import type { AgentTaskId, SandboxId, Tx } from '@platform/shared-kernel/pure';
 import type { AgentTask } from '../entities/agent-task.entity';
 
 /**

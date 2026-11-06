@@ -52,6 +52,11 @@ export const imageManifests = sqliteTable(
       .$type<EntrypointContractVO>()
       .notNull(),
     supportedRuntimes: text('supported_runtimes', { mode: 'json' }).$type<string[]>().notNull(),
+    /** Build declarations, independent of runtime availability. Old rows remain unknown. */
+    runtimeVersions: text('runtime_versions', { mode: 'json' })
+      .$type<Record<string, string>>()
+      .notNull()
+      .default({}),
     resourceDefaults: text('resource_defaults', { mode: 'json' })
       .$type<ResourceDefaultsVO>()
       .notNull(),

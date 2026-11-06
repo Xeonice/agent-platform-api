@@ -1,8 +1,6 @@
 import type { AutomationDto, AutomationRunDto } from '@platform/contracts';
 import type { Automation } from '../../domain/entities/automation.entity';
 import type { AutomationRun } from '../../domain/entities/automation-run.entity';
-import type { RetentionDays } from '../../domain/value-objects/policies.vo';
-import type { TimeoutMinutes } from '../../domain/value-objects/policies.vo';
 
 /**
  * 聚合 → 线上 DTO（10 §7.3）。
@@ -24,8 +22,8 @@ export const AutomationMapper = {
       scheduleKind: a.schedule.kind,
       scheduleConfig: a.schedule.config,
       timezone: a.schedule.timezone,
-      timeoutMinutes: a.timeoutMinutes as TimeoutMinutes,
-      artifactRetentionDays: a.retentionDays as RetentionDays,
+      timeoutMinutes: a.timeoutMinutes,
+      artifactRetentionDays: a.retentionDays,
       ...(a.webhook !== null ? { webhookUrl: a.webhook.url } : {}),
       triggerOn: a.webhook?.triggerOn ?? 'failure',
       enabled: a.enabled,

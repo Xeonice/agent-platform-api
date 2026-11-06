@@ -11,6 +11,7 @@ import {
   type RuntimeLogWriterOptions,
 } from './runtime-log-writer';
 import { FileRuntimeLogReader, RUNTIME_LOG_READER } from './runtime-log-reader';
+import { currentCoordinatorWorkRegistry } from '@platform/shared-kernel';
 
 export type LoggingModuleOptions = Partial<RuntimeLogWriterOptions>;
 
@@ -54,7 +55,16 @@ export class LoggingModule {
     return {
       module: LoggingModule,
       providers: [
-        { provide: RUNTIME_LOG_WRITER, useFactory: () => new RuntimeLogWriter(writerOptions) },
+        {
+          provide: RUNTIME_LOG_WRITER,
+          useFactory: () => {
+            const writer = new RuntimeLogWriter(writerOptions);
+            currentCoordinatorWorkRegistry()?.registerFinalizer('platform.logging', () =>
+              writer.close(),
+            );
+            return writer;
+          },
+        },
         {
           provide: RUNTIME_LOG_READER,
           useFactory: (writer: RuntimeLogWriter) => new FileRuntimeLogReader(writer),

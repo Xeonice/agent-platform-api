@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.HOST_CAPACITY_PROBE = void 0;
+exports.HOST_CAPACITY_PROBE = Symbol('HostCapacityProbe');
+//# sourceMappingURL=host-capacity.port.js.map

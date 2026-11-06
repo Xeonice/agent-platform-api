@@ -108,7 +108,7 @@ export type PresetImageStep = (typeof PRESET_IMAGE_STEPS)[number];
 export interface DiagnoseStartFrame {
   event: 'start';
   /** 固定顺序（= {@link DIAGNOSE_CHECK_IDS}）+ 每项的中文标题。 */
-  checks: Array<{ id: DiagnoseCheckId; label: string }>;
+  checks: { id: DiagnoseCheckId; label: string }[];
   /** 单项超时预算（ms）。服务端保证，前端**不要自己计时**（F21-5 §7.1 ②）。 */
   timeoutMs: number;
 }

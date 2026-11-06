@@ -1,3 +1,5 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK, shiftMs } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -59,6 +61,8 @@ const REFRESH_CMD_TIMEOUT_MS = 120_000;
  */
 @Injectable()
 export class CredentialRefreshScanner implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('runtime.refresh');
+
   private readonly logger = new Logger('CredentialRefreshScanner');
   private running = false;
   private readonly inFlight = new Set<string>();
@@ -73,121 +77,129 @@ export class CredentialRefreshScanner implements OnApplicationBootstrap {
 
   onApplicationBootstrap(): void {
     if (process.env.DISABLE_CREDENTIAL_REFRESH_SCANNER === '1') return;
-    this.timer = setInterval(() => void this.runOnce(), SCAN_INTERVAL_MS);
+    this.timer = this.worker.ownInterval(setInterval(() => void this.runOnce(), SCAN_INTERVAL_MS));
     // do not keep the event loop alive purely for the scanner
-    this.timer.unref?.();
+    this.timer.unref();
   }
 
   /** One scan pass. Idempotent under the single-instance lock. */
   async runOnce(): Promise<void> {
-    if (this.running) return; // single-instance lock (P2-1)
-    this.running = true;
-    try {
-      const due = await this.credentials.listRefreshDue(REFRESH_LEAD_MS);
-      for (const [index, item] of due.entries()) {
-        if (this.inFlight.has(item.credentialId)) continue; // per-cred in-flight dedup
-        this.inFlight.add(item.credentialId);
-        try {
-          await this.refreshOne(item);
-        } catch (e) {
-          if (e instanceof HelperUnavailableError) {
-            const skipped = due.length - index - 1;
-            this.logger.warn(
-              `refresh skipped for ${item.credentialId}: ${e.message}（帐号登录环境不可用，不计入刷新失败次数` +
-                (skipped > 0 ? `；本轮其余 ${String(skipped)} 份凭证也跳过` : '') +
-                '，下一轮再试）',
-            );
-            return;
+    return this.worker.run(async () => {
+      if (this.running) return; // single-instance lock (P2-1)
+      this.running = true;
+      try {
+        const due = await this.credentials.listRefreshDue(REFRESH_LEAD_MS);
+        for (const [index, item] of due.entries()) {
+          if (this.inFlight.has(item.credentialId)) continue; // per-cred in-flight dedup
+          this.inFlight.add(item.credentialId);
+          try {
+            await this.refreshOne(item);
+          } catch (e) {
+            if (e instanceof HelperUnavailableError) {
+              const skipped = due.length - index - 1;
+              this.logger.warn(
+                `refresh skipped for ${item.credentialId}: ${e.message}（帐号登录环境不可用，不计入刷新失败次数` +
+                  (skipped > 0 ? `；本轮其余 ${String(skipped)} 份凭证也跳过` : '') +
+                  '，下一轮再试）',
+              );
+              return;
+            }
+            this.logger.warn(`refresh failed for ${item.credentialId}: ${errorMessage(e)}`);
+            await this.credentials.recordRefreshFailure(item.credentialId);
+          } finally {
+            this.inFlight.delete(item.credentialId);
           }
-          this.logger.warn(`refresh failed for ${item.credentialId}: ${(e as Error).message}`);
-          await this.credentials.recordRefreshFailure(item.credentialId);
-        } finally {
-          this.inFlight.delete(item.credentialId);
         }
+      } finally {
+        this.running = false;
       }
-    } finally {
-      this.running = false;
-    }
+    });
   }
 
   private async refreshOne(item: RuntimeRefreshDue): Promise<void> {
-    const { credentialId, runtimeId, obtainedVia } = item;
-    // Dispatch to the runtime's adapter: only a runtime that DECLARED a
-    // refreshCapability is refreshed here (05 §5.1). Others (claude setup-token /
-    // api-key, or any new runtime without one) are skipped gracefully — no error,
-    // no failure recorded, no scanner-side `runtimeId === 'codex'` branch.
-    const adapter = this.registry.has(runtimeId) ? this.registry.get(runtimeId) : undefined;
-    const cap = adapter?.refreshCapability;
-    if (!adapter || !cap) return;
-    // ⚠️ AND ONLY THE METHODS THE ADAPTER SAYS ARE REFRESHABLE (05 §5.1 ★5.1a ①). This
-    // check used to live in the credential REPOSITORY as `obtainedVia === 'oauth-device'`
-    // — Codex's login shape, in a place the adapter cannot see and cannot override. It
-    // belongs here, where the adapter's own declaration is in hand. Skipping is silent
-    // ON PURPOSE and costs nothing: it is not a failure, so it must not burn one of the
-    // three retries that eventually mark a credential expired.
-    if (!cap.eligibleMethods.includes(obtainedVia)) return;
-    // The ONE call site of the refresh out-口 (05 §4.3 裁决 D-18): `prepareForRefresh`
-    // is the only method that hands out the complete auth file with the real
-    // refresh_token, and this scanner — which never touches a sandbox — is its only
-    // legitimate caller. A credential carrying no platform auth file surfaces as
-    // NO_CREDENTIAL here and is recorded as a refresh failure by `runOnce`.
-    const mat = await this.credentials.prepareForRefresh(credentialId);
-    try {
-      // ⚠️ `cap.authFileRelPath`, NOT a hard-coded `'auth.json'` (05 §5.1 ★5.1a ②). With
-      // the wrong name the seed lands where the CLI never looks, the probe runs
-      // unauthenticated, and the read-back below returns THE FILE WE JUST WROTE — a
-      // lenient parser then reports success and the platform stores the same expired
-      // token as 「refreshed」, forever, without a single log line. `configDirEnvNames`
-      // is handed over too so the helper points THIS runtime's config-dir variables at
-      // the throw-away HOME (04 §3 ★3z); the mkdtemp-per-session + `finally` delete
-      // discipline (P1-3) is unchanged.
-      const session = await this.helper.openSession(
-        cap.probeCommand,
-        [{ relPath: cap.authFileRelPath, content: mat.authFile, mode: 0o600 }],
-        adapter.configDirEnvNames,
-      );
+    return this.worker.run(async () => {
+      const { credentialId, runtimeId, obtainedVia } = item;
+      // Dispatch to the runtime's adapter: only a runtime that DECLARED a
+      // refreshCapability is refreshed here (05 §5.1). Others (claude setup-token /
+      // api-key, or any new runtime without one) are skipped gracefully — no error,
+      // no failure recorded, no scanner-side `runtimeId === 'codex'` branch.
+      const adapter = this.registry.has(runtimeId) ? this.registry.get(runtimeId) : undefined;
+      const cap = adapter?.refreshCapability;
+      if (!adapter || !cap) return;
+      // ⚠️ AND ONLY THE METHODS THE ADAPTER SAYS ARE REFRESHABLE (05 §5.1 ★5.1a ①). This
+      // check used to live in the credential REPOSITORY as `obtainedVia === 'oauth-device'`
+      // — Codex's login shape, in a place the adapter cannot see and cannot override. It
+      // belongs here, where the adapter's own declaration is in hand. Skipping is silent
+      // ON PURPOSE and costs nothing: it is not a failure, so it must not burn one of the
+      // three retries that eventually mark a credential expired.
+      if (!cap.eligibleMethods.includes(obtainedVia)) return;
+      // The ONE call site of the refresh out-口 (05 §4.3 裁决 D-18): `prepareForRefresh`
+      // is the only method that hands out the complete auth file with the real
+      // refresh_token, and this scanner — which never touches a sandbox — is its only
+      // legitimate caller. A credential carrying no platform auth file surfaces as
+      // NO_CREDENTIAL here and is recorded as a refresh failure by `runOnce`.
+      const mat = await this.credentials.prepareForRefresh(credentialId);
       try {
-        await this.waitForExit(session.pty, REFRESH_CMD_TIMEOUT_MS);
-        // ⚠️ 同 `codex.adapter` 那条:经会话自己的 readFile,⛔ 不走宿主 fs ——
-        //    容器形态下 `session.homeDir` 在 helper 容器里。
-        const raw = await session.readFile(cap.authFileRelPath);
-        const { accessToken, credentialFiles } = cap.parseRefreshedAuth(raw);
-        if (!accessToken) throw new Error('refreshed auth file missing access token');
-        // Re-store BOTH halves: the adapter's freshly SANITIZED injectable files and the
-        // platform-only complete file. Dropping `credentialFiles` here would leave the
-        // next injection with nothing to write (05 §4.3 ②).
-        const payload: RuntimeSecretPayload = { accessToken, credentialFiles, authFile: raw };
-        // The refreshed token's lifetime is a VENDOR fact ⇒ ask the adapter, exactly
-        // as the login path does (04 §3 `credentialTtlMs`). The constant below is the
-        // last resort for an adapter that declares none; RA-19 keeps compliant
-        // adapters off it.
-        const ttlMs = adapter.credentialTtlMs?.[obtainedVia] ?? REFRESHED_ACCESS_TTL_MS;
-        await this.credentials.applyRefresh(
-          credentialId,
-          payload,
-          shiftMs(this.clock.now(), ttlMs),
+        // ⚠️ `cap.authFileRelPath`, NOT a hard-coded `'auth.json'` (05 §5.1 ★5.1a ②). With
+        // the wrong name the seed lands where the CLI never looks, the probe runs
+        // unauthenticated, and the read-back below returns THE FILE WE JUST WROTE — a
+        // lenient parser then reports success and the platform stores the same expired
+        // token as 「refreshed」, forever, without a single log line. `configDirEnvNames`
+        // is handed over too so the helper points THIS runtime's config-dir variables at
+        // the throw-away HOME (04 §3 ★3z); the mkdtemp-per-session + `finally` delete
+        // discipline (P1-3) is unchanged.
+        const session = await this.helper.openSession(
+          cap.probeCommand,
+          [{ relPath: cap.authFileRelPath, content: mat.authFile, mode: 0o600 }],
+          adapter.configDirEnvNames,
         );
+        try {
+          await this.waitForExit(session.pty, REFRESH_CMD_TIMEOUT_MS);
+          // ⚠️ 同 `codex.adapter` 那条:经会话自己的 readFile,⛔ 不走宿主 fs ——
+          //    容器形态下 `session.homeDir` 在 helper 容器里。
+          const raw = await session.readFile(cap.authFileRelPath);
+          const { accessToken, credentialFiles } = cap.parseRefreshedAuth(raw);
+          if (!accessToken) throw new Error('refreshed auth file missing access token');
+          // Re-store BOTH halves: the adapter's freshly SANITIZED injectable files and the
+          // platform-only complete file. Dropping `credentialFiles` here would leave the
+          // next injection with nothing to write (05 §4.3 ②).
+          const payload: RuntimeSecretPayload = { accessToken, credentialFiles, authFile: raw };
+          // The refreshed token's lifetime is a VENDOR fact ⇒ ask the adapter, exactly
+          // as the login path does (04 §3 `credentialTtlMs`). The constant below is the
+          // last resort for an adapter that declares none; RA-19 keeps compliant
+          // adapters off it.
+          const ttlMs = adapter.credentialTtlMs?.[obtainedVia] ?? REFRESHED_ACCESS_TTL_MS;
+          await this.credentials.applyRefresh(
+            credentialId,
+            payload,
+            shiftMs(this.clock.now(), ttlMs),
+          );
+        } finally {
+          await session.dispose();
+        }
       } finally {
-        await session.dispose();
+        mat.zeroize();
       }
-    } finally {
-      mat.zeroize();
-    }
+    });
   }
 
   private waitForExit(
     pty: { onExit(cb: (code: number | null) => void): void },
     timeoutMs: number,
   ): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let done = false;
-      const finish = (): void => {
-        if (done) return;
-        done = true;
-        resolve();
-      };
-      pty.onExit(() => finish());
-      setTimeout(finish, timeoutMs);
+    return this.worker.run(async () => {
+      return new Promise<void>((resolve) => {
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        pty.onExit(() => {
+          finish();
+        });
+        setTimeout(finish, timeoutMs);
+      });
     });
   }
 }

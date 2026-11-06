@@ -18,7 +18,7 @@ import {
   unlockSucceededRecord,
 } from './access-audit';
 
-const UnlockSchema = z.object({ passcode: z.string().min(1) });
+const UnlockSchema = z.object({ passcode: z.string().min(1).max(1024) });
 export class UnlockRequestDto extends createZodDto(UnlockSchema) {}
 
 /**
@@ -58,7 +58,8 @@ export class AccessController {
     @Body() body: UnlockRequestDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): { unlocked: true } {
+  ): { unlocked: true } | Promise<{ unlocked: true }> {
+    if (this.passcodes.authorityEnabled) return this.unlockAtAuthority(body, req, res);
     // no passcode configured (dev) ⇒ nothing to unlock; the guard also allows all.
     // ⚠️ 也不记审计：这里根本没有门，落一行「已解锁」是在记一件没发生的事。
     if (!this.passcodes.enabled) return { unlocked: true };
@@ -82,6 +83,36 @@ export class AccessController {
     this.audit.record(unlockFailedRecord(outcome));
     // 达到阈值的那一次，除了「又错一次」还要落一行**门被锁上了**（error 级）。
     if (outcome.lockedForSec > 0) this.audit.record(accessLockedRecord(outcome));
+    throw passcodeInvalid();
+  }
+  private async unlockAtAuthority(
+    body: UnlockRequestDto,
+    req: Request,
+    res: Response,
+  ): Promise<{ unlocked: true }> {
+    const decision = await this.passcodes.unlockAtAuthority(req, body.passcode);
+    if (!decision.status.enabled) return { unlocked: true };
+    if (decision.authorized && decision.sessionToken) {
+      setSessionCookie(res, decision.sessionToken);
+      this.audit.record(unlockSucceededRecord());
+      return { unlocked: true };
+    }
+    if (decision.failure?.kind === 'locked' && decision.failure.retryAfterSec) {
+      this.audit.record(lockedAttemptRecord(decision.failure.retryAfterSec));
+      throw passcodeLocked(decision.failure.retryAfterSec);
+    }
+    if (
+      decision.failure?.kind === 'invalid' &&
+      decision.failure.consecutiveFailures !== undefined
+    ) {
+      const outcome = {
+        consecutiveFailures: decision.failure.consecutiveFailures,
+        maxFailures: 5,
+        lockedForSec: decision.failure.lockedForSec ?? 0,
+      };
+      this.audit.record(unlockFailedRecord(outcome));
+      if (outcome.lockedForSec > 0) this.audit.record(accessLockedRecord(outcome));
+    }
     throw passcodeInvalid();
   }
 }

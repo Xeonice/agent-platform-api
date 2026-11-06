@@ -29,8 +29,8 @@ export interface AgentProviderState {
 export function readAgentState(handle: SandboxHandle): AgentProviderState {
   const s = handle.providerState;
   if (s === undefined) return {};
-  const token = s['agentAuthToken'];
-  const port = s['agentEndpointPort'];
+  const token = s.agentAuthToken;
+  const port = s.agentEndpointPort;
   return {
     agentAuthToken: typeof token === 'string' ? token : undefined,
     agentEndpointPort: typeof port === 'number' ? port : undefined,
@@ -46,7 +46,7 @@ export function readAgentState(handle: SandboxHandle): AgentProviderState {
  */
 export function agentProviderState(state: AgentProviderState): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  if (state.agentAuthToken !== undefined) out['agentAuthToken'] = state.agentAuthToken;
-  if (state.agentEndpointPort !== undefined) out['agentEndpointPort'] = state.agentEndpointPort;
+  if (state.agentAuthToken !== undefined) out.agentAuthToken = state.agentAuthToken;
+  if (state.agentEndpointPort !== undefined) out.agentEndpointPort = state.agentEndpointPort;
   return out;
 }

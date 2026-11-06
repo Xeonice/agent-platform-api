@@ -25,7 +25,7 @@ export interface TerminalAuthenticator {
    * with the REST guard). The implementation owns its own clock — callers never
    * pass wall-clock time.
    */
-  authorize(credentials: TerminalHandshakeCredentials): boolean;
+  authorize(credentials: TerminalHandshakeCredentials): boolean | Promise<boolean>;
 }
 
 export const TERMINAL_AUTHENTICATOR = Symbol('TerminalAuthenticator');

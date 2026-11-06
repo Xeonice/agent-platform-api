@@ -1,3 +1,4 @@
+import { requireGitObtainedVia } from '../domain/value-objects/obtained-via.vo';
 import {
   BadRequestException,
   ConflictException,
@@ -125,7 +126,7 @@ export class CredentialApplicationService {
         this.repo.saveSync(tx, cred);
         this.events.publishInTx(tx, cred.pullEvents());
       });
-      return { id: id as string, maskedIdentifier: masked.toString() };
+      return { id: id, maskedIdentifier: masked.toString() };
     } catch (e) {
       throw this.mapDomainError(e);
     } finally {
@@ -140,7 +141,7 @@ export class CredentialApplicationService {
 
   async revokeGitCredential(id: string): Promise<void> {
     const cred = await this.repo.findById(asCredentialId(id));
-    if (!cred || cred.kind !== 'git') {
+    if (cred?.kind !== 'git') {
       throw new NotFoundException(`git credential ${id} not found`);
     }
     if (cred.isRevoked()) return; // idempotent
@@ -260,7 +261,7 @@ export class CredentialApplicationService {
     }
     // stored
     const cred = await this.repo.findById(asCredentialId(input.credentialId));
-    if (!cred || cred.kind !== 'git') {
+    if (cred?.kind !== 'git') {
       throw new NotFoundException(`git credential ${input.credentialId} not found`);
     }
     let blob: EncryptedBlob;
@@ -271,7 +272,7 @@ export class CredentialApplicationService {
     }
     return {
       // narrowed: `cred.kind === 'git'` above ⇒ obtainedVia is a GitObtainedVia
-      kind: cred.obtainedVia as GitObtainedVia,
+      kind: requireGitObtainedVia(cred.obtainedVia),
       allowedHosts: cred.allowedHosts,
       blob,
       platform: cred.metadata?.provider,

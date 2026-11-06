@@ -1,3 +1,5 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { errorMessage, isRecord } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { CLOCK } from '@platform/shared-kernel';
 import type { Clock } from '@platform/shared-kernel';
@@ -66,6 +68,8 @@ const DATA_PLANE_PROBE_CMD = ['/bin/true'];
  */
 @Injectable()
 export class SandboxHealthMonitor implements OnApplicationBootstrap {
+  private readonly worker = coordinatorWorker('sandbox.health');
+
   private readonly logger = new Logger('SandboxHealthMonitor');
   private readonly current = new Map<string, SandboxHealthWire>();
   /** 平台的抗抖动计数（跨采样）。provider 报的那个是它自己的，两者同形不同源。 */
@@ -84,8 +88,10 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
 
   onApplicationBootstrap(): void {
     if (process.env.DISABLE_SANDBOX_HEALTH_MONITOR === '1') return;
-    this.timer = setInterval(() => void this.runOnce(), SAMPLE_INTERVAL_MS);
-    this.timer.unref?.();
+    this.timer = this.worker.ownInterval(
+      setInterval(() => void this.runOnce(), SAMPLE_INTERVAL_MS),
+    );
+    this.timer.unref();
   }
 
   /** `SandboxDto.health` 的取数。没观测过 ⇒ `undefined`（缺席 ≠ unhealthy）。 */
@@ -95,23 +101,25 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
 
   /** 一轮采样。幂等，可直接被测试调用。 */
   async runOnce(): Promise<void> {
-    if (this.running) return; // 单实例串行：上一轮没跑完时不重入
-    this.running = true;
-    try {
-      const all = await this.repo.findAll();
-      // 只探**活着**的：`starting` 还没到能 exec 的地方，终态没有什么可探的（03 §7.8
-      // 的场景是「DB 里写着 running、数据面已经挂了」）。
-      const live = all.filter((s) => s.status === 'running' || s.status === 'idle');
-      const liveIds = new Set(live.map((s) => s.id as string));
-      for (const sandbox of live) await this.sample(sandbox);
-      // 沙箱没了就把它的观测一起丢掉，别让 map 变成一条只增不减的泄漏
-      for (const id of [...this.current.keys()]) if (!liveIds.has(id)) this.forget(id);
-      for (const id of [...this.failureStreak.keys()]) if (!liveIds.has(id)) this.forget(id);
-    } catch (e) {
-      this.logger.warn(`health sweep failed: ${(e as Error).message}`);
-    } finally {
-      this.running = false;
-    }
+    return this.worker.run(async () => {
+      if (this.running) return; // 单实例串行：上一轮没跑完时不重入
+      this.running = true;
+      try {
+        const all = await this.repo.findAll();
+        // 只探**活着**的：`starting` 还没到能 exec 的地方，终态没有什么可探的（03 §7.8
+        // 的场景是「DB 里写着 running、数据面已经挂了」）。
+        const live = all.filter((s) => s.status === 'running' || s.status === 'idle');
+        const liveIds = new Set(live.map((s) => s.id as string));
+        for (const sandbox of live) await this.sample(sandbox);
+        // 沙箱没了就把它的观测一起丢掉，别让 map 变成一条只增不减的泄漏
+        for (const id of [...this.current.keys()]) if (!liveIds.has(id)) this.forget(id);
+        for (const id of [...this.failureStreak.keys()]) if (!liveIds.has(id)) this.forget(id);
+      } catch (e) {
+        this.logger.warn(`health sweep failed: ${errorMessage(e)}`);
+      } finally {
+        this.running = false;
+      }
+    });
   }
 
   private forget(id: string): void {
@@ -121,92 +129,94 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
   }
 
   private async sample(sandbox: Sandbox): Promise<void> {
-    const id = sandbox.id as string;
-    const handle = handleOf(sandbox);
-    if (handle === null) return; // 还没有实例，没什么可探的
-    let provider: SandboxProvider;
-    try {
-      provider = this.registry.get(sandbox.provider);
-    } catch {
-      return; // provider 没注册（第三方被卸了）—— 不是沙箱的健康问题
-    }
+    return this.worker.run(async () => {
+      const id = sandbox.id as string;
+      const handle = handleOf(sandbox);
+      if (handle === null) return; // 还没有实例，没什么可探的
+      let provider: SandboxProvider;
+      try {
+        provider = this.registry.get(sandbox.provider);
+      } catch {
+        return; // provider 没注册（第三方被卸了）—— 不是沙箱的健康问题
+      }
 
-    // ── 零成本层 ────────────────────────────────────────────────────────────
-    let status: SandboxRuntimeStatus | null = null;
-    let zeroCostFailure = false;
-    let reason = '';
-    try {
-      status = await provider.inspect(handle);
-    } catch (e) {
-      // ⚠️ **必须 catch。** 03 §7.8 实现纪律 2：一次探测异常冒泡出去就成了别人的失败。
-      zeroCostFailure = true;
-      reason = `inspect failed: ${(e as Error).message}`;
-    }
+      // ── 零成本层 ────────────────────────────────────────────────────────────
+      let status: SandboxRuntimeStatus | null = null;
+      let zeroCostFailure = false;
+      let reason = '';
+      try {
+        status = await provider.inspect(handle);
+      } catch (e) {
+        // ⚠️ **必须 catch。** 03 §7.8 实现纪律 2：一次探测异常冒泡出去就成了别人的失败。
+        zeroCostFailure = true;
+        reason = `inspect failed: ${errorMessage(e)}`;
+      }
 
-    if (status !== null) {
-      const signs = this.anomalySigns(id, status);
-      zeroCostFailure = signs.length > 0;
-      reason = signs.join('; ');
-    }
+      if (status !== null) {
+        const signs = this.anomalySigns(id, status);
+        zeroCostFailure = signs.length > 0;
+        reason = signs.join('; ');
+      }
 
-    if (!zeroCostFailure) {
-      /**
-       * ⚠️ **「没有异常迹象」不等于 `healthy`。**
-       *
-       * 实测（2026-08-31，真 boxlite 微 VM + `agent-infra/sandbox:latest`）：
-       * `info().healthStatus.state === 'None'` —— 这张镜像**根本没配 health check**，
-       * 于是零成本层能拿到的正面证据只有「VM 在跑」+「execErrorsTotal 没涨」。拿它写
-       * `healthy` 就是在替沙箱担保一件没人问过的事，而 03 §7.8 自己定的语义是
-       * 「`healthy` ⇒ agent 可用（**充分条件**）」。
-       *
-       * ⇒ provider 明确报 `healthy` 才是 `healthy`；否则是 `unknown`（「没问出来」）。
-       * 真正挣来 `healthy` 的另一条路是**数据面确认成功**（见下面那一段）——那是这条
-       * 链路上唯一能证明「agent 真的能用」的证据。
-       */
-      const claimed = status?.health?.state === 'healthy';
-      // ⚠️ **抗抖动计数在这里清，不在 `record()` 里。** 放进 `record()` 会连同「确认
-      // 失败但还没到 N 次」那个中间态一起清掉 —— 而那个中间态的 state 也是 `unknown`
-      // （一次失败还不构成「不健康」这个断言），于是计数永远回不到 3，翻转永远不发生。
-      this.failureStreak.delete(id);
+      if (!zeroCostFailure) {
+        /**
+         * ⚠️ **「没有异常迹象」不等于 `healthy`。**
+         *
+         * 实测（2026-08-31，真 boxlite 微 VM + `agent-infra/sandbox:latest`）：
+         * `info().healthStatus.state === 'None'` —— 这张镜像**根本没配 health check**，
+         * 于是零成本层能拿到的正面证据只有「VM 在跑」+「execErrorsTotal 没涨」。拿它写
+         * `healthy` 就是在替沙箱担保一件没人问过的事，而 03 §7.8 自己定的语义是
+         * 「`healthy` ⇒ agent 可用（**充分条件**）」。
+         *
+         * ⇒ provider 明确报 `healthy` 才是 `healthy`；否则是 `unknown`（「没问出来」）。
+         * 真正挣来 `healthy` 的另一条路是**数据面确认成功**（见下面那一段）——那是这条
+         * 链路上唯一能证明「agent 真的能用」的证据。
+         */
+        const claimed = status?.health?.state === 'healthy';
+        // ⚠️ **抗抖动计数在这里清，不在 `record()` 里。** 放进 `record()` 会连同「确认
+        // 失败但还没到 N 次」那个中间态一起清掉 —— 而那个中间态的 state 也是 `unknown`
+        // （一次失败还不构成「不健康」这个断言），于是计数永远回不到 3，翻转永远不发生。
+        this.failureStreak.delete(id);
+        this.record(id, sandbox, {
+          state: claimed ? 'healthy' : 'unknown',
+          lastCheckedAt: this.clock.now().toISOString(),
+          message:
+            status?.health?.message ??
+            'no anomaly signs, but the provider reported no positive health signal',
+          consecutiveFailures: 0,
+        });
+        return;
+      }
+
+      // ── 数据面层（按需，一次最小 exec）──────────────────────────────────────
+      const confirmed = await this.confirmDataPlane(provider, handle);
+      if (confirmed === true) {
+        // 零成本层报了异常迹象，但数据面**真的能用** —— 这正是 aio HEALTHCHECK 那种
+        // 「比平台的关心面更严格」的信号该有的下场：迹象归迹象，不翻转。
+        this.failureStreak.delete(id);
+        this.record(id, sandbox, {
+          state: 'healthy',
+          lastCheckedAt: this.clock.now().toISOString(),
+          message: `anomaly sign cleared by data-plane probe (${reason})`,
+          consecutiveFailures: 0,
+        });
+        return;
+      }
+
+      const streak = (this.failureStreak.get(id) ?? 0) + 1;
+      this.failureStreak.set(id, streak);
+      const detail =
+        confirmed === undefined
+          ? `data-plane probe inconclusive (${reason})`
+          : `data-plane probe failed (${reason})`;
       this.record(id, sandbox, {
-        state: claimed ? 'healthy' : 'unknown',
+        // ⚠️ **连续 N 次之前不翻。** 中间态是 `unknown`，不是 `unhealthy`：一次失败
+        // 还不构成「不健康」这个断言，少报是降级、多报是撒谎。
+        state: streak >= FLIP_AFTER_CONSECUTIVE_FAILURES ? 'unhealthy' : 'unknown',
         lastCheckedAt: this.clock.now().toISOString(),
-        message:
-          status?.health?.message ??
-          'no anomaly signs, but the provider reported no positive health signal',
-        consecutiveFailures: 0,
+        message: detail,
+        consecutiveFailures: streak,
       });
-      return;
-    }
-
-    // ── 数据面层（按需，一次最小 exec）──────────────────────────────────────
-    const confirmed = await this.confirmDataPlane(provider, handle);
-    if (confirmed === true) {
-      // 零成本层报了异常迹象，但数据面**真的能用** —— 这正是 aio HEALTHCHECK 那种
-      // 「比平台的关心面更严格」的信号该有的下场：迹象归迹象，不翻转。
-      this.failureStreak.delete(id);
-      this.record(id, sandbox, {
-        state: 'healthy',
-        lastCheckedAt: this.clock.now().toISOString(),
-        message: `anomaly sign cleared by data-plane probe (${reason})`,
-        consecutiveFailures: 0,
-      });
-      return;
-    }
-
-    const streak = (this.failureStreak.get(id) ?? 0) + 1;
-    this.failureStreak.set(id, streak);
-    const detail =
-      confirmed === undefined
-        ? `data-plane probe inconclusive (${reason})`
-        : `data-plane probe failed (${reason})`;
-    this.record(id, sandbox, {
-      // ⚠️ **连续 N 次之前不翻。** 中间态是 `unknown`，不是 `unhealthy`：一次失败
-      // 还不构成「不健康」这个断言，少报是降级、多报是撒谎。
-      state: streak >= FLIP_AFTER_CONSECUTIVE_FAILURES ? 'unhealthy' : 'unknown',
-      lastCheckedAt: this.clock.now().toISOString(),
-      message: detail,
-      consecutiveFailures: streak,
     });
   }
 
@@ -252,18 +262,20 @@ export class SandboxHealthMonitor implements OnApplicationBootstrap {
     provider: SandboxProvider,
     handle: SandboxHandle,
   ): Promise<boolean | undefined> {
-    try {
-      const exec = toExecFn(provider, handle);
-      const result = await exec(DATA_PLANE_PROBE_CMD, {
-        timeoutMs: DATA_PLANE_PROBE_TIMEOUT_MS,
-      });
-      // ⚠️ **显式要求 `=== 0`。** 「没有退出码」的流在 `toExecFn` 里已经被归一成 `-1`
-      // （SP-09），写成 `!== 0` 或 `?? 0` 都会把它读成成功 —— 而实测中真的出现过一批
-      // 没有退出码的 exec（03 §7.8 实现纪律 1）。
-      return result.exitCode === 0;
-    } catch {
-      return undefined;
-    }
+    return this.worker.run(async () => {
+      try {
+        const exec = toExecFn(provider, handle);
+        const result = await exec(DATA_PLANE_PROBE_CMD, {
+          timeoutMs: DATA_PLANE_PROBE_TIMEOUT_MS,
+        });
+        // ⚠️ **显式要求 `=== 0`。** 「没有退出码」的流在 `toExecFn` 里已经被归一成 `-1`
+        // （SP-09），写成 `!== 0` 或 `?? 0` 都会把它读成成功 —— 而实测中真的出现过一批
+        // 没有退出码的 exec（03 §7.8 实现纪律 1）。
+        return result.exitCode === 0;
+      } catch {
+        return undefined;
+      }
+    });
   }
 
   /**
@@ -317,6 +329,6 @@ function handleOf(sandbox: Sandbox): SandboxHandle | null {
 
 /** boxlite 把它折在 `raw` 里（见 `boxlite-sandbox.provider.ts` 的 `inspect`）。 */
 function readExecErrors(status: SandboxRuntimeStatus): number | undefined {
-  const raw = status.raw as { execErrorsTotal?: unknown } | undefined;
-  return typeof raw?.execErrorsTotal === 'number' ? raw.execErrorsTotal : undefined;
+  const raw = status.raw;
+  return isRecord(raw) && typeof raw.execErrorsTotal === 'number' ? raw.execErrorsTotal : undefined;
 }

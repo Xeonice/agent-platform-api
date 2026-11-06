@@ -1,6 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { IoAdapter } from '@nestjs/platform-socket.io';
-import type { Server, ServerOptions } from 'socket.io';
+import { Server, type ServerOptions } from 'socket.io';
 import { isRequestOriginAllowed } from './public-origin-policy';
 import { DeploymentState } from '../platform/deployment/deployment-state';
 import {
@@ -13,6 +13,7 @@ class OriginCheckedIoAdapter extends IoAdapter {
   constructor(
     app: INestApplication,
     private readonly network: PublicNetworkConfig,
+    private readonly ready: () => boolean,
   ) {
     super(app);
     this.deployment = app.get(DeploymentState);
@@ -20,10 +21,10 @@ class OriginCheckedIoAdapter extends IoAdapter {
 
   override createIOServer(port: number, options?: Partial<ServerOptions>): Server {
     const previousCheck = options?.allowRequest;
-    const server: Server = super.createIOServer(port, {
+    const server: unknown = super.createIOServer(port, {
       ...options,
       allowRequest: (req, done) => {
-        if (this.deployment.draining) {
+        if (!this.ready() || this.deployment.draining) {
           done('Service is preparing an update', false);
           return;
         }
@@ -35,6 +36,7 @@ class OriginCheckedIoAdapter extends IoAdapter {
         else done(null, true);
       },
     } satisfies Partial<ServerOptions>);
+    if (!isSocketIOServer(server)) throw new TypeError('Expected a socket.io server');
     const stopObserving = this.deployment.observeSockets(() => server.engine.clientsCount);
     server.engine.once('close', stopObserving);
     return server;
@@ -49,6 +51,11 @@ class OriginCheckedIoAdapter extends IoAdapter {
 export function setupWebsockets(
   app: INestApplication,
   network: PublicNetworkConfig = readPublicNetworkConfig(),
+  ready: () => boolean = () => true,
 ): void {
-  app.useWebSocketAdapter(new OriginCheckedIoAdapter(app, network));
+  app.useWebSocketAdapter(new OriginCheckedIoAdapter(app, network, ready));
+}
+
+function isSocketIOServer(value: unknown): value is Server {
+  return value instanceof Server;
 }

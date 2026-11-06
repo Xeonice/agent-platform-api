@@ -105,7 +105,7 @@ function formatPath(path: readonly (string | number)[]): string {
  * 话才有用。完整清单在 `details` 里，一条不少。
  */
 function summarize(details: readonly ValidationDetail[]): string {
-  const first = details[0];
+  const first = details.at(0);
   if (first === undefined) return '请求参数校验失败';
   const subject = first.path === undefined ? '请求体' : `请求参数 ${first.path}`;
   const rest = details.length - 1;

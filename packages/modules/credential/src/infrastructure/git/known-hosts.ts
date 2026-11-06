@@ -127,7 +127,6 @@ function matchesHashedHost(encoded: string, target: string): boolean {
   const parts = encoded.split('|');
   if (parts.length !== 4) return false;
   return (
-    createHmac('sha1', Buffer.from(parts[2]!, 'base64')).update(target).digest('base64') ===
-    parts[3]
+    createHmac('sha1', Buffer.from(parts[2], 'base64')).update(target).digest('base64') === parts[3]
   );
 }

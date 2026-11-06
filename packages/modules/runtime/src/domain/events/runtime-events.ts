@@ -1,4 +1,4 @@
-import type { DomainEvent } from '@platform/shared-kernel';
+import type { DomainEvent } from '@platform/shared-kernel/pure';
 import type { RuntimeInstallState } from '../entities/runtime-installation.entity';
 import type { RuntimeAuthMode } from '../entities/runtime-settings.entity';
 

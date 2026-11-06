@@ -1,4 +1,4 @@
-import { fromEpochMs, shiftMs } from '@platform/shared-kernel';
+import { fromEpochMs, shiftMs } from '@platform/shared-kernel/pure';
 import { AutomationInvariantError } from '../errors/automation-errors';
 
 /**
@@ -10,7 +10,7 @@ import { AutomationInvariantError } from '../errors/automation-errors';
  */
 
 /** I-AUT-5：只有四档，别的分钟数是调用方算错了。 */
-export const ALLOWED_TIMEOUT_MINUTES = [30, 60, 120, 240] as const;
+export const ALLOWED_TIMEOUT_MINUTES = Object.freeze([30, 60, 120, 240] as const);
 export type TimeoutMinutes = (typeof ALLOWED_TIMEOUT_MINUTES)[number];
 
 export class TimeoutPolicy {
@@ -22,59 +22,67 @@ export class TimeoutPolicy {
   }
 
   static of(minutes: number): TimeoutPolicy {
-    if (!(ALLOWED_TIMEOUT_MINUTES as readonly number[]).includes(minutes)) {
+    if (!isTimeoutMinutes(minutes)) {
       throw new AutomationInvariantError(
         `timeout must be one of ${ALLOWED_TIMEOUT_MINUTES.join('/')} minutes (I-AUT-5), got ${String(minutes)}`,
         'INVALID_TIMEOUT',
       );
     }
-    return new TimeoutPolicy(minutes as TimeoutMinutes);
+    return new TimeoutPolicy(minutes);
   }
 }
 
 /** I-AUR-2 / 03 §8.2 行 3：24min 间隔 × 最多 5 次（≈2h 窗口）。 */
-export class RetryPolicy {
-  static readonly INTERVAL_MS = 24 * 60_000;
-  static readonly MAX_ATTEMPTS = 5;
+export const RetryPolicy = Object.freeze({
+  INTERVAL_MS: 24 * 60_000,
+  MAX_ATTEMPTS: 5,
 
   /** 还能不能再排一次。`retryCount` 是**已经排过**的次数。 */
-  static canRetry(retryCount: number): boolean {
+  canRetry(retryCount: number): boolean {
     return retryCount < RetryPolicy.MAX_ATTEMPTS;
-  }
+  },
 
-  static nextAttemptAt(now: Date): Date {
+  nextAttemptAt(now: Date): Date {
     return shift(now, RetryPolicy.INTERVAL_MS);
-  }
-}
+  },
+});
 
 /** 03 §8.4 / I-AUT-2：≥3 降频，≥10 禁用。 */
-export class FailurePolicy {
-  static readonly DEGRADE_AT = 3;
-  static readonly DISABLE_AT = 10;
+export const FailurePolicy = Object.freeze({
+  DEGRADE_AT: 3,
+  DISABLE_AT: 10,
 
-  static shouldDegrade(failureCount: number): boolean {
+  shouldDegrade(failureCount: number): boolean {
     return failureCount >= FailurePolicy.DEGRADE_AT;
-  }
+  },
 
-  static shouldDisable(failureCount: number): boolean {
+  shouldDisable(failureCount: number): boolean {
     return failureCount >= FailurePolicy.DISABLE_AT;
-  }
-}
+  },
+});
 
 /** 03 §8.2「宕机 missed」的默认阈值（分钟）。 */
 export const DEFAULT_MISSED_THRESHOLD_MIN = 5;
 
 /** 保留期（I-RV-1 的三个取值；自动化产物喂 `retained_volumes.retain_until`）。 */
-export const ALLOWED_RETENTION_DAYS = [3, 7, 30] as const;
+export const ALLOWED_RETENTION_DAYS = Object.freeze([3, 7, 30] as const);
 export type RetentionDays = (typeof ALLOWED_RETENTION_DAYS)[number];
 
 export function assertRetentionDays(days: number): RetentionDays {
-  if (!(ALLOWED_RETENTION_DAYS as readonly number[]).includes(days)) {
+  if (!isRetentionDays(days)) {
     throw new AutomationInvariantError(
       `artifactRetentionDays must be one of ${ALLOWED_RETENTION_DAYS.join('/')}, got ${String(days)}`,
     );
   }
-  return days as RetentionDays;
+  return days;
+}
+
+function isTimeoutMinutes(minutes: number): minutes is TimeoutMinutes {
+  return ALLOWED_TIMEOUT_MINUTES.some((allowed) => allowed === minutes);
+}
+
+function isRetentionDays(days: number): days is RetentionDays {
+  return ALLOWED_RETENTION_DAYS.some((allowed) => allowed === days);
 }
 
 /**

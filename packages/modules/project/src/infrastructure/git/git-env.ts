@@ -85,7 +85,6 @@ const GUARDED_ENV = new Set([
  * `GIT_TRACE=1` on the host. That was already true of four of them; it is the price of
  * a child process that cannot be made to print its own credentials.
  */
-const GIT_TRACE_PREFIX = /^GIT_TRACE/;
 
 export function cleanGitEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -93,7 +92,7 @@ export function cleanGitEnv(): Record<string, string> {
     if (v === undefined) continue;
     const upper = k.toUpperCase();
     if (GUARDED_ENV.has(upper)) continue;
-    if (GIT_TRACE_PREFIX.test(upper)) continue;
+    if (upper.startsWith('GIT_TRACE')) continue;
     if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/i.test(k)) continue;
     env[k] = v;
   }

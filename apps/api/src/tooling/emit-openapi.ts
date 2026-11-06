@@ -7,6 +7,7 @@ import { patchNestJsSwagger } from 'nestjs-zod';
 import { AppModule } from '../app.module';
 import { ErrorEnvelope } from '../bootstrap/error-envelope.dto';
 import { applyUnicodeLengthConstraints } from '../bootstrap/openapi-constraints';
+import { errorMessage } from '@platform/shared-kernel';
 
 async function main(): Promise<void> {
   process.env.DATABASE_URL = ':memory:';
@@ -38,8 +39,8 @@ const emitDeadline = setTimeout(() => {
 void main()
   .catch((e: unknown) => {
     // ⚠️ `void main()` 单独用会把 rejection 变成 unhandled，配合上面那个 abort 就是静默。
-    console.error(`emit-openapi 失败：${(e as Error).message}`);
-    console.error((e as Error).stack ?? '');
+    console.error(`emit-openapi 失败：${errorMessage(e)}`);
+    console.error(e instanceof Error ? (e.stack ?? '') : '');
     process.exitCode = 1;
   })
   .finally(() => {

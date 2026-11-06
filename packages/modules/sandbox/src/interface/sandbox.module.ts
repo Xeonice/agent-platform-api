@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { CLOCK, type Clock } from '@platform/shared-kernel';
 import {
   AUTOMATION_TASK_LAUNCHER,
   SANDBOX_EXEC_PORT,
@@ -8,9 +9,16 @@ import {
   TASK_EVENT_BROADCASTER,
   TASK_LOG_STORE,
   WORKSPACE_PREPARER,
+  RUNTIME_BUSINESS_AUTHORITY,
+  RUNTIME_OWNER_SCHEDULING,
 } from '@platform/contracts';
 import { SANDBOX_REPOSITORY } from '../domain/repositories/sandbox.repository';
 import { AGENT_TASK_REPOSITORY } from '../domain/repositories/agent-task.repository';
+import { AGENT_TASK_START_INTENTS } from '../domain/ports/agent-task-start-intents.port';
+import { SANDBOX_CREATE_INTENTS } from '../domain/ports/sandbox-create-intents.port';
+import { SANDBOX_ADMISSION_INTENTS } from '../domain/ports/sandbox-admission-intents.port';
+import { SANDBOX_STARTUP_PROGRESS } from '../domain/ports/sandbox-startup-progress.port';
+import { SANDBOX_STOP_INTENTS } from '../domain/ports/sandbox-stop-intents.port';
 import { RESOURCE_ALLOCATION_REPOSITORY } from '../domain/repositories/resource-allocation.repository';
 import { HOST_CAPACITY_PROBE } from '../domain/ports/host-capacity.port';
 import { SandboxApplicationService } from '../application/sandbox-application.service';
@@ -29,8 +37,14 @@ import { QuotaReconciler } from '../application/quota-reconciler';
 import { CredentialRevokedHandler } from '../application/event-handlers/credential-revoked.handler';
 import { SqliteSandboxRepository } from '../infrastructure/persistence/sqlite/sandbox.repository.impl';
 import { SqliteAgentTaskRepository } from '../infrastructure/persistence/sqlite/agent-task.repository.impl';
+import { SqliteAgentTaskStartIntents } from '../infrastructure/persistence/sqlite/agent-task-start-intents.impl';
+import { SqliteSandboxCreateIntents } from '../infrastructure/persistence/sqlite/sandbox-create-intents.impl';
+import { SqliteSandboxAdmissionIntents } from '../infrastructure/persistence/sqlite/sandbox-admission-intents.impl';
+import { SqliteSandboxStartupProgress } from '../infrastructure/persistence/sqlite/sandbox-startup-progress.impl';
+import { SqliteSandboxStopIntents } from '../infrastructure/persistence/sqlite/sandbox-stop-intents.impl';
 import { SqliteResourceAllocationRepository } from '../infrastructure/persistence/sqlite/resource-allocation.repository.impl';
 import { OsHostCapacityProbe } from '../infrastructure/scheduler/host-capacity.probe';
+import { RuntimeOwnerCapacityProbe } from '../infrastructure/scheduler/runtime-owner-capacity.probe';
 import { FsTaskLogStore } from '../infrastructure/tasks/fs-task-log.store';
 import { FsWorkspaceArtifactReader } from '../infrastructure/tasks/fs-workspace-artifact-reader';
 import { WORKSPACE_ARTIFACT_READER } from '../domain/ports/workspace-artifact-reader.port';
@@ -48,6 +62,15 @@ import { AgentTaskController } from './http/agent-task.controller';
 import { ProviderController } from './http/provider.controller';
 import { TasksGateway } from './gateway/tasks.gateway';
 import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
+import { createRuntimeOwnerProviderRegistry } from '../infrastructure/runtime-rpc/owner-factory';
+import {
+  explicitRuntimeBusinessAuthority,
+  withRuntimeBusinessAuthority,
+} from '../infrastructure/runtime-rpc/authority-context';
+
+const remoteRuntime = ['coordinator', 'coordinator-prepared'].includes(
+  process.env.PLATFORM_PROCESS_ROLE ?? '',
+);
 
 /**
  * Composition root for the sandbox context — the ONE place ports are wired to
@@ -65,6 +88,10 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
 @Module({
   controllers: [SandboxController, AgentTaskController, ProviderController],
   providers: [
+    {
+      provide: RUNTIME_BUSINESS_AUTHORITY,
+      useValue: { run: withRuntimeBusinessAuthority, current: explicitRuntimeBusinessAuthority },
+    },
     SandboxApplicationService,
     AgentTaskApplicationService,
     ProvisionSandboxWorkflow,
@@ -81,8 +108,16 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: WORKSPACE_ARTIFACT_READER, useClass: FsWorkspaceArtifactReader },
     { provide: SANDBOX_REPOSITORY, useClass: SqliteSandboxRepository },
     { provide: AGENT_TASK_REPOSITORY, useClass: SqliteAgentTaskRepository },
+    { provide: AGENT_TASK_START_INTENTS, useClass: SqliteAgentTaskStartIntents },
+    { provide: SANDBOX_CREATE_INTENTS, useClass: SqliteSandboxCreateIntents },
+    { provide: SANDBOX_ADMISSION_INTENTS, useClass: SqliteSandboxAdmissionIntents },
+    { provide: SANDBOX_STARTUP_PROGRESS, useClass: SqliteSandboxStartupProgress },
+    { provide: SANDBOX_STOP_INTENTS, useClass: SqliteSandboxStopIntents },
     { provide: RESOURCE_ALLOCATION_REPOSITORY, useClass: SqliteResourceAllocationRepository },
-    { provide: HOST_CAPACITY_PROBE, useClass: OsHostCapacityProbe },
+    {
+      provide: HOST_CAPACITY_PROBE,
+      useClass: remoteRuntime ? RuntimeOwnerCapacityProbe : OsHostCapacityProbe,
+    },
     // 03 §3：显式 FIFO（创建/销毁/对账的读-改-写都从它过）+ 互斥登记
     // —— `RESOURCE_EXHAUSTED` 的唯一真实抛出点。
     SchedulerQueue,
@@ -92,26 +127,44 @@ import { SandboxMcpTools } from './mcp/sandbox.mcp-tools';
     { provide: WORKSPACE_PREPARER, useClass: FsWorkspacePreparer },
     { provide: DOCKER_CLIENT, useFactory: createDockerClient },
     SandboxHealthMonitor,
-    AioSandboxProvider,
-    BoxliteSandboxProvider,
-    { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
+    ...(remoteRuntime
+      ? [
+          { provide: RUNTIME_OWNER_SCHEDULING, useExisting: SANDBOX_PROVIDER_REGISTRY },
+          {
+            provide: SANDBOX_PROVIDER_REGISTRY,
+            useFactory: (clock: Clock) => createRuntimeOwnerProviderRegistry(clock),
+            inject: [CLOCK],
+          },
+        ]
+      : [
+          AioSandboxProvider,
+          BoxliteSandboxProvider,
+          { provide: SANDBOX_PROVIDER_REGISTRY, useClass: SandboxProviderRegistry },
+        ]),
     { provide: SANDBOX_PTY_PORT, useClass: SandboxPtyAdapter },
     { provide: SANDBOX_EXEC_PORT, useClass: SandboxExecAdapter },
     { provide: SANDBOX_FACADE, useClass: SandboxFacadeAdapter },
     // 03 §8.2 行 4：automation 起的必须是**标准**无头 Task —— 这个 adapter 就是那条
     // 「不许绕过」的落点，它内部调的是人手动建 Task 走的同一个 application 方法。
     { provide: AUTOMATION_TASK_LAUNCHER, useClass: AutomationTaskLauncherAdapter },
-    RuntimeReconciler,
+    ...(remoteRuntime ? [] : [RuntimeReconciler]),
     // 开机自检：填了 SANDBOX_DOCKER_NETWORK 就证实「我自己也在那个网络里」——
     // 那句声明里唯一填得错的一半（shared/11 §1.4）。没填 = 直接返回。
-    DockerSelfNetworkCheck,
+    ...(remoteRuntime ? [] : [DockerSelfNetworkCheck]),
     SandboxEventProjector,
     CredentialRevokedHandler,
   ],
   exports: [
+    RUNTIME_BUSINESS_AUTHORITY,
+    ...(remoteRuntime ? [RUNTIME_OWNER_SCHEDULING] : []),
+    AGENT_TASK_START_INTENTS,
+    SANDBOX_CREATE_INTENTS,
     SandboxApplicationService,
     AgentTaskApplicationService,
+    TasksGateway,
     SANDBOX_PROVIDER_REGISTRY,
+    RunAgentTaskWorkflow,
+    ProvisionSandboxWorkflow,
     SANDBOX_PTY_PORT,
     SANDBOX_EXEC_PORT,
     SANDBOX_FACADE,

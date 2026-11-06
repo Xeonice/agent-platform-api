@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 import type { ImageManifest } from '../entities/image-manifest.entity';
 
 export interface ImageManifestRepository {
@@ -47,8 +47,14 @@ export interface ImageManifestRepository {
    * retires v1 in favour of v2. Filtering here would make 「换一版预制镜像」 silently
    * un-registerable for everything built on the old one.
    */
-  listBuiltinAnchors(): Promise<Array<{ ref: string; digest: string; diffIds: string[] }>>;
+  listBuiltinAnchors(): Promise<{ ref: string; digest: string; diffIds: string[] }[]>;
   saveSync(tx: Tx, manifest: ImageManifest): void;
+  /** Add missing declarations for the same digest without saving stale config/active state. */
+  backfillRuntimeVersionsSync(
+    tx: Tx,
+    manifestId: string,
+    versions: Record<string, string>,
+  ): Record<string, string>;
   /**
    * Retire every OTHER active row of the same tag, in the caller's transaction.
    *

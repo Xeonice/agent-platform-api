@@ -69,7 +69,6 @@ const GUARDED_ENV = new Set([
  * `GIT_TRACE=1` on the host. That was already true of four of them; it is the price of
  * a child process that cannot be made to print its own credentials.
  */
-const GIT_TRACE_PREFIX = /^GIT_TRACE/;
 
 function cleanAmbientEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -77,7 +76,7 @@ function cleanAmbientEnv(): Record<string, string> {
     if (v === undefined) continue;
     const upper = k.toUpperCase();
     if (GUARDED_ENV.has(upper)) continue;
-    if (GIT_TRACE_PREFIX.test(upper)) continue;
+    if (upper.startsWith('GIT_TRACE')) continue;
     if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/i.test(k)) continue;
     env[k] = v;
   }
@@ -106,7 +105,7 @@ export function buildChildEnv(auth: InjectedAuth): Record<string, string> {
 export function buildUnsafe(auth: InjectedAuth): SimpleGitOptions['unsafe'] {
   const unsafe: NonNullable<SimpleGitOptions['unsafe']> = {};
   if (auth.gitSshCommand) unsafe.allowUnsafeSshCommand = true;
-  if (auth.env && auth.env.GIT_CONFIG_COUNT) {
+  if (auth.env?.GIT_CONFIG_COUNT) {
     unsafe.allowUnsafeConfigEnvCount = true;
     unsafe.allowUnsafeCredentialHelper = true;
   }

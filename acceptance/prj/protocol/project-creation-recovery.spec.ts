@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { createServer, type Server } from 'node:http';
 import { readdir, stat } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
@@ -125,8 +126,8 @@ describe('PRJ real HTTP, Git subprocess, current SQLite and baseline filesystem'
       .get<ProjectRepository>(PROJECT_REPOSITORY)
       .findById(asProjectId(created.body.id));
     expect(actual).not.toBeNull();
-    expect((await stat(actual!.baselinePath)).isDirectory()).toBe(true);
-    expect(await readdir(actual!.baselinePath)).toEqual([]);
+    expect((await stat(assertDefined(actual).baselinePath)).isDirectory()).toBe(true);
+    expect(await readdir(assertDefined(actual).baselinePath)).toEqual([]);
     const count = (await http().get('/api/system/audit?category=project').expect(200)).body.items
       .length;
     const cancelled = await http()
@@ -189,6 +190,6 @@ describe('PRJ real HTTP, Git subprocess, current SQLite and baseline filesystem'
     const actual = await platform.app
       .get<ProjectRepository>(PROJECT_REPOSITORY)
       .findById(asProjectId(failed.project.id));
-    expect(await readdir(actual!.baselinePath)).toEqual([]);
+    expect(await readdir(assertDefined(actual).baselinePath)).toEqual([]);
   });
 });

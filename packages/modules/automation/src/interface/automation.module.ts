@@ -8,6 +8,8 @@ import { AUTOMATION_RUN_LOG_READER } from '../domain/ports/run-log-reader.port';
 import { AutomationApplicationService } from '../application/automation-application.service';
 import { AutomationScheduler } from '../application/automation.scheduler';
 import { AutomationNotifier } from '../application/automation.notifier';
+import { AUTOMATION_LAUNCH_INTENTS } from '../domain/ports/automation-launch-intents.port';
+import { SqliteAutomationLaunchIntents } from '../infrastructure/persistence/sqlite/automation-launch-intents.impl';
 import { SqliteAutomationRepository } from '../infrastructure/persistence/sqlite/automation.repository.impl';
 import { SqliteAutomationRunRepository } from '../infrastructure/persistence/sqlite/automation-run.repository.impl';
 import { HttpWebhookSender } from '../infrastructure/webhook/http-webhook.sender';
@@ -30,6 +32,7 @@ import { ProjectAutomationController } from './http/project-automation.controlle
     AutomationApplicationService,
     AutomationScheduler,
     AutomationNotifier,
+    { provide: AUTOMATION_LAUNCH_INTENTS, useClass: SqliteAutomationLaunchIntents },
     { provide: AUTOMATION_REPOSITORY, useClass: SqliteAutomationRepository },
     { provide: AUTOMATION_RUN_REPOSITORY, useClass: SqliteAutomationRunRepository },
     { provide: WEBHOOK_SENDER, useClass: HttpWebhookSender },

@@ -1,0 +1,19 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SandboxInvariantViolationError = void 0;
+/**
+ * A sandbox aggregate invariant was violated (23 §5.2). Unlike
+ * `InvalidSandboxTransitionError` (a legitimate user-facing 409 — "you cannot stop
+ * a destroyed task"), this signals that the CALLER asked for something the model
+ * forbids outright, e.g. consuming an already-consumed instruction (I-SBX-10).
+ */
+class SandboxInvariantViolationError extends Error {
+    invariant;
+    constructor(invariant, message) {
+        super(`${invariant}: ${message}`);
+        this.invariant = invariant;
+        this.name = 'SandboxInvariantViolationError';
+    }
+}
+exports.SandboxInvariantViolationError = SandboxInvariantViolationError;
+//# sourceMappingURL=invariant-violation.error.js.map

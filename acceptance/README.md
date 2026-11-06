@@ -17,12 +17,21 @@ pnpm test:pure
 pnpm test:service
 pnpm test:sqlite
 pnpm test:protocol
+pnpm test:contract
 pnpm check:acceptance
 node scripts/check-fake-provider-caps.mjs
 node scripts/check-wire-snapshots.mjs
 ```
 
 `check:acceptance` 要从包含主仓产品规范的 workspace 执行；独立 API CI 运行实际场景与报告。`execution-report.json` 由每次验收生成，并由 Jenkins 构建归档，保存已执行测试、实际 Vitest matcher 调用数和测试源 SHA-256。静态 expect 表达式数量单独记录，不能充当实际断言数。
+
+报告的 `tests` 包括显式 skipped/todo；`executedTests` 与 `matcherEvidenceRecords` 仅计实际 passed/failed 执行项，跳过用例不伪造 matcher 证据。每条 matcher 证据保留文件和测试名。可用 `pnpm test:acceptance:report -- acceptance/contracts` 定向复跑契约报告；CI 无参数执行完整范围。
+
+`pnpm test:contract` 显式先运行 `acceptance/contracts/pure` 的 Golden 静态契约，再运行 `acceptance/contracts/protocol/owner-extension.spec.ts` 的真实 Owner HTTP 扩展验收；任一阶段失败或未发现测试均失败。Golden 将现存公共 testkit 用于真实内建 `aio`／`boxlite`、`codex`／`claude-code` 与 OCI 实现，只控制 OCI 元数据传输和 Runtime 的 exec 记录，不调用 CLI、外网或用户凭证。默认 `test:acceptance:report` 也会发现这两类目录，因此 CI 全量验收包含它们。
+
+共同测试入口在运行 `protocol` 前使用当前 Node 和本地 TypeScript 执行增量 `tsc -b`；编译失败即停止，不启动协议测试。`test:protocol`、`test:contract` 与全量报告均包含这一步，Owner 的真实子进程不会依赖手工 build 或旧 dist；仅运行 pure/service/sqlite 不增加该构建步骤。
+
+Golden 的 Provider 静态条款不创建 Guest：SP-01／DP 实机条款会显式显示 skipped，Claude 未声明 refresh 能力的条款也保留适用性说明；这些不能算作实机、模型或沙箱连续性通过。Owner 协议验收使用独立临时目录和测试第三方 Provider，验证真实注册、发现和路由，不代表 Docker／BoxLite Guest 已创建。
 
 主仓 `pnpm --dir e2e-contract test` 使用真实 Chromium、生产 Next.js、完整编译后 Nest 和干净 SQLite。报告位于 `e2e-contract/artifacts/execution-report.json`，记录实际场景、运行时断言与外部夹具边界；真实 Docker/BoxLite、厂商 OAuth 和 native PTY 另行验收。
 

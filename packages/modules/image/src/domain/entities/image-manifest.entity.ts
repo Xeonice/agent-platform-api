@@ -1,4 +1,4 @@
-import { AggregateRoot } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
 import {
   ImageActivated,
   ImageConfigUpdated,
@@ -7,9 +7,10 @@ import {
   ImageRegistered,
   ImageValidated,
 } from '../events/image-events';
-import { ValidationOutcome } from '../value-objects/validation-outcome.vo';
+import type { ValidationOutcome } from '../value-objects/validation-outcome.vo';
 import type { ValidationFinding } from '../value-objects/validation-outcome.vo';
 import { ImageStateError } from '../errors/image-errors';
+import { normalizeRuntimeVersions } from '../value-objects/runtime-versions.vo';
 
 /**
  * Entry contract + scheduler defaults, redeclared inside the image domain.
@@ -62,6 +63,8 @@ export interface ImageManifestProps {
   digest: string;
   entrypointContract: EntrypointContractVO;
   supportedRuntimes: string[];
+  /** Metadata omitted by older providers/rows means unknown, never uninstalled. */
+  runtimeVersions?: Record<string, string>;
   resourceDefaults: ResourceDefaultsVO;
   labelsRequired: string[];
   /**
@@ -115,7 +118,9 @@ export interface ImageManifestProps {
  * and `unique(image_id, version) WHERE is_active`) are not aggregate invariants —
  * they are application checks plus DB unique indexes (23 §4.6 第三类).
  *
- * ⚠️ THE ROW IS IMMUTABLE EXCEPT FOR TWO FIELDS (I-IMG-7). `digest` / `baseImage` /
+ * ⚠️ THE COORDINATE IS IMMUTABLE (I-IMG-7). Validation/config/active state can change;
+ * missing build declarations may be backfilled only after re-resolving the same digest.
+ * `digest` / `baseImage` /
  * `version` / `derivedFromDigest` are never UPDATEd — upgrading an image is INSERT a
  * new row + move the `is_active` pointer, NOT edit in place. That is what turns I-IMG-3
  * (「is_active=false 的引用仍合法」) from a promise into a STRUCTURAL guarantee: a
@@ -131,6 +136,7 @@ export class ImageManifest extends AggregateRoot<string> {
   readonly digest: string;
   readonly entrypointContract: EntrypointContractVO;
   readonly supportedRuntimes: string[];
+  private _runtimeVersions: Record<string, string>;
   readonly resourceDefaults: ResourceDefaultsVO;
   readonly labelsRequired: string[];
   /** The lineage anchor — immutable with the rest of the coordinate (I-IMG-7). */
@@ -151,6 +157,7 @@ export class ImageManifest extends AggregateRoot<string> {
     this.digest = props.digest;
     this.entrypointContract = props.entrypointContract;
     this.supportedRuntimes = props.supportedRuntimes;
+    this._runtimeVersions = normalizeRuntimeVersions(props.runtimeVersions);
     this.resourceDefaults = props.resourceDefaults;
     this.labelsRequired = props.labelsRequired;
     this.diffIds = props.diffIds;
@@ -188,6 +195,15 @@ export class ImageManifest extends AggregateRoot<string> {
 
   get validation(): ValidationOutcome {
     return this._validation;
+  }
+
+  get runtimeVersions(): Record<string, string> {
+    return { ...this._runtimeVersions };
+  }
+
+  /** Fill previously unreported declarations only after resolving THIS digest again. */
+  backfillRuntimeVersions(versions: Record<string, string>): void {
+    this._runtimeVersions = { ...normalizeRuntimeVersions(versions), ...this._runtimeVersions };
   }
 
   get config(): ImageConfigVO | null {

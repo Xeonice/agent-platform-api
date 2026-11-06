@@ -1,4 +1,4 @@
-import type { CredentialId, Tx } from '@platform/shared-kernel';
+import type { CredentialId, Tx } from '@platform/shared-kernel/pure';
 import type { Credential } from '../entities/credential.entity';
 import type { EncryptedBlob } from '../value-objects/encrypted-blob.vo';
 import type { KnownHostEntry } from '../value-objects/credential-metadata.vo';

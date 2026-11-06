@@ -34,15 +34,15 @@ export function parseHttpOrigin(raw: string): string | undefined {
 export function readPublicNetworkConfig(
   source: NodeJS.ProcessEnv = process.env,
 ): PublicNetworkConfig {
-  const rawOrigins = (source['API_ALLOWED_ORIGINS'] ?? '').trim();
+  const rawOrigins = (source.API_ALLOWED_ORIGINS ?? '').trim();
   const origins = rawOrigins === '' ? [] : rawOrigins.split(',').map((value) => value.trim());
   const allowedOrigins = origins.map((origin) => {
     const parsed = parseHttpOrigin(origin);
     if (!parsed) throw new Error('API_ALLOWED_ORIGINS must contain exact HTTP(S) origins');
     return parsed;
   });
-  const trustProxy = source['API_TRUST_PROXY'] ?? 'none';
-  const drainFile = (source['DEPLOYMENT_DRAIN_FILE'] ?? '').trim();
+  const trustProxy = source.API_TRUST_PROXY ?? 'none';
+  const drainFile = (source.DEPLOYMENT_DRAIN_FILE ?? '').trim();
   if (drainFile !== '' && !isAbsolute(drainFile)) {
     throw new Error('DEPLOYMENT_DRAIN_FILE must be an absolute path');
   }
@@ -56,13 +56,13 @@ export function readPublicNetworkConfig(
     ) {
       throw new Error('cloudflare-loopback requires explicit HTTPS API_ALLOWED_ORIGINS');
     }
-    if (!['127.0.0.1', '::1', 'localhost'].includes(source['HOST'] ?? '127.0.0.1')) {
+    if (!['127.0.0.1', '::1', 'localhost'].includes(source.HOST ?? '127.0.0.1')) {
       throw new Error('cloudflare-loopback requires a loopback HOST');
     }
-    if (source['ACCESS_PASSCODE_ALLOW_LOOPBACK'] === 'true') {
+    if (source.ACCESS_PASSCODE_ALLOW_LOOPBACK === 'true') {
       throw new Error('cloudflare-loopback cannot enable ACCESS_PASSCODE_ALLOW_LOOPBACK');
     }
-    if (source['PASSCODE_COOKIE_SECURE'] !== 'true') {
+    if (source.PASSCODE_COOKIE_SECURE !== 'true') {
       throw new Error('cloudflare-loopback requires PASSCODE_COOKIE_SECURE=true');
     }
   }

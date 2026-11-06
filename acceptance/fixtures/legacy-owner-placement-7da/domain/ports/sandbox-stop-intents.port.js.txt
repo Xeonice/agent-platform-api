@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SANDBOX_STOP_INTENTS = void 0;
+exports.SANDBOX_STOP_INTENTS = Symbol('SandboxStopIntents');
+//# sourceMappingURL=sandbox-stop-intents.port.js.map

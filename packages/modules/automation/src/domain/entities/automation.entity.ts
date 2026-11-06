@@ -1,10 +1,10 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { AutomationId, ProjectId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { AutomationId, ProjectId } from '@platform/shared-kernel/pure';
 import { AutomationInvariantError } from '../errors/automation-errors';
 import { Schedule } from '../value-objects/schedule.vo';
 import type { ScheduleConfig, ScheduleKind } from '../value-objects/schedule.vo';
 import { FailurePolicy, TimeoutPolicy, assertRetentionDays } from '../value-objects/policies.vo';
-import type { RetentionDays } from '../value-objects/policies.vo';
+import type { RetentionDays, TimeoutMinutes } from '../value-objects/policies.vo';
 import { WebhookTarget } from '../value-objects/webhook-target.vo';
 import type { TriggerOn } from '../value-objects/webhook-target.vo';
 import {
@@ -191,7 +191,7 @@ export class Automation extends AggregateRoot<AutomationId> {
   get concurrency(): ConcurrencyMode {
     return this._concurrency;
   }
-  get timeoutMinutes(): number {
+  get timeoutMinutes(): TimeoutMinutes {
     return this._timeout.minutes;
   }
   get retentionDays(): RetentionDays {

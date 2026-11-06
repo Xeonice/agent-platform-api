@@ -81,10 +81,10 @@ function recordingExec(homeProbeAnswer = '/home/gem'): {
   calls: RecordedExec[];
 } {
   const calls: RecordedExec[] = [];
-  const exec: SandboxExecFn = async (cmd, execOpts) => {
+  const exec: SandboxExecFn = (cmd, execOpts) => {
     calls.push({ cmd, stdin: execOpts?.stdin, env: execOpts?.env, cwd: execOpts?.cwd });
     const stdout = cmd.some((token) => token.includes('$HOME')) ? homeProbeAnswer : '';
-    return { stdout, stderr: '', exitCode: 0 };
+    return Promise.resolve({ stdout, stderr: '', exitCode: 0 });
   };
   return { exec, calls };
 }
@@ -110,14 +110,16 @@ function allBytesGivenToExec(calls: RecordedExec[]): string[] {
 const REFRESH_TOKEN_FIELD_RE =
   /"refresh_token"\s*:\s*(?:"((?:\\.|[^"\\])*)"|(null|true|false|-?\d+(?:\.\d+)?))/g;
 
-function refreshTokenValuesIn(payloads: string[]): Array<string | null> {
-  const found: Array<string | null> = [];
+function refreshTokenValuesIn(payloads: string[]): (string | null)[] {
+  const found: (string | null)[] = [];
   for (const payload of payloads) {
     REFRESH_TOKEN_FIELD_RE.lastIndex = 0;
     let match = REFRESH_TOKEN_FIELD_RE.exec(payload);
     while (match !== null) {
       // `null` marks a non-string value (null/number/bool) — never acceptable material.
-      found.push(match[1] === undefined ? null : (JSON.parse(`"${match[1]}"`) as string));
+      const capture = match.at(1);
+      const decoded: unknown = capture === undefined ? null : JSON.parse(`"${capture}"`);
+      found.push(typeof decoded === 'string' ? decoded : null);
       match = REFRESH_TOKEN_FIELD_RE.exec(payload);
     }
   }
@@ -131,12 +133,24 @@ function refreshTokenValuesIn(payloads: string[]): Array<string | null> {
 function inertAuthSession(): AuthSessionContext {
   const pty: ProcessStream = {
     ref: 'testkit-inert-pty',
-    onData(): void {},
-    write(): void {},
-    resize(): void {},
-    onExit(): void {},
-    detach(): void {},
-    async kill(): Promise<void> {},
+    onData(): void {
+      /* Inert fixture emits no data. */
+    },
+    write(): void {
+      /* Inert fixture runs no process. */
+    },
+    resize(): void {
+      /* Inert fixture owns no terminal. */
+    },
+    onExit(): void {
+      /* Inert fixture emits no exit. */
+    },
+    detach(): void {
+      /* Inert fixture has no transport. */
+    },
+    kill(): Promise<void> {
+      return Promise.resolve();
+    },
   };
   return {
     pty,
@@ -162,7 +176,8 @@ function errorCodeOf(e: unknown): string | undefined {
  * (`codex` / `claude-code`) and third-party adapters run the SAME suite.
  *
  * SCOPE: only clauses that need NO real CLI, no network and no sandbox host — so it
- * runs unconditionally in the `contract` vitest project. The clauses that need a live
+ * runs unconditionally in the `pure` project through `pnpm test:contract`.
+ * The separate Owner extension acceptance runs in `protocol`. Clauses that need a live
  * CLI (04 §10.3 RA-01/RA-02 install round-trip, RA-05 challenge shape, RA-06
  * credential material) are out of scope here; RA-04's golden output fixtures live in
  * the adapters' own parser unit tests.
@@ -195,7 +210,7 @@ export function runRuntimeAdapterContractTests(
   describe(`RuntimeAdapter contract: ${label}`, () => {
     it('RA-08 (MUST): id/displayName/vendor are non-empty and id === the registry key', () => {
       const adapter = factory();
-      const identity: ReadonlyArray<readonly [string, string]> = [
+      const identity: readonly (readonly [string, string])[] = [
         ['id', adapter.id],
         ['displayName', adapter.displayName],
         ['vendor', adapter.vendor],
@@ -306,7 +321,7 @@ export function runRuntimeAdapterContractTests(
     if (declaresApiKeyCheck) {
       it('RA-11 (MUST, declared validateApiKey): malformed keys rejected, the fixture accepted', () => {
         const adapter = factory();
-        const validate = adapter.validateApiKey;
+        const validate = adapter.validateApiKey?.bind(adapter);
         expect(validate, 'validateApiKey disappeared between construction and use').toBeTypeOf(
           'function',
         );
@@ -338,7 +353,8 @@ export function runRuntimeAdapterContractTests(
       it('RA-12 (MUST, declared credentialTtlMs): keys are offered methods, values positive finite ms', () => {
         const adapter = factory();
         const methods = adapter.getAuthMethods();
-        for (const [method, value] of Object.entries(adapter.credentialTtlMs ?? {})) {
+        const ttl: Record<string, number | undefined> = adapter.credentialTtlMs ?? {};
+        for (const [method, value] of Object.entries(ttl)) {
           // an explicitly-undefined entry means "no expiry" — same as absent (04 §3)
           if (value === undefined) continue;
           expect(RUNTIME_AUTH_METHODS, `'${method}' is not a contract auth method`).toContain(
@@ -471,7 +487,7 @@ export function runRuntimeAdapterContractTests(
         const valid = opts.validApiKeySample;
         if (canAutoBuildApiKeyCase && valid !== undefined) {
           const builder = factory();
-          const fromSecret = builder.createCredentialFromSecret;
+          const fromSecret = builder.createCredentialFromSecret?.bind(builder);
           if (fromSecret) {
             cases.push({
               label: 'api-key (built from validApiKeySample)',

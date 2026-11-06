@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import type { ProcessStream } from '@platform/contracts';
 import type { ExecResult } from './aio-http';
 
@@ -38,14 +39,6 @@ export interface ExecControl {
   abort(): void;
 }
 
-/** AIO shell-websocket frames (server → client). */
-type AioServerFrame =
-  | { type: 'output'; data: string }
-  | { type: 'ping' }
-  | { type: 'session_id'; data: string }
-  | { type: 'ready'; data: string }
-  | { type: string; data?: unknown };
-
 /**
  * The slice of the WHATWG `WebSocket` surface the PTY stream actually uses. A real
  * `WebSocket` satisfies it structurally; declaring it lets the kill/keepalive
@@ -69,19 +62,26 @@ export class AioWsProcessStream implements ProcessStream {
     // AIO session_id is captured internally and never surfaced (ADR: only the
     // gateway's socketSessionKey is external). Default ref until the agent sends it.
     this.ref = 'aio-pty';
-    ws.addEventListener('message', (ev: MessageEvent) => this.onMessage(ev));
-    ws.addEventListener('close', () => this.synthExit(null));
-    ws.addEventListener('error', () => this.synthExit(null));
+    ws.addEventListener('message', (ev: MessageEvent) => {
+      this.onMessage(ev);
+    });
+    ws.addEventListener('close', () => {
+      this.synthExit(null);
+    });
+    ws.addEventListener('error', () => {
+      this.synthExit(null);
+    });
   }
 
   private onMessage(ev: MessageEvent): void {
     const raw = typeof ev.data === 'string' ? ev.data : String(ev.data);
-    let frame: AioServerFrame;
+    let frame: unknown;
     try {
-      frame = JSON.parse(raw) as AioServerFrame;
+      frame = JSON.parse(raw);
     } catch {
       return; // non-JSON keepalive / noise — ignore
     }
+    if (!isRecord(frame)) return;
     switch (frame.type) {
       case 'output':
         if (typeof frame.data === 'string') {
@@ -216,8 +216,12 @@ export class AioExecProcessStream implements ProcessStream {
     private readonly control: ExecControl,
   ) {
     result
-      .then(({ output, code }) => this.settle(Buffer.from(output, 'utf8'), code))
-      .catch(() => this.settle(Buffer.from(''), null));
+      .then(({ output, code }) => {
+        this.settle(Buffer.from(output, 'utf8'), code);
+      })
+      .catch(() => {
+        this.settle(Buffer.from(''), null);
+      });
   }
 
   private settle(output: Buffer, code: number | null): void {

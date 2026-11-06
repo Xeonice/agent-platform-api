@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.readSqlite = readSqlite;
+/** Promise-based repository ports over synchronous SQLite: execute immediately,
+ * while reporting a read/decoder failure as a rejection, like an async method. */
+function readSqlite(read) {
+    return new Promise((resolve) => {
+        resolve(read());
+    });
+}
+//# sourceMappingURL=read-sqlite.js.map

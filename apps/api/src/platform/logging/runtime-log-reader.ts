@@ -78,7 +78,7 @@ function planWithinBudget(paths: string[], maxBytes: number): ReadPlanEntry[] {
   const plan: ReadPlanEntry[] = [];
   let budget = maxBytes;
   for (let i = paths.length - 1; i >= 0 && budget > 0; i--) {
-    const path = paths[i]!;
+    const path = paths[i];
     let size = 0;
     try {
       size = statSync(path).size;
@@ -124,7 +124,7 @@ async function* emit(
         if (entry.start > 0) continue;
       }
       const stamp = LINE_TIMESTAMP_RE.exec(line);
-      if (stamp) lastMs = Date.parse(stamp[1]!);
+      if (stamp) lastMs = Date.parse(stamp[1]);
       if (lastMs !== undefined) {
         if (fromMs !== undefined && lastMs < fromMs) continue;
         if (toMs !== undefined && lastMs > toMs) continue;

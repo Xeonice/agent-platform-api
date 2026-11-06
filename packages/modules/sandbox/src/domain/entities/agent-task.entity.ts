@@ -1,5 +1,5 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { AgentTaskId, SandboxId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { AgentTaskId, SandboxId } from '@platform/shared-kernel/pure';
 import { AgentTaskFinished, AgentTaskStarted } from '../events/agent-task-events';
 import { isTerminalTaskStatus, type AgentTaskStatus } from '../value-objects/agent-task-status.vo';
 
@@ -266,7 +266,7 @@ export class AgentTask extends AggregateRoot<AgentTaskId> {
     if (!this.isRunning) {
       throw new Error(`agent task ${this.id} already finished as '${this._status}'`);
     }
-    if (this._cancelRequestedAt === null) this._cancelRequestedAt = now;
+    this._cancelRequestedAt ??= now;
   }
 
   /**

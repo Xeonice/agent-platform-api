@@ -1,3 +1,4 @@
+import { DockerStateSchema } from '../docker/docker-values';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import type Docker from 'dockerode';
 import {
@@ -200,7 +201,8 @@ export class AioSandboxProvider implements SandboxProvider {
     const at = this.clock?.now().toISOString();
     if (at === undefined) return status; // 没有 clock ⇒ 不编一个采样时刻出来
     if (status.lifecycleState === 'instance_missing') return status;
-    const raw = status.raw as { Health?: { Status?: string; FailingStreak?: number } } | undefined;
+    const decoded = DockerStateSchema.safeParse(status.raw);
+    const raw = decoded.success ? decoded.data : undefined;
     return {
       ...status,
       health: readAioHealth({
@@ -228,7 +230,9 @@ export class AioSandboxProvider implements SandboxProvider {
       const base = await this.agentOrigin(handle);
       const ctrl = new AbortController();
       // ⚠️ 单次探测超时必须**远小于**采样周期（30s），否则探测自己会堆积。
-      const timer = setTimeout(() => ctrl.abort(), AioSandboxProvider.PROBE_TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        ctrl.abort();
+      }, AioSandboxProvider.PROBE_TIMEOUT_MS);
       try {
         return (await fetch(`${base}${AGENT_PING_PATH}`, { method: 'GET', signal: ctrl.signal }))
           .ok;

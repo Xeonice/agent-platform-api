@@ -12,7 +12,7 @@ export function normalizeImageAlias(value: string | null): string | null {
     throw new ImageAliasValidationError('别名不能包含换行或控制字符');
   }
   const normalized = value.trim();
-  if ([...normalized].length > 64) {
+  if (Array.from(normalized).length > 64) {
     throw new ImageAliasValidationError('别名最多 64 个字符');
   }
   return normalized === '' ? null : normalized;

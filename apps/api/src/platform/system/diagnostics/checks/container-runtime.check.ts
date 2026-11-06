@@ -1,3 +1,4 @@
+import { errorMessage } from '@platform/shared-kernel';
 import http from 'node:http';
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
@@ -64,7 +65,7 @@ export class ContainerRuntimeCheck implements DiagnoseCheck {
         },
       };
     } catch (e) {
-      const reason = (e as Error).message;
+      const reason = errorMessage(e);
       const { provider, substrate } = defaultSubstrate(this.providers);
       return {
         ...unreachableVerdict(substrate, provider, target.describe, reason),
@@ -138,7 +139,7 @@ interface DockerTarget {
 /** 与 `createDockerClient()` 同一套解析（shared/11 §1）——两处改动要同步。 */
 function dockerTarget(): DockerTarget {
   const host = process.env.DOCKER_HOST;
-  if (host && host.startsWith('tcp://')) {
+  if (host?.startsWith('tcp://')) {
     const url = new URL(host);
     const port = Number(url.port || 2375);
     return {
@@ -148,7 +149,7 @@ function dockerTarget(): DockerTarget {
       describe: `tcp://${url.hostname}:${String(port)}`,
     };
   }
-  if (host && host.startsWith('unix://')) {
+  if (host?.startsWith('unix://')) {
     const p = host.replace('unix://', '');
     return { kind: 'unix', socketPath: p, describe: p };
   }
@@ -204,7 +205,9 @@ function ping(target: DockerTarget, ctx: DiagnoseContext): Promise<Pong> {
       req.destroy(new Error(`${String(ctx.timeoutMs)}ms 内无应答`)),
     );
     ctx.signal.addEventListener('abort', () => req.destroy(new Error('已取消')), { once: true });
-    req.on('error', (e) => reject(e));
+    req.on('error', (e) => {
+      reject(e);
+    });
     req.end();
   });
 }

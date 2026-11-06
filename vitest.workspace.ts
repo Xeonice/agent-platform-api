@@ -5,10 +5,12 @@ import swc from 'unplugin-swc';
 const r = (p: string) => resolve(__dirname, p);
 
 /**
- * Resolve internal packages to SOURCE so tests run without a prior build
- * (CI runs tests before `build`, shared/09 §2.3).
+ * Resolve internal packages to SOURCE for the in-process test subjects.
+ * The shared runner additionally builds protocol child-process entry points
+ * before that project runs; a fresh checkout must not exercise stale dist.
  */
 const alias = {
+  '@platform/shared-kernel/pure': r('packages/shared-kernel/src/pure.ts'),
   '@platform/shared-kernel': r('packages/shared-kernel/src/index.ts'),
   '@platform/contracts/testkit': r('packages/contracts/src/testkit/index.ts'),
   '@platform/contracts': r('packages/contracts/src/index.ts'),

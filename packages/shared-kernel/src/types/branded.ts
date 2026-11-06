@@ -18,10 +18,16 @@ export type NodeId = Brand<string, 'NodeId'>;
 // NOTE: the transaction token `Tx` lives in ./ports/unit-of-work.port — it is
 // opaque and mintable ONLY inside UnitOfWork.run (P2-1), not a branded id here.
 
-export const asSandboxId = (v: string): SandboxId => v as SandboxId;
-export const asAgentTaskId = (v: string): AgentTaskId => v as AgentTaskId;
-export const asProjectId = (v: string): ProjectId => v as ProjectId;
-export const asCredentialId = (v: string): CredentialId => v as CredentialId;
-export const asRetainedVolumeId = (v: string): RetainedVolumeId => v as RetainedVolumeId;
-export const asImageId = (v: string): ImageId => v as ImageId;
-export const asAutomationId = (v: string): AutomationId => v as AutomationId;
+function nominalId<T extends string>(value: string): Brand<string, T> {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Nominal tags have no runtime representation; this central types boundary only labels an already typed string, never validates external data.
+  return value as Brand<string, T>;
+}
+
+export const asSandboxId = (v: string): SandboxId => nominalId<'SandboxId'>(v);
+export const asAgentTaskId = (v: string): AgentTaskId => nominalId<'AgentTaskId'>(v);
+export const asProjectId = (v: string): ProjectId => nominalId<'ProjectId'>(v);
+export const asCredentialId = (v: string): CredentialId => nominalId<'CredentialId'>(v);
+export const asRetainedVolumeId = (v: string): RetainedVolumeId => nominalId<'RetainedVolumeId'>(v);
+export const asImageId = (v: string): ImageId => nominalId<'ImageId'>(v);
+export const asAutomationId = (v: string): AutomationId => nominalId<'AutomationId'>(v);
+export const asNodeId = (v: string): NodeId => nominalId<'NodeId'>(v);

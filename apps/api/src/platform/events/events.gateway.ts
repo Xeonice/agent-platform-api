@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Logger } from '@nestjs/common';
 import { type OnGatewayInit, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
@@ -21,10 +22,15 @@ import type {
  */
 @WebSocketGateway({ namespace: '/events' })
 export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
+  private readonly worker = coordinatorWorker('platform.events-gateway', () => {
+    this.prepareHandoff();
+  });
+
   private readonly logger = new Logger('EventsGateway');
+  private retiring = false;
 
   @WebSocketServer()
-  private readonly server!: Namespace;
+  private readonly server?: Namespace;
 
   constructor(@Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator) {}
 
@@ -56,30 +62,61 @@ export class EventsGateway implements OnGatewayInit, SandboxEventBroadcaster {
    * can see.
    */
   afterInit(server: Namespace): void {
-    server.use((socket, next) => {
-      if (!this.auth.authorize(this.readCredentials(socket))) {
+    const authorize = async (socket: Socket, next: (error?: Error) => void) => {
+      if (!(await this.auth.authorize(this.readCredentials(socket)))) {
         this.logger.warn('events handshake rejected: missing/invalid access passcode');
         next(wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode'));
         return;
       }
+      if (this.retiring) {
+        next(
+          wsHandshakeError(
+            'APPLICATION_WRITER_QUIESCED',
+            'events transport is moving to the active coordinator',
+          ),
+        );
+        return;
+      }
       next();
+    };
+    server.use((socket, next) => {
+      void this.worker
+        .run(() => authorize(socket, next))
+        .catch(() => {
+          next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+        });
     });
   }
 
   /** Broadcast a projected event to all connected /events sockets. */
   broadcast(event: SandboxWsEvent): void {
-    this.server?.emit('event', event);
+    if (!this.retiring) this.server?.emit('event', event);
+  }
+
+  /** Reconnect only transport; committed state and the original runtime are retained. */
+  prepareHandoff(): number {
+    this.retiring = true;
+    const count = this.activeTransportConnections;
+    this.server?.disconnectSockets(false);
+    return count;
+  }
+
+  resumeAfterHandoff(): void {
+    this.retiring = false;
+  }
+
+  get activeTransportConnections(): number {
+    return this.server?.sockets.size ?? 0;
   }
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth =
-      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth = typeof auth?.passcode === 'string' ? auth.passcode : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;
     const fromBearer = authz?.startsWith('Bearer ') ? authz.slice('Bearer '.length) : undefined;
-    const query = client.handshake.query['passcode'];
+    const query = client.handshake.query.passcode;
     const fromQuery = Array.isArray(query) ? query[0] : query;
     return {
       passcode: fromAuth ?? fromHeader ?? fromBearer ?? fromQuery,

@@ -9,6 +9,7 @@ export default defineConfig({
   dialect: 'sqlite',
   schema: [
     './packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite.ts',
+    './packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox-admission-intents.sqlite.ts',
     './packages/modules/sandbox/src/infrastructure/persistence/schema/agent-task.sqlite.ts',
     './packages/modules/sandbox/src/infrastructure/persistence/schema/resource-allocation.sqlite.ts',
     './packages/modules/project/src/infrastructure/persistence/schema/project.sqlite.ts',
@@ -21,6 +22,7 @@ export default defineConfig({
     // 平台级表（13 §2.8）。落在 apps/api 而不是某个 module —— 理由写在 schema 文件顶部。
     './apps/api/src/platform/audit/audit-events.sqlite.ts',
     './apps/api/src/platform/system/system-settings.sqlite.ts',
+    './apps/api/src/platform/upgrade/upgrade.sqlite.ts',
   ],
   out: './drizzle',
 });

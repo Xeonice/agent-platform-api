@@ -194,12 +194,12 @@ export class RuntimeCredentialService {
       );
     }
     const cred = await this.requireRuntimeCredential(
-      id as string,
+      id,
       candidates.find((c) => c.id === id),
     );
     const out = await this.materializer.materializeForInjection(this.materializeInputFor(cred));
     this.touchLastUsed(cred);
-    return Object.assign(out, { credentialId: cred.id as string });
+    return Object.assign(out, { credentialId: cred.id });
   }
 
   /**
@@ -221,7 +221,7 @@ export class RuntimeCredentialService {
     prefetched?: Credential,
   ): Promise<Credential> {
     const cred = prefetched ?? (await this.repo.findById(asCredentialId(credentialId)));
-    if (!cred || cred.kind !== 'runtime') {
+    if (cred?.kind !== 'runtime') {
       throw new CredentialPreparationError(
         'NO_CREDENTIAL',
         `runtime credential ${credentialId} not found`,
@@ -233,7 +233,7 @@ export class RuntimeCredentialService {
   private materializeInputFor(cred: Credential): MaterializeRuntimeInput {
     return {
       runtimeId: cred.runtimeId ?? '',
-      obtainedVia: cred.obtainedVia as RuntimeAuthMethod,
+      obtainedVia: requireRuntimeMethod(cred.obtainedVia),
       maskedIdentifier: cred.masked.toString(),
       issuedAt: cred.issuedAt,
       expiresAt: cred.expiresAt,
@@ -243,7 +243,9 @@ export class RuntimeCredentialService {
 
   private touchLastUsed(cred: Credential): void {
     try {
-      this.uow.run((tx) => this.repo.touchLastUsedSync(tx, cred.id, this.clock.now()));
+      this.uow.run((tx) => {
+        this.repo.touchLastUsedSync(tx, cred.id, this.clock.now());
+      });
     } catch {
       /* best-effort */
     }
@@ -254,7 +256,7 @@ export class RuntimeCredentialService {
     credentialId: string,
   ): Promise<RuntimeCredentialDeletionPreviewDto> {
     const cred = await this.repo.findById(asCredentialId(credentialId));
-    if (!cred || cred.kind !== 'runtime' || cred.runtimeId !== runtimeId)
+    if (cred?.kind !== 'runtime' || cred.runtimeId !== runtimeId)
       throw new NotFoundException('凭证已不存在。');
     if (!this.sandboxFacade) throw new Error('Sandbox credential impact reader unavailable');
     const bound = await this.bindings.listByCredential(cred.id);
@@ -282,7 +284,7 @@ export class RuntimeCredentialService {
     if (!cred) return { credentialStatus: 'none' };
     return {
       credentialStatus: this.deriveStatus(cred, this.clock.now()),
-      credentialId: cred.id as string,
+      credentialId: cred.id,
       maskedIdentifier: cred.masked.toString(),
       expiresAt: cred.expiresAt ? cred.expiresAt.toISOString() : undefined,
     };
@@ -305,7 +307,7 @@ export class RuntimeCredentialService {
       if (!cred) continue;
       const derived = this.deriveStatus(cred, now);
       out.push({
-        credentialId: cred.id as string,
+        credentialId: cred.id,
         mode,
         maskedIdentifier: cred.masked.toString(),
         status: derived === 'active' ? 'ok' : derived === 'expiring' ? 'expiring' : 'expired',
@@ -328,7 +330,7 @@ export class RuntimeCredentialService {
   /** Revoke a runtime credential (DELETE endpoint). Publishes `CredentialRevoked`. */
   async revoke(runtimeId: string, credentialId: string): Promise<void> {
     const cred = await this.repo.findById(asCredentialId(credentialId));
-    if (!cred || cred.kind !== 'runtime' || cred.runtimeId !== runtimeId) {
+    if (cred?.kind !== 'runtime' || cred.runtimeId !== runtimeId) {
       throw new NotFoundException(`runtime credential ${credentialId} not found for ${runtimeId}`);
     }
     if (cred.isRevoked()) return; // idempotent
@@ -365,11 +367,13 @@ export class RuntimeCredentialService {
       sandboxId: asSandboxId(sandboxId),
       now,
     });
-    return this.uow.run((tx) => {
-      if (!this.bindings.saveIfUsableSync(tx, binding, runtimeId, now)) return false;
-      this.events.publishInTx(tx, [new CredentialInjected(id, sandboxId, now)]);
-      return true;
-    });
+    return Promise.resolve(
+      this.uow.run((tx) => {
+        if (!this.bindings.saveIfUsableSync(tx, binding, runtimeId, now)) return false;
+        this.events.publishInTx(tx, [new CredentialInjected(id, sandboxId, now)]);
+        return true;
+      }),
+    );
   }
 
   /**
@@ -394,7 +398,7 @@ export class RuntimeCredentialService {
     for (const c of due) {
       if (!isRuntimeAuthMethod(c.obtainedVia)) continue;
       out.push({
-        credentialId: c.id as string,
+        credentialId: c.id,
         runtimeId: c.runtimeId ?? '',
         obtainedVia: c.obtainedVia,
       });
@@ -412,9 +416,9 @@ export class RuntimeCredentialService {
     try {
       const encrypted = await this.crypto.encrypt(secret);
       const now = this.clock.now();
-      this.uow.run((tx) =>
-        this.repo.refreshSync(tx, asCredentialId(credentialId), encrypted, newExpiresAt, now),
-      );
+      this.uow.run((tx) => {
+        this.repo.refreshSync(tx, asCredentialId(credentialId), encrypted, newExpiresAt, now);
+      });
     } finally {
       secret.zeroize();
     }
@@ -422,6 +426,15 @@ export class RuntimeCredentialService {
 
   /** Refresh scanner failure path: bump refresh_failures (≥3 stops, 05 §5.1). */
   async recordRefreshFailure(credentialId: string): Promise<void> {
-    this.uow.run((tx) => this.repo.recordRefreshFailureSync(tx, asCredentialId(credentialId)));
+    this.uow.run((tx) => {
+      this.repo.recordRefreshFailureSync(tx, asCredentialId(credentialId));
+    });
+
+    return Promise.resolve();
   }
+}
+
+function requireRuntimeMethod(value: string): RuntimeAuthMethod {
+  if (!isRuntimeAuthMethod(value)) throw new Error('Invalid runtime credential method');
+  return value;
 }

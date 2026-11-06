@@ -1,5 +1,5 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { AutomationId } from '@platform/shared-kernel';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { AutomationId } from '@platform/shared-kernel/pure';
 import { AutomationRunStateError } from '../errors/automation-errors';
 import { RetryPolicy } from '../value-objects/policies.vo';
 

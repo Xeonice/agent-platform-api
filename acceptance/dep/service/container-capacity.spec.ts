@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -69,7 +70,7 @@ describe('container CPU/RAM limits constrain actual admission rather than host t
       h.service.create({ projectId: 'prj-1', runtime: 'claude-code' }),
     ]);
     await Promise.all(tasks.map((task) => waitForStatus(h.service, task.id, 'running')));
-    await h.service.stop(tasks[0]!.id);
+    await h.service.stop(assertDefined(tasks[0]).id);
     expect(await h.service.defaultCapacity()).toMatchObject({
       remainingTasks: 0,
       registeredTasks: 2,

@@ -79,8 +79,8 @@ import { DockerodeProvisionAdapter } from './preset-image/dockerode-provision.ad
         new PresetImageProvisioner(
           docker,
           {
-            assetsDir: (): string | undefined => process.env['SANDBOX_IMAGE_ASSETS_DIR'],
-            upstreamRef: (): string | undefined => process.env['SANDBOX_PRESET_IMAGE_SOURCE'],
+            assetsDir: (): string | undefined => process.env.SANDBOX_IMAGE_ASSETS_DIR,
+            upstreamRef: (): string | undefined => process.env.SANDBOX_PRESET_IMAGE_SOURCE,
           },
           {
             // ⚠️ **权威是 registry 的 `defaultProvider`，不是 `process.platform`**

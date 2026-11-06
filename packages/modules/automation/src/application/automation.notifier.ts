@@ -1,3 +1,4 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { UnitOfWork } from '@platform/shared-kernel';
@@ -29,6 +30,8 @@ const SUMMARY_BYTES = 1024;
  */
 @Injectable()
 export class AutomationNotifier {
+  private readonly worker = coordinatorWorker('automation.notifier');
+
   private readonly logger = new Logger('AutomationNotifier');
   /** 已经为哪些规则发过「降频/禁用」通知 —— 避免每轮重发（进程内即可，重启重发一次无害）。 */
   private readonly announced = new Map<string, string>();
@@ -43,69 +46,77 @@ export class AutomationNotifier {
 
   /** stdout 末尾 1KB —— 列表快速预览（13 §2.7.2）。读不到就不给，不编。 */
   async summarize(logPath: string | null): Promise<string | undefined> {
-    if (logPath === null) return undefined;
-    try {
-      const slice = await this.logs.read(logPath, undefined, SUMMARY_BYTES);
-      return slice.content === '' ? undefined : slice.content;
-    } catch {
-      return undefined;
-    }
+    return this.worker.run(async () => {
+      if (logPath === null) return undefined;
+      try {
+        const slice = await this.logs.read(logPath, undefined, SUMMARY_BYTES);
+        return slice.content === '' ? undefined : slice.content;
+      } catch {
+        return undefined;
+      }
+    });
   }
 
   /** ① run 终态。 */
   async afterRunFinished(automation: Automation, run: AutomationRun): Promise<void> {
-    const outcome = toOutcome(run.status);
-    if (outcome === null) return;
-    const target = automation.webhook;
-    // I-AUT-6：`webhook` 为空**根本不发**（不是发一条被过滤的）。
-    if (target === null) return;
-    if (!target.matches(outcome)) {
-      this.persistStatus(run.id, 'skipped');
-      return;
-    }
-    const payload = await this.payload(automation, run, `run.${run.status}`);
-    const result = await this.sender.deliver(target.url, payload);
-    this.persistStatus(run.id, result);
+    return this.worker.run(async () => {
+      const outcome = toOutcome(run.status);
+      if (outcome === null) return;
+      const target = automation.webhook;
+      // I-AUT-6：`webhook` 为空**根本不发**（不是发一条被过滤的）。
+      if (target === null) return;
+      if (!target.matches(outcome)) {
+        this.persistStatus(run.id, 'skipped');
+        return;
+      }
+      const payload = await this.payload(automation, run, `run.${run.status}`);
+      const result = await this.sender.deliver(target.url, payload);
+      this.persistStatus(run.id, result);
+    });
   }
 
   /** ③ 凭证过期跳过（03 §8.2 行 2）。 */
   async afterAuthExpired(automation: Automation, run: AutomationRun): Promise<void> {
-    const target = automation.webhook;
-    if (target === null) return;
-    // ⚠️ **不过 `triggerOn` 匹配**：这条不是「运行结果」，它是「这条规则从现在起
-    // 跑不了了」。用 `triggerOn='success'` 把它过滤掉，等于让一个只关心成功通知的人
-    // 永远不知道自己的凭证过期了。
-    const payload = await this.payload(automation, run, 'auth.expired');
-    const result = await this.sender.deliver(target.url, payload);
-    this.persistStatus(run.id, result);
+    return this.worker.run(async () => {
+      const target = automation.webhook;
+      if (target === null) return;
+      // ⚠️ **不过 `triggerOn` 匹配**：这条不是「运行结果」，它是「这条规则从现在起
+      // 跑不了了」。用 `triggerOn='success'` 把它过滤掉，等于让一个只关心成功通知的人
+      // 永远不知道自己的凭证过期了。
+      const payload = await this.payload(automation, run, 'auth.expired');
+      const result = await this.sender.deliver(target.url, payload);
+      this.persistStatus(run.id, result);
+    });
   }
 
   /** ② 降频与自动禁用（P21-7 §5）。 */
   async afterStateChange(automation: Automation): Promise<void> {
-    const target = automation.webhook;
-    if (target === null) return;
-    const state = !automation.enabled
-      ? 'automation.disabled'
-      : automation.degraded
-        ? 'automation.degraded'
-        : null;
-    if (state === null) {
-      this.announced.delete(automation.id);
-      return;
-    }
-    if (this.announced.get(automation.id) === state) return;
-    this.announced.set(automation.id, state);
-    const project = await this.projectName(automation.projectId);
-    await this.sender.deliver(target.url, {
-      event: state,
-      automationId: automation.id,
-      automationName: automation.name,
-      projectId: automation.projectId,
-      projectName: project,
-      runtimeId: automation.runtimeId,
-      triggeredAt: (automation.lastTriggeredAt ?? automation.updatedAt).toISOString(),
-      status: state === 'automation.disabled' ? 'disabled' : 'degraded',
-      errorMessage: `consecutive failures: ${String(automation.failureCount)}`,
+    return this.worker.run(async () => {
+      const target = automation.webhook;
+      if (target === null) return;
+      const state = !automation.enabled
+        ? 'automation.disabled'
+        : automation.degraded
+          ? 'automation.degraded'
+          : null;
+      if (state === null) {
+        this.announced.delete(automation.id);
+        return;
+      }
+      if (this.announced.get(automation.id) === state) return;
+      this.announced.set(automation.id, state);
+      const project = await this.projectName(automation.projectId);
+      await this.sender.deliver(target.url, {
+        event: state,
+        automationId: automation.id,
+        automationName: automation.name,
+        projectId: automation.projectId,
+        projectName: project,
+        runtimeId: automation.runtimeId,
+        triggeredAt: (automation.lastTriggeredAt ?? automation.updatedAt).toISOString(),
+        status: state === 'automation.disabled' ? 'disabled' : 'degraded',
+        errorMessage: `consecutive failures: ${String(automation.failureCount)}`,
+      });
     });
   }
 
@@ -114,32 +125,36 @@ export class AutomationNotifier {
     run: AutomationRun,
     event: string,
   ): Promise<WebhookPayload> {
-    const base: WebhookPayload = {
-      event,
-      automationId: automation.id,
-      automationName: automation.name,
-      projectId: automation.projectId,
-      projectName: await this.projectName(automation.projectId),
-      runtimeId: automation.runtimeId,
-      triggeredAt: run.triggeredAt.toISOString(),
-      status: run.status,
-      ...(run.completedAt !== null ? { finishedAt: run.completedAt.toISOString() } : {}),
-      ...(run.errorCode !== null ? { errorCode: run.errorCode } : {}),
-      ...(run.errorMessage !== null ? { errorMessage: run.errorMessage } : {}),
-    };
-    const taskUrl = deepLink(run.sandboxId);
-    // ⚠️ `publicBaseUrl` 未配置 ⇒ **省略 `taskUrl`**（T-AUT-33），而不是拼出
-    // `undefined/?taskId=…`。一条看起来可点的死链比没有链接更糟。
-    return taskUrl === undefined ? base : { ...base, taskUrl };
+    return this.worker.run(async () => {
+      const base: WebhookPayload = {
+        event,
+        automationId: automation.id,
+        automationName: automation.name,
+        projectId: automation.projectId,
+        projectName: await this.projectName(automation.projectId),
+        runtimeId: automation.runtimeId,
+        triggeredAt: run.triggeredAt.toISOString(),
+        status: run.status,
+        ...(run.completedAt !== null ? { finishedAt: run.completedAt.toISOString() } : {}),
+        ...(run.errorCode !== null ? { errorCode: run.errorCode } : {}),
+        ...(run.errorMessage !== null ? { errorMessage: run.errorMessage } : {}),
+      };
+      const taskUrl = deepLink(run.sandboxId);
+      // ⚠️ `publicBaseUrl` 未配置 ⇒ **省略 `taskUrl`**（T-AUT-33），而不是拼出
+      // `undefined/?taskId=…`。一条看起来可点的死链比没有链接更糟。
+      return taskUrl === undefined ? base : { ...base, taskUrl };
+    });
   }
 
   private async projectName(projectId: string): Promise<string> {
-    try {
-      return (await this.projects.get(projectId)).name;
-    } catch {
-      // 项目查不到不该把一条通知拦下来 —— 载荷里 `projectId` 本来就是权威那一个。
-      return projectId;
-    }
+    return this.worker.run(async () => {
+      try {
+        return (await this.projects.get(projectId)).name;
+      } catch {
+        // 项目查不到不该把一条通知拦下来 —— 载荷里 `projectId` 本来就是权威那一个。
+        return projectId;
+      }
+    });
   }
 
   /**
@@ -149,18 +164,20 @@ export class AutomationNotifier {
    * （10s 超时 + 5s/25s 退避），那期间调用方手里的副本可能已经过时。
    */
   private persistStatus(runId: string, status: 'sent' | 'failed' | 'skipped'): void {
-    void this.runs
-      .findById(runId)
-      .then((fresh) => {
-        if (fresh === null) return;
-        fresh.recordWebhookStatus(status);
-        this.uow.run((tx) => {
-          this.runs.saveSync(tx, fresh);
-        });
-      })
-      .catch((e: unknown) => {
-        this.logger.warn(`could not record webhook status for run ${runId}: ${String(e)}`);
-      });
+    void this.worker.run(() =>
+      this.runs
+        .findById(runId)
+        .then((fresh) => {
+          if (fresh === null) return;
+          fresh.recordWebhookStatus(status);
+          this.uow.run((tx) => {
+            this.runs.saveSync(tx, fresh);
+          });
+        })
+        .catch((e: unknown) => {
+          this.logger.warn(`could not record webhook status for run ${runId}: ${String(e)}`);
+        }),
+    );
   }
 }
 

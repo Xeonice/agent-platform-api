@@ -3,12 +3,12 @@ import { and, asc, eq, isNull, isNotNull, lte } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { DATABASE } from '@platform/shared-kernel';
 import type { ProjectId, RetainedVolumeId, Tx } from '@platform/shared-kernel';
-import type { RetainedVolumeSource } from '@platform/contracts';
 import { RetainedVolume } from '../../../domain/entities/retained-volume.entity';
 import type { RetainedVolumeRepository } from '../../../domain/repositories/retained-volume.repository';
 import { retainedVolumes, type RetainedVolumeRow } from '../schema/retained-volume.sqlite';
+import { asRetainedVolumeId, asProjectId } from '@platform/shared-kernel';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** SQLite (better-sqlite3 + Drizzle) implementation of `RetainedVolumeRepository`. */
 @Injectable()
@@ -17,7 +17,7 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
 
   async findById(id: RetainedVolumeId): Promise<RetainedVolume | null> {
     const row = this.db.select().from(retainedVolumes).where(eq(retainedVolumes.id, id)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async findByWorkspacePath(workspacePath: string): Promise<RetainedVolume | null> {
@@ -26,7 +26,7 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
       .from(retainedVolumes)
       .where(eq(retainedVolumes.workspacePath, workspacePath))
       .get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async listByProject(projectId: ProjectId, includeDeleted = false): Promise<RetainedVolume[]> {
@@ -34,13 +34,15 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
     const where = includeDeleted
       ? eq(retainedVolumes.projectId, projectId)
       : and(eq(retainedVolumes.projectId, projectId), live);
-    return this.db
-      .select()
-      .from(retainedVolumes)
-      .where(where)
-      .orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id))
-      .all()
-      .map(toDomain);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(retainedVolumes)
+        .where(where)
+        .orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id))
+        .all()
+        .map(toDomain),
+    );
   }
 
   async listAll(includeDeleted = false): Promise<RetainedVolume[]> {
@@ -51,7 +53,7 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
           .where(isNull(retainedVolumes.deletedAt))
           .orderBy(asc(retainedVolumes.retainUntil), asc(retainedVolumes.id))
           .all();
-    return rows.map(toDomain);
+    return Promise.resolve(rows.map(toDomain));
   }
 
   /**
@@ -60,13 +62,15 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
    * `markDeleted()` —— I-RV-2 会把那一轮整个打断。
    */
   async listExpired(now: Date): Promise<RetainedVolume[]> {
-    return this.db
-      .select()
-      .from(retainedVolumes)
-      .where(and(lte(retainedVolumes.retainUntil, now), isNull(retainedVolumes.deletedAt)))
-      .orderBy(asc(retainedVolumes.retainUntil))
-      .all()
-      .map(toDomain);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(retainedVolumes)
+        .where(and(lte(retainedVolumes.retainUntil, now), isNull(retainedVolumes.deletedAt)))
+        .orderBy(asc(retainedVolumes.retainUntil))
+        .all()
+        .map(toDomain),
+    );
   }
 
   /** 见接口注释：删项目时连带清掉登记行，否则 FK `restrict` 会让项目永远删不掉。 */
@@ -118,14 +122,14 @@ export class SqliteRetainedVolumeRepository implements RetainedVolumeRepository 
 
 function toDomain(row: RetainedVolumeRow): RetainedVolume {
   return RetainedVolume.rehydrate({
-    id: row.id as RetainedVolumeId,
-    projectId: row.projectId as ProjectId,
+    id: asRetainedVolumeId(row.id),
+    projectId: asProjectId(row.projectId),
     sandboxId: row.sandboxId,
     sandboxName: row.sandboxName,
     sourceAutomationId: row.sourceAutomationId,
     sourceAutomationName: row.sourceAutomationName,
     workspacePath: row.workspacePath,
-    source: row.source as RetainedVolumeSource,
+    source: row.source,
     diskBytes: row.diskBytes,
     downloadBytes: row.downloadBytes,
     retainedAt: row.retainedAt,

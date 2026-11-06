@@ -91,7 +91,7 @@ function canonicalHost(token: string): string | null {
 function toAuthority(host: string, port: number | null, scheme: GitRemoteScheme): string {
   const dflt = DEFAULT_PORTS[scheme];
   if (port === null || port === dflt) return host;
-  return `${host}:${port}`;
+  return `${host}:${String(port)}`;
 }
 
 /**
@@ -160,7 +160,7 @@ function isBlockedIpv6(ip: string): boolean {
   if (hex) {
     const hi = Number.parseInt(hex[1], 16);
     const lo = Number.parseInt(hex[2], 16);
-    return isBlockedIpv4(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    return isBlockedIpv4([(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join('.'));
   }
   const head = lower.split(':')[0];
   if (

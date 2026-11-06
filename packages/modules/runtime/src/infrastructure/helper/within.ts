@@ -13,8 +13,10 @@ export async function within<T>(work: Promise<T>, ms: number): Promise<T | typeo
     return await Promise.race([
       work,
       new Promise<typeof TIMED_OUT>((resolve) => {
-        timer = setTimeout(() => resolve(TIMED_OUT), ms);
-        timer.unref?.();
+        timer = setTimeout(() => {
+          resolve(TIMED_OUT);
+        }, ms);
+        timer.unref();
       }),
     ]);
   } finally {

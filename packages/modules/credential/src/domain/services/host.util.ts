@@ -10,7 +10,12 @@
  * (https=443, http=80, ssh=22, git=9418), else `host:port`. Enterprise self-hosted
  * git commonly runs on :8443/:8080/:3000, so this is load-bearing.
  */
-const DEFAULT_PORTS: Record<string, number> = { https: 443, http: 80, ssh: 22, git: 9418 };
+const DEFAULT_PORTS: Readonly<Partial<Record<string, number>>> = {
+  https: 443,
+  http: 80,
+  ssh: 22,
+  git: 9418,
+};
 
 function unbracket(s: string): string {
   return s.startsWith('[') && s.endsWith(']') ? s.slice(1, -1) : s;
@@ -21,7 +26,7 @@ export function toAuthority(host: string, port: number | null, scheme: string): 
   const h = unbracket(host.trim().toLowerCase());
   const dflt = DEFAULT_PORTS[scheme];
   if (port === null || (dflt !== undefined && port === dflt)) return h;
-  return `${h}:${port}`;
+  return `${h}:${String(port)}`;
 }
 
 /**
@@ -38,14 +43,14 @@ export function normalizeAllowedHost(raw: string, defaultPort: number): string {
       const host = s.slice(1, end);
       const m = /^:(\d+)$/.exec(s.slice(end + 1));
       const port = m ? Number(m[1]) : null;
-      return port === null || port === defaultPort ? host : `${host}:${port}`;
+      return port === null || port === defaultPort ? host : `${host}:${String(port)}`;
     }
     return s;
   }
   const m = /^([^:]+):(\d+)$/.exec(s); // host:port (bare IPv6 has multiple colons → no match)
   if (m) {
     const port = Number(m[2]);
-    return port === defaultPort ? m[1] : `${m[1]}:${port}`;
+    return port === defaultPort ? m[1] : `${m[1]}:${String(port)}`;
   }
   return s; // bare host / bare IPv6
 }

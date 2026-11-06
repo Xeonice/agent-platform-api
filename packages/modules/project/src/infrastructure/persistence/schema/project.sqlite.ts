@@ -1,3 +1,4 @@
+import { CLONE_STATUSES } from '../../../domain/value-objects/project-status.vo';
 import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, check } from 'drizzle-orm/sqlite-core';
 
@@ -12,14 +13,25 @@ export const projects = sqliteTable(
   {
     id: text('id').primaryKey(),
     name: text('name').notNull().unique(), // I-PRJ-4: names are unique
-    sourceType: text('source_type').notNull(),
+    sourceType: text('source_type', { enum: ['git', 'empty'] }).notNull(),
     repoUrl: text('repo_url'),
     repoBranch: text('repo_branch'),
-    cloneStatus: text('clone_status').notNull().default('cloning'),
-    cloneErrorCode: text('clone_error_code'),
+    cloneStatus: text('clone_status', { enum: CLONE_STATUSES }).notNull().default('cloning'),
+    cloneErrorCode: text('clone_error_code', {
+      enum: [
+        'CLONE_FAILED_PERMISSION',
+        'CLONE_FAILED_NOT_FOUND',
+        'CLONE_FAILED_NETWORK',
+        'TIMEOUT',
+        'INTERRUPTED',
+        'DISK_INSUFFICIENT',
+      ],
+    }),
     baselinePath: text('baseline_path').notNull(),
     baselineSizeBytes: integer('baseline_size_bytes'),
-    workspaceMode: text('workspace_mode').notNull().default('copy'),
+    workspaceMode: text('workspace_mode', { enum: ['copy'] })
+      .notNull()
+      .default('copy'),
     version: integer('version').notNull().default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

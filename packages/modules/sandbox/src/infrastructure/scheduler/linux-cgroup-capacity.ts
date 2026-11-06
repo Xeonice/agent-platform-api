@@ -31,8 +31,8 @@ export async function linuxResourceCapacity(
     .split('\n')
     .map((line) => {
       const match = /^\d+:([^:]*):(\/.*)$/.exec(line);
-      if (!match || !validPath(match[2]!)) throw invalidLimit();
-      return { controllers: match[1]!.split(',').filter(Boolean), path: match[2]! };
+      if (!match || !validPath(match[2])) throw invalidLimit();
+      return { controllers: match[1].split(',').filter(Boolean), path: match[2] };
     });
   for (const mount of cgroupMounts(mountInfo)) {
     const group = groups.find((candidate) =>
@@ -98,15 +98,15 @@ function cgroupMounts(text: string): CgroupMount[] {
   const mounts: CgroupMount[] = [];
   for (const line of text.trim().split('\n')) {
     const parts = line.split(' - ');
-    const fields = parts[0]?.split(' ');
-    const details = parts[1]?.split(' ');
-    if (!fields || !details || !['cgroup', 'cgroup2'].includes(details[0]!)) continue;
+    const fields = parts.at(0)?.split(' ');
+    const details = parts.at(1)?.split(' ');
+    if (!fields || !details || !['cgroup', 'cgroup2'].includes(details[0])) continue;
     if (fields.length < 6 || details.length < 3) throw invalidLimit();
     mounts.push({
-      root: decodeMountPath(fields[3]!),
-      point: decodeMountPath(fields[4]!),
+      root: decodeMountPath(fields[3]),
+      point: decodeMountPath(fields[4]),
       version: details[0] === 'cgroup2' ? 2 : 1,
-      controllers: details[2]!.split(','),
+      controllers: details[2].split(','),
     });
   }
   return mounts;
@@ -138,8 +138,8 @@ async function cpuMax(path: string): Promise<number | undefined> {
   if (raw === null) return undefined;
   const fields = raw.trim().split(/\s+/);
   if (fields.length !== 2) throw invalidLimit();
-  const period = positive(fields[1]!);
-  return fields[0] === 'max' ? undefined : positive(fields[0]!) / period;
+  const period = positive(fields[1]);
+  return fields[0] === 'max' ? undefined : positive(fields[0]) / period;
 }
 
 async function cpuV1(directory: string): Promise<number | undefined> {
@@ -157,8 +157,8 @@ function cpuSetSize(raw: string): number {
   const ranges = raw.split(',').map((entry) => {
     const match = /^(\d+)(?:-(\d+))?$/.exec(entry);
     if (!match) throw invalidLimit();
-    const start = Number(unsigned(match[1]!));
-    const end = Number(unsigned(match[2] ?? match[1]!));
+    const start = Number(unsigned(match[1]));
+    const end = Number(unsigned(match.at(2) ?? match[1]));
     if (!Number.isSafeInteger(end) || start > end) throw invalidLimit();
     return { start, end };
   });

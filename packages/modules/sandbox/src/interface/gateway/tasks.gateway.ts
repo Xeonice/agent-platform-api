@@ -1,4 +1,9 @@
-import { Inject, Logger, type OnModuleInit } from '@nestjs/common';
+import { Inject, Logger, Optional, type OnModuleInit } from '@nestjs/common';
+import {
+  COORDINATOR_GATEWAY_WORK_FACTORY,
+  type CoordinatorGatewayWork,
+  type CoordinatorGatewayWorkFactory,
+} from '@platform/contracts';
 import {
   ConnectedSocket,
   MessageBody,
@@ -73,23 +78,40 @@ interface Subscription {
  */
 @WebSocketGateway({ namespace: '/tasks' })
 export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModuleInit {
+  private readonly worker: CoordinatorGatewayWork;
+
   private readonly logger = new Logger('TasksGateway');
   /** taskId → socketId → subscription. */
   private readonly subscriptions = new Map<string, Map<string, Subscription>>();
+  private namespace?: Namespace;
+  private retiring = false;
 
   constructor(
     private readonly app: AgentTaskApplicationService,
     private readonly hub: TaskEventHub,
     @Inject(TERMINAL_AUTHENTICATOR) private readonly auth: TerminalAuthenticator,
-  ) {}
+    @Optional()
+    @Inject(COORDINATOR_GATEWAY_WORK_FACTORY)
+    workFactory?: CoordinatorGatewayWorkFactory,
+  ) {
+    this.worker = workFactory?.register('sandbox.tasks-gateway', () => {
+      this.prepareHandoff();
+    }) ?? { run: (work) => work() };
+  }
 
   /**
    * Attach to the producer side. Going through the hub rather than BEING the
    * broadcaster is what keeps gateway → service → workflow → broadcaster from closing
    * into a cycle (see `TaskEventHub`).
    */
+  private subscriptionLive(sub: { live: boolean }, client: Socket): boolean {
+    return sub.live && !this.retiring && client.connected;
+  }
+
   onModuleInit(): void {
-    this.hub.onFrame((taskId, frame) => this.publish(taskId, frame));
+    this.hub.onFrame((taskId, frame) => {
+      this.publish(taskId, frame);
+    });
   }
 
   /**
@@ -109,68 +131,81 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
    * client that would rather not parse prose at all.
    */
   afterInit(server: Namespace): void {
+    this.namespace = server;
     server.use((socket, next) => {
-      const rejection = this.rejectHandshake(socket);
-      if (rejection) {
-        this.logger.warn(`tasks handshake rejected: ${rejection.message}`);
-        next(rejection);
-        return;
-      }
-      next();
+      void this.rejectHandshake(socket)
+        .then((rejection) => {
+          if (rejection) {
+            this.logger.warn(`tasks handshake rejected: ${rejection.message}`);
+            next(rejection);
+            return;
+          }
+          next();
+        })
+        .catch(() => {
+          next(wsHandshakeError('UNAUTHORIZED', 'access authority unavailable'));
+        });
     });
   }
 
   /** `null` ⇒ the handshake is acceptable. */
-  private rejectHandshake(client: Socket): Error | null {
-    // access-passcode gate FIRST, exactly like /terminal and /events: the REST guard
-    // self-exempts non-HTTP contexts, so the WS handshake re-checks it itself. This
-    // channel carries agent OUTPUT — the contents of a private repository, in general
-    // — so an unauthenticated socket must never reach the subscribe path.
-    if (!this.auth.authorize(this.readCredentials(client))) {
-      return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
-    }
-    // Frame-schema agreement, checked AFTER auth so an unauthenticated client cannot
-    // use the distinct rejection codes to fingerprint the server (same order as
-    // /terminal). `/tasks` carries its OWN hash: a task-frame change must not
-    // invalidate every open terminal, and vice versa.
-    //
-    // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. The old
-    // `presented !== undefined &&` let every client that simply omits it straight
-    // through — i.e. the check could only ever catch a client that was already being
-    // careful, which is the one that does not need catching. A `/tasks` frame is parsed
-    // by a zod union on the other side, so a shape drift shows up as frames being
-    // silently DROPPED; the handshake is the only place it can be reported as itself.
-    const presented = this.readSchemaHash(client);
-    if (presented !== WS_TASKS_SCHEMA_HASH) {
-      return wsHandshakeError(
-        'SCHEMA_MISMATCH',
-        `expected ${WS_TASKS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
-      );
-    }
-    // Addressing, checked LAST — a client that cannot even agree on the frame shapes is
-    // better told THAT, and it is the older client, so the more useful diagnosis wins.
-    //
-    // ⚠️ IT IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT — the same lesson the schema hash
-    // taught, applied here. While it was optional, a socket that simply omitted it could
-    // `subscribe` to ANY task in the deployment by id, so the rule could only ever bind
-    // the client that was already scoping itself: the one that does not need binding.
-    // REST has no such hole (`requireTask` treats the sandbox id in the path as part of
-    // the task's identity), and two shells that disagree about who may read what is not
-    // a difference worth keeping.
-    //
-    // It lives in the HANDSHAKE QUERY rather than on the frame, which is what makes the
-    // change affordable at all: `TaskClientFrame.subscribe` has no `sandboxId`, and
-    // adding one would move `WS_PROTOCOL_CANONICAL` / `WS_TASKS_SCHEMA_HASH`, which must
-    // be bumped in lockstep across both repos. The query is also exactly how `/terminal`
-    // scopes itself, so this is the established shape and not a new one.
-    const scope = this.readQuery(client, 'sandboxId');
-    if (scope === undefined || scope === '') {
-      return wsHandshakeError(
-        'SANDBOX_REQUIRED',
-        'the handshake query must name the sandbox this socket is watching (?sandboxId=…)',
-      );
-    }
-    return null;
+  private async rejectHandshake(client: Socket): Promise<Error | null> {
+    return this.worker.run(async () => {
+      // access-passcode gate FIRST, exactly like /terminal and /events: the REST guard
+      // self-exempts non-HTTP contexts, so the WS handshake re-checks it itself. This
+      // channel carries agent OUTPUT — the contents of a private repository, in general
+      // — so an unauthenticated socket must never reach the subscribe path.
+      if (!(await this.auth.authorize(this.readCredentials(client)))) {
+        return wsHandshakeError('UNAUTHORIZED', 'missing or invalid access passcode');
+      }
+      if (this.retiring)
+        return wsHandshakeError(
+          'APPLICATION_WRITER_QUIESCED',
+          'task transport is moving to the active coordinator',
+        );
+      // Frame-schema agreement, checked AFTER auth so an unauthenticated client cannot
+      // use the distinct rejection codes to fingerprint the server (same order as
+      // /terminal). `/tasks` carries its OWN hash: a task-frame change must not
+      // invalidate every open terminal, and vice versa.
+      //
+      // ⚠️ THE HASH IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT. The old
+      // `presented !== undefined &&` let every client that simply omits it straight
+      // through — i.e. the check could only ever catch a client that was already being
+      // careful, which is the one that does not need catching. A `/tasks` frame is parsed
+      // by a zod union on the other side, so a shape drift shows up as frames being
+      // silently DROPPED; the handshake is the only place it can be reported as itself.
+      const presented = this.readSchemaHash(client);
+      if (presented !== WS_TASKS_SCHEMA_HASH) {
+        return wsHandshakeError(
+          'SCHEMA_MISMATCH',
+          `expected ${WS_TASKS_SCHEMA_HASH}, got ${presented ?? 'none'}`,
+        );
+      }
+      // Addressing, checked LAST — a client that cannot even agree on the frame shapes is
+      // better told THAT, and it is the older client, so the more useful diagnosis wins.
+      //
+      // ⚠️ IT IS REQUIRED, NOT MERELY CHECKED-IF-PRESENT — the same lesson the schema hash
+      // taught, applied here. While it was optional, a socket that simply omitted it could
+      // `subscribe` to ANY task in the deployment by id, so the rule could only ever bind
+      // the client that was already scoping itself: the one that does not need binding.
+      // REST has no such hole (`requireTask` treats the sandbox id in the path as part of
+      // the task's identity), and two shells that disagree about who may read what is not
+      // a difference worth keeping.
+      //
+      // It lives in the HANDSHAKE QUERY rather than on the frame, which is what makes the
+      // change affordable at all: `TaskClientFrame.subscribe` has no `sandboxId`, and
+      // adding one would move `WS_PROTOCOL_CANONICAL` / `WS_TASKS_SCHEMA_HASH`, which must
+      // be bumped in lockstep across both repos. The query is also exactly how `/terminal`
+      // scopes itself, so this is the established shape and not a new one.
+      const scope = this.readQuery(client, 'sandboxId');
+      if (scope === undefined || scope === '') {
+        return wsHandshakeError(
+          'SANDBOX_REQUIRED',
+          'the handshake query must name the sandbox this socket is watching (?sandboxId=…)',
+        );
+      }
+      return null;
+    });
   }
 
   handleDisconnect(client: Socket): void {
@@ -182,22 +217,44 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     }
   }
 
+  /** Invalidate old replay loops and reattach the same persisted task from its cursor. */
+  prepareHandoff(): number {
+    this.retiring = true;
+    const count = this.activeTransportConnections;
+    for (const subs of this.subscriptions.values())
+      for (const sub of subs.values()) sub.live = false;
+    this.subscriptions.clear();
+    this.namespace?.disconnectSockets(false);
+    return count;
+  }
+
+  resumeAfterHandoff(): void {
+    this.retiring = false;
+  }
+
+  get activeTransportConnections(): number {
+    return this.namespace?.sockets.size ?? 0;
+  }
+
   @SubscribeMessage('frame')
   async onFrame(
     @ConnectedSocket() client: Socket,
     @MessageBody() frame: TaskClientFrame,
   ): Promise<void> {
-    switch (frame.type) {
-      case 'subscribe':
-        await this.subscribe(client, frame.taskId, frame.fromSeq ?? 0);
-        return;
-      case 'unsubscribe':
-        this.unsubscribe(client, frame.taskId);
-        return;
-      case 'ping':
-        this.send(client, { type: 'pong' });
-        return;
-    }
+    return this.worker.run(async () => {
+      if (this.retiring || !client.connected) return;
+      switch (frame.type) {
+        case 'subscribe':
+          await this.subscribe(client, frame.taskId, frame.fromSeq ?? 0);
+          return;
+        case 'unsubscribe':
+          this.unsubscribe(client, frame.taskId);
+          return;
+        case 'ping':
+          this.send(client, { type: 'pong' });
+          return;
+      }
+    });
   }
 
   /** Deliver one produced frame to every socket subscribed to that task. */
@@ -214,84 +271,91 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
   }
 
   private async subscribe(client: Socket, taskId: string, fromSeq: number): Promise<void> {
-    const task = await this.app.findTask(taskId);
-    // The SAME addressing rule as REST's `requireTask`, and now unconditionally: the
-    // handshake refuses a socket that did not declare a sandbox, so every socket that
-    // reaches here has one and every socket is held to it.
-    //
-    // The scope is read from the HANDSHAKE, never from the frame. A frame is whatever
-    // the client typed a millisecond ago; the query was fixed when the connection was
-    // admitted, which is what stops one socket from re-scoping itself per subscribe. And
-    // the comparison fails CLOSED: `undefined` — unreachable past the middleware, but
-    // free to be exact about — equals no sandbox id, so a hole in the middleware would
-    // deny rather than admit.
-    const scope = this.readQuery(client, 'sandboxId');
-    if (!task || task.sandboxId !== scope) {
-      // a CODE, never a sentence — the frontend renders the 人话 (P22 §1).
-      this.send(client, { type: 'error', taskId, code: 'NOT_FOUND' });
-      // ⚠️ AND A TERMINATING FRAME. A bare `error` leaves the subscriber inside
-      // "回放中" forever: `caught_up` is the only thing that ends the replay phase, and
-      // for a task that does not exist there is no `exit` coming either. Returning
-      // without one is how a panel gets stuck on 运行中 until the tab is closed.
-      this.send(client, { type: 'caught_up', taskId, firstSeq: fromSeq + 1, seq: fromSeq });
-      return;
-    }
-    // Retire whatever this socket was subscribed to before. The map is keyed by
-    // `client.id`, so a second `subscribe` REPLACES the entry — but the previous
-    // replay loop still holds the previous object, and the de-duplication high-water
-    // mark lives on it, so without this the socket sees every event twice. The
-    // frontend re-sends `subscribe` on every reconnect, so this is routine.
-    const previous = this.byTask(taskId).get(client.id);
-    if (previous) previous.live = false;
-    // register FIRST so nothing produced during the replay can be missed.
-    const sub: Subscription = {
-      socket: client,
-      pending: [],
-      replaying: true,
-      deliveredSeq: fromSeq,
-      exitSent: false,
-      live: true,
-    };
-    this.byTask(taskId).set(client.id, sub);
-
-    // `firstSeq` is what makes a TRUNCATED replay detectable: a subscriber comparing it
-    // against `fromSeq + 1` learns that the head is missing, which a gap check on `seq`
-    // alone cannot reveal. An empty replay reports `seq + 1` — an empty range.
-    let firstSeq: number | undefined;
-    try {
-      for (const { seq, event } of await this.app.replay(taskId, fromSeq)) {
-        if (!sub.live) return; // superseded (or the socket went away) mid-replay
-        firstSeq ??= seq;
-        this.deliver(sub, { type: 'event', taskId, seq, event });
+    return this.worker.run(async () => {
+      const task = await this.app.findTask(taskId);
+      if (this.retiring || !client.connected) return;
+      // The SAME addressing rule as REST's `requireTask`, and now unconditionally: the
+      // handshake refuses a socket that did not declare a sandbox, so every socket that
+      // reaches here has one and every socket is held to it.
+      //
+      // The scope is read from the HANDSHAKE, never from the frame. A frame is whatever
+      // the client typed a millisecond ago; the query was fixed when the connection was
+      // admitted, which is what stops one socket from re-scoping itself per subscribe. And
+      // the comparison fails CLOSED: `undefined` — unreachable past the middleware, but
+      // free to be exact about — equals no sandbox id, so a hole in the middleware would
+      // deny rather than admit.
+      const scope = this.readQuery(client, 'sandboxId');
+      if (!task || task.sandboxId !== scope) {
+        // a CODE, never a sentence — the frontend renders the 人话 (P22 §1).
+        this.send(client, { type: 'error', taskId, code: 'NOT_FOUND' });
+        // ⚠️ AND A TERMINATING FRAME. A bare `error` leaves the subscriber inside
+        // "回放中" forever: `caught_up` is the only thing that ends the replay phase, and
+        // for a task that does not exist there is no `exit` coming either. Returning
+        // without one is how a panel gets stuck on 运行中 until the tab is closed.
+        this.send(client, { type: 'caught_up', taskId, firstSeq: fromSeq + 1, seq: fromSeq });
+        return;
       }
-    } catch (e) {
-      this.logger.error(`replay for task ${taskId} failed: ${(e as Error).message}`);
-      this.send(client, { type: 'error', taskId, code: 'REPLAY_FAILED' });
-    }
+      // Retire whatever this socket was subscribed to before. The map is keyed by
+      // `client.id`, so a second `subscribe` REPLACES the entry — but the previous
+      // replay loop still holds the previous object, and the de-duplication high-water
+      // mark lives on it, so without this the socket sees every event twice. The
+      // frontend re-sends `subscribe` on every reconnect, so this is routine.
+      const previous = this.byTask(taskId).get(client.id);
+      if (previous) previous.live = false;
+      // register FIRST so nothing produced during the replay can be missed.
+      const sub: Subscription = {
+        socket: client,
+        pending: [],
+        replaying: true,
+        deliveredSeq: fromSeq,
+        exitSent: false,
+        live: true,
+      };
+      this.byTask(taskId).set(client.id, sub);
 
-    // everything after this frame is live (contract wording, and it is literally true:
-    // the buffered frames flushed below all post-date the replay).
-    this.send(client, {
-      type: 'caught_up',
-      taskId,
-      firstSeq: firstSeq ?? sub.deliveredSeq + 1,
-      seq: sub.deliveredSeq,
-    });
-    sub.replaying = false;
-    if (!sub.live) return;
-    for (const frame of sub.pending.splice(0)) this.deliver(sub, frame);
+      // `firstSeq` is what makes a TRUNCATED replay detectable: a subscriber comparing it
+      // against `fromSeq + 1` learns that the head is missing, which a gap check on `seq`
+      // alone cannot reveal. An empty replay reports `seq + 1` — an empty range.
+      let firstSeq: number | undefined;
+      try {
+        for (const { seq, event } of await this.app.replay(taskId, fromSeq)) {
+          if (!this.subscriptionLive(sub, client)) return; // superseded (or the socket went away) mid-replay
+          firstSeq ??= seq;
+          this.deliver(sub, { type: 'event', taskId, seq, event });
+        }
+      } catch (e) {
+        if (!this.subscriptionLive(sub, client)) return;
+        this.logger.error(
+          `replay for task ${taskId} failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        this.send(client, { type: 'error', taskId, code: 'REPLAY_FAILED' });
+      }
 
-    // A task that ALREADY finished will never publish an exit frame again, so a late
-    // subscriber would otherwise wait forever for a terminal state it can already see.
-    const current = await this.app.findTask(taskId);
-    if (current && !current.isRunning && !sub.exitSent) {
-      this.deliver(sub, {
-        type: 'exit',
+      // everything after this frame is live (contract wording, and it is literally true:
+      // the buffered frames flushed below all post-date the replay).
+      if (!this.subscriptionLive(sub, client)) return;
+      this.send(client, {
+        type: 'caught_up',
         taskId,
-        status: current.status,
-        ...(current.exitCode !== null ? { exitCode: current.exitCode } : {}),
+        firstSeq: firstSeq ?? sub.deliveredSeq + 1,
+        seq: sub.deliveredSeq,
       });
-    }
+      sub.replaying = false;
+      if (!this.subscriptionLive(sub, client)) return;
+      for (const frame of sub.pending.splice(0)) this.deliver(sub, frame);
+
+      // A task that ALREADY finished will never publish an exit frame again, so a late
+      // subscriber would otherwise wait forever for a terminal state it can already see.
+      const current = await this.app.findTask(taskId);
+      if (current && !current.isRunning && !sub.exitSent) {
+        this.deliver(sub, {
+          type: 'exit',
+          taskId,
+          status: current.status,
+          ...(current.exitCode !== null ? { exitCode: current.exitCode } : {}),
+        });
+      }
+    });
   }
 
   private unsubscribe(client: Socket, taskId: string): void {
@@ -342,7 +406,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
     const header = client.handshake.headers[X_SCHEMA_HASH_HEADER];
     if (header) return Array.isArray(header) ? header[0] : header;
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth = auth?.['xSchemaHash'];
+    const fromAuth = auth?.xSchemaHash;
     if (typeof fromAuth === 'string') return fromAuth;
     return this.readQuery(client, 'xSchemaHash');
   }
@@ -354,8 +418,7 @@ export class TasksGateway implements OnGatewayInit, OnGatewayDisconnect, OnModul
 
   private readCredentials(client: Socket): TerminalHandshakeCredentials {
     const auth = client.handshake.auth as Record<string, unknown> | undefined;
-    const fromAuth =
-      typeof auth?.['passcode'] === 'string' ? (auth['passcode'] as string) : undefined;
+    const fromAuth = typeof auth?.passcode === 'string' ? auth.passcode : undefined;
     const header = client.handshake.headers['x-access-passcode'];
     const fromHeader = Array.isArray(header) ? header[0] : header;
     const authz = client.handshake.headers.authorization;

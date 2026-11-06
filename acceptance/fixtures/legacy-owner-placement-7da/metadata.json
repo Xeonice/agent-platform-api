@@ -1,0 +1,292 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Immutable A2 compiled Sandbox reader compatibility fixture; not complete old-server or Native qualification. External Nest/Drizzle/SQLite and workspace dependencies are actual host installations, not the Linux archive node_modules.",
+  "sourceApiRevision": "7da1e0b22ae43f79a4b9ed0baf0b1be34eabf427",
+  "sourceProjectRevision": "2ac2b36a26ee1419eca6da2ed4a575af0d1c6758",
+  "archive": {
+    "name": "agent-platform-v0.3.21-experiment.iflytek.20261020.1-linux-arm64.tgz",
+    "sha256": "ad8aeded3ae50b38e0e427d8aa6fa5042fbcd9ece63c84e73a5d4d6f8e0cac9d",
+    "bytes": 94888961,
+    "url": "https://github.com/Xeonice/cloud-agent-platform-docs/releases/download/v0.3.21-experiment.iflytek.20261020.1/agent-platform-v0.3.21-experiment.iflytek.20261020.1-linux-arm64.tgz"
+  },
+  "envelope": {
+    "filename": "qualification-release.json",
+    "sha256": "4f6f774ee4a8b20b963be2b7e2928edd48442cf49380b1d0c50618d9527e41a3",
+    "manifestDigest": "sha256:6716aa4bcab77def70273fb5b5322598b354e74fed971e2908f6cd3e5c446143",
+    "signatureAlgorithm": "Ed25519",
+    "signatureKeyId": "qualification-iflytek-20261017-r1-publisher",
+    "signatureVerifiedWithPublicTrustRootAtPublishedAt": true
+  },
+  "trustRoot": {
+    "filename": "qualification-trust-root.json",
+    "sha256": "0b0433028e9c7590b3b1dbcb5a831519a76c04224f532cb4e45d66d07fab893b"
+  },
+  "entrypoints": [
+    "infrastructure/persistence/sqlite/resource-allocation.repository.impl.js",
+    "infrastructure/persistence/sqlite/sandbox.repository.impl.js",
+    "application/dto/sandbox.mapper.js",
+    "application/workflows/provision-sandbox.workflow.js"
+  ],
+  "externalImports": [
+    "@nestjs/common",
+    "@platform/contracts",
+    "@platform/shared-kernel",
+    "@platform/shared-kernel/pure",
+    "async-mutex",
+    "drizzle-orm",
+    "drizzle-orm/sqlite-core"
+  ],
+  "externalArchiveVersions": {
+    "@nestjs/common": "11.1.29",
+    "drizzle-orm": "0.36.4",
+    "better-sqlite3": "11.10.0",
+    "async-mutex": "0.5.0",
+    "@platform/shared-kernel": "0.0.1",
+    "@platform/contracts": "0.0.1"
+  },
+  "files": [
+    {
+      "module": "application/dto/sandbox.mapper.js",
+      "fixture": "application/dto/sandbox.mapper.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/application/dto/sandbox.mapper.js",
+      "bytes": 3324,
+      "sha256": "948d590d84143769622655040ce7bc0c613959922440fa7dd55c55d598d3b1fa",
+      "sourcePath": "packages/modules/sandbox/src/application/dto/sandbox.mapper.ts",
+      "sourceSha256": "01b95db58fef50bba2344c52227f3303bfa0ada353362ff1b0fb5e877294650e"
+    },
+    {
+      "module": "application/resource-allocator.js",
+      "fixture": "application/resource-allocator.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/application/resource-allocator.js",
+      "bytes": 15628,
+      "sha256": "acb13c2b6d67f710f7c75148c97af09a94de2d51af82c05e21e2d1c5f2cd20f0",
+      "sourcePath": "packages/modules/sandbox/src/application/resource-allocator.ts",
+      "sourceSha256": "9c351e5fa8653918519c36b4c5415a1bcbd32215eded7fb29204bcc5da852bf1"
+    },
+    {
+      "module": "application/scheduler-queue.js",
+      "fixture": "application/scheduler-queue.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/application/scheduler-queue.js",
+      "bytes": 8377,
+      "sha256": "613617eefbe02d6e195381f71e424e76ba53eea46c666b651767dec93ef18391",
+      "sourcePath": "packages/modules/sandbox/src/application/scheduler-queue.ts",
+      "sourceSha256": "7105cc8ec6c499f50e4f96efcf691c7555af939aa334e208514e2ee446d77240"
+    },
+    {
+      "module": "application/teardown-deadline.js",
+      "fixture": "application/teardown-deadline.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/application/teardown-deadline.js",
+      "bytes": 833,
+      "sha256": "58d7fd8db9cd438a0a96c711d5cec1b63e0464cf125c5747ec4d4ace8c8661f3",
+      "sourcePath": "packages/modules/sandbox/src/application/teardown-deadline.ts",
+      "sourceSha256": "eb83bb24922f157aa9ed211716b5066b8e12407df01a682faff1544f998617b2"
+    },
+    {
+      "module": "application/workflows/provision-sandbox.workflow.js",
+      "fixture": "application/workflows/provision-sandbox.workflow.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/application/workflows/provision-sandbox.workflow.js",
+      "bytes": 65633,
+      "sha256": "80385606e099bda2cd1fdae0c20b2a3870ca805980dddf81dabe315d70f79a22",
+      "sourcePath": "packages/modules/sandbox/src/application/workflows/provision-sandbox.workflow.ts",
+      "sourceSha256": "a496c2402f0206ee0a9f04b3054887bd3ff557f7f00e940aee2b85b1791ee255"
+    },
+    {
+      "module": "domain/entities/resource-allocation.entity.js",
+      "fixture": "domain/entities/resource-allocation.entity.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/entities/resource-allocation.entity.js",
+      "bytes": 5583,
+      "sha256": "bf2b85bfdfcca17eee11696ca4651e0d89549ab1d6b5e1d497b8efbdfcd73de9",
+      "sourcePath": "packages/modules/sandbox/src/domain/entities/resource-allocation.entity.ts",
+      "sourceSha256": "d0c6bdcee38265bce1179d1269a9e34180bf8875b7c3247b74c59a07782b4ffd"
+    },
+    {
+      "module": "domain/entities/sandbox.entity.js",
+      "fixture": "domain/entities/sandbox.entity.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/entities/sandbox.entity.js",
+      "bytes": 12227,
+      "sha256": "89480d9371b2f0985c20ddc691827c4db7857d9648f4c1faf2f37842c5db4ac1",
+      "sourcePath": "packages/modules/sandbox/src/domain/entities/sandbox.entity.ts",
+      "sourceSha256": "838e4f1b106ed3eb8a5f0c30fbfe46bd3af40449e5c752ecc9437ddb4dfae027"
+    },
+    {
+      "module": "domain/entities/state-transition.entity.js",
+      "fixture": "domain/entities/state-transition.entity.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/entities/state-transition.entity.js",
+      "bytes": 1546,
+      "sha256": "38fb56dfffe5befb37ea97513b7e45cc4e554bf8eb1432d9c3908b7f0a83aa90",
+      "sourcePath": "packages/modules/sandbox/src/domain/entities/state-transition.entity.ts",
+      "sourceSha256": "d9d58e2c054f6c90eb04709bd99f4a07570f367a744850dd70201904c422b716"
+    },
+    {
+      "module": "domain/errors/invalid-transition.error.js",
+      "fixture": "domain/errors/invalid-transition.error.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/errors/invalid-transition.error.js",
+      "bytes": 600,
+      "sha256": "c3928f92f9992975c685e875021b9cb8fbe1b5ede60f848c3e1b24f6e7561a87",
+      "sourcePath": "packages/modules/sandbox/src/domain/errors/invalid-transition.error.ts",
+      "sourceSha256": "1d04f860b8beee71a92133ba97e1701ed59ff5ce78e2147a6d2c72df8bf95ada"
+    },
+    {
+      "module": "domain/errors/invariant-violation.error.js",
+      "fixture": "domain/errors/invariant-violation.error.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/errors/invariant-violation.error.js",
+      "bytes": 820,
+      "sha256": "20d28bbc24c466d55775937d4ea4d8c0d816b8222489547e2f50fddda5772aac",
+      "sourcePath": "packages/modules/sandbox/src/domain/errors/invariant-violation.error.ts",
+      "sourceSha256": "01d4f5d445a3e83ab5b2ec78105dd565711090a41539032461b31d33f8392745"
+    },
+    {
+      "module": "domain/errors/write-conflict.error.js",
+      "fixture": "domain/errors/write-conflict.error.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/errors/write-conflict.error.js",
+      "bytes": 717,
+      "sha256": "bf114265f9cb0f053616fba2bfb7f1203f64535e58789125324e4bf8d4023014",
+      "sourcePath": "packages/modules/sandbox/src/domain/errors/write-conflict.error.ts",
+      "sourceSha256": "ec9fa30660035b02e8455b1e457bfa490f9632bae1f8197121cab43bd9cf2c14"
+    },
+    {
+      "module": "domain/events/sandbox-events.js",
+      "fixture": "domain/events/sandbox-events.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/events/sandbox-events.js",
+      "bytes": 6209,
+      "sha256": "c4f9a63d64b78a21791dd260353307ab229b34fe4254b3474bb69bd5dcc880e4",
+      "sourcePath": "packages/modules/sandbox/src/domain/events/sandbox-events.ts",
+      "sourceSha256": "9ccb0b236dfb2a5ad5c3052584d97d0208ae039355af08d34d972d4755b6e82b"
+    },
+    {
+      "module": "domain/ports/host-capacity.port.js",
+      "fixture": "domain/ports/host-capacity.port.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/ports/host-capacity.port.js",
+      "bytes": 220,
+      "sha256": "3e936ad94caecefc980f43222e20292c3c0744bc4a74f06f7fa407867c6b5b03",
+      "sourcePath": "packages/modules/sandbox/src/domain/ports/host-capacity.port.ts",
+      "sourceSha256": "2a70e63d516f5ecce825fbbcbad3c92061f768657a419d5704ce1797e335cbe2"
+    },
+    {
+      "module": "domain/ports/sandbox-create-intents.port.js",
+      "fixture": "domain/ports/sandbox-create-intents.port.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/ports/sandbox-create-intents.port.js",
+      "bytes": 238,
+      "sha256": "f454c8dfc57857e11596e02816afc5fc1a44da760bb65883397ff03e7840506f",
+      "sourcePath": "packages/modules/sandbox/src/domain/ports/sandbox-create-intents.port.ts",
+      "sourceSha256": "db0b3807f1beb5928fa9a08d67ca0a1419040a53409127858028777fd1dfbef8"
+    },
+    {
+      "module": "domain/ports/sandbox-startup-progress.port.js",
+      "fixture": "domain/ports/sandbox-startup-progress.port.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/ports/sandbox-startup-progress.port.js",
+      "bytes": 251,
+      "sha256": "34f087f30d5eb89a5e25cf9b8dd4a2d2639d0ad882a64e7acb21023f3d0c9ac6",
+      "sourcePath": "packages/modules/sandbox/src/domain/ports/sandbox-startup-progress.port.ts",
+      "sourceSha256": "1154b4e5a7fba0624a45967eab3d3f3bfe2bf40adcdcd3bcfef5f099de378104"
+    },
+    {
+      "module": "domain/ports/sandbox-stop-intents.port.js",
+      "fixture": "domain/ports/sandbox-stop-intents.port.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/ports/sandbox-stop-intents.port.js",
+      "bytes": 230,
+      "sha256": "39e886c323e22343dfda8b909e9b6805e4d4ccb5b456ec13563a77d24bd87f4f",
+      "sourcePath": "packages/modules/sandbox/src/domain/ports/sandbox-stop-intents.port.ts",
+      "sourceSha256": "571e14788fe8d6c971c31535df07795d3e518c9aceb67d63cb5cb1dd2c762fa1"
+    },
+    {
+      "module": "domain/repositories/resource-allocation.repository.js",
+      "fixture": "domain/repositories/resource-allocation.repository.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/repositories/resource-allocation.repository.js",
+      "bytes": 265,
+      "sha256": "b210444c52f53f3d0ccf7f611fbefd1ee0c7981bd62074db4c2f4c15343373fc",
+      "sourcePath": "packages/modules/sandbox/src/domain/repositories/resource-allocation.repository.ts",
+      "sourceSha256": "d1b59b170d6591ee2de49f62347f1d1daff95f815d44e2a5c47d43fd3743366f"
+    },
+    {
+      "module": "domain/repositories/sandbox.repository.js",
+      "fixture": "domain/repositories/sandbox.repository.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/repositories/sandbox.repository.js",
+      "bytes": 375,
+      "sha256": "b6a5a0d04fc063cbe79f1186b542aa6bbd95f9babe90a3b6b18084e59bda6826",
+      "sourcePath": "packages/modules/sandbox/src/domain/repositories/sandbox.repository.ts",
+      "sourceSha256": "ce75a991606f552488613f45d7aa07e07a8a574d4c74e575f80f96c9fd2133c3"
+    },
+    {
+      "module": "domain/services/resource-pool.domain-service.js",
+      "fixture": "domain/services/resource-pool.domain-service.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/services/resource-pool.domain-service.js",
+      "bytes": 9520,
+      "sha256": "4fc2644ef7a0908ca31abbe0cd7ae4d916a0cce40417c41fce5e3313d82aabe1",
+      "sourcePath": "packages/modules/sandbox/src/domain/services/resource-pool.domain-service.ts",
+      "sourceSha256": "84a122affb7a606c89a05a51bfec6c32ee0832fef5bb617e8736539ade9548f4"
+    },
+    {
+      "module": "domain/services/task-name.policy.js",
+      "fixture": "domain/services/task-name.policy.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/services/task-name.policy.js",
+      "bytes": 2706,
+      "sha256": "47bd4925a1e95f1c0084827511e5fdad2fb0ac1aafd11b65e973abca12836c7b",
+      "sourcePath": "packages/modules/sandbox/src/domain/services/task-name.policy.ts",
+      "sourceSha256": "d71733c9ce83885918fb01b3fa13defb87bbfe40f5ad1825a89106262d5168b4"
+    },
+    {
+      "module": "domain/value-objects/initial-task.vo.js",
+      "fixture": "domain/value-objects/initial-task.vo.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/value-objects/initial-task.vo.js",
+      "bytes": 3747,
+      "sha256": "533677efe2ce30383cc9bd2000248116e17e8b9b4b4147e883de7e7f5d0a2292",
+      "sourcePath": "packages/modules/sandbox/src/domain/value-objects/initial-task.vo.ts",
+      "sourceSha256": "ae7e187ee6603b419e823a513c1d480702b3617be6c23dc78f0a41a6bf3b5939"
+    },
+    {
+      "module": "domain/value-objects/sandbox-status.vo.js",
+      "fixture": "domain/value-objects/sandbox-status.vo.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/domain/value-objects/sandbox-status.vo.js",
+      "bytes": 2374,
+      "sha256": "c94dcce29f5b484d8c878418a6e7f7389a28c2850166069888d9ee9d44f493cf",
+      "sourcePath": "packages/modules/sandbox/src/domain/value-objects/sandbox-status.vo.ts",
+      "sourceSha256": "353cc54ba78ae92e7a9e67f331de8758aeb499236cb00bd606e1c77d8fa813f7"
+    },
+    {
+      "module": "infrastructure/persistence/schema/resource-allocation.sqlite.js",
+      "fixture": "infrastructure/persistence/schema/resource-allocation.sqlite.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/infrastructure/persistence/schema/resource-allocation.sqlite.js",
+      "bytes": 3974,
+      "sha256": "bc1d237e19ef3dc80a566d6313e3b0857675239396ce637900049858939ccc48",
+      "sourcePath": "packages/modules/sandbox/src/infrastructure/persistence/schema/resource-allocation.sqlite.ts",
+      "sourceSha256": "2647165c515651bfb0ce3fc3031eacd01a1225b7456b1914046a371546cdc791"
+    },
+    {
+      "module": "infrastructure/persistence/schema/sandbox.sqlite.js",
+      "fixture": "infrastructure/persistence/schema/sandbox.sqlite.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/infrastructure/persistence/schema/sandbox.sqlite.js",
+      "bytes": 10543,
+      "sha256": "a60840f12c39160ce3d1837b3fac33ab3248ea4db67b268ab58d14604b07e4bf",
+      "sourcePath": "packages/modules/sandbox/src/infrastructure/persistence/schema/sandbox.sqlite.ts",
+      "sourceSha256": "3ebf4ee7502bb33e7c8e2928a423a6153ecddd89895f31442f6e7908f886eec8"
+    },
+    {
+      "module": "infrastructure/persistence/sqlite/read-sqlite.js",
+      "fixture": "infrastructure/persistence/sqlite/read-sqlite.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/infrastructure/persistence/sqlite/read-sqlite.js",
+      "bytes": 414,
+      "sha256": "24eb3129827ab66f5afa6084c3fb8689ecf4b98427cc69adf7f53a4461946f8c",
+      "sourcePath": "packages/modules/sandbox/src/infrastructure/persistence/sqlite/read-sqlite.ts",
+      "sourceSha256": "bcde53f55a5a33b1dc7cb1c58696a30cc20525672fba57809c82512788013eac"
+    },
+    {
+      "module": "infrastructure/persistence/sqlite/resource-allocation.repository.impl.js",
+      "fixture": "infrastructure/persistence/sqlite/resource-allocation.repository.impl.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/infrastructure/persistence/sqlite/resource-allocation.repository.impl.js",
+      "bytes": 5377,
+      "sha256": "02709ff53d3fc4324bc84669f26c3627815d799b1188b424fbe088eb5928215b",
+      "sourcePath": "packages/modules/sandbox/src/infrastructure/persistence/sqlite/resource-allocation.repository.impl.ts",
+      "sourceSha256": "b37b365dcf5487b669f9b19d059603406e38012670b45620fce490000402d366"
+    },
+    {
+      "module": "infrastructure/persistence/sqlite/sandbox.repository.impl.js",
+      "fixture": "infrastructure/persistence/sqlite/sandbox.repository.impl.js.txt",
+      "archiveMember": "./api/node_modules/.pnpm/@platform+sandbox@file+packages+modules+sandbox_@modelcontextprotocol+sdk@1.30.0_zod@3.25.76__g6gqobpfhnz4tugqwvnvwc5ui4/node_modules/@platform/sandbox/dist/infrastructure/persistence/sqlite/sandbox.repository.impl.js",
+      "bytes": 18147,
+      "sha256": "b22cc2aafe14a0ea19ed4a89861896fa59fce75f4598d43b0310ddebf3cb720d",
+      "sourcePath": "packages/modules/sandbox/src/infrastructure/persistence/sqlite/sandbox.repository.impl.ts",
+      "sourceSha256": "2b3f98959f2aca1b1ed6810c04ca297596f44fe739b84169f11e305fea2ad560"
+    }
+  ]
+}

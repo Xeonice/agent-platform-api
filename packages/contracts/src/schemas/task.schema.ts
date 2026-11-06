@@ -116,7 +116,7 @@ export const RunAgentTaskSchema = z.object({
     .string()
     .trim()
     .min(1)
-    .refine((value) => [...value].length <= 8000, '任务指令最多 8000 个字符'),
+    .refine((value) => Array.from(value).length <= 8000, '任务指令最多 8000 个字符'),
   timeoutMinutes: TaskTimeoutMinutesSchema.optional(),
   /**
    * 上一轮的会话引用(`RuntimeTaskSpec.resumeFrom`)。给了就是接着上次聊。

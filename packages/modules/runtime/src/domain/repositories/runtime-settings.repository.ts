@@ -1,4 +1,4 @@
-import type { Tx } from '@platform/shared-kernel';
+import type { Tx } from '@platform/shared-kernel/pure';
 import type { RuntimeSettings } from '../entities/runtime-settings.entity';
 
 /**

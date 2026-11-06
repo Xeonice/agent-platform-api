@@ -1,4 +1,4 @@
-import type { ProjectId, Tx } from '@platform/shared-kernel';
+import type { ProjectId, Tx } from '@platform/shared-kernel/pure';
 import type { Project } from '../entities/project.entity';
 
 /**

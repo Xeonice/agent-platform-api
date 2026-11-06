@@ -1,3 +1,4 @@
+import { isRecord } from '@platform/shared-kernel';
 import { createReadStream } from 'node:fs';
 import { appendFile, mkdir, stat, truncate } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -122,8 +123,8 @@ export class FsTaskLogStore implements TaskLogStore {
     const path = this.stdoutPath(taskId);
     const exists = await stat(path).then(
       () => true,
-      (e: NodeJS.ErrnoException) => {
-        if (e.code === 'ENOENT') return false;
+      (e: unknown) => {
+        if (isRecord(e) && e.code === 'ENOENT') return false;
         throw e;
       },
     );

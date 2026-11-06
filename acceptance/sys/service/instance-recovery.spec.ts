@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { stub } from '../../support/strict-ports';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeReconciler } from '../../../packages/modules/sandbox/src/infrastructure/reconcile/runtime-reconciler';
 import {
@@ -8,7 +9,7 @@ import {
 } from '../../../packages/modules/sandbox/src/infrastructure/reconcile/instance-id';
 
 const boxes = vi.hoisted(() => ({
-  list: [] as { id: string; name: string; state?: { status: string; running: boolean } }[],
+  list: [] as unknown[],
   removed: [] as string[],
   removeError: null as Error | null,
 }));
@@ -62,22 +63,53 @@ describe('reconcile terminated or unbound runtime instances within this platform
         Id: row.id,
         Names: [row.id],
         Labels: { 'platform.sandboxId': row.id, [INSTANCE_LABEL]: mine },
+        State: row.status === 'running' ? 'running' : 'exited',
       })),
       {
         Id: 'foreign',
         Names: ['foreign'],
         Labels: { 'platform.sandboxId': 'other', [INSTANCE_LABEL]: 'another-instance' },
+        State: 'running',
       },
     ]);
     boxes.list = [
-      ...rows.map((row) => ({ id: row.id, name: `${boxliteNamePrefix()}${row.id}` })),
-      { id: 'foreign', name: 'platform-boxlite-another-instance-other' },
+      ...rows.map((row) => ({
+        id: row.id,
+        name: `${boxliteNamePrefix()}${row.id}`,
+        state: {
+          status: row.status === 'running' ? 'running' : 'stopped',
+          running: row.status === 'running',
+        },
+      })),
+      {
+        id: 'foreign',
+        name: 'platform-boxlite-another-instance-other',
+        state: { status: 'running', running: true },
+      },
     ];
     boxes.removed = [];
     const reconciler = new RuntimeReconciler(db as never, d.client as never);
     expect(await reconciler.reconcile()).toEqual({ removedContainers: 3, removedBoxes: 3 });
     expect(d.removed).toEqual(['unbound', 'failed', 'deleted']);
     expect(boxes.removed).toEqual(['unbound', 'failed', 'deleted']);
+  });
+  it('does not remove instances when the SDK list lacks confirmed state facts', async () => {
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const d = docker([
+      {
+        Id: 'unbound',
+        Names: ['unbound'],
+        Labels: { 'platform.sandboxId': 'unbound', [INSTANCE_LABEL]: platformInstanceId() },
+      },
+    ]);
+    boxes.list = [
+      { id: 'unbound', name: `${boxliteNamePrefix()}unbound`, state: { status: 'stopped' } },
+    ];
+    boxes.removed = [];
+    const reconciler = new RuntimeReconciler(db as never, d.client as never);
+    expect(await reconciler.reconcile()).toEqual({ removedContainers: 0, removedBoxes: 0 });
+    expect(d.removed).toEqual([]);
+    expect(boxes.removed).toEqual([]);
   });
 });
 
@@ -187,7 +219,8 @@ describe('the platform auth helper is never an orphan; only a dead leftover is c
 });
 
 describe('a helper left under a provider that is no longer the default is removed whatever its state', () => {
-  const registry = (defaultProvider: string) => ({ defaultProvider }) as never;
+  const registry = (defaultProvider: string) =>
+    stub<NonNullable<ConstructorParameters<typeof RuntimeReconciler>[2]>>({ defaultProvider });
   const runningHelperBox = () => [
     {
       id: 'helper-box',

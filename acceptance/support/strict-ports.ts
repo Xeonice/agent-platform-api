@@ -1,10 +1,26 @@
 /** Fails on any dependency access outside the scenario's explicit scope. */
 export function unused<T extends object>(label: string): T {
-  return new Proxy({} as T, {
-    get: (_target, key) => {
-      throw new Error(`${label}.${String(key)} is outside this scenario`);
+  const proxy = new Proxy(
+    {},
+    {
+      get: (_target, key) => {
+        throw new Error(`${label}.${String(key)} is outside this scenario`);
+      },
+    },
+  );
+  return proxy as T;
+}
+
+/** Partial test port whose unprovided members fail instead of masquerading as an implementation. */
+export function stub<T extends object>(members: Partial<T>, label = 'fixture port'): T {
+  const proxy = new Proxy(members, {
+    get(target, key, receiver) {
+      if (!Object.hasOwn(target, key))
+        throw new Error(`${label}.${String(key)} is outside this scenario`);
+      return Reflect.get(target, key, receiver);
     },
   });
+  return proxy as T;
 }
 
 export function deferred<T>() {

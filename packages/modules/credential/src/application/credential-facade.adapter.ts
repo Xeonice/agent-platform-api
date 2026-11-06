@@ -1,3 +1,4 @@
+import { requireGitObtainedVia } from '../domain/value-objects/obtained-via.vo';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { CLOCK, UNIT_OF_WORK } from '@platform/shared-kernel';
 import type { Clock, UnitOfWork } from '@platform/shared-kernel';
@@ -145,7 +146,7 @@ export class CredentialFacadeAdapter implements CredentialFacade {
     try {
       context = await this.materializer.materialize({
         // narrowed: `prepareGitAuth` only ever sees git credentials (forKind)
-        obtainedVia: cred.obtainedVia as GitObtainedVia,
+        obtainedVia: requireGitObtainedVia(cred.obtainedVia),
         secret: blob,
         allowedHosts: cred.allowedHosts,
         host,
@@ -161,7 +162,9 @@ export class CredentialFacadeAdapter implements CredentialFacade {
 
     // Best-effort: record "last used" (P21-3 §10.1). Never fail the clone over it.
     try {
-      this.uow.run((tx) => this.repo.touchLastUsedSync(tx, selectedId, this.clock.now()));
+      this.uow.run((tx) => {
+        this.repo.touchLastUsedSync(tx, selectedId, this.clock.now());
+      });
     } catch {
       /* ignore */
     }
@@ -173,11 +176,13 @@ export class CredentialFacadeAdapter implements CredentialFacade {
         ? {}
         : {
             recordSuccessfulClone: async () => {
-              const entries = await context.readKnownHosts!();
+              if (context.readKnownHosts === undefined)
+                throw new Error('Known-host reader unavailable');
+              const entries = await context.readKnownHosts();
               if (entries.length > 0)
-                this.uow.run((tx) =>
-                  this.repo.recordGitKnownHostsSync(tx, selectedId, entries, this.clock.now()),
-                );
+                this.uow.run((tx) => {
+                  this.repo.recordGitKnownHostsSync(tx, selectedId, entries, this.clock.now());
+                });
             },
           }),
     };

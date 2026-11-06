@@ -18,7 +18,7 @@ import type {
 } from '@platform/contracts';
 import { sandboxes } from '@platform/sandbox';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /** 失败率的统计窗口 —— P21-5 §3 那句「最近 1h 失败率 5%」。 */
 export const HEALTH_WINDOW_MS = 60 * 60 * 1000;
@@ -115,8 +115,6 @@ export class SystemProvidersService {
       .where(gte(sandboxes.createdAt, since))
       .groupBy(sandboxes.provider)
       .all();
-    return new Map(
-      rows.map((r) => [r.provider, { total: Number(r.total), failed: Number(r.failed ?? 0) }]),
-    );
+    return new Map(rows.map((r) => [r.provider, { total: r.total, failed: r.failed }]));
   }
 }

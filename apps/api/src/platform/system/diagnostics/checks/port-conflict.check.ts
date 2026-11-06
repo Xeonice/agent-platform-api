@@ -51,7 +51,7 @@ export class PortConflictCheck implements DiagnoseCheck {
   }
 
   async run(ctx: DiagnoseContext): Promise<DiagnoseCheckResult> {
-    const conflicts: Array<{ port: WatchedPort; holders: PortHolder[] }> = [];
+    const conflicts: { port: WatchedPort; holders: PortHolder[] }[] = [];
     const undetermined: WatchedPort[] = [];
     const self: WatchedPort[] = [];
 
@@ -80,13 +80,13 @@ export class PortConflictCheck implements DiagnoseCheck {
         status: 'fail',
         // ⚠️ headline 只回答「好不好 + 挡不挡我干活」。**被谁占**是这一项的全部价值，
         //    但它带着进程名与 pid，一行放不下 —— 下沉到 detailText，⛔ 不许丢掉。
-        headline: `端口 ${String(conflicts[0]!.port.port)} 被占用，平台起不来`,
+        headline: `端口 ${String(conflicts[0].port.port)} 被占用，平台起不来`,
         detailText: `${lines.join('；')}。`,
         // ⚠️ 建议里给的是**查证**命令而不是 `kill`：占用者可能是用户正在用的另一个应用
         //    （实测那次就是 Docker Desktop），诊断没有资格替他决定杀掉它。
         nextStep:
           '先确认它是什么，确实该让路就停掉它；否则给平台换一个端口（PORT=<其它端口>）后重启平台。',
-        command: `lsof -nP -iTCP:${String(conflicts[0]!.port.port)} -sTCP:LISTEN`,
+        command: `lsof -nP -iTCP:${String(conflicts[0].port.port)} -sTCP:LISTEN`,
         detail: {
           conflicts: conflicts.map((c) => ({
             port: c.port.port,
@@ -174,7 +174,7 @@ export function parseLsof(stdout: string): PortHolder[] {
 export function parseSs(stdout: string): PortHolder[] {
   const out: PortHolder[] = [];
   for (const m of stdout.matchAll(/\(\("([^"]+)",pid=(\d+)/g)) {
-    out.push({ command: m[1]!, pid: Number(m[2]) });
+    out.push({ command: m[1], pid: Number(m[2]) });
   }
   return out;
 }
@@ -196,7 +196,7 @@ function run(cmd: string, args: string[], ctx: DiagnoseContext): Promise<RunResu
         //   · ENOENT      —— 命令不存在 ⇒ 换下一条路径（最小化镜像里没有 lsof）
         //   · killed/超时 —— **查不出来**，绝不能当成「端口空着」
         //   · 退出码非 0  —— 命令跑完了，`lsof` 无匹配就是退出码 1 ⇒ stdout 空就是答案
-        const err = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
+        const err = error;
         if (err && (err.code === 'ENOENT' || err.killed === true)) {
           resolve({ spawned: false, stdout: '' });
           return;

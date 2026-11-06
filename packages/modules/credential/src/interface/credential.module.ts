@@ -8,6 +8,8 @@ import { GIT_REMOTE_TESTER } from '../domain/ports/git-remote-tester.port';
 import { RUNTIME_CREDENTIAL_MATERIALIZER } from '../domain/ports/runtime-credential-materializer.port';
 import { CredentialApplicationService } from '../application/credential-application.service';
 import { CredentialFacadeAdapter } from '../application/credential-facade.adapter';
+import { CredentialRevocationFacadeAdapter } from '../application/credential-revocation-facade.adapter';
+import { CREDENTIAL_REVOCATION_FACADE } from '../application/credential-revocation.facade';
 import { RuntimeCredentialService } from '../application/runtime-credential.service';
 import { SqliteCredentialRepository } from '../infrastructure/persistence/sqlite/credential.repository.impl';
 import { SqliteCredentialSandboxBindingRepository } from '../infrastructure/persistence/sqlite/credential-sandbox-binding.repository.impl';
@@ -33,6 +35,7 @@ import { CredentialController } from './http/credential.controller';
     CredentialApplicationService,
     RuntimeCredentialService,
     CredentialFacadeAdapter,
+    CredentialRevocationFacadeAdapter,
     MasterKeyProvider,
     KeyfileBootSweeper,
     { provide: CREDENTIAL_REPOSITORY, useClass: SqliteCredentialRepository },
@@ -45,12 +48,13 @@ import { CredentialController } from './http/credential.controller';
     { provide: GIT_REMOTE_TESTER, useClass: GitLsRemoteTester },
     { provide: RUNTIME_CREDENTIAL_MATERIALIZER, useClass: DefaultRuntimeCredentialMaterializer },
     { provide: CREDENTIAL_FACADE, useExisting: CredentialFacadeAdapter },
+    { provide: CREDENTIAL_REVOCATION_FACADE, useExisting: CredentialRevocationFacadeAdapter },
   ],
   exports: [
     CredentialApplicationService,
     RuntimeCredentialService,
     CREDENTIAL_FACADE,
-    CREDENTIAL_SANDBOX_BINDING_REPOSITORY,
+    CREDENTIAL_REVOCATION_FACADE,
   ],
 })
 export class CredentialModule {}

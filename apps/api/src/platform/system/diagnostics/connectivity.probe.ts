@@ -256,7 +256,7 @@ export async function probeOne(
       target: label,
       ok: false,
       modelApi: target.modelApi,
-      hint: hintFor(e as Error, target, proxyUrl !== null),
+      hint: hintFor(e instanceof Error ? e : new Error(String(e)), target, proxyUrl !== null),
       ...(e instanceof ProbeTimeoutError ? { timedOut: true } : {}),
     };
   }
@@ -415,11 +415,17 @@ function tlsHandshake(
       socket.destroy();
       reject(e);
     };
-    socket.setTimeout(timeoutMs, () =>
-      fail(new ProbeTimeoutError(`${String(timeoutMs)}ms 内未完成 TLS 握手`)),
-    );
+    socket.setTimeout(timeoutMs, () => {
+      fail(new ProbeTimeoutError(`${String(timeoutMs)}ms 内未完成 TLS 握手`));
+    });
     socket.on('error', fail);
-    signal.addEventListener('abort', () => fail(new Error('已取消')), { once: true });
+    signal.addEventListener(
+      'abort',
+      () => {
+        fail(new Error('已取消'));
+      },
+      { once: true },
+    );
   });
 }
 

@@ -1,3 +1,4 @@
+import { assertDefined } from '../../support/assert-defined';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -72,8 +73,7 @@ async function setup() {
     { now: () => now },
     unused<RuntimeCredentialService>('runtime credential'),
   );
-  const key = (await readFile(pinnedKnownHostsPath(), 'utf8'))
-    .split('\n')[0]!
+  const key = assertDefined((await readFile(pinnedKnownHostsPath(), 'utf8')).split('\n')[0])
     .split(' ')
     .slice(1)
     .join(' ');
@@ -104,7 +104,7 @@ describe('successful SSH clone records public host fingerprints in the credentia
     h.advance();
     await handle.recordSuccessfulClone?.();
     const saved = await h.repo.findById(h.id);
-    expect(CredentialMapper.toMaskedGit(saved!)).toMatchObject({
+    expect(CredentialMapper.toMaskedGit(assertDefined(saved))).toMatchObject({
       platform: 'gitea',
       knownHosts: [
         {

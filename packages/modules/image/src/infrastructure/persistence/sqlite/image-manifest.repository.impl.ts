@@ -7,11 +7,12 @@ import { formatImageRef } from '@platform/contracts';
 import { ImageStateError } from '../../../domain/errors/image-errors';
 import { ImageManifest } from '../../../domain/entities/image-manifest.entity';
 import { ValidationOutcome } from '../../../domain/value-objects/validation-outcome.vo';
-import type { ImageValidationStatus } from '../../../domain/value-objects/validation-outcome.vo';
+import { ImageValidationStatusSchema } from '@platform/contracts';
 import type { ImageManifestRepository } from '../../../domain/repositories/image-manifest.repository';
 import { images, imageManifests, type ImageManifestRow } from '../schema/image.sqlite';
+import { normalizeRuntimeVersions } from '../../../domain/value-objects/runtime-versions.vo';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 @Injectable()
 export class SqliteImageManifestRepository implements ImageManifestRepository {
@@ -19,7 +20,7 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
 
   async findById(id: string): Promise<ImageManifest | null> {
     const row = this.db.select().from(imageManifests).where(eq(imageManifests.id, id)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async findByDigest(imageId: string, digest: string): Promise<ImageManifest | null> {
@@ -28,7 +29,7 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
       .from(imageManifests)
       .where(and(eq(imageManifests.imageId, imageId), eq(imageManifests.digest, digest)))
       .get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async findActiveByVersion(imageId: string, version: string): Promise<ImageManifest | null> {
@@ -43,26 +44,30 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
         ),
       )
       .get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async listByImage(imageId: string): Promise<ImageManifest[]> {
-    return this.db
-      .select()
-      .from(imageManifests)
-      .where(eq(imageManifests.imageId, imageId))
-      .orderBy(desc(imageManifests.registeredAt))
-      .all()
-      .map(toDomain);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(imageManifests)
+        .where(eq(imageManifests.imageId, imageId))
+        .orderBy(desc(imageManifests.registeredAt))
+        .all()
+        .map(toDomain),
+    );
   }
 
   async listAll(): Promise<ImageManifest[]> {
-    return this.db
-      .select()
-      .from(imageManifests)
-      .orderBy(desc(imageManifests.registeredAt))
-      .all()
-      .map(toDomain);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(imageManifests)
+        .orderBy(desc(imageManifests.registeredAt))
+        .all()
+        .map(toDomain),
+    );
   }
 
   /**
@@ -81,13 +86,17 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
    * `getInstallPlan()`'s verdict (0 秒 vs 753 秒), never in visibility.
    */
   async listSelectable(): Promise<ImageManifest[]> {
-    return this.db
-      .select()
-      .from(imageManifests)
-      .where(and(eq(imageManifests.isActive, true), ne(imageManifests.validationStatus, 'invalid')))
-      .orderBy(desc(imageManifests.registeredAt))
-      .all()
-      .map(toDomain);
+    return Promise.resolve(
+      this.db
+        .select()
+        .from(imageManifests)
+        .where(
+          and(eq(imageManifests.isActive, true), ne(imageManifests.validationStatus, 'invalid')),
+        )
+        .orderBy(desc(imageManifests.registeredAt))
+        .all()
+        .map(toDomain),
+    );
   }
 
   /**
@@ -98,24 +107,26 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
    * refuses, prints a `ref` the user can literally put after `FROM`; when it admits,
    * it stores the matched anchor's `digest` as the derived row's lineage record.
    */
-  async listBuiltinAnchors(): Promise<Array<{ ref: string; digest: string; diffIds: string[] }>> {
-    return this.db
-      .select({
-        name: images.name,
-        version: imageManifests.version,
-        digest: imageManifests.digest,
-        diffIds: imageManifests.diffIds,
-      })
-      .from(imageManifests)
-      .innerJoin(images, eq(imageManifests.imageId, images.id))
-      .where(eq(images.isBuiltin, true))
-      .orderBy(desc(imageManifests.registeredAt))
-      .all()
-      .map((r) => ({
-        ref: formatImageRef(r.name, r.version),
-        digest: r.digest,
-        diffIds: r.diffIds,
-      }));
+  async listBuiltinAnchors(): Promise<{ ref: string; digest: string; diffIds: string[] }[]> {
+    return Promise.resolve(
+      this.db
+        .select({
+          name: images.name,
+          version: imageManifests.version,
+          digest: imageManifests.digest,
+          diffIds: imageManifests.diffIds,
+        })
+        .from(imageManifests)
+        .innerJoin(images, eq(imageManifests.imageId, images.id))
+        .where(eq(images.isBuiltin, true))
+        .orderBy(desc(imageManifests.registeredAt))
+        .all()
+        .map((r) => ({
+          ref: formatImageRef(r.name, r.version),
+          digest: r.digest,
+          diffIds: r.diffIds,
+        })),
+    );
   }
 
   saveSync(_tx: Tx, manifest: ImageManifest): void {
@@ -129,6 +140,7 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
         digest: manifest.digest,
         entrypointContract: manifest.entrypointContract,
         supportedRuntimes: manifest.supportedRuntimes,
+        runtimeVersions: manifest.runtimeVersions,
         resourceDefaults: manifest.resourceDefaults,
         labelsRequired: manifest.labelsRequired,
         diffIds: manifest.diffIds,
@@ -159,6 +171,29 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
       .run();
   }
 
+  backfillRuntimeVersionsSync(
+    _tx: Tx,
+    manifestId: string,
+    versions: Record<string, string>,
+  ): Record<string, string> {
+    const row = this.db
+      .select({ runtimeVersions: imageManifests.runtimeVersions })
+      .from(imageManifests)
+      .where(eq(imageManifests.id, manifestId))
+      .get();
+    if (!row) throw new ImageStateError(`manifest ${manifestId} no longer exists`);
+    const current = normalizeRuntimeVersions(row.runtimeVersions);
+    const merged = { ...normalizeRuntimeVersions(versions), ...current };
+    if (JSON.stringify(current) !== JSON.stringify(merged)) {
+      this.db
+        .update(imageManifests)
+        .set({ runtimeVersions: merged })
+        .where(eq(imageManifests.id, manifestId))
+        .run();
+    }
+    return merged;
+  }
+
   deactivateOthersSync(tx: Tx, imageId: string, version: string, keepId: string): void {
     void tx;
     this.db
@@ -179,9 +214,9 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
     const live = this.db.get<{ n: number }>(
       sql`select count(*) as n from sandboxes where image_ref = ${id} and status <> 'destroyed'`,
     );
-    if ((live?.n ?? 0) > 0)
+    if (live.n > 0)
       throw new ImageStateError(
-        `还有 ${String(live?.n)} 个任务（含已停止）在用这个版本，请改为在这张镜像上点 [禁用]。`,
+        `还有 ${String(live.n)} 个任务（含已停止）在用这个版本，请改为在这张镜像上点 [禁用]。`,
       );
     // Destroyed records are hidden task history; their FK must not make the manifest undeletable forever.
     this.db.run(
@@ -204,12 +239,12 @@ export class SqliteImageManifestRepository implements ImageManifestRepository {
     const row = this.db.get<{ n: number }>(
       sql`select count(*) as n from sandboxes where image_ref = ${manifestId} and status <> 'destroyed'`,
     );
-    return row?.n ?? 0;
+    return Promise.resolve(row.n);
   }
 }
 
 function toDomain(row: ImageManifestRow): ImageManifest {
-  const status = row.validationStatus as ImageValidationStatus;
+  const status = ImageValidationStatusSchema.parse(row.validationStatus);
   const findings = row.validationErrors ?? [];
   return ImageManifest.rehydrate({
     id: row.id,
@@ -219,6 +254,7 @@ function toDomain(row: ImageManifestRow): ImageManifest {
     digest: row.digest,
     entrypointContract: row.entrypointContract,
     supportedRuntimes: row.supportedRuntimes,
+    runtimeVersions: row.runtimeVersions,
     resourceDefaults: row.resourceDefaults,
     labelsRequired: row.labelsRequired,
     diffIds: row.diffIds,

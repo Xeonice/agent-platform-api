@@ -34,6 +34,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import './check-agent-cli-versions.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(resolve(root, p), 'utf8');
@@ -132,6 +133,13 @@ if (
   problems.push(`${WF} 必须完整声明两档固定 GHCR 坐标和 linux/amd64、linux/arm64 平台`);
 
 const tagOf = (ref) => /:([^/:]+)$/.exec(ref)?.[1] ?? 'latest';
+const boundTag = publish.versionTag ?? publish.defaultTag;
+if (
+  publish.versionTag !== undefined &&
+  !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(publish.versionTag)
+)
+  problems.push(`${WF} versionTag 必须是不可变版本标签`);
+if (publish.versionTag === 'latest') problems.push(`${WF} versionTag 不得使用 latest`);
 for (const [provider, ref] of published) {
   const entry = matrix.find((m) => m.tier === provider);
   if (entry === undefined) {
@@ -152,13 +160,13 @@ for (const [provider, ref] of published) {
   }
   // 出厂 tag 必须列入发布配置。
   const tag = tagOf(ref);
-  if (tag !== publish.defaultTag) {
+  if (tag !== boundTag) {
     problems.push(
       `${provider} 档：出厂坐标用的是 \`:${tag}\`，但 ${WF} 的 tags 里没有推这个 tag。\n` +
         `  ⇒ 镜像推上去了，出厂默认那一行仍然 404。`,
     );
   }
-  if (ref !== `${publish.registry}/${publish.owner}/${entry.image}:${publish.defaultTag}`)
+  if (ref !== `${publish.registry}/${publish.owner}/${entry.image}:${boundTag}`)
     problems.push(
       `${provider} 档出厂坐标 ${ref} 与 Jenkins 发布配置的 registry/owner/image/tag 不一致`,
     );

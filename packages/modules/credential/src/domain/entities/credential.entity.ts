@@ -1,8 +1,8 @@
-import { AggregateRoot } from '@platform/shared-kernel';
-import type { CredentialId } from '@platform/shared-kernel';
-import { EncryptedBlob, Erased, isEncrypted } from '../value-objects/encrypted-blob.vo';
-import type { CredentialSecret } from '../value-objects/encrypted-blob.vo';
-import { MaskedIdentifier } from '../value-objects/masked-identifier.vo';
+import { AggregateRoot } from '@platform/shared-kernel/pure';
+import type { CredentialId } from '@platform/shared-kernel/pure';
+import { Erased, isEncrypted } from '../value-objects/encrypted-blob.vo';
+import type { CredentialSecret, EncryptedBlob } from '../value-objects/encrypted-blob.vo';
+import type { MaskedIdentifier } from '../value-objects/masked-identifier.vo';
 import type { CredentialMetadata } from '../value-objects/credential-metadata.vo';
 import { isRuntimeAuthMethod, modeForRuntimeMethod } from '../value-objects/obtained-via.vo';
 import type {
@@ -143,7 +143,7 @@ export class Credential extends AggregateRoot<CredentialId> {
     }
     if (!isRuntimeAuthMethod(input.obtainedVia)) {
       throw new InvalidCredentialError(
-        `runtime credential obtainedVia must be a RuntimeAuthMethod (I-CRD-1), got '${input.obtainedVia}'`,
+        `runtime credential obtainedVia must be a RuntimeAuthMethod (I-CRD-1), got '${String(input.obtainedVia)}'`,
       );
     }
     const cred = new Credential({

@@ -19,6 +19,11 @@ describe('automation terminal outcome and retained artifact recovery', () => {
     const h = harness();
     const first = launcher(h);
     const { sandboxId } = await first.createSandbox({
+      runId: 'retention-run',
+      retryCount: 0,
+      acceptedSandboxId: 'sbx-1',
+      acceptedTaskId: 'retention-task',
+      actorId: 'retention-run',
       projectId: 'prj-1',
       runtimeId: 'claude-code',
       prompt: 'report',
@@ -74,6 +79,11 @@ describe('automation terminal outcome and retained artifact recovery', () => {
     };
     const adapter = launcher(h);
     const { sandboxId } = await adapter.createSandbox({
+      runId: 'retention-run',
+      retryCount: 0,
+      acceptedSandboxId: 'sbx-1',
+      acceptedTaskId: 'retention-task',
+      actorId: 'retention-run',
       projectId: 'prj-1',
       runtimeId: 'claude-code',
       prompt: 'report',

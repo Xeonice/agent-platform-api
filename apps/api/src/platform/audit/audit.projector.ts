@@ -75,7 +75,9 @@ export class AuditProjector implements OnApplicationBootstrap {
   ) {}
 
   onApplicationBootstrap(): void {
-    this.events.subscribe((batch) => this.onEvents(batch));
+    this.events.subscribe((batch) => {
+      this.onEvents(batch);
+    });
   }
 
   private onEvents(batch: DomainEvent[]): void {
@@ -256,7 +258,7 @@ export function project(e: DomainEvent): AuditRecordInput | null {
       actor: 'user',
       // ⛔ summary 里不出现宿主路径（部署布局），也不出现 UUID 之外的定位信息 ——
       // 两个大小才是用户看这一行要的：删掉能拿回多少 / 下载要拉多少。
-      summary: `保留成果（磁盘 ${e.diskBytes} 字节 / 下载 ${e.downloadBytes} 字节）`,
+      summary: `保留成果（磁盘 ${String(e.diskBytes)} 字节 / 下载 ${String(e.downloadBytes)} 字节）`,
       detail: {
         projectId: e.projectId,
         sandboxId: e.sandboxId,

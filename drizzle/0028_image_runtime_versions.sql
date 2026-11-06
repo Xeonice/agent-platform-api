@@ -1,0 +1,1 @@
+ALTER TABLE `image_manifests` ADD `runtime_versions` text DEFAULT '{}' NOT NULL;

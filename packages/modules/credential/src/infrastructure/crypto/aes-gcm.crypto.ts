@@ -5,6 +5,7 @@ import { DecryptionError } from '../../domain/ports/crypto.port';
 import { EncryptedBlob } from '../../domain/value-objects/encrypted-blob.vo';
 import { SecretMaterial } from '../../domain/value-objects/secret-material.vo';
 import { MasterKeyProvider } from './master-key.provider';
+import { errorMessage } from '@platform/shared-kernel';
 
 const ALGO = 'aes-256-gcm';
 const IV_BYTES = 12;
@@ -27,11 +28,13 @@ export class AesGcmCrypto implements CryptoService {
     const cipher = createCipheriv(ALGO, key, iv);
     const blob = plain.use((buf) => Buffer.concat([cipher.update(buf), cipher.final()]));
     const authTag = cipher.getAuthTag();
-    return new EncryptedBlob(
-      blob.toString('base64'),
-      iv.toString('base64'),
-      authTag.toString('base64'),
-      keyId,
+    return Promise.resolve(
+      new EncryptedBlob(
+        blob.toString('base64'),
+        iv.toString('base64'),
+        authTag.toString('base64'),
+        keyId,
+      ),
     );
   }
 
@@ -44,9 +47,9 @@ export class AesGcmCrypto implements CryptoService {
         decipher.update(Buffer.from(blob.blob, 'base64')),
         decipher.final(),
       ]);
-      return SecretMaterial.fromBuffer(plain);
+      return await Promise.resolve(SecretMaterial.fromBuffer(plain));
     } catch (e) {
-      throw new DecryptionError((e as Error).message);
+      throw new DecryptionError(errorMessage(e));
     }
   }
 }

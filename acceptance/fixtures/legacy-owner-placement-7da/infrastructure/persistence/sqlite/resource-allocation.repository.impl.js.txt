@@ -1,0 +1,108 @@
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SqliteResourceAllocationRepository = void 0;
+const read_sqlite_1 = require("./read-sqlite");
+const common_1 = require("@nestjs/common");
+const drizzle_orm_1 = require("drizzle-orm");
+const shared_kernel_1 = require("@platform/shared-kernel");
+const resource_allocation_entity_1 = require("../../../domain/entities/resource-allocation.entity");
+const resource_allocation_sqlite_1 = require("../schema/resource-allocation.sqlite");
+/** SQLite (better-sqlite3 + Drizzle) implementation of `ResourceAllocationRepository`. */
+let SqliteResourceAllocationRepository = class SqliteResourceAllocationRepository {
+    db;
+    constructor(db) {
+        this.db = db;
+    }
+    listActive(nodeId) {
+        return (0, read_sqlite_1.readSqlite)(() => {
+            return this.db
+                .select()
+                .from(resource_allocation_sqlite_1.resourceAllocations)
+                .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(resource_allocation_sqlite_1.resourceAllocations.nodeId, nodeId), (0, drizzle_orm_1.isNull)(resource_allocation_sqlite_1.resourceAllocations.releasedAt)))
+                .orderBy((0, drizzle_orm_1.asc)(resource_allocation_sqlite_1.resourceAllocations.allocatedAt))
+                .all()
+                .map(toDomain);
+        });
+    }
+    findActiveBySandbox(sandboxId) {
+        return (0, read_sqlite_1.readSqlite)(() => {
+            const row = this.db
+                .select()
+                .from(resource_allocation_sqlite_1.resourceAllocations)
+                .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(resource_allocation_sqlite_1.resourceAllocations.sandboxId, sandboxId), (0, drizzle_orm_1.isNull)(resource_allocation_sqlite_1.resourceAllocations.releasedAt)))
+                .get();
+            return row ? toDomain(row) : null;
+        });
+    }
+    listAll() {
+        return (0, read_sqlite_1.readSqlite)(() => {
+            return this.db
+                .select()
+                .from(resource_allocation_sqlite_1.resourceAllocations)
+                .orderBy((0, drizzle_orm_1.asc)(resource_allocation_sqlite_1.resourceAllocations.allocatedAt))
+                .all()
+                .map(toDomain);
+        });
+    }
+    /**
+     * ⚠️ `onConflictDoUpdate` 挂在 **PK** 上，不是挂在 `uq_alloc_active` 上。释放是对
+     * **同一行**的更新（按 id），而 `uq_alloc_active` 的冲突意味着「这个 sandbox 已经有
+     * 一条活跃登记了」—— 那是 I-RA-2 被撞破，必须抛到调用方，不能被一句 upsert 抹平。
+     */
+    saveSync(_tx, allocation) {
+        const values = {
+            id: allocation.id,
+            sandboxId: allocation.sandboxId,
+            nodeId: allocation.nodeId,
+            coresReserved: allocation.coresReserved,
+            ramMbReserved: allocation.ramMbReserved,
+            diskMbReserved: allocation.diskMbReserved,
+            allocatedAt: allocation.allocatedAt,
+            releasedAt: allocation.releasedAt,
+            reconciliationStatus: allocation.reconciliationStatus,
+        };
+        this.db
+            .insert(resource_allocation_sqlite_1.resourceAllocations)
+            .values(values)
+            .onConflictDoUpdate({
+            target: resource_allocation_sqlite_1.resourceAllocations.id,
+            set: {
+                releasedAt: values.releasedAt,
+                reconciliationStatus: values.reconciliationStatus,
+            },
+        })
+            .run();
+    }
+};
+exports.SqliteResourceAllocationRepository = SqliteResourceAllocationRepository;
+exports.SqliteResourceAllocationRepository = SqliteResourceAllocationRepository = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, common_1.Inject)(shared_kernel_1.DATABASE)),
+    __metadata("design:paramtypes", [Object])
+], SqliteResourceAllocationRepository);
+function toDomain(row) {
+    return resource_allocation_entity_1.ResourceAllocation.rehydrate({
+        id: row.id,
+        sandboxId: (0, shared_kernel_1.asSandboxId)(row.sandboxId),
+        nodeId: (0, shared_kernel_1.asNodeId)(row.nodeId),
+        coresReserved: row.coresReserved,
+        ramMbReserved: row.ramMbReserved,
+        diskMbReserved: row.diskMbReserved,
+        allocatedAt: row.allocatedAt,
+        releasedAt: row.releasedAt,
+        reconciliationStatus: row.reconciliationStatus,
+    });
+}
+//# sourceMappingURL=resource-allocation.repository.impl.js.map

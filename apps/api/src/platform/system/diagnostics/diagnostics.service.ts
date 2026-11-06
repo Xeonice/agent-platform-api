@@ -1,3 +1,5 @@
+import { coordinatorWorker } from '@platform/shared-kernel';
+import { errorMessage } from '@platform/shared-kernel';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CLOCK, type Clock } from '@platform/shared-kernel';
 import {
@@ -9,7 +11,6 @@ import {
 import type {
   AuditRecorder,
   DiagnoseCheckFrame,
-  DiagnoseCheckId,
   DiagnoseServerFrame,
   DiagnoseStatus,
 } from '@platform/contracts';
@@ -33,6 +34,8 @@ export const DIAGNOSE_TIMEOUT_MS = 10_000;
  */
 @Injectable()
 export class DiagnosticsService {
+  private readonly worker = coordinatorWorker('platform.diagnostics');
+
   private readonly logger = new Logger('Diagnostics');
 
   constructor(
@@ -61,88 +64,96 @@ export class DiagnosticsService {
           '契约是权威（sse-protocol.ts），装配要跟着改。',
       );
     }
-    return DIAGNOSE_CHECK_IDS.map((id) => byId.get(id)!);
+    return DIAGNOSE_CHECK_IDS.map((id) => {
+      const check = byId.get(id);
+      if (!check) throw new Error(`Missing diagnostic check: ${id}`);
+      return check;
+    });
   }
 
   async run(emit: (frame: DiagnoseServerFrame) => void, signal: AbortSignal): Promise<void> {
-    const checks = this.ordered();
-    const startFrame = {
-      event: 'start',
-      checks: checks.map((c) => ({ id: c.id, label: c.label })),
-      timeoutMs: DIAGNOSE_TIMEOUT_MS,
-    } as const;
-    const generation = this.snapshots?.begin(startFrame, this.clock.now());
-    emit(startFrame);
+    return this.worker.run(async () => {
+      const checks = this.ordered();
+      const startFrame = {
+        event: 'start',
+        checks: checks.map((c) => ({ id: c.id, label: c.label })),
+        timeoutMs: DIAGNOSE_TIMEOUT_MS,
+      } as const;
+      const generation = this.snapshots?.begin(startFrame, this.clock.now());
+      emit(startFrame);
 
-    const roundStarted = this.clock.now().getTime();
-    const frames: DiagnoseCheckFrame[] = [];
-    await Promise.all(
-      checks.map(async (check) => {
-        const frame = await this.runOne(check, signal);
-        frames.push(frame);
-        if (!signal.aborted) {
-          if (generation !== undefined) this.snapshots?.record(generation, frame);
-          emit(frame);
-        }
-      }),
-    );
-    if (signal.aborted) {
-      if (generation !== undefined) this.snapshots?.abort(generation, this.clock.now());
-      return;
-    }
+      const roundStarted = this.clock.now().getTime();
+      const frames: DiagnoseCheckFrame[] = [];
+      await Promise.all(
+        checks.map(async (check) => {
+          const frame = await this.runOne(check, signal);
+          frames.push(frame);
+          if (!signal.aborted) {
+            if (generation !== undefined) this.snapshots?.record(generation, frame);
+            emit(frame);
+          }
+        }),
+      );
+      if (signal.aborted) {
+        if (generation !== undefined) this.snapshots?.abort(generation, this.clock.now());
+        return;
+      }
 
-    const statuses = frames.map((f) => f.status);
-    const count = (s: DiagnoseStatus): number => statuses.filter((x) => x === s).length;
-    const doneFrame = {
-      event: 'done',
-      okCount: count('ok'),
-      infoCount: count('info'),
-      warnCount: count('warn'),
-      // ⚠️ `timeout` 计进 failCount：对「整轮结论」而言，「答不上来」与「答坏了」是同一
-      //    件事 —— 都不是「好的」。分开呈现由前端按每项的 status 做，汇总数字不该给出
-      //    「7 ok / 1 timeout」这种让人以为「没有失败」的读数。
-      failCount: count('fail') + count('timeout'),
-      totalMs: this.clock.now().getTime() - roundStarted,
-    } as const;
-    if (generation !== undefined) this.snapshots?.finish(generation, doneFrame, this.clock.now());
-    emit(doneFrame);
+      const statuses = frames.map((f) => f.status);
+      const count = (s: DiagnoseStatus): number => statuses.filter((x) => x === s).length;
+      const doneFrame = {
+        event: 'done',
+        okCount: count('ok'),
+        infoCount: count('info'),
+        warnCount: count('warn'),
+        // ⚠️ `timeout` 计进 failCount：对「整轮结论」而言，「答不上来」与「答坏了」是同一
+        //    件事 —— 都不是「好的」。分开呈现由前端按每项的 status 做，汇总数字不该给出
+        //    「7 ok / 1 timeout」这种让人以为「没有失败」的读数。
+        failCount: count('fail') + count('timeout'),
+        totalMs: this.clock.now().getTime() - roundStarted,
+      } as const;
+      if (generation !== undefined) this.snapshots?.finish(generation, doneFrame, this.clock.now());
+      emit(doneFrame);
 
-    this.recordAudit(frames);
+      this.recordAudit(frames);
+    });
   }
 
   /** 单项：计时 + 超时竞速 + 兜底 catch。 */
   private async runOne(check: DiagnoseCheck, signal: AbortSignal): Promise<DiagnoseCheckFrame> {
-    const started = this.clock.now().getTime();
-    const base = { event: 'check' as const, id: check.id as DiagnoseCheckId, label: check.label };
-    try {
-      const result = await withTimeout(
-        check.run({ timeoutMs: DIAGNOSE_TIMEOUT_MS, signal }),
-        DIAGNOSE_TIMEOUT_MS,
-      );
-      if (result === TIMED_OUT) {
+    return this.worker.run(async () => {
+      const started = this.clock.now().getTime();
+      const base = { event: 'check' as const, id: check.id, label: check.label };
+      try {
+        const result = await withTimeout(
+          this.worker.run(() => check.run({ timeoutMs: DIAGNOSE_TIMEOUT_MS, signal })),
+          DIAGNOSE_TIMEOUT_MS,
+        );
+        if (result === TIMED_OUT) {
+          return {
+            ...base,
+            status: 'timeout',
+            // ⚠️ 「超时」≠「不可达」：这一项**没有结论**，不是「结论是坏的」。
+            headline: `${String(DIAGNOSE_TIMEOUT_MS / 1000)} 秒内没有结果`,
+            detailText: '这一项这次没有结论，其余项不受影响。',
+            nextStep: '看这一项依赖的东西是卡住了还是在报错；再跑一次诊断，看它是不是每次都超时。',
+            durationMs: this.clock.now().getTime() - started,
+          };
+        }
+        return { ...base, ...result, durationMs: this.clock.now().getTime() - started };
+      } catch (e) {
+        // 防御，不是设计：`DiagnoseCheck.run()` 契约上不许抛（它是唯一知道刚才在做什么的
+        // 人，翻译成人话是它的责任）。真抛了也不能让整轮塌掉。
+        this.logger.error(`诊断项 ${check.id} 抛出异常：${errorMessage(e)}`);
         return {
           ...base,
-          status: 'timeout',
-          // ⚠️ 「超时」≠「不可达」：这一项**没有结论**，不是「结论是坏的」。
-          headline: `${String(DIAGNOSE_TIMEOUT_MS / 1000)} 秒内没有结果`,
-          detailText: '这一项这次没有结论，其余项不受影响。',
-          nextStep: '看这一项依赖的东西是卡住了还是在报错；再跑一次诊断，看它是不是每次都超时。',
+          status: 'fail',
+          headline: '这一项检查自己出错了',
+          detailText: errorMessage(e),
           durationMs: this.clock.now().getTime() - started,
         };
       }
-      return { ...base, ...result, durationMs: this.clock.now().getTime() - started };
-    } catch (e) {
-      // 防御，不是设计：`DiagnoseCheck.run()` 契约上不许抛（它是唯一知道刚才在做什么的
-      // 人，翻译成人话是它的责任）。真抛了也不能让整轮塌掉。
-      this.logger.error(`诊断项 ${check.id} 抛出异常：${(e as Error).message}`);
-      return {
-        ...base,
-        status: 'fail',
-        headline: '这一项检查自己出错了',
-        detailText: `${(e as Error).message}`,
-        durationMs: this.clock.now().getTime() - started,
-      };
-    }
+    });
   }
 
   /**
@@ -188,7 +199,9 @@ const TIMED_OUT = Symbol('diagnose-timeout');
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    timer = setTimeout(() => {
+      resolve(TIMED_OUT);
+    }, ms);
     timer.unref();
   });
   work.catch(() => undefined);

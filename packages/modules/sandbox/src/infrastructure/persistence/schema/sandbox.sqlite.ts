@@ -1,3 +1,5 @@
+import { SANDBOX_STATUSES } from '../../../domain/value-objects/sandbox-status.vo';
+import { TRIGGERED_BY } from '../../../domain/entities/state-transition.entity';
 import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, real, index, check } from 'drizzle-orm/sqlite-core';
 
@@ -63,7 +65,7 @@ export const sandboxes = sqliteTable(
      */
     imageRef: text('image_ref'),
     provider: text('provider').notNull().default('aio'),
-    status: text('status').notNull().default('pending'),
+    status: text('status', { enum: SANDBOX_STATUSES }).notNull().default('pending'),
     headless: integer('headless', { mode: 'boolean' }).notNull(),
     timeoutMinutes: integer('timeout_minutes'),
     idleTimeoutSec: integer('idle_timeout_sec').notNull().default(1800),
@@ -143,10 +145,10 @@ export const sandboxStateTransitions = sqliteTable(
   {
     id: text('id').primaryKey(),
     sandboxId: text('sandbox_id').notNull(),
-    fromStatus: text('from_status'),
-    toStatus: text('to_status').notNull(),
+    fromStatus: text('from_status', { enum: SANDBOX_STATUSES }),
+    toStatus: text('to_status', { enum: SANDBOX_STATUSES }).notNull(),
     at: integer('at', { mode: 'timestamp' }).notNull(),
-    triggeredBy: text('triggered_by').notNull(),
+    triggeredBy: text('triggered_by', { enum: TRIGGERED_BY }).notNull(),
   },
   (t) => ({
     sandboxIdx: index('idx_transitions_sandbox').on(t.sandboxId),

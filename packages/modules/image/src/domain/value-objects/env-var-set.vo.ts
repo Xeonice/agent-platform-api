@@ -1,4 +1,4 @@
-import { isReservedEnvName } from '@platform/shared-kernel';
+import { isReservedEnvName } from '@platform/shared-kernel/pure';
 import {
   ENV_DUPLICATE_KEY,
   ENV_LIMIT_EXCEEDED,

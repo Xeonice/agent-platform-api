@@ -7,7 +7,7 @@ import { Image } from '../../../domain/entities/image.entity';
 import type { ImageRepository } from '../../../domain/repositories/image.repository';
 import { images, type ImageRow } from '../schema/image.sqlite';
 
-type Db = BetterSQLite3Database<Record<string, never>>;
+type Db = BetterSQLite3Database;
 
 /**
  * SQLite `ImageRepository`. Writes are synchronous and run inside the caller's
@@ -20,7 +20,7 @@ export class SqliteImageRepository implements ImageRepository {
 
   async findById(id: string): Promise<Image | null> {
     const row = this.db.select().from(images).where(eq(images.id, id)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   findByIdSync(_tx: Tx, id: string): Image | null {
@@ -30,11 +30,11 @@ export class SqliteImageRepository implements ImageRepository {
 
   async findByName(name: string): Promise<Image | null> {
     const row = this.db.select().from(images).where(eq(images.name, name)).get();
-    return row ? toDomain(row) : null;
+    return Promise.resolve(row ? toDomain(row) : null);
   }
 
   async list(): Promise<Image[]> {
-    return this.db.select().from(images).all().map(toDomain);
+    return Promise.resolve(this.db.select().from(images).all().map(toDomain));
   }
 
   saveSync(_tx: Tx, image: Image): void {

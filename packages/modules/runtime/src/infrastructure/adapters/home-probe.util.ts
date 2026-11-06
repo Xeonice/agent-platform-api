@@ -22,7 +22,7 @@ export async function probeSandboxHome(
   const r = await exec(HOME_PROBE_CMD, { timeoutMs: HOME_PROBE_TIMEOUT_MS });
   const home = r.stdout.trim();
   if (r.exitCode !== 0 || !home.startsWith('/')) {
-    throw onFailure(`could not resolve $HOME inside the sandbox (exit ${r.exitCode})`);
+    throw onFailure(`could not resolve $HOME inside the sandbox (exit ${String(r.exitCode)})`);
   }
   return home.endsWith('/') ? home.slice(0, -1) : home;
 }

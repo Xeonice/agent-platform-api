@@ -76,12 +76,16 @@ export class DockerodeProvisionAdapter implements PresetImageDockerPort {
       this.docker.modem.followProgress(
         stream,
         (err: Error | null, out: DockerProgressFrame[]) => {
-          if (err !== null) return reject(err);
+          if (err !== null) {
+            reject(err);
+            return;
+          }
           const failed = out.find((f) => f.error !== undefined || f.errorDetail !== undefined);
           if (failed !== undefined) {
-            return reject(
+            reject(
               new Error(`${what}失败：${failed.error ?? failed.errorDetail?.message ?? '未知'}`),
             );
+            return;
           }
           resolve();
         },

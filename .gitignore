@@ -29,3 +29,6 @@ reports/
 
 # 每次验收生成，由 Jenkins 保存
 acceptance/execution-report.json
+
+# Local qualification reports; durable release evidence is archived by CI.
+artifacts/
