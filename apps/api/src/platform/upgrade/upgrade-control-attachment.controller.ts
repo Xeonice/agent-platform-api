@@ -1,10 +1,12 @@
 import { Body, Controller, Get, Post, Req } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { UpgradeSecurity } from '../access-passcode/upgrade-security.service';
 import { UpgradeControlAttachment } from './upgrade-control-attachment';
 
 /** Only fixed local startup inputs are accepted. This is not a migration or
  * Entry delegation executor and never activates independent authority. */
+@ApiExcludeController()
 @Controller('internal/upgrade-control-attachment')
 export class UpgradeControlAttachmentController {
   constructor(

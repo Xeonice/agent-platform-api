@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { Test } from '@nestjs/testing';
 import { Controller, Get, Inject } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -57,6 +58,9 @@ import { planFixtureEnvelope, planFixtureSource } from '../../support/upgrade-pl
 import { deferred, stub, unused, useEnv } from '../../support/strict-ports';
 import type { SignedUpgradeManifest } from '@platform/contracts';
 
+const { DocumentBuilder, SwaggerModule } = createRequire(resolve('apps/api/package.json'))(
+  '@nestjs/swagger',
+) as typeof import('../../../apps/api/node_modules/@nestjs/swagger');
 const key = 'isolated-ledger-hot-attach-controller-key-32',
   instanceId = 'hot-attach-local';
 const internal = { 'x-platform-internal-key': key, 'x-platform-instance-id': instanceId };
@@ -281,6 +285,23 @@ async function fixture(options: { schema29?: boolean } = {}) {
 }
 
 describe('fixed hot Control ledger attachment — real SQLite/Nest and actual JS passive reservation', () => {
+  it('keeps fixed bootstrap maintenance HTTP outside business OpenAPI without hiding existing controllers', async () => {
+    const f = await fixture();
+    const document = SwaggerModule.createDocument(f.app, new DocumentBuilder().build());
+    for (const path of [
+      '/internal/upgrade-control-attachment',
+      '/internal/upgrade-control-attachment/freeze',
+      '/internal/upgrade-control-attachment/attach',
+    ]) {
+      expect(document.paths).not.toHaveProperty(path);
+    }
+    expect(document.paths['/internal/upgrades/pending']?.get).toBeDefined();
+    await request(f.app.getHttpServer())
+      .get('/internal/upgrade-control-attachment')
+      .set(internal)
+      .expect(200);
+  });
+
   it('freezes durably then atomically attaches readonly without releasing the real business writer', async () => {
     const f = await fixture();
     await request(f.app.getHttpServer())
