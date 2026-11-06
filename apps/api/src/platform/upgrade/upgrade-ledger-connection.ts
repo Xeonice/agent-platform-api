@@ -7,7 +7,7 @@ import { lstatSync, realpathSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, resolve } from 'node:path';
 import { CLOCK, platformInstanceId, type Clock } from '@platform/shared-kernel';
 import { SystemClock } from '../time/system-clock';
-import { canonicalUpgrade, requireUpgrade, upgradeDigest } from './upgrade-trust';
+import { canonicalUpgrade, requireUpgrade, upgradeDigest, UpgradeError } from './upgrade-trust';
 import type { UpgradeStoreOptions, UpgradeLedgerAccess } from './upgrade-control-bridge';
 import { UPGRADE_CONTROL_SCHEMA_VERSION } from './control-store-schema';
 
@@ -341,11 +341,7 @@ export class UpgradeLedgerConnection implements OnModuleDestroy, UpgradeLedgerAc
           Promise.allSettled([...this.pending]),
           new Promise<never>((_ok, fail) => {
             timer = setTimeout(() => {
-              fail(
-                Object.assign(new Error('LEGACY_CONTROL_WORK_NOT_SETTLED'), {
-                  code: 'LEGACY_CONTROL_WORK_NOT_SETTLED',
-                }),
-              );
+              fail(new UpgradeError('LEGACY_CONTROL_WORK_NOT_SETTLED'));
             }, remaining);
           }),
         ]);

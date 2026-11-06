@@ -493,6 +493,53 @@ describe('fixed hot Control ledger attachment — real SQLite/Nest and actual JS
     expect(committed).toBe(attachedBaseline + 1);
     expect(() => f.writer.assert()).not.toThrow();
   });
+  it('returns HTTP409 for the original freeze timeout while preserving the durable scope and actual pending Promise', async () => {
+    const f = await fixture(),
+      gate = deferred<void>();
+    close.push(() => gate.resolve());
+    const plan = { ...f.plan, deadline: Date.now() + 500 },
+      input = { ...f.freezeInput, specDigest: upgradeDigest(plan) };
+    writeFileSync(
+      join(f.root, 'freeze.json'),
+      JSON.stringify({ spec: plan, signedManifest: f.signedManifest }),
+      { mode: 0o600 },
+    );
+    let executions = 0;
+    const original = f.store.runLedgerWork(async () => {
+      executions++;
+      await gate.promise;
+      return f.store.instance();
+    });
+    const response = await request(f.app.getHttpServer())
+      .post('/internal/upgrade-control-attachment/freeze')
+      .set(internal)
+      .send(input)
+      .expect(409);
+    expect(response.body.code).toBe('LEGACY_CONTROL_WORK_NOT_SETTLED');
+    expect(executions).toBe(1);
+    expect(f.connection.legacyWorkSnapshot()).toMatchObject({
+      admissionClosed: true,
+      active: 1,
+      epoch: 1,
+    });
+    const receipt = f.connection.frozenReceipt();
+    expect(receipt?.specDigest).toBe(input.specDigest);
+    await request(f.app.getHttpServer())
+      .post('/internal/upgrade-control-attachment/freeze')
+      .set(internal)
+      .send(input)
+      .expect(409);
+    expect(f.connection.frozenReceipt()).toEqual(receipt);
+    expect(f.business.prepare('SELECT count(*) n FROM upgrade_control_attachment').get()).toEqual({
+      n: 1,
+    });
+    expect(f.store.ledgerReadonly).toBe(false);
+    expect(() => f.writer.assert()).not.toThrow();
+    gate.resolve();
+    expect(await original).toMatchObject({ ready: 1 });
+    expect(executions).toBe(1);
+    expect(f.connection.legacyWorkSnapshot().active).toBe(0);
+  });
   it('uses actual schema29 fallback for the old accept/claim/renew/commit protocol and rejects unsupported fast RPCs', async () => {
     const f = await fixture({ schema29: true }),
       plan = freezeUpgradePlan(f.signedManifest, f.source);
