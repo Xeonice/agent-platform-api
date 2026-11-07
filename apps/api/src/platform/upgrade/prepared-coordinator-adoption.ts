@@ -26,8 +26,10 @@ export async function completePreparedCoordinatorAdoption(p: {
   continuity(): Promise<Record<string, unknown>>;
   assertAuthority(): void;
   transportReady(): boolean;
+  setBusinessReady(ready: boolean): void;
   binding: { path: string; origin: string; artifactDigest: string | null };
 }): Promise<Record<string, unknown>> {
+  p.setBusinessReady(false);
   return withCoordinatorBusinessEpoch(p.store.sqlite, async () => {
     const writer = coordinatorWriterControl(p.store.sqlite);
     requireUpgrade(writer.generation === p.generation, 'HANDOFF_WRITER_EPOCH_CHANGED');
@@ -63,6 +65,30 @@ export async function completePreparedCoordinatorAdoption(p: {
     const continuity = await p.budget.step(() => p.continuity());
     check();
     requireUpgrade(continuity.qualified === true, 'HANDOFF_CONTINUITY_UNCONFIRMED');
+    const preparation = {
+      phase: 'ready-publication-prepared',
+      qualified: true,
+      commitKnown: false,
+      instanceId: p.store.instanceId,
+      attemptId: p.row.attempt_id,
+      generation: p.generation,
+      writerFence,
+      controllerFence: p.fence,
+      artifactDigest: p.binding.artifactDigest,
+      preparedAt: p.clock.now().toISOString(),
+      continuity,
+    };
+    const prepared = p.store.sqlite
+      .prepare("UPDATE coordinator_handoffs SET evidence=? WHERE attempt_id=? AND stage='adopting'")
+      .run(JSON.stringify(preparation), p.row.attempt_id);
+    requireUpgrade(prepared.changes === 1, 'HANDOFF_STAGE_CONFLICT');
+    check();
+    // The new epoch, initialized hooks and complete continuity proof are now
+    // durable. Arm the actual listener BEFORE the atomic binding rename can
+    // direct a concurrent lease or business request to it. This does not mark
+    // the handoff applied: that follows durable publication below.
+    p.setBusinessReady(true);
+    check();
     await p.budget.step(() =>
       writeInstalledBinding(
         p.binding.path,
@@ -89,15 +115,29 @@ export async function completePreparedCoordinatorAdoption(p: {
       artifactDigest: p.binding.artifactDigest,
       generation: p.generation,
       observedAt: fromEpochMs(activatedAt).toISOString(),
+      preparation,
     };
     check();
-    const committed = p.store.sqlite
-      .prepare(
-        "UPDATE coordinator_handoffs SET stage='adopted',activated_at=?,evidence=? WHERE attempt_id=? AND stage='adopting'",
-      )
-      .run(activatedAt, JSON.stringify(evidence), p.row.attempt_id);
-    requireUpgrade(committed.changes === 1, 'HANDOFF_STAGE_CONFLICT');
+    p.store.sqlite
+      .transaction(() => {
+        check();
+        const committed = p.store.sqlite
+          .prepare(
+            "UPDATE coordinator_handoffs SET stage='adopted',activated_at=?,evidence=? WHERE attempt_id=? AND stage='adopting'",
+          )
+          .run(activatedAt, JSON.stringify(evidence), p.row.attempt_id);
+        requireUpgrade(committed.changes === 1, 'HANDOFF_STAGE_CONFLICT');
+        // A synchronous epoch/deadline rejection must roll back this marker too.
+        check();
+      })
+      .immediate();
     check();
     return evidence;
+  }).catch((error: unknown) => {
+    // Publication may already have renamed the binding before fsync/deadline
+    // failure. Close admission synchronously; retain the original durable
+    // adopting intent for inspection, never reverse the binding or claim applied.
+    p.setBusinessReady(false);
+    throw error;
   });
 }

@@ -143,6 +143,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     projection = undefined;
   }
   let state: 'prepared' | 'adopting' | 'ready' | 'unknown' = 'prepared';
+  let businessReady = false;
   let adopting: Promise<Record<string, unknown>> | null = null;
   let adoptedIntent: string | null = null;
   let moduleInitializationStarted = false;
@@ -150,7 +151,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     app,
     readPublicNetworkConfig(),
     { host: env.host, port: env.port },
-    () => state === 'ready',
+    () => businessReady,
   );
   app.enableShutdownHooks();
   let recoveryWatch: NodeJS.Timeout | undefined = undefined;
@@ -282,6 +283,9 @@ export async function startPreparedCoordinator(): Promise<void> {
           );
         },
         transportReady: () => preparedCoordinatorBusinessTransportReady(app),
+        setBusinessReady: (ready) => {
+          businessReady = ready;
+        },
         binding: {
           path: requiredUpgradeValue(process.env.PLATFORM_COORDINATOR_BINDING_PATH),
           origin: `http://${env.host}:${String(env.port)}`,
@@ -305,6 +309,7 @@ export async function startPreparedCoordinator(): Promise<void> {
       });
       return { commitKnown: true, stage: 'adopted', evidence };
     })().catch((error: unknown) => {
+      businessReady = false;
       state = 'unknown';
       workers.invalidateCoverage();
       throw error;
