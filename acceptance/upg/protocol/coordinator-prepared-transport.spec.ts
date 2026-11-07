@@ -1,10 +1,23 @@
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Server } from 'node:http';
-import { Controller, Get, Inject } from '@nestjs/common';
+import {
+  ConsoleLogger,
+  Controller,
+  Get,
+  Global,
+  HttpException,
+  Inject,
+  Logger,
+  Module,
+  type INestApplication,
+} from '@nestjs/common';
+import { createRequire } from 'node:module';
+import { CLOCK } from '@platform/shared-kernel';
 import { Test } from '@nestjs/testing';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -14,7 +27,13 @@ import request from 'supertest';
 import {
   prepareCoordinatorHttpTransport,
   preparedCoordinatorBusinessTransportReady,
+  attachPreparedCoordinatorLogger,
 } from '../../../apps/api/src/roles/coordinator-prepared-main';
+import {
+  LoggingModule,
+  RuntimeLogWriter,
+  RUNTIME_LOG_WRITER,
+} from '../../../apps/api/src/platform/logging';
 import { preparedConnection } from '../../../apps/api/src/platform/persistence/prepared-connection';
 import {
   coordinatorWriterControl,
@@ -25,6 +44,22 @@ import { DeploymentState } from '../../../apps/api/src/platform/deployment/deplo
 import { useEnv } from '../../support/strict-ports';
 
 const SQLITE = Symbol('prepared-transport-test-sqlite');
+const { NestFactory } = createRequire(resolve('apps/api/package.json'))('@nestjs/core');
+@Global()
+@Module({
+  providers: [{ provide: CLOCK, useValue: { now: () => new Date('2026-11-07T00:00:00.000Z') } }],
+  exports: [CLOCK],
+})
+class PreparedLogClock {}
+@Module({})
+class PreparedLogModule {}
+@Controller('prepared-log-proof')
+class PreparedLogProof {
+  @Get() capacity() {
+    new Logger('prepared-capacity').warn('PROVIDER_UNAVAILABLE workspace unconfirmed');
+    throw new HttpException({ code: 'PROVIDER_UNAVAILABLE' }, 409);
+  }
+}
 @Controller('prepared-transport-proof')
 class PreparedTransportProof {
   constructor(@Inject(SQLITE) private readonly sqlite: Database.Database) {}
@@ -38,6 +73,56 @@ afterEach(async () => {
 });
 
 describe('REQ-UPG-001/006 — actual prepared HTTP listener and SQLite writer boundary', () => {
+  it('flushes real Nest startup logs before initialization and keeps later capacity rejections in the existing redacted writer', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prepared-real-logger-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    cleanup.push(() => {
+      Logger.overrideLogger(new ConsoleLogger());
+    });
+    let hooks = 0;
+    const app: INestApplication = await NestFactory.create(
+      {
+        module: PreparedLogModule,
+        imports: [PreparedLogClock, LoggingModule.forRoot({ dir })],
+        controllers: [PreparedLogProof],
+        providers: [
+          {
+            provide: 'prepared-log-hook',
+            useValue: {
+              onApplicationBootstrap() {
+                hooks++;
+                new Logger('prepared-hook').log('actual init hook completed');
+              },
+            },
+          },
+        ],
+      },
+      { bufferLogs: true, abortOnError: false },
+    );
+    cleanup.push(() => app.close());
+    const writer = app.get<RuntimeLogWriter>(RUNTIME_LOG_WRITER);
+    new Logger('prepared-startup').warn(
+      'startup buffered sk-ant-oat01-fixture_secret_abcdefghijkl',
+    );
+    attachPreparedCoordinatorLogger(app);
+    await expect.poll(() => readFile(writer.currentPath, 'utf8')).toContain('startup buffered');
+    expect(hooks).toBe(0);
+    await app.listen(0, '127.0.0.1');
+    await request(app.getHttpServer())
+      .get('/prepared-log-proof')
+      .expect(409, { code: 'PROVIDER_UNAVAILABLE' });
+    expect(hooks).toBe(1);
+    await app.close();
+    const body = await readFile(writer.currentPath, 'utf8');
+    expect(body).toContain('actual init hook completed');
+    expect(body).toContain('PROVIDER_UNAVAILABLE workspace unconfirmed');
+    expect(body).toContain('sk-ant-oat01-***');
+    expect(body).not.toContain('fixture_secret_abcdefghijkl');
+    expect(body.match(/startup buffered/g)).toHaveLength(1);
+    await writer.close();
+    expect(await readFile(writer.currentPath, 'utf8')).toBe(body);
+  });
+
   async function fixture(failHook = false) {
     const directory = mkdtempSync(join(tmpdir(), 'upg-prepared-http-'));
     cleanup.push(() => rmSync(directory, { recursive: true, force: true }));

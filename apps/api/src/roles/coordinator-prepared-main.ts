@@ -14,6 +14,7 @@ import { PROJECT_READ_PROJECTION, type ProjectReadProjection } from '@platform/p
 import { supportedDataFormats } from '../platform/data-format-capabilities';
 import { SystemClock } from '../platform/time/system-clock';
 import { env } from '../platform/config/env';
+import { PlatformLoggerService } from '../platform/logging';
 import {
   activatePreparedPlatform,
   platformConnection,
@@ -39,6 +40,14 @@ import {
 export function preparedCoordinatorBusinessTransportReady(app: INestApplication): boolean {
   const server: unknown = app.getHttpServer();
   return server instanceof Server && server.listening;
+}
+
+/** Match the normal Coordinator's logger before publishing prepared identity.
+ * Explicitly flush its startup buffer while the source writer is still live;
+ * adoption never has to flush the accumulated startup backlog in its budget. */
+export function attachPreparedCoordinatorLogger(app: INestApplication): void {
+  app.useLogger(app.get(PlatformLoggerService));
+  app.flushLogs();
 }
 
 /** Reserve the actual business socket and assemble its transport before the
@@ -117,6 +126,7 @@ export async function startPreparedCoordinator(): Promise<void> {
     ]);
   platformConnection();
   const app = await NestFactory.create(AppModule, { bufferLogs: true, abortOnError: false });
+  attachPreparedCoordinatorLogger(app);
   const quota = app.get(QuotaReconciler);
   const taskRecovery = app.get(AgentTaskApplicationService);
   quota.deferStartupUntilReady();

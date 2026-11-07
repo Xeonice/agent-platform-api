@@ -13,6 +13,7 @@ import {
   chown,
 } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { availableParallelism, cpus, tmpdir, totalmem } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -36,6 +37,7 @@ import {
 } from '../../../packages/modules/sandbox/src/infrastructure/runtime-rpc/owner-factory';
 import { CounterProcessProvider } from '../../upg/runtime/child-provider';
 import { useEnv } from '../../support/strict-ports';
+import { upgradeDigest } from '../../../apps/api/src/platform/upgrade/upgrade-trust';
 
 const key = 'capacity-fixture-coordinator-key-not-production';
 const instanceId = 'capacity-fixture-instance';
@@ -45,11 +47,44 @@ const artifactDigest = 'sha256:' + 'a'.repeat(64);
 const contexts: { close(): Promise<void> }[] = [];
 type Capacity = RuntimeOwnerCapacity['capacity'];
 
-async function coldFactoryInput() {
+async function coldFactoryInput(layout: 'future' | 'original' | 'current' = 'future') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-cold-factory-')));
   await chmod(root, 0o700);
-  const home = join(root, 'owner'),
+  const home =
+      layout === 'original'
+        ? join(root, 'original-owner')
+        : layout === 'current'
+          ? join(root, 'runtime-owners', randomUUID())
+          : join(root, 'future-owners', 'a'.repeat(64), randomUUID()),
     sdkRoot = join(home, 'boxlite');
+  const workspaceRoot = join(root, 'business', 'workspaces');
+  await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
+  // A real, contained protocol-only installed tree; never a release qualification.
+  const installed = join(root, 'installed'),
+    entry = 'api/apps/api/dist/roles/runtime-owner-main.js';
+  await mkdir(dirname(join(installed, entry)), { recursive: true });
+  const body = '/* isolated physical Owner fixture */';
+  await writeFile(join(installed, entry), body);
+  const files = [
+    {
+      path: entry,
+      bytes: Buffer.byteLength(body),
+      mode: (await lstat(join(installed, entry))).mode & 0o777,
+      digest: 'sha256:' + createHash('sha256').update(body).digest('hex'),
+    },
+  ];
+  await writeFile(
+    join(installed, 'upgrade-artifact.json'),
+    JSON.stringify({
+      files,
+      components: {
+        owner: {
+          artifactDigest: upgradeDigest(files),
+          inputFingerprint: upgradeDigest('cold-owner-protocol-fixture'),
+        },
+      },
+    }),
+  );
   const restore = useEnv({
     PLATFORM_PROCESS_ROLE: 'runtime-owner',
     PLATFORM_INSTANCE_ID: instanceId,
@@ -58,6 +93,7 @@ async function coldFactoryInput() {
     RUNTIME_OWNER_ID: ownerId,
     RUNTIME_OWNER_HOME: home,
     BOXLITE_HOME: sdkRoot,
+    RUNTIME_OWNER_WORKSPACE_ROOT: workspaceRoot,
     RUNTIME_OWNER_PORT: '0',
     PLATFORM_ARTIFACT_DIGEST: undefined,
     DATABASE_URL: undefined,
@@ -84,9 +120,18 @@ async function coldFactoryInput() {
     root,
     home,
     sdkRoot,
+    workspaceRoot,
     external,
     lock,
-    start: async () => (running = await startRuntimeOwnerFromEnvironment(clock, registry, lock)),
+    start: async (linuxRoot = '/') => {
+      const oldEntry = process.argv[1];
+      process.argv[1] = join(installed, entry);
+      try {
+        return (running = await startRuntimeOwnerFromEnvironment(clock, registry, lock, linuxRoot));
+      } finally {
+        process.argv[1] = oldEntry;
+      }
+    },
     close: async () => {
       try {
         await running?.close();
@@ -196,6 +241,83 @@ afterEach(async () => {
 });
 
 describe('Owner capacity is a separate authenticated read-only observation [AC-UPG-001.4] [AC-UPG-007.3]', () => {
+  it.each(['explicit', 'current-layout', 'legacy-mount-witness', 'production-aliases'] as const)(
+    'the actual cold factory samples a custom workspace bind through %s without SDK effects',
+    async (mode) => {
+      const f = await coldFactoryInput(
+        mode === 'production-aliases'
+          ? 'original'
+          : mode === 'current-layout'
+            ? 'current'
+            : 'future',
+      );
+      const linux = await fixture();
+      if (mode === 'legacy-mount-witness' || mode === 'production-aliases')
+        delete process.env.RUNTIME_OWNER_WORKSPACE_ROOT;
+      const mountInfo =
+        `35 24 0:30 / /sys/fs/cgroup ro - cgroup2 cgroup rw\n36 24 0:31 ${f.home} ${f.home} rw - ext4 /dev/fixture rw\n37 24 0:31 ${f.workspaceRoot} ${f.workspaceRoot} rw - ext4 /dev/fixture rw\n` +
+        (mode === 'production-aliases'
+          ? `38 24 0:31 ${f.workspaceRoot} /data/workspaces rw - ext4 /dev/fixture rw\n`
+          : '');
+      await linux.put('proc/self/mountinfo', mountInfo);
+      const running = await f.start(linux.linuxRoot);
+      const origin = `http://127.0.0.1:${(running.server.server.address() as AddressInfo).port}`;
+      const response = await fetch(origin + '/runtime/capacity', {
+        headers: { 'x-platform-internal-key': key, 'x-platform-instance-id': instanceId },
+      });
+      expect(response.status).toBe(200);
+      expect(
+        RuntimeOwnerCapacitySchema.parse(await response.json()).capacity.ramMb,
+      ).toBeGreaterThan(0);
+      expect(await readdir(f.sdkRoot)).toEqual([]);
+      expect(running.server.journal.assignments()).toEqual([]);
+      expect([
+        f.external.creates,
+        f.external.starts,
+        f.external.stops,
+        f.external.destroys,
+      ]).toEqual([0, 0, 0, 0]);
+    },
+  );
+
+  it.each([
+    'missing-mount',
+    'readonly-mount',
+    'duplicate-mount',
+    'wrong-explicit',
+    'missing-directory',
+    'symlink-directory',
+    'unknown-layout',
+  ] as const)('the actual factory keeps unknown workspace capacity closed: %s', async (fault) => {
+    const f = await coldFactoryInput(fault === 'unknown-layout' ? 'current' : 'future'),
+      linux = await fixture();
+    if (fault === 'unknown-layout') delete process.env.RUNTIME_OWNER_WORKSPACE_ROOT;
+    if (fault === 'wrong-explicit') process.env.RUNTIME_OWNER_WORKSPACE_ROOT = f.sdkRoot;
+    const row = `37 24 0:31 ${f.workspaceRoot} ${f.workspaceRoot} ${fault === 'readonly-mount' ? 'ro' : 'rw'} - ext4 /dev/fixture rw\n`;
+    await linux.put(
+      'proc/self/mountinfo',
+      '35 24 0:30 / /sys/fs/cgroup ro - cgroup2 cgroup rw\n' +
+        (fault === 'missing-mount' ? '' : row) +
+        (fault === 'duplicate-mount' ? row : ''),
+    );
+    const running = await f.start(linux.linuxRoot);
+    if (fault === 'missing-directory') await rm(f.workspaceRoot, { recursive: true });
+    if (fault === 'symlink-directory') {
+      await rm(f.workspaceRoot, { recursive: true });
+      await symlink(f.sdkRoot, f.workspaceRoot);
+    }
+    const origin = `http://127.0.0.1:${(running.server.server.address() as AddressInfo).port}`;
+    const response = await fetch(origin + '/runtime/capacity', {
+      headers: { 'x-platform-internal-key': key, 'x-platform-instance-id': instanceId },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'PROVIDER_UNAVAILABLE' } });
+    expect(running.server.journal.assignments()).toEqual([]);
+    expect([f.external.creates, f.external.starts, f.external.stops, f.external.destroys]).toEqual([
+      0, 0, 0, 0,
+    ]);
+  });
+
   it('creates only the cold SDK directory under the real locked factory before publishing HTTP metadata', async () => {
     const f = await coldFactoryInput();
     expect(await lstat(f.sdkRoot).catch(() => null)).toBe(null);

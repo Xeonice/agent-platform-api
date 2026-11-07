@@ -20,6 +20,7 @@ import { RuntimeOwnerServer } from './owner-server';
 import { ownerArtifactIdentity } from './artifact-identity';
 import { RuntimeOwnerProviderRegistry } from './owner-client';
 import { sampleRuntimeOwnerCapacity } from './owner-capacity';
+import { resolveRuntimeOwnerWorkspaceRoot } from './owner-workspace-root';
 
 /** Exclusive process lock complements the SDK home lock, including AIO owners. */
 export class RuntimeOwnerHomeLock {
@@ -247,13 +248,14 @@ export async function startRuntimeOwnerFromEnvironment(
   clock: Clock,
   registry: ProviderRegistry,
   lock: RuntimeOwnerHomeLock,
+  linuxRoot = '/',
 ): Promise<{ server: RuntimeOwnerServer; close(): Promise<void> }> {
   const { instanceId, ownerId, key, home } = assertRuntimeOwnerEnvironment();
   lock.assertHeld();
   const capacityRoots = {
     sdkRoot: process.env.BOXLITE_HOME ?? '',
-    workspaceRoot: '/data/workspaces',
   };
+  const workspaceRoot = process.env.RUNTIME_OWNER_WORKSPACE_ROOT;
   ensureRuntimeOwnerSdkHome(home, capacityRoots.sdkRoot);
   lock.assertHeld();
   let server: RuntimeOwnerServer | undefined;
@@ -268,7 +270,20 @@ export async function startRuntimeOwnerFromEnvironment(
       privateDatabaseIsolation: true,
       journalPath: resolve(home, 'runtime-owner.sqlite'),
       registry,
-      capacity: () => sampleRuntimeOwnerCapacity(capacityRoots),
+      capacity: async () =>
+        sampleRuntimeOwnerCapacity(
+          {
+            ...capacityRoots,
+            workspaceRoot: await resolveRuntimeOwnerWorkspaceRoot(
+              {
+                home,
+                workspaceRoot,
+              },
+              linuxRoot,
+            ),
+          },
+          linuxRoot,
+        ),
     });
     await server.listen(Number(process.env.RUNTIME_OWNER_PORT ?? '3231'));
   } catch (error) {
