@@ -324,10 +324,10 @@ export class TerminalGateway
           ...(bookmark ? { terminalIdentity: bookmark.terminalIdentity } : {}),
           ...(target.kind !== 'agent' ? { shellId: target.shellId } : {}),
         });
-        // 清单**不挡在 `session` 之前**：它要问一次沙箱（一次 exec 往返），而 `session`
-        // 帧里装着重连凭据、也是前端判定"连上了"的那一帧。搭在它前面等于把开终端的
-        // 首帧延后一个 exec。⇒ 先把 session 发出去，清单随后补一帧（06 §5.5）。
-        if (target.kind === 'agent') void this.pushShellInventory(client, sandboxId);
+        // Any attached tab can restore its sandbox's other tabs: a hidden Agent
+        // tab may never fit/connect after reload. Inventory never delays session;
+        // revision 2 additionally waits for physical confirmation and ready below.
+        if (revision === 1) void this.pushShellInventory(client, sandboxId);
 
         const pending: Buffer[] = [];
         let confirmGuest!: () => void;
@@ -399,6 +399,7 @@ export class TerminalGateway
               existingSession: target.kind === 'agent' || !target.create,
             });
             for (const chunk of pending) batcher.write(chunk);
+            void this.pushShellInventory(client, sandboxId);
           } finally {
             if (deadline) clearTimeout(deadline);
           }
@@ -523,10 +524,10 @@ export class TerminalGateway
   /**
    * 把「这个 sandbox 里还有哪几个用户终端」推给前端（06 §5.5）。
    *
-   * ⚠️ **只在 `kind=agent` 那条连接上推**，不是每条连接都推。清单是 **sandbox 级**的
-   * 事实、只有一个消费者（标签栏），而 Agent 标签是每次页面加载**必然**连、且**只连
-   * 一条**的那个（它是兜底选中的标签）。每条 shell 连接也推的话，N 个标签就要付 N 次
-   * `tmux list-sessions` 的 exec，换回 N 份一模一样的清单。
+   * Every successful attachment receives the sandbox-level inventory, including
+   * shell/runtime attachments. Restoring a selected shell does not require an
+   * otherwise hidden Agent tab to connect. Each attachment pays one list-sessions
+   * exec, asynchronously after session (revision 1) or confirmed ready (revision 2).
    *
    * ⚠️ **不做「排除当前已连着的会话」这种去重**。清单属于 **Task** 而不属于某个浏览器
    * （06 §5.5 决策三）：换台机器打开同一个任务，也该看得见这些终端。按"谁连着就不报"
@@ -539,15 +540,20 @@ export class TerminalGateway
    */
   private async pushShellInventory(client: Socket, sandboxId: string): Promise<void> {
     return this.worker.run(async () => {
+      const stillAttached = () =>
+        !this.retirementClosed &&
+        !disconnected(client) &&
+        this.attachments.get(client.id)?.confirmed === true;
+      if (!stillAttached()) return;
       try {
         const shells = await this.sessions.listShellSessions(sandboxId);
-        this.send(client, { type: 'shells', shells });
+        if (stillAttached()) this.send(client, { type: 'shells', shells });
       } catch (e) {
         // 走到这里说明是 `listShellSessions` 之外的意外（它自己已经把已知失败折成 null）。
         this.logger.error(
           `sandbox ${sandboxId}: push shell inventory failed: ${e instanceof Error ? e.message : String(e)}`,
         );
-        this.send(client, { type: 'shells', shells: null });
+        if (stillAttached()) this.send(client, { type: 'shells', shells: null });
       }
     });
   }
