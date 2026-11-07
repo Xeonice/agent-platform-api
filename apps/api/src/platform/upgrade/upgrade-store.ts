@@ -44,6 +44,7 @@ import {
   type UpgradeStageProgress,
 } from '@platform/contracts';
 import { PLATFORM_SQLITE } from '../persistence/platform-sqlite.token';
+import { CONTROL_METADATA_MIGRATION } from '../persistence/control-metadata-schema-bridge';
 import {
   requireUpgrade,
   upgradeDigest,
@@ -123,6 +124,9 @@ export interface UpgradeCommit {
 }
 const ACTIVE =
   "('accepted','downloading','package-verified','migrating','prepared','candidate-ready','routing-switched','observing','api-activated')";
+// Same upper bound as the existing private control RPC row reader. Check in
+// SQLite before materializing legacy JSON in JavaScript; this is not a new DDL.
+const CONTROL_LEGACY_ROW_BYTES = 8 * 1024 * 1024;
 
 /** Ledger writes use ledgerSqlite; business participants keep their own sqlite authority. */
 @Injectable()
@@ -199,8 +203,71 @@ export class UpgradeStore {
     }
     return cached;
   }
+  private get schema29ControlMetadata(): boolean {
+    if (this.fastMetadata) return false;
+    const ledger = this.ledgerSqlite;
+    if (
+      !ledger
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'")
+        .get()
+    )
+      return false;
+    const journal = ledger
+      .prepare<unknown[], { hash: string; created_at: number }>(
+        'SELECT hash,created_at FROM __drizzle_migrations ORDER BY created_at,id LIMIT 30',
+      )
+      .all();
+    if (
+      journal.length !== 29 ||
+      upgradeDigest(journal) !== CONTROL_METADATA_MIGRATION.sourceJournalDigest
+    )
+      return false;
+    // A journal number alone must not opt a partial/future layout into the
+    // compatibility path, or enable writes to missing fast-metadata columns.
+    return Object.entries({
+      upgrade_attempts:
+        'attempt_id,instance_id,actor_id,request_id,request_digest,target_release_id,target_digest,manifest,plan,source_activation,source_actual,generation,sequence,state,stage,reason,controller_id,fence,lease_expires_at,accepted_at,observed_at',
+      upgrade_steps: 'attempt_id,step_id,completed_work,applied,receipt_digest,evidence,applied_at',
+    }).every(([table, names]) => {
+      const columns = ledger
+        .prepare<unknown[], { name: string; type: string; pk: number; notnull: number }>(
+          `PRAGMA table_info(${table})`,
+        )
+        .all();
+      return (
+        columns.map((column) => column.name).join(',') === names &&
+        columns.every((column) => {
+          const pk =
+            column.name === 'attempt_id'
+              ? 1
+              : table === 'upgrade_steps' && column.name === 'step_id'
+                ? 2
+                : 0;
+          const type = [
+            'generation',
+            'sequence',
+            'fence',
+            'lease_expires_at',
+            'accepted_at',
+            'observed_at',
+            'applied',
+            'applied_at',
+          ].includes(column.name)
+            ? 'INTEGER'
+            : column.name === 'completed_work'
+              ? 'REAL'
+              : 'TEXT';
+          return (
+            column.pk === pk &&
+            (pk === 0 || column.notnull === 1) &&
+            column.type.toUpperCase() === type
+          );
+        })
+      );
+    });
+  }
   controlCapabilities() {
-    return this.fastMetadata
+    return this.fastMetadata || this.schema29ControlMetadata
       ? UPGRADE_CONTROL_CAPABILITIES
       : { progressEvidenceReference: 1 as const };
   }
@@ -1345,14 +1412,17 @@ export class UpgradeStore {
     return row;
   }
   private controlRow(id: string) {
-    requireUpgrade(this.fastMetadata, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
+    const fast = this.fastMetadata;
+    requireUpgrade(fast || this.schema29ControlMetadata, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
     const row = this.ledgerSqlite
       .prepare<
         unknown[],
         {
           attempt_id: string;
           target_digest: string;
+          target_release_id: string;
           plan_digest: string | null;
+          legacy_plan: string | null;
           generation: number;
           sequence: number;
           state: UpgradeAttempt['state'];
@@ -1369,21 +1439,82 @@ export class UpgradeStore {
           evidence_digest: string | null;
         }
       >(
-        `SELECT a.attempt_id,a.target_digest,a.plan_digest,a.generation,a.sequence,a.state,a.stage,
+        `SELECT a.attempt_id,a.target_digest,a.target_release_id,${fast ? 'a.plan_digest,NULL AS legacy_plan' : `NULL AS plan_digest,CASE WHEN octet_length(a.plan)<=${CONTROL_LEGACY_ROW_BYTES.toString()} THEN a.plan END AS legacy_plan`},a.generation,a.sequence,a.state,a.stage,
       a.fence,a.controller_id,a.lease_expires_at,
       (SELECT attempt_id FROM upgrade_attempts WHERE instance_id=? ORDER BY generation DESC,rowid DESC LIMIT 1) AS current_attempt_id,
       (SELECT fence FROM platform_operations WHERE instance_id=? AND role='project-name-contract' ORDER BY fence DESC LIMIT 1) AS contract_fence_floor,
-      s.step_id AS checkpoint_step_id,s.completed_work,s.applied,s.receipt_digest,s.evidence_digest
+      s.step_id AS checkpoint_step_id,s.completed_work,s.applied,s.receipt_digest,${fast ? 's.evidence_digest' : 'NULL AS evidence_digest'}
       FROM upgrade_attempts a LEFT JOIN upgrade_steps s ON s.attempt_id=a.attempt_id AND s.step_id=a.stage
       WHERE a.attempt_id=? AND a.instance_id=?`,
       )
       .get(this.instanceId, this.instanceId, id, this.instanceId);
     requireUpgrade(row, 'UPGRADE_ATTEMPT_NOT_FOUND', 404);
+    if (!fast) {
+      requireUpgrade(row.legacy_plan !== null, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
+      let raw: unknown;
+      try {
+        raw = JSON.parse(row.legacy_plan);
+      } catch {
+        requireUpgrade(false, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
+      }
+      const parsed = UpgradePlanSchema.safeParse(raw);
+      requireUpgrade(parsed.success, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
+      const { planDigest, ...unsigned } = parsed.data;
+      requireUpgrade(
+        canonicalUpgrade(raw) === canonicalUpgrade(parsed.data) &&
+          upgradeDigest(unsigned) === planDigest &&
+          parsed.data.manifestDigest === row.target_digest &&
+          parsed.data.releaseId === row.target_release_id,
+        'UPGRADE_CONTROL_METADATA_UNKNOWN',
+      );
+      row.plan_digest = planDigest;
+      if (row.checkpoint_step_id)
+        row.evidence_digest = this.schema29EvidenceDigest(id, row.checkpoint_step_id, row);
+    }
     requireUpgrade(
       typeof row.plan_digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(row.plan_digest),
       'UPGRADE_CONTROL_METADATA_UNKNOWN',
     );
     return row;
+  }
+  private schema29EvidenceDigest(
+    id: string,
+    stepId: string,
+    metadata: { applied: number | null; receipt_digest: string | null },
+  ): string {
+    requireUpgrade(
+      metadata.applied === 0 || metadata.applied === 1,
+      'UPGRADE_CONTROL_METADATA_UNKNOWN',
+    );
+    // Every product legacy/current step-applied commit checked this digest
+    // against its evidence before making applied=1 in the same transaction.
+    // Applied receipts are immutable under subsequent progress writes.
+    if (metadata.applied === 1) {
+      requireUpgrade(
+        typeof metadata.receipt_digest === 'string' &&
+          /^sha256:[a-f0-9]{64}$/.test(metadata.receipt_digest),
+        'UPGRADE_CONTROL_METADATA_UNKNOWN',
+      );
+      return metadata.receipt_digest;
+    }
+    // An unapplied checkpoint cannot borrow a receipt digest. Hash the actual
+    // bounded JSON (including real null), never a caller-supplied reference.
+    const row = this.ledgerSqlite
+      .prepare<unknown[], { bytes: number; evidence: string | null }>(
+        `SELECT coalesce(octet_length(evidence),0) AS bytes,CASE WHEN coalesce(octet_length(evidence),0)<=${CONTROL_LEGACY_ROW_BYTES.toString()} THEN evidence END AS evidence FROM upgrade_steps WHERE attempt_id=? AND step_id=?`,
+      )
+      .get(id, stepId);
+    requireUpgrade(
+      row && row.bytes <= CONTROL_LEGACY_ROW_BYTES,
+      'UPGRADE_CONTROL_METADATA_UNKNOWN',
+    );
+    let evidence: unknown = null;
+    try {
+      if (row.evidence !== null) evidence = JSON.parse(row.evidence);
+    } catch {
+      requireUpgrade(false, 'UPGRADE_CONTROL_METADATA_UNKNOWN');
+    }
+    return upgradeDigest(evidence);
   }
   private controlReceipt(row: ReturnType<UpgradeStore['controlRow']>): UpgradeControlReceipt {
     return {
@@ -1524,7 +1655,9 @@ export class UpgradeStore {
       completedWork: row.completed_work,
       applied: row.applied === 1,
       receiptDigest: row.receipt_digest,
-      evidenceDigest: row.evidence_digest,
+      evidenceDigest:
+        row.evidence_digest ??
+        (this.schema29ControlMetadata ? this.schema29EvidenceDigest(id, stepId, row) : null),
     };
   }
   step(
@@ -1565,6 +1698,9 @@ export class UpgradeStore {
     confirmed?: ConfirmedServiceRelease,
     restoredPartial?: UpgradeSourceActual,
   ): UpgradeCommitReceipt {
+    // Validate bounded legacy plan metadata before the material commit path
+    // can parse that plan. The transaction rechecks it again in eventReceipt.
+    if (!this.fastMetadata) this.controlRow(id);
     return this.persistCommit(id, command, confirmed, restoredPartial, () =>
       this.eventReceipt(id, command.eventId),
     );

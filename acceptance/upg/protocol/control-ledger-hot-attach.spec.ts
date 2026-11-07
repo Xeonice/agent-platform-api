@@ -561,11 +561,14 @@ describe('fixed hot Control ledger attachment — real SQLite/Nest and actual JS
     expect(executions).toBe(1);
     expect(f.connection.legacyWorkSnapshot().active).toBe(0);
   });
-  it('uses actual schema29 fallback for the old accept/claim/renew/commit protocol and rejects unsupported fast RPCs', async () => {
+  it('preserves the old schema29 protocol while serving verified light RPCs without migration30', async () => {
     const f = await fixture({ schema29: true }),
       plan = freezeUpgradePlan(f.signedManifest, f.source);
     expect(f.source.schema).toBe(29);
-    expect(f.store.controlCapabilities()).toEqual({ progressEvidenceReference: 1 });
+    expect(f.store.controlCapabilities()).toEqual({
+      controlFastPath: 1,
+      progressEvidenceReference: 1,
+    });
     expect(f.business.pragma('table_info(upgrade_attempts)')).not.toContainEqual(
       expect.objectContaining({ name: 'plan_digest' }),
     );
@@ -607,22 +610,23 @@ describe('fixed hot Control ledger attachment — real SQLite/Nest and actual JS
     expect(f.store.snapshot(attempt.attemptId).appliedSteps.map((s) => s.stepId)).toContain(
       step.stepId,
     );
-    expect(() => f.store.authorityCheck(attempt.attemptId, claim.fence, claim.generation)).toThrow(
-      'UPGRADE_CONTROL_METADATA_UNKNOWN',
-    );
-    expect(() =>
+    expect(
+      f.store.authorityCheck(attempt.attemptId, claim.fence, claim.generation).planDigest,
+    ).toBe(plan.planDigest);
+    expect(
       f.store.leaseRenew(
         attempt.attemptId,
         claim.fence,
         claim.generation,
         'schema29-old-controller',
-      ),
-    ).toThrow('UPGRADE_CONTROL_METADATA_UNKNOWN');
-    expect(() =>
-      f.store.progressCheckpoint(attempt.attemptId, claim.fence, claim.generation),
-    ).toThrow('UPGRADE_CONTROL_METADATA_UNKNOWN');
-    expect(() => f.store.commitReceipt(attempt.attemptId, command)).toThrow(
-      'UPGRADE_CONTROL_METADATA_UNKNOWN',
+      ).fence,
+    ).toBe(claim.fence);
+    expect(
+      f.store.progressCheckpoint(attempt.attemptId, claim.fence, claim.generation).step
+        ?.evidenceDigest,
+    ).toBe(upgradeDigest(evidence));
+    expect(f.store.commitReceipt(attempt.attemptId, command).eventDigest).toBe(
+      upgradeDigest(command),
     );
   });
   it('prepares against the real 29-prefix without applying migration30, then freezes and attaches full independent control metadata', async () => {

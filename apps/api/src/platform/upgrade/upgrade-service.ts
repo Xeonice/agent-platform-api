@@ -995,14 +995,30 @@ export class UpgradeService implements OnApplicationBootstrap, OnModuleDestroy {
           );
           return { request_id: prior.request_id, value: prior.value, revision: prior.revision };
         }
+        // Product probe rows are append-only. The newest row of this attempt
+        // carries its committed COUNT+1 revision, including legacy writers.
+        // Read the real rowid tail inside this same transaction: no cache may
+        // survive rollback, restart or a different writer's append.
+        const last = this.store.sqlite
+          .prepare<unknown[], { rowid: number; attempt_id: string; revision: number }>(
+            'SELECT rowid,attempt_id,revision FROM upgrade_probe_records ORDER BY rowid DESC LIMIT 1',
+          )
+          .get();
         const revision =
-          requiredUpgradeValue(
-            this.store.sqlite
-              .prepare<unknown[], { n: number }>(
-                'SELECT count(*) AS n FROM upgrade_probe_records WHERE attempt_id=?',
-              )
-              .get(input.attemptId),
-          ).n + 1;
+          last?.attempt_id === input.attemptId &&
+          Number.isSafeInteger(last.rowid) &&
+          last.rowid > 0 &&
+          Number.isSafeInteger(last.revision) &&
+          last.revision > 0 &&
+          last.revision < Number.MAX_SAFE_INTEGER
+            ? last.revision + 1
+            : requiredUpgradeValue(
+                this.store.sqlite
+                  .prepare<unknown[], { n: number }>(
+                    'SELECT count(*) AS n FROM upgrade_probe_records WHERE attempt_id=?',
+                  )
+                  .get(input.attemptId),
+              ).n + 1;
         this.store.sqlite
           .prepare('INSERT INTO upgrade_probe_records VALUES(?,?,?,?,?)')
           .run(input.requestId, input.attemptId, input.value, revision, this.clock.now().getTime());
