@@ -625,6 +625,63 @@ describe('UPG actual backend HTTP evidence, independent of sticky gateway succes
       await f.stopSamplingAndDrain();
     }
   });
+  it('sustains a real sixty-second three-lane HTTP window under recurring synchronous SQLite work', async () => {
+    const f = await fixture();
+    f.db.exec('CREATE TABLE sampler_full_window_pressure(value TEXT NOT NULL)');
+    f.db.prepare('INSERT INTO sampler_full_window_pressure VALUES(?)').run('x'.repeat(64 * 1024));
+    const query = f.db.prepare('SELECT length(value) FROM sampler_full_window_pressure');
+    const started = performance.now();
+    let pressureRounds = 0;
+    f.observer.onApplicationBootstrap();
+    try {
+      // This is wall-clock execution, not a clock offset, fake timer, shortened
+      // policy window, or synthetic sample count. The same event loop performs
+      // real synchronous SQLite work for 120 ms in every recurring round.
+      while (performance.now() - started < 65000) {
+        const until = performance.now() + 120;
+        let row: unknown;
+        do {
+          row = query.get();
+        } while (performance.now() < until);
+        expect(row).toEqual({ 'length(value)': 65536 });
+        pressureRounds++;
+        await delay(45);
+      }
+      const measured = (['gateway', 'source', 'candidate'] as const).map((lane) => {
+        const actual = f.read(lane);
+        expect(actual.known).toBe(true);
+        expect(actual.windowMs).toBeGreaterThanOrEqual(60000);
+        const hz = (1000 * (actual.requests - 1)) / actual.windowMs;
+        expect(hz).toBeGreaterThanOrEqual(10);
+        expect(actual.failures).toBe(0);
+        expect(actual.maxLatencyMs).toBeLessThanOrEqual(2000);
+        const backend = lane === 'candidate' ? f.candidate : f.source;
+        const methods = new Map<string, string[]>();
+        for (const request of backend.requests) {
+          const seen = methods.get(request.requestId) ?? [];
+          seen.push(request.method);
+          methods.set(request.requestId, seen);
+        }
+        const ids = new Set(actual.samples.map((sample) => sample.request_id));
+        expect(ids.size).toBe(actual.requests);
+        for (const id of ids) expect(methods.get(id)).toEqual(['POST', 'GET']);
+        return {
+          lane,
+          samples: actual.requests,
+          windowMs: actual.windowMs,
+          hz,
+          failures: actual.failures,
+          maxLatencyMs: actual.maxLatencyMs,
+        };
+      });
+      console.info(
+        'ACTUAL_SIXTY_SECOND_SQLITE_PRESSURE_HTTP_PAIRS',
+        JSON.stringify({ elapsedMs: performance.now() - started, pressureRounds, measured }),
+      );
+    } finally {
+      await f.stopSamplingAndDrain();
+    }
+  }, 80000);
   it('bounds a long overdue timer to four actual pairs per lane without backdating them', async () => {
     const f = await fixture();
     let release = () => {};
