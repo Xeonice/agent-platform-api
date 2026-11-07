@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { performance } from 'node:perf_hooks';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fromEpochMs } from '@platform/shared-kernel';
@@ -577,6 +578,150 @@ describe('UPG actual backend HTTP evidence, independent of sticky gateway succes
     await slow;
     expect(f.read('candidate')).toMatchObject({ known: true, requests: 1, failures: 0 });
   });
+  it('maintains actual HTTP pair cadence through recurring synchronous SQLite work', async () => {
+    const f = await fixture();
+    f.db.exec('CREATE TABLE sampler_pressure(value TEXT NOT NULL)');
+    f.db.prepare('INSERT INTO sampler_pressure VALUES(?)').run('x'.repeat(64 * 1024));
+    const query = f.db.prepare('SELECT length(value) FROM sampler_pressure');
+    const measured: Array<{
+      lane: UpgradeProbeLane;
+      samples: number;
+      windowMs: number;
+      hz: number;
+    }> = [];
+    f.observer.onApplicationBootstrap();
+    try {
+      // Real synchronous DB calls hold the same event loop for 120 ms, followed
+      // by enough I/O time for real HTTP responses. A setInterval-only generator
+      // loses missed ticks here even though every read/write pair is healthy.
+      for (let i = 0; i < 24; i++) {
+        const until = performance.now() + 120;
+        let row: unknown;
+        do {
+          row = query.get();
+        } while (performance.now() < until);
+        expect(row).toEqual({ 'length(value)': 65536 });
+        await delay(45);
+      }
+      for (const lane of ['gateway', 'source', 'candidate'] as const) {
+        const actual = f.read(lane);
+        expect(actual.known).toBe(true);
+        expect(actual.failures).toBe(0);
+        expect(actual.windowMs).toBeGreaterThan(3000);
+        const hz = (1000 * (actual.requests - 1)) / actual.windowMs;
+        expect(hz).toBeGreaterThanOrEqual(10);
+        measured.push({ lane, samples: actual.requests, windowMs: actual.windowMs, hz });
+        const ids = new Set(actual.samples.map((sample) => sample.request_id));
+        expect(ids.size).toBe(actual.requests);
+        const backend = lane === 'candidate' ? f.candidate : f.source;
+        for (const id of ids)
+          expect(
+            backend.requests.filter((request) => request.requestId === id).map((r) => r.method),
+          ).toEqual(['POST', 'GET']);
+        expect(actual.maxLatencyMs).toBeLessThanOrEqual(2000);
+      }
+      console.info('ACTUAL_HTTP_PAIR_CADENCE', JSON.stringify(measured));
+    } finally {
+      await f.stopSamplingAndDrain();
+    }
+  });
+  it('bounds a long overdue timer to four actual pairs per lane without backdating them', async () => {
+    const f = await fixture();
+    let release = () => {};
+    const pending = new Promise<void>((ok) => {
+      release = ok;
+    });
+    const entryBinding = f.inspector.entryBinding;
+    vi.spyOn(f.inspector, 'entryBinding').mockImplementation(async () => {
+      await pending;
+      return entryBinding();
+    });
+    f.observer.onApplicationBootstrap();
+    f.observer['nextSampleAt'] = performance.now() - 10000;
+    try {
+      await vi.waitFor(
+        () => expect(f.observer['inFlight']).toEqual({ gateway: 4, source: 4, candidate: 4 }),
+        { timeout: 1000, interval: 2 },
+      );
+      f.observer['worker'].cancel(f.observer['timer']);
+      const releasedAt = Date.now();
+      release();
+      await vi.waitFor(
+        () => expect(f.observer['inFlight']).toEqual({ gateway: 0, source: 0, candidate: 0 }),
+        { timeout: 2000, interval: 5 },
+      );
+      for (const lane of ['gateway', 'source', 'candidate'] as const) {
+        const actual = f.read(lane);
+        expect(actual.requests).toBe(4);
+        expect(actual.samples.every((sample) => sample.observed_at >= releasedAt)).toBe(true);
+      }
+    } finally {
+      release();
+      await f.stopSamplingAndDrain();
+    }
+  });
+  it('retains the original eighty-pair in-flight limit under excess real HTTP admission', async () => {
+    const f = await fixture();
+    let release = () => {};
+    const gate = new Promise<void>((ok) => {
+      release = ok;
+    });
+    const entryBinding = f.inspector.entryBinding;
+    vi.spyOn(f.inspector, 'entryBinding').mockImplementation(async () => {
+      await gate;
+      return entryBinding();
+    });
+    const pending = Array.from({ length: 85 }, () => f.sample('candidate'));
+    try {
+      expect(f.observer['inFlight'].candidate).toBe(80);
+      release();
+      await Promise.all(pending);
+      expect(f.read('candidate')).toMatchObject({ requests: 80, failures: 0 });
+      expect(f.candidate.requests.filter((request) => request.method === 'POST')).toHaveLength(80);
+      expect(f.candidate.requests.filter((request) => request.method === 'GET')).toHaveLength(80);
+    } finally {
+      release();
+      await Promise.allSettled(pending);
+      await f.stopSamplingAndDrain();
+    }
+  });
+  it.each(['route', 'controller fence', 'retirement'] as const)(
+    'rejects overdue-scheduler results after %s changes during actual HTTP',
+    async (change) => {
+      const f = await fixture();
+      f.candidate.waitMs = 75;
+      f.observer.onApplicationBootstrap();
+      f.observer['nextSampleAt'] = performance.now() - 10000;
+      try {
+        await vi.waitFor(() => expect(f.observer['inFlight'].candidate).toBe(4), {
+          timeout: 1000,
+          interval: 2,
+        });
+        f.observer['worker'].cancel(f.observer['timer']);
+        const scope = assertDefined(f.read('candidate').scope);
+        await vi.waitFor(
+          () =>
+            expect(f.candidate.requests.some((request) => request.method === 'POST')).toBe(true),
+          { timeout: 1000, interval: 2 },
+        );
+        if (change === 'route') f.change({ routeGeneration: 2 });
+        else if (change === 'controller fence') f.expireController();
+        else f.observer.onModuleDestroy();
+        await vi.waitFor(
+          () => expect(f.observer['inFlight']).toEqual({ gateway: 0, source: 0, candidate: 0 }),
+          { timeout: 2000, interval: 5 },
+        );
+        expect(f.evidence.read('candidate', scope, 5000)).toMatchObject({
+          requests: 0,
+          known: false,
+        });
+        expect(f.candidate.requests.filter((request) => request.method === 'POST')).toHaveLength(4);
+        expect(f.candidate.requests.filter((request) => request.method === 'GET')).toHaveLength(4);
+      } finally {
+        await f.stopSamplingAndDrain();
+      }
+    },
+  );
   it('reports actual candidate transport failure even without a completed verified pair', async () => {
     const f = await fixture();
     f.candidate.waitMs = 2200;

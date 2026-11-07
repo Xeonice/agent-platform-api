@@ -1,4 +1,5 @@
 import { coordinatorWorker } from '@platform/shared-kernel';
+import { performance } from 'node:perf_hooks';
 import { matchesProbeScope } from './upgrade-probe-evidence';
 import {
   nullableUpgradeRecord,
@@ -48,6 +49,9 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   private readonly worker = coordinatorWorker('upgrade.observer');
 
   private timer?: ReturnType<typeof setInterval>;
+  private nextSampleAt = 0;
+  private readonly sampleIntervalMs = 50;
+  private readonly maxCatchUpPairs = 4;
   private readonly inFlight: Record<UpgradeProbeLane, number> = {
     gateway: 0,
     source: 0,
@@ -72,24 +76,35 @@ export class UpgradeObserver implements OnApplicationBootstrap, OnModuleDestroy 
   ) {}
   onApplicationBootstrap(): void {
     if (process.env.PLATFORM_PROCESS_ROLE !== 'coordinator') return;
+    this.nextSampleAt = performance.now() + this.sampleIntervalMs;
     this.timer = this.worker.ownInterval(
       setInterval(() => {
+        const now = performance.now();
         if (
           this.retired ||
           (this.store.legacyAdmissionFrozen && !this.store.ledgerReadonly) ||
           process.env.COORDINATOR_WRITER_FENCE_VALID !== 'true'
-        )
+        ) {
+          this.nextSampleAt = now + this.sampleIntervalMs;
           return;
+        }
+        // setInterval coalesces callbacks while synchronous DB/JSON work holds
+        // the event loop. Advance absolute monotonic deadlines, then launch at
+        // most four real pairs per lane. Older missed slots are discarded;
+        // observed_at and every success still come from the actual HTTP pair.
+        const due = Math.max(0, Math.floor((now - this.nextSampleAt) / this.sampleIntervalMs) + 1);
+        this.nextSampleAt += due * this.sampleIntervalMs;
         try {
-          for (const lane of ['gateway', 'source', 'candidate'] as const)
-            void withCoordinatorBusinessEpoch(
-              this.store.sqlite,
-              () => this.store.recoveryObservation(() => this.sample(lane)) ?? this.sample(lane),
-            ).catch(() => undefined);
+          for (let slot = 0; slot < Math.min(due, this.maxCatchUpPairs); slot++)
+            for (const lane of ['gateway', 'source', 'candidate'] as const)
+              void withCoordinatorBusinessEpoch(
+                this.store.sqlite,
+                () => this.store.recoveryObservation(() => this.sample(lane)) ?? this.sample(lane),
+              ).catch(() => undefined);
         } catch {
           /* A concurrent writer retirement admits no new sample. */
         }
-      }, 50),
+      }, this.sampleIntervalMs),
     );
     this.timer.unref();
   }
