@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ConfirmedServiceReleaseSchema,
   UpgradeManifestSchema,
+  UpgradePolicySchema,
   type UpgradeManifest,
 } from '@platform/contracts';
 import {
@@ -172,6 +173,76 @@ function roots(qualification = false) {
 }
 
 describe('REQ-UPG-008/009 — actual Ed25519 trust and fixed deployment plans', () => {
+  it('keeps legacy policies unchanged and validates only the opted-in Coordinator preparation profile', () => {
+    const policy = manifest().policy;
+    expect(UpgradePolicySchema.parse(policy)).toEqual(policy);
+    expect(UpgradePolicySchema.parse(policy)).not.toHaveProperty('coordinatorPreparationProfile');
+    // This field was an unknown passthrough extension before the opt-in profile.
+    // Do not retroactively tighten an existing signed legacy policy.
+    const legacyExtension = { ...policy, candidateStartupMs: 180_000 };
+    expect(UpgradePolicySchema.parse(legacyExtension)).toEqual(legacyExtension);
+    for (const candidateStartupMs of [undefined, 1, 120_000]) {
+      const profiled = {
+        ...policy,
+        coordinatorPreparationProfile: 'coordinator-phased-v1' as const,
+        ...(candidateStartupMs === undefined ? {} : { candidateStartupMs }),
+      };
+      expect(UpgradePolicySchema.parse(profiled)).toEqual(profiled);
+    }
+    for (const candidateStartupMs of [
+      null,
+      0,
+      -1,
+      120_001,
+      1.5,
+      '120000',
+      Number.NaN,
+      Infinity,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      const rejected = UpgradePolicySchema.safeParse({
+        ...policy,
+        coordinatorPreparationProfile: 'coordinator-phased-v1',
+        candidateStartupMs,
+      });
+      expect(rejected.success).toBe(false);
+      if (!rejected.success)
+        expect(rejected.error.issues).toContainEqual(
+          expect.objectContaining({ path: ['candidateStartupMs'] }),
+        );
+    }
+    for (const coordinatorPreparationProfile of ['coordinator-phased-v2', '', null, true])
+      expect(
+        UpgradePolicySchema.safeParse({ ...policy, coordinatorPreparationProfile }).success,
+      ).toBe(false);
+  });
+
+  it('binds the opted-in profile and budget into Ed25519 signatures, input fingerprints and frozen API plans', () => {
+    const m = manifest();
+    const previousInput = upgradeRunInputFingerprint(m);
+    m.policy = UpgradePolicySchema.parse({
+      ...m.policy,
+      coordinatorPreparationProfile: 'coordinator-phased-v1',
+      candidateStartupMs: 120_000,
+    });
+    const input = upgradeRunInputFingerprint(m);
+    expect(input).not.toBe(previousInput);
+    for (const evidence of m.evidence) evidence.inputFingerprint = input;
+    const signed = envelope(m);
+    expect(verifyUpgradeEnvelope(signed, roots(), Date.parse(at))).toEqual(signed);
+    expect(freezeUpgradePlan(signed, source()).policy).toEqual(m.policy);
+    for (const mutate of [
+      (policy: UpgradeManifest['policy']) => delete policy.coordinatorPreparationProfile,
+      (policy: UpgradeManifest['policy']) => (policy.candidateStartupMs = 119_999),
+    ]) {
+      const tampered = structuredClone(signed);
+      mutate(tampered.manifest.policy);
+      expect(() => verifyUpgradeEnvelope(tampered, roots(), Date.parse(at))).toThrow(
+        'SIGNATURE_OR_MANIFEST_DIGEST_INVALID',
+      );
+    }
+  });
+
   it('repairs a same-release mixed Web tuple only through its explicit signed path, refusing an unchanged installation or borrowing the older path', () => {
     const m = manifest(true);
     const installedB = {
@@ -278,40 +349,51 @@ describe('REQ-UPG-008/009 — actual Ed25519 trust and fixed deployment plans', 
       'INCOMPATIBLE_PROTOCOL',
     );
   });
-  it('has identical canonical bytes, qualification input and fixed plan to the real CD/controller module', async () => {
-    const deploy = await import(resolve('../deploy/upgrade/trust.mjs'));
-    const old = source(),
-      m = manifest(true),
-      signed = envelope(m);
-    const apiPlan = freezeUpgradePlan(signed, old);
-    const current = {
-      instanceId: 'trust-test-instance',
-      releaseId: old.releaseId,
-      channel: old.channel,
-      schema: old.schema,
-      generation: old.activationGeneration,
-      platform: process.platform,
-      arch: process.arch,
-      protocols: Object.fromEntries(
-        (['api', 'web', 'coordinator', 'owner', 'installer'] as const).map((name) => [
-          name,
-          assertDefined(old.components[name]).protocol,
-        ]),
-      ),
-      ...Object.fromEntries(
-        (['api', 'web', 'coordinator', 'owner', 'installer'] as const).flatMap((name) => [
-          [name + 'Digest', assertDefined(old.components[name]).artifactDigest],
-          [name + 'InputFingerprint', assertDefined(old.components[name]).inputFingerprint],
-        ]),
-      ),
-    };
-    const verified = deploy.verifyManifest(signed, roots(true), current, Date.parse(at));
-    expect(deploy.canonical(m)).toBe(canonicalUpgrade(m));
-    expect(deploy.runInputFingerprint(m)).toBe(upgradeRunInputFingerprint(m));
-    expect(deploy.freezePlan(verified, current)).toEqual(apiPlan);
-    expect(apiPlan.steps.map((s) => s.kind)).toContain('installer-handoff');
-    expect(apiPlan.steps.map((s) => s.kind)).toContain('coordinator-handoff');
-  });
+  it.each([false, true])(
+    'has identical canonical bytes, qualification input and fixed plan to the real CD/controller module (profile=%s)',
+    async (profiled) => {
+      const deploy = await import(resolve('../deploy/upgrade/trust.mjs'));
+      const old = source(),
+        m = manifest(true);
+      if (profiled) {
+        m.policy = UpgradePolicySchema.parse({
+          ...m.policy,
+          coordinatorPreparationProfile: 'coordinator-phased-v1',
+          candidateStartupMs: 120_000,
+        });
+        assertDefined(m.qualification).inputFingerprint = upgradeRunInputFingerprint(m);
+      }
+      const signed = envelope(m);
+      const apiPlan = freezeUpgradePlan(signed, old);
+      const current = {
+        instanceId: 'trust-test-instance',
+        releaseId: old.releaseId,
+        channel: old.channel,
+        schema: old.schema,
+        generation: old.activationGeneration,
+        platform: process.platform,
+        arch: process.arch,
+        protocols: Object.fromEntries(
+          (['api', 'web', 'coordinator', 'owner', 'installer'] as const).map((name) => [
+            name,
+            assertDefined(old.components[name]).protocol,
+          ]),
+        ),
+        ...Object.fromEntries(
+          (['api', 'web', 'coordinator', 'owner', 'installer'] as const).flatMap((name) => [
+            [name + 'Digest', assertDefined(old.components[name]).artifactDigest],
+            [name + 'InputFingerprint', assertDefined(old.components[name]).inputFingerprint],
+          ]),
+        ),
+      };
+      const verified = deploy.verifyManifest(signed, roots(true), current, Date.parse(at));
+      expect(deploy.canonical(m)).toBe(canonicalUpgrade(m));
+      expect(deploy.runInputFingerprint(m)).toBe(upgradeRunInputFingerprint(m));
+      expect(deploy.freezePlan(verified, current)).toEqual(apiPlan);
+      expect(apiPlan.steps.map((s) => s.kind)).toContain('installer-handoff');
+      expect(apiPlan.steps.map((s) => s.kind)).toContain('coordinator-handoff');
+    },
+  );
   it('reuses exact artifacts without replacing real component provenance or the three audit SHAs', () => {
     const old = source(),
       m = manifest(true);

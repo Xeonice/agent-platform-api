@@ -106,8 +106,24 @@ export const UpgradePolicySchema = z
     stopUserResources: z.literal(false),
     restoreLiveVolume: z.literal(false),
     contractInUpgrade: z.literal(false),
+    coordinatorPreparationProfile: z.literal('coordinator-phased-v1').optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((policy, context) => {
+    if (policy.coordinatorPreparationProfile === undefined) return;
+    const budget = policy.candidateStartupMs === undefined ? 120_000 : policy.candidateStartupMs;
+    if (
+      typeof budget !== 'number' ||
+      !Number.isSafeInteger(budget) ||
+      budget <= 0 ||
+      budget > 120_000
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['candidateStartupMs'],
+        message: 'COORDINATOR_PREPARATION_BUDGET_INVALID',
+      });
+  });
 /** Separately signed semantic contraction; ordinary installation never executes it. */
 export const UpgradeContractPlanSchema = z
   .object({
